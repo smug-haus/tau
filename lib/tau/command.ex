@@ -20,7 +20,9 @@ defmodule Tau.Command do
           | {:run, String.t()}
           | :ignore
 
+  alias Tau.Command.Context
+
   @callback name() :: String.t()
   @callback description() :: String.t()
-  @callback execute(args :: String.t(), ctx :: map()) :: result()
+  @callback execute(args :: String.t(), ctx :: Context.t()) :: result()
 end

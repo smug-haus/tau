@@ -70,9 +70,13 @@ defmodule Tau.Hooks.Shell do
   end
 
   defp do_run(cmd, timeout_ms, event, payload) do
+    # Defensive: `Tau.Session.hook_payload/3` already sets
+    # `:hook_event_name`, but a non-FSM caller (or a hook that
+    # rewrote payload via `{:cont, _}`) might not. Force it before
+    # encoding so the on-the-wire JSON is always complete.
     json =
       payload
-      |> Map.put("hook_event_name", to_string(event))
+      |> Map.put(:hook_event_name, to_string(event))
       |> Jason.encode!()
 
     port =
@@ -102,6 +106,16 @@ defmodule Tau.Hooks.Shell do
     end
   end
 
+  # Hook stdin/stdout uses Claude-Code's documented contract:
+  # `updatedInput` rewrites the next-step tool input; `continue: false,
+  # reason: ...` halts; `continue: true` proceeds.
+  #
+  # We normalise the result back to the atom-keyed payload shape the
+  # rest of the FSM expects (#55) — without this, a `{:cont, payload}`
+  # from a shell hook handed a string-keyed map to subsequent
+  # programmatic hooks and to `Tau.Session.handle_event/4`'s
+  # `Map.get(payload, :tool_input, ...)` (which fell through to the
+  # default, silently ignoring the rewrite).
   defp parse_response(output, original) do
     output = String.trim(output)
 
@@ -109,18 +123,23 @@ defmodule Tau.Hooks.Shell do
       :cont
     else
       case Jason.decode(output) do
-        {:ok, %{"updatedInput" => updated}} -> {:cont, updated}
-        {:ok, %{"continue" => false, "reason" => r}} -> {:halt, r}
-        {:ok, %{"continue" => true}} -> :cont
-        _ -> :cont
+        {:ok, %{"updatedInput" => updated}} ->
+          {:cont, Map.put(original, :tool_input, updated)}
+
+        {:ok, %{"continue" => false, "reason" => r}} ->
+          {:halt, stringify_reason(r)}
+
+        {:ok, %{"continue" => true}} ->
+          :cont
+
+        _ ->
+          :cont
       end
     end
-    |> tag_with(original)
   end
 
-  defp tag_with(:cont, _orig), do: :cont
-  defp tag_with({:cont, p}, _orig), do: {:cont, p}
-  defp tag_with({:halt, r}, _orig), do: {:halt, r}
+  defp stringify_reason(r) when is_binary(r), do: r
+  defp stringify_reason(r), do: inspect(r)
 
   defp matches?(_matcher, _payload), do: true
 

@@ -184,9 +184,44 @@ commits close them.
    something needs to happen later, file the issue and reference its
    number from the source line: `# See #42`.
 
+## Architectural decisions: ADRs in `docs/adr/`
+
+The non-negotiables above tell you what's _forbidden_. ADRs in
+`docs/adr/` tell you what was _chosen_, and why a future change
+would need fresh justification. **Read the ADR index
+(`docs/adr/README.md`) before proposing any change that touches the
+supervision tree, a behaviour contract, a public struct's hidden
+contract, or a layering decision the obvious refactor would
+invert.**
+
+When to file a new ADR:
+
+- A behaviour callback you're tempted to add as `@optional_callbacks`
+  (capture why some implementations can skip it).
+- An OTP shape that looks redundant (a process where a function
+  would do, a registry that's not strictly needed) — explain the
+  reason or it'll get refactored away.
+- A field on a public struct with a hidden contract
+  (JSON-encodable values, namespaced keys, default semantics).
+- A naming or layering choice that the obvious refactor would
+  invert.
+
+When _not_ to file an ADR:
+
+- Anything covered explicitly by a non-negotiable (just follow the
+  rule).
+- Bug fixes that don't change architecture; polish; doc rewording.
+
+Process: copy `docs/adr/0000-template.md` to the next number, fill
+it in, link it from the PR description, and reference it in the
+commit message ("ADR-0007"). See `docs/adr/README.md` for the
+full conventions.
+
 ## Where to find more
 
 - **GitHub issues** — the live backlog. `is:open` for active work.
+- **`docs/adr/`** — architectural decisions (start with
+  `docs/adr/README.md`).
 - `/root/.claude/plans/` — milestone-scale plans (M0–M8 implementation
   plan, large refactors). Smaller decisions live in issue comments.
 - `priv/livebooks/` — walkthroughs that double as smoke tests.

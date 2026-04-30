@@ -1,17 +1,51 @@
 defmodule Tau.Providers.Replay do
   @moduledoc """
   Test-only provider that replays a recorded sequence of
-  `Tau.Provider.Event` structs from a JSONL fixture file.
+  `Tau.Provider.Event` structs.
 
-  Useful for end-to-end session tests and the `mix tau.hello` smoke task
-  when no real provider key is available.
+  Useful for end-to-end session tests and the `mix tau.hello` smoke
+  task when no real provider key is available.
 
-  Configure via `Application.put_env/3`:
+  ## Configuring per-session (preferred)
 
-      Application.put_env(:tau, Tau.Providers.Replay, fixture: "test/fixtures/foo.jsonl")
+  Pass the fixture via `Tau.start_session/1`'s `:provider_ctx` opt
+  (ADR-0002). This is per-session, in-memory, not persisted —
+  non-JSON-encodable event structs are fine here, unlike
+  `:metadata`.
 
-  Each line of the fixture is a JSON object with an event `type` and the
-  remaining fields used to build the corresponding event struct.
+      events = [
+        %Tau.Provider.Event.TextDelta{block_id: "b", text: "hi"},
+        %Tau.Provider.Event.Done{stop_reason: :stop}
+      ]
+
+      {:ok, sid} =
+        Tau.start_session(
+          provider: Tau.Providers.Replay,
+          provider_ctx: %{replay_fixture: events}
+        )
+
+  Tests using this pattern can be `async: true` — there is no
+  global `Application.put_env/3` to leak across processes.
+
+  ## Configuring deployment-wide
+
+  For the `mix tau.hello` smoke task (which can't pass a `ctx`),
+  set the fixture in `config/test.exs`:
+
+      config :tau, Tau.Providers.Replay, fixture: "test/fixtures/foo.jsonl"
+
+  The `Application.get_env/2` fallback only runs when no
+  `:replay_fixture` is supplied via `provider_ctx`. **Do not** set
+  this from inside a `setup` block (per the project's "no
+  `Application.put_env/3` for runtime state" non-negotiable).
+
+  ## Fixture format
+
+  A fixture is either:
+
+  - A list of `%Tau.Provider.Event{}` structs (in-memory), or
+  - A path to a JSONL file where each line is a JSON object with a
+    `type` field and event-specific keys.
   """
 
   @behaviour Tau.Provider
@@ -26,17 +60,31 @@ defmodule Tau.Providers.Replay do
     do: %{thinking: false, tools: true, vision: false, prompt_caching: false, parallel_tools: false}
 
   @impl Tau.Provider
-  def stream(_messages, _opts \\ %{}, _ctx \\ %{}) do
-    fixture = Application.get_env(:tau, __MODULE__, [])[:fixture]
-
-    events =
-      cond do
-        is_list(fixture) -> fixture
-        is_binary(fixture) and File.regular?(fixture) -> from_file(fixture)
-        true -> default_events()
-      end
-
+  def stream(_messages, _opts \\ %{}, ctx \\ %{}) do
+    events = resolve_fixture(ctx)
     {:ok, Stream.map(events, & &1)}
+  end
+
+  defp resolve_fixture(ctx) do
+    cond do
+      is_list(ctx[:replay_fixture]) ->
+        ctx[:replay_fixture]
+
+      is_binary(ctx[:replay_fixture]) and File.regular?(ctx[:replay_fixture]) ->
+        from_file(ctx[:replay_fixture])
+
+      true ->
+        case Application.get_env(:tau, __MODULE__, [])[:fixture] do
+          fixture when is_list(fixture) ->
+            fixture
+
+          fixture when is_binary(fixture) ->
+            if File.regular?(fixture), do: from_file(fixture), else: default_events()
+
+          _ ->
+            default_events()
+        end
+    end
   end
 
   defp from_file(path) do

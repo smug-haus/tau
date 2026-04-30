@@ -4,10 +4,20 @@ defmodule Tau.Permissions.RuleSet do
   `{decision, matcher, compiled_rule}` triples and stores them in
   `:persistent_term` for lock-free reads.
 
-  Listens for `{:settings_reloaded, settings}` messages from
-  `Tau.Settings.Cache` and recompiles.
+  Subscribes to the `"settings"` PubSub topic at startup and recompiles
+  on `{:settings_reloaded, settings}` (ADR-0004 — PubSub is the
+  cross-process event channel; we no longer accept the deprecated
+  `Process.whereis(...) |> send(...)` pattern).
   """
   use GenServer
+
+  @typedoc """
+  Permissions mode that gates tool dispatch and slash-command
+  execution. Single source of truth — `Tau.Command.Context`,
+  `Tau.Tool.Context`, `Tau.Session.Meta`, and the hook payload all
+  use this type (M12).
+  """
+  @type mode :: :default | :accept_edits | :plan | :auto | :dont_ask | :bypass
 
   @persistent_key {Tau.Permissions, :rule_set}
 
@@ -19,6 +29,7 @@ defmodule Tau.Permissions.RuleSet do
 
   @impl true
   def init(_opts) do
+    Phoenix.PubSub.subscribe(Tau.PubSub, "settings")
     publish(compile_from_settings())
     {:ok, %{}}
   end

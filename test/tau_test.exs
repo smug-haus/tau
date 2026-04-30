@@ -27,8 +27,8 @@ defmodule TauTest do
       assert is_list(Tau.list_sessions())
     end
 
-    test "fork is not yet implemented" do
-      assert Tau.fork("any", "any") == {:error, :not_implemented}
+    test "fork on a non-existent parent session returns :parent_not_found" do
+      assert Tau.fork("does-not-exist", "any") == {:error, :parent_not_found}
     end
   end
 end

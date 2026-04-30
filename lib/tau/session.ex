@@ -32,7 +32,52 @@ defmodule Tau.Session do
   @type id :: String.t()
 
   defmodule Meta do
-    @moduledoc "Session metadata returned by `Tau.list_sessions/1`."
+    @moduledoc """
+    Session metadata returned by `Tau.list_sessions/1`.
+
+    ## The `:metadata` field — contract
+
+    `:metadata` is an arbitrary user-supplied map propagated from
+    `Tau.start_session/1`'s `:metadata` opt. It travels with the
+    session through fork/resume, is persisted in the JSONL session
+    header, and is reachable by tools (`Tau.Tool.Context.metadata`)
+    and slash commands (`Tau.Command.Context.metadata`).
+
+    Two consequences for callers:
+
+      * **Values must be JSON-encodable.** The session's persistence
+        layer (`Tau.Persistence.Jsonl`) writes the header via
+        `Jason.encode!/2`. PIDs, references, anonymous functions,
+        ports, tuples (other than the ones Jason supports natively),
+        and module structs without a `Jason.Encoder` impl will crash
+        the session at init time. Stick to: maps, lists, strings,
+        numbers, booleans, `nil`, and atoms (encoded as strings).
+        For things that need a process handle, register a name with
+        `Process.register/2` and put the atom in metadata.
+
+      * **Namespace your keys.** Tau itself reserves a small set of
+        keys; future versions may grow that set. To avoid collisions,
+        put your keys under a project-specific prefix (e.g.
+        `"my_app__foo"`) or use a tagged tuple as a value.
+
+    ### Reserved metadata keys
+
+    Read or written by Tau today:
+
+      * `:permissions_mode` — atom controlling tool permissions
+        evaluation. Read by `Tau.Session.dispatch_tools/2` and
+        plumbed through to `Tau.Command.Context.permissions_mode`.
+        Defaults to `:default` if unset. Valid values:
+        `:default | :accept_edits | :plan | :auto | :dont_ask | :bypass`.
+
+      * `:forked_from` — `%{session: parent_id, event: parent_event_id}`
+        map, written by `Tau.fork/2` onto the new session's metadata
+        so the JSONL header records its provenance. Do not set this
+        manually.
+
+    Both keys live under the atom namespace; do not shadow them with
+    string-keyed equivalents.
+    """
     @enforce_keys [:id, :cwd, :created_at]
     defstruct [:id, :cwd, :created_at, :updated_at, :provider, :model, :metadata]
 
@@ -191,6 +236,55 @@ defmodule Tau.Session do
   @spec list_sessions(map()) :: [Meta.t()]
   def list_sessions(filters \\ %{}), do: Tau.Persistence.impl().list(filters)
 
+  @typedoc """
+  Curated read-only view of a live session, returned by `snapshot/1`.
+
+  The shape is **stable** across internal refactors — adding a field
+  is allowed; renaming or repurposing one isn't. Callers (tests,
+  TUI panels, debug tools) depend on this contract.
+  """
+  @type snapshot :: %{
+          id: String.t(),
+          state: atom(),
+          cwd: String.t(),
+          provider: module() | nil,
+          model: String.t() | nil,
+          messages: [Tau.Message.t()],
+          message_count: non_neg_integer(),
+          skills: [{String.t(), Tau.Skill.t()}],
+          metadata: map(),
+          permissions_mode: atom()
+        }
+
+  @doc """
+  Return a read-only snapshot of a live session's data (#58).
+
+  Tests and inspection tools should call this instead of reaching
+  into the FSM via `:sys.get_state/1` — it insulates callers from
+  internal data-shape refactors. Returns `{:error, :not_found}`
+  for a session id that isn't currently registered.
+  """
+  @spec snapshot(id()) :: {:ok, snapshot()} | {:error, :not_found}
+  def snapshot(id) do
+    with {:ok, pid} <- whereis(id) do
+      {state, data} = :sys.get_state(pid)
+
+      {:ok,
+       %{
+         id: data.id,
+         state: state,
+         cwd: data.cwd,
+         provider: data.provider,
+         model: data.model,
+         messages: data.messages,
+         message_count: length(data.messages),
+         skills: data.skills,
+         metadata: data.metadata,
+         permissions_mode: Map.get(data.metadata, :permissions_mode, :default)
+       }}
+    end
+  end
+
   defp whereis(id) do
     case Registry.lookup(Tau.Sessions.Registry, id) do
       [{pid, _}] -> {:ok, pid}
@@ -246,6 +340,7 @@ defmodule Tau.Session do
     provider = opts[:provider] || Tau.Provider.default()
     model = opts[:model]
     metadata = opts[:metadata] || %{}
+    provider_ctx = opts[:provider_ctx] || %{}
     persistence = opts[:persistence] || Tau.Persistence.impl()
     preload = opts[:preload_events] || []
 
@@ -273,7 +368,13 @@ defmodule Tau.Session do
           metadata: metadata
         })
 
-        messages = events_to_messages(preload)
+        skills = load_skills(cwd)
+
+        messages =
+          preload
+          |> events_to_messages()
+          |> prepend_skill_messages(skills)
+          |> inject_memory(cwd)
 
         data = %{
           id: id,
@@ -281,12 +382,17 @@ defmodule Tau.Session do
           provider: provider,
           model: model,
           metadata: metadata,
+          provider_ctx: provider_ctx,
           messages: messages,
+          skills: skills,
           persistence: persistence,
           persist_handle: persist_handle,
           provider_task: nil,
           assembler: nil,
-          tools_in_flight: %{}
+          tools_in_flight: %{},
+          # ADR-0008: slash-command tasks (user code) run isolated under
+          # Tau.Tools.TaskSupervisor, never inline in the FSM.
+          command_task: nil
         }
 
         {:ok, :awaiting_user, data}
@@ -315,32 +421,44 @@ defmodule Tau.Session do
   # --- Event handlers -------------------------------------------------------
 
   @impl :gen_statem
+  # ADR-0008: while a slash-command task is in flight, postpone any
+  # subsequent user_message casts. They get re-delivered when the FSM
+  # next transitions, which guarantees order without dropping input.
+  def handle_event(:cast, {:user_message, _}, _state, %{command_task: t} = _data)
+      when t != nil do
+    {:keep_state_and_data, [{:postpone, true}]}
+  end
+
   def handle_event(:cast, {:user_message, msg}, _state, data) do
-    msg = expand_slash_command(msg)
+    case classify_slash_command(msg) do
+      {:async, mod, args, msg} ->
+        spawn_command_task(mod, args, msg, data)
 
-    case Tau.Hooks.Dispatcher.run(:user_prompt_submit, %{
-           session_id: data.id,
-           message: msg,
-           cwd: data.cwd
-         }) do
-      {:halt, reason} ->
-        broadcast(data.id, %Events.Cancelled{session_id: data.id, reason: {:hook_halt, reason}})
-        {:keep_state, data}
-
-      {:deny, reason} ->
-        broadcast(data.id, %Events.Cancelled{session_id: data.id, reason: {:hook_deny, reason}})
-        {:keep_state, data}
-
-      {:cont, payload} ->
-        msg = Map.get(payload, :message, msg)
-
-        data =
-          data
-          |> append_message(msg)
-          |> persist_event("user_message", message_to_data(msg))
-
-        handle_event(:internal, :start_provider, :provider_streaming, data)
+      {:sync, msg} ->
+        process_user_message(msg, data)
     end
+  end
+
+  def handle_event(:info, {:command_done, result, original_msg}, _state, data) do
+    msg = apply_command_result(result, original_msg)
+    process_user_message(msg, %{data | command_task: nil})
+  end
+
+  def handle_event(
+        :info,
+        {:command_timeout, pid, original_msg, ms},
+        _state,
+        %{command_task: pid} = data
+      ) do
+    if Process.alive?(pid), do: Process.exit(pid, :brutal_kill)
+    msg = apply_command_result({:timeout, ms}, original_msg)
+    process_user_message(msg, %{data | command_task: nil})
+  end
+
+  def handle_event(:info, {:command_timeout, _pid, _msg, _ms}, _state, data) do
+    # Late timeout — task already completed and {:command_done, ...}
+    # has already been processed. Drop.
+    {:keep_state, data}
   end
 
   def handle_event(:internal, :start_provider, :provider_streaming, data) do
@@ -348,7 +466,9 @@ defmodule Tau.Session do
 
     parent = self()
 
-    case data.provider.stream(data.messages, %{model: data.model}, %{session_id: data.id}) do
+    ctx = Map.merge(data.provider_ctx, %{session_id: data.id})
+
+    case data.provider.stream(data.messages, %{model: data.model}, ctx) do
       {:ok, stream} ->
         task =
           Task.async(fn ->
@@ -420,11 +540,15 @@ defmodule Tau.Session do
       if Process.alive?(t.pid), do: Task.shutdown(t, :brutal_kill)
     end)
 
+    if data.command_task && Process.alive?(data.command_task) do
+      Process.exit(data.command_task, :brutal_kill)
+    end
+
     broadcast(data.id, %Events.Cancelled{session_id: data.id, reason: :user})
     persist_event(data, "cancellation", %{reason: "user"})
 
     {:next_state, :awaiting_user,
-     %{data | provider_task: nil, tools_in_flight: %{}, assembler: nil}}
+     %{data | provider_task: nil, tools_in_flight: %{}, assembler: nil, command_task: nil}}
   end
 
   def handle_event(:cast, :stop, _state, data) do
@@ -456,6 +580,37 @@ defmodule Tau.Session do
 
   # --- Helpers --------------------------------------------------------------
 
+  # Common path that handles a user_message after any slash-command
+  # expansion has resolved. Called both by the synchronous
+  # handle_event(:cast, {:user_message, _}, _, _) clause (no slash
+  # command, or file-command) and by the
+  # handle_event(:info, {:command_done, _, _}, _, _) clause when the
+  # slash-command Task delivers its result (ADR-0008).
+  defp process_user_message(msg, data) do
+    case Tau.Hooks.Dispatcher.run(
+           :user_prompt_submit,
+           hook_payload(data, :user_prompt_submit, %{message: msg})
+         ) do
+      {:halt, reason} ->
+        broadcast(data.id, %Events.Cancelled{session_id: data.id, reason: {:hook_halt, reason}})
+        {:keep_state, data}
+
+      {:deny, reason} ->
+        broadcast(data.id, %Events.Cancelled{session_id: data.id, reason: {:hook_deny, reason}})
+        {:keep_state, data}
+
+      {:cont, payload} ->
+        msg = Map.get(payload, :message, msg)
+
+        data =
+          data
+          |> append_message(msg)
+          |> persist_event("user_message", message_to_data(msg))
+
+        handle_event(:internal, :start_provider, :provider_streaming, data)
+    end
+  end
+
   defp finalize_assistant(assembler, data) do
     msg = Assembler.assistant(assembler)
     data = data |> append_message(msg) |> persist_event("assistant_message", message_to_data(msg))
@@ -484,11 +639,12 @@ defmodule Tau.Session do
       })
 
       case compactor.compact(data.messages, %{provider: data.provider, model: data.model}) do
-        {:ok, new_messages} ->
+        {:ok, new_messages, summary_text} ->
           data =
             persist_event(data, "compaction", %{
               before_count: length(data.messages),
-              after_count: length(new_messages)
+              after_count: length(new_messages),
+              summary: format_summary_for_persist(summary_text)
             })
 
           :telemetry.execute([:tau, :compaction, :stop], %{system_time: System.system_time()}, %{
@@ -540,13 +696,14 @@ defmodule Tau.Session do
     tasks =
       Enum.into(allowed, %{}, fn %{id: id, name: name, arguments: args} ->
         # :pre_tool_use hook may rewrite args or veto.
-        case Tau.Hooks.Dispatcher.run(:pre_tool_use, %{
-               session_id: data.id,
-               tool_name: name,
-               tool_call_id: id,
-               tool_input: args,
-               cwd: data.cwd
-             }) do
+        case Tau.Hooks.Dispatcher.run(
+               :pre_tool_use,
+               hook_payload(data, :pre_tool_use, %{
+                 tool_name: name,
+                 tool_call_id: id,
+                 tool_input: args
+               })
+             ) do
           {:halt, reason} ->
             denied =
               ToolResult.new(
@@ -620,15 +777,16 @@ defmodule Tau.Session do
         end
 
       # :post_tool_use hook may rewrite the result.
+      post_event = if result.is_error, do: :post_tool_use_failure, else: :post_tool_use
+
       result =
         case Tau.Hooks.Dispatcher.run(
-               if(result.is_error, do: :post_tool_use_failure, else: :post_tool_use),
-               %{
-                 session_id: data.id,
+               post_event,
+               hook_payload(data, post_event, %{
                  tool_name: name,
                  tool_call_id: id,
                  result: result
-               }
+               })
              ) do
           {:cont, %{result: rewritten}} when is_struct(rewritten, ToolResult) -> rewritten
           _ -> result
@@ -645,71 +803,26 @@ defmodule Tau.Session do
 
     case Tau.Tool.lookup(name) do
       {:ok, mod} ->
-        ctx =
-          Tau.Tool.Context.new(
-            tool_call_id: call_id,
-            session_id: data.id,
-            cwd: data.cwd,
-            emit: fn payload ->
-              broadcast(data.id, %Events.ToolUpdate{
-                session_id: data.id,
-                tool_call_id: call_id,
-                payload: payload
-              })
+        case Tau.Tool.Validator.validate(mod, args) do
+          :ok ->
+            run_tool_validated(name, call_id, args, data, mod, started)
 
-              :ok
-            end
-          )
+          {:error, errors} ->
+            summary = Tau.Tool.Validator.format_errors(errors)
 
-        :telemetry.execute(
-          [:tau, :tool, :execute, :start],
-          %{system_time: System.system_time()},
-          %{tool: name, tool_call_id: call_id}
-        )
+            :telemetry.execute(
+              [:tau, :tool, :validate, :error],
+              %{system_time: System.system_time()},
+              %{tool: name, tool_call_id: call_id, errors: summary}
+            )
 
-        result =
-          try do
-            case mod.execute(args || %{}, ctx) do
-              {:ok, %Tau.Tool.Result{} = r} ->
-                ToolResult.new(
-                  tool_call_id: call_id,
-                  tool_name: name,
-                  content: r.content,
-                  details: r.details,
-                  is_error: r.is_error
-                )
-
-              {:error, reason} ->
-                ToolResult.new(
-                  tool_call_id: call_id,
-                  tool_name: name,
-                  content: "Tool error: #{inspect(reason)}",
-                  is_error: true
-                )
-            end
-          rescue
-            e ->
-              :telemetry.execute(
-                [:tau, :tool, :execute, :exception],
-                %{duration: System.monotonic_time(:millisecond) - started},
-                %{tool: name, error: Exception.message(e)}
-              )
-
-              ToolResult.new(
-                tool_call_id: call_id,
-                tool_name: name,
-                content: "Tool exception: #{Exception.message(e)}",
-                is_error: true
-              )
-          end
-
-        :telemetry.execute(
-          [:tau, :tool, :execute, :stop],
-          %{duration: System.monotonic_time(:millisecond) - started},
-          %{tool: name, tool_call_id: call_id, is_error: result.is_error}
-        )
-
-        result
+            ToolResult.new(
+              tool_call_id: call_id,
+              tool_name: name,
+              content: "Invalid arguments for tool #{name}: #{summary}",
+              is_error: true
+            )
+        end
 
       :error ->
         ToolResult.new(
@@ -719,6 +832,74 @@ defmodule Tau.Session do
           is_error: true
         )
     end
+  end
+
+  defp run_tool_validated(name, call_id, args, data, mod, started) do
+    ctx =
+      Tau.Tool.Context.new(
+        tool_call_id: call_id,
+        session_id: data.id,
+        cwd: data.cwd,
+        emit: fn payload ->
+          broadcast(data.id, %Events.ToolUpdate{
+            session_id: data.id,
+            tool_call_id: call_id,
+            payload: payload
+          })
+
+          :ok
+        end
+      )
+
+    :telemetry.execute(
+      [:tau, :tool, :execute, :start],
+      %{system_time: System.system_time()},
+      %{tool: name, tool_call_id: call_id}
+    )
+
+    result =
+      try do
+        case mod.execute(args || %{}, ctx) do
+          {:ok, %Tau.Tool.Result{} = r} ->
+            ToolResult.new(
+              tool_call_id: call_id,
+              tool_name: name,
+              content: r.content,
+              details: r.details,
+              is_error: r.is_error
+            )
+
+          {:error, reason} ->
+            ToolResult.new(
+              tool_call_id: call_id,
+              tool_name: name,
+              content: "Tool error: #{inspect(reason)}",
+              is_error: true
+            )
+        end
+      rescue
+        e ->
+          :telemetry.execute(
+            [:tau, :tool, :execute, :exception],
+            %{duration: System.monotonic_time(:millisecond) - started},
+            %{tool: name, error: Exception.message(e)}
+          )
+
+          ToolResult.new(
+            tool_call_id: call_id,
+            tool_name: name,
+            content: "Tool exception: #{Exception.message(e)}",
+            is_error: true
+          )
+      end
+
+    :telemetry.execute(
+      [:tau, :tool, :execute, :stop],
+      %{duration: System.monotonic_time(:millisecond) - started},
+      %{tool: name, tool_call_id: call_id, is_error: result.is_error}
+    )
+
+    result
   end
 
   defp append_message(data, msg), do: %{data | messages: data.messages ++ [msg]}
@@ -758,6 +939,34 @@ defmodule Tau.Session do
 
   defp broadcast(id, event) do
     Phoenix.PubSub.broadcast(Tau.PubSub, "session:#{id}", event)
+  end
+
+  # --- Hook payload --------------------------------------------------------
+  #
+  # Phase 10's hook contract (mirroring Claude Code's): every hook payload
+  # carries session_id, cwd, permission_mode, hook_event_name, and
+  # transcript_path in addition to event-specific fields. Callers pass only
+  # the event-specific extras; the canonical fields are always present.
+
+  defp hook_payload(data, event, extras) when is_map(extras) do
+    Map.merge(
+      %{
+        session_id: data.id,
+        cwd: data.cwd,
+        permission_mode: Map.get(data.metadata, :permissions_mode, :default),
+        hook_event_name: to_string(event),
+        transcript_path: transcript_path(data),
+        metadata: data.metadata || %{}
+      },
+      extras
+    )
+  end
+
+  defp transcript_path(%{persistence: p, id: id, cwd: cwd}) do
+    # path_for/2 is a required Tau.Persistence callback (#61). Backends
+    # without an on-disk file return a pseudo-URI; the field on the
+    # hook payload is always a non-nil binary.
+    p.path_for(id, cwd)
   end
 
   defp register_builtins do
@@ -815,6 +1024,89 @@ defmodule Tau.Session do
 
   defp serialize_block(other), do: other
 
+  # --- Skill loading + injection --------------------------------------------
+  #
+  # Per ADR-0005 the session is a read-only consumer of skill data:
+  # filesystem-discovered skills come from the pure
+  # Tau.Skills.Loader.discover/1, extension-provided skills come
+  # from the registry that Tau.Extensions.Loader populates once at
+  # boot. We merge both, deduplicating by name (filesystem wins on
+  # conflict, since cwd-local should mask priv/bundled).
+
+  defp load_skills(cwd) do
+    discovered = Tau.Skills.Loader.discover(cwd)
+    extension = Tau.Skills.Loader.list_extension_skills()
+
+    skills =
+      (extension ++ discovered)
+      |> Enum.uniq_by(fn {name, _} -> name end)
+      |> Enum.sort_by(fn {name, _} -> name end)
+
+    if skills != [] do
+      active_count = Enum.count(skills, fn {_n, s} -> not s.disable_model_invocation end)
+
+      :telemetry.execute(
+        [:tau, :skills, :loaded],
+        %{count: length(skills), active: active_count, skipped: length(skills) - active_count},
+        %{cwd: cwd}
+      )
+    end
+
+    skills
+  end
+
+  defp prepend_skill_messages(messages, skills) do
+    active = Enum.reject(skills, fn {_name, s} -> s.disable_model_invocation end)
+
+    case active do
+      [] ->
+        messages
+
+      list ->
+        Enum.map(list, fn {name, %Tau.Skill{} = s} ->
+          Tau.Message.User.new(render_skill(name, s),
+            metadata: %{role: :system, source: :skill, name: name, path: s.path}
+          )
+        end) ++ messages
+    end
+  end
+
+  defp render_skill(name, %Tau.Skill{description: desc, body: body}) do
+    header =
+      if is_binary(desc) and desc != "" do
+        "# Skill: #{name}\n\n_#{desc}_\n\n"
+      else
+        "# Skill: #{name}\n\n"
+      end
+
+    header <> body
+  end
+
+  # --- Memory injection -----------------------------------------------------
+
+  defp inject_memory(messages, cwd) do
+    case Tau.Memory.Loader.load(cwd) do
+      [] ->
+        messages
+
+      cascade ->
+        bytes = Enum.reduce(cascade, 0, fn {_p, b}, acc -> acc + byte_size(b) end)
+
+        :telemetry.execute(
+          [:tau, :memory, :loaded],
+          %{file_count: length(cascade), bytes: bytes},
+          %{cwd: cwd}
+        )
+
+        memory_messages =
+          Enum.map(cascade, fn {path, body} ->
+            Tau.Message.User.new(body, metadata: %{role: :system, source: :memory, path: path})
+          end)
+
+        memory_messages ++ messages
+    end
+  end
+
   # --- Event replay (for fork/resume) ---------------------------------------
 
   defp events_to_messages(events) do
@@ -846,7 +1138,26 @@ defmodule Tau.Session do
     )
   end
 
+  defp event_to_message(%{"kind" => "compaction", "data" => %{"summary" => s}})
+       when is_binary(s) and s != "" do
+    Tau.Message.User.new(s, metadata: %{role: :compaction_summary})
+  end
+
   defp event_to_message(_), do: nil
+
+  # --- Compaction helpers --------------------------------------------------
+  #
+  # We persist the full <conversation_summary>...</conversation_summary>
+  # block as the JSONL "summary" field so events_to_messages/1's
+  # "compaction" clause can reconstruct the synthetic message verbatim
+  # on Tau.fork/2 / Tau.resume/1. The compactor returns just the inner
+  # text via the new tri-tuple contract (#57); we wrap it here.
+
+  defp format_summary_for_persist(nil), do: nil
+
+  defp format_summary_for_persist(summary_text) when is_binary(summary_text) do
+    "<conversation_summary>\n#{summary_text}\n</conversation_summary>"
+  end
 
   defp deserialize_blocks(blocks) when is_list(blocks),
     do: Enum.map(blocks, &deserialize_block/1)
@@ -867,42 +1178,103 @@ defmodule Tau.Session do
   defp stop_reason_atom(s) when is_binary(s), do: String.to_atom(s)
   defp stop_reason_atom(s), do: s
 
-  # --- Slash commands -------------------------------------------------------
+  # --- Slash commands (ADR-0008) -------------------------------------------
+  #
+  # Programmatic slash-command bodies (Tau.Command modules) run in a
+  # supervised Task — never inline in the FSM — so a misbehaving
+  # extension can't deadlock the session. File-commands stay
+  # synchronous; they're bounded File.read/1s with no user code.
+  #
+  # classify_slash_command/1 is a pure parser: it returns
+  # `{:async, mod, args, msg}` (caller spawns the task) or
+  # `{:sync, msg}` (caller proceeds directly with the rewritten
+  # message).
 
-  defp expand_slash_command(%Tau.Message.User{content: c} = msg) when is_binary(c) do
+  defp classify_slash_command(%Tau.Message.User{content: c} = msg) when is_binary(c) do
     case Tau.Commands.Parser.parse(c) do
       {:command, name, args} ->
         case Tau.Commands.Parser.lookup(name) do
           {:ok, mod} when is_atom(mod) ->
-            invoke_command(mod, name, args, msg)
+            if function_exported?(mod, :execute, 2) do
+              {:async, mod, args, msg}
+            else
+              {:sync, msg}
+            end
 
           {:ok, path} when is_binary(path) ->
-            invoke_file_command(path, args, msg)
+            {:sync, invoke_file_command(path, args, msg)}
 
           :error ->
-            # Unknown slash command; pass through verbatim — the model can
-            # handle it as a stylistic preface or report that it's unknown.
-            msg
+            # Unknown slash command; pass through verbatim — the model
+            # can handle it as a stylistic preface or report that it's
+            # unknown.
+            {:sync, msg}
         end
 
       _ ->
-        msg
+        {:sync, msg}
     end
   end
 
-  defp expand_slash_command(msg), do: msg
+  defp classify_slash_command(msg), do: {:sync, msg}
 
-  defp invoke_command(mod, _name, args, msg) do
-    if function_exported?(mod, :execute, 2) do
-      case mod.execute(args, %{}) do
-        {:inject, prefix} -> %Tau.Message.User{msg | content: prefix <> "\n\n" <> msg.content}
-        {:replace, replacement} -> %Tau.Message.User{msg | content: replacement}
-        {:run, replacement} -> %Tau.Message.User{msg | content: replacement}
-        :ignore -> msg
-        _ -> msg
-      end
-    else
-      msg
+  defp spawn_command_task(mod, args, msg, data) do
+    parent = self()
+    ctx = build_command_ctx(data)
+    timeout_ms = Application.get_env(:tau, :slash_command_timeout_ms, 30_000)
+
+    # Use start_child (not async_nolink) so we can deliver the result
+    # from *inside* the worker via Process.send. async_nolink's Task
+    # struct is owner-locked; querying it from a watcher pid raises
+    # ArgumentError. The session FSM tracks the worker pid directly
+    # for cancel/timeout purposes.
+    {:ok, pid} =
+      Task.Supervisor.start_child(Tau.Tools.TaskSupervisor, fn ->
+        result =
+          try do
+            mod.execute(args, ctx)
+          rescue
+            e -> {:crashed, Exception.message(e)}
+          catch
+            kind, value -> {:crashed, "uncaught #{kind}: #{inspect(value)}"}
+          end
+
+        Process.send(parent, {:command_done, result, msg}, [])
+      end)
+
+    Process.send_after(self(), {:command_timeout, pid, msg, timeout_ms}, timeout_ms)
+
+    {:keep_state, %{data | command_task: pid}}
+  end
+
+  defp apply_command_result(result, msg) do
+    case result do
+      {:inject, prefix} when is_binary(prefix) ->
+        %Tau.Message.User{msg | content: prefix <> "\n\n" <> msg.content}
+
+      {:replace, replacement} when is_binary(replacement) ->
+        %Tau.Message.User{msg | content: replacement}
+
+      {:run, replacement} when is_binary(replacement) ->
+        %Tau.Message.User{msg | content: replacement}
+
+      :ignore ->
+        msg
+
+      {:crashed, reason} ->
+        %Tau.Message.User{
+          msg
+          | content: "(slash command crashed: #{reason})\n\n" <> msg.content
+        }
+
+      {:timeout, ms} ->
+        %Tau.Message.User{
+          msg
+          | content: "(slash command timed out after #{ms}ms)\n\n" <> msg.content
+        }
+
+      _ ->
+        msg
     end
   end
 
@@ -911,5 +1283,19 @@ defmodule Tau.Session do
       {:ok, body} -> %Tau.Message.User{msg | content: body <> "\n\n" <> args}
       _ -> msg
     end
+  end
+
+  defp build_command_ctx(data) do
+    sid = data.id
+
+    Tau.Command.Context.new(
+      session_id: sid,
+      cwd: data.cwd,
+      permissions_mode: Map.get(data.metadata, :permissions_mode, :default),
+      emit: fn payload ->
+        Phoenix.PubSub.broadcast(Tau.PubSub, "session:#{sid}", payload)
+      end,
+      metadata: data.metadata
+    )
   end
 end

@@ -22,6 +22,8 @@ defmodule Tau.Compactor.SummarizeTail do
   alias Tau.Provider.Event
 
   @impl Tau.Compactor
+  def should_compact?([], _usage), do: false
+
   def should_compact?(messages, usage) do
     msg_count_threshold = Application.get_env(:tau, :compaction_threshold_messages, 50)
     token_threshold = Application.get_env(:tau, :compaction_threshold_tokens, 120_000)
@@ -32,18 +34,43 @@ defmodule Tau.Compactor.SummarizeTail do
 
   @impl Tau.Compactor
   def compact(messages, ctx) do
-    cutoff = max(div(length(messages) * 6, 10), 1)
-    {old, recent} = Enum.split(messages, cutoff)
+    {pinned, conv} = Enum.split_with(messages, &pinned?/1)
 
-    case summarise(old, ctx) do
-      {:ok, summary_text} ->
-        synth = Message.User.new("<conversation_summary>\n#{summary_text}\n</conversation_summary>")
-        {:ok, [synth | recent]}
+    case conv do
+      [] ->
+        # Nothing conversational to summarise — emitting an empty
+        # <conversation_summary> block would just be noise.
+        {:ok, pinned, nil}
 
-      {:error, _} = err ->
-        err
+      _ ->
+        cutoff = max(div(length(conv) * 6, 10), 1)
+        {old, recent} = Enum.split(conv, cutoff)
+
+        case summarise(old, ctx) do
+          {:ok, summary_text} ->
+            synth =
+              Message.User.new(
+                "<conversation_summary>\n#{summary_text}\n</conversation_summary>",
+                metadata: %{role: :compaction_summary}
+              )
+
+            {:ok, pinned ++ [synth | recent], summary_text}
+
+          {:error, _} = err ->
+            err
+        end
     end
   end
+
+  # Pinned messages are preserved verbatim across compaction.
+  # `:system`           — memory cascade + skill bodies (ADR-0005).
+  # `:compaction_summary` — output of an earlier compaction round
+  #                       (ADR-0007); preserved so we don't
+  #                       re-summarise a summary and lose fidelity
+  #                       geometrically.
+  defp pinned?(%Message.User{metadata: %{role: :system}}), do: true
+  defp pinned?(%Message.User{metadata: %{role: :compaction_summary}}), do: true
+  defp pinned?(_), do: false
 
   defp summarise([], _ctx), do: {:ok, ""}
 

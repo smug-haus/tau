@@ -136,8 +136,21 @@ defmodule Tau.Persistence.Jsonl do
     end
   end
 
-  @doc "Compute the JSONL path for a session id."
-  @spec path_for(String.t(), Path.t()) :: Path.t()
+  @doc """
+  Compute the JSONL path for a session id.
+
+  ### Concurrent reads
+
+  The file is opened with `:delayed_write` for write throughput.
+  Hooks that read this path while the session is still appending
+  may see partial JSONL — the last few events may be sitting in
+  the writer's buffer. Hooks that need a consistent view should
+  treat partial-line failures as "skip and continue" rather than
+  fatal. A future `flush/1` callback can be added if hooks need
+  at-rest semantics.
+  """
+  @impl Tau.Persistence
+  @spec path_for(String.t(), Path.t()) :: String.t()
   def path_for(session_id, cwd) do
     hash = :crypto.hash(:sha256, cwd) |> Base.encode16(case: :lower) |> binary_part(0, 16)
 
