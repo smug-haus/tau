@@ -103,34 +103,24 @@ jobs:
         id: test_step
         run: mix test --cover 2>&1 | tee /tmp/test.log
         continue-on-error: true
-      - name: Push test log to ci-logs branch on failure
+      - name: Push test log to per-job branch on failure
         if: steps.test_step.outcome == 'failure'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -e
-          mkdir -p /tmp/logwork && cd /tmp/logwork
-          git init -q
+          set -ex
+          # Use the existing checked-out repo (actions/checkout@v4 above).
           git config user.email "ci@local"
           git config user.name "ci"
-          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
-          # Try to fetch existing ci-logs branch; create orphan if missing
-          if git fetch --depth=1 origin ci-logs 2>/dev/null; then
-            git checkout ci-logs
-          else
-            git checkout --orphan ci-logs
-            git rm -rf . 2>/dev/null || true
-          fi
-          mkdir -p "logs/${{ github.sha }}"
-          tail -300 /tmp/test.log > "logs/${{ github.sha }}/test-${{ matrix.elixir }}.log"
-          git add logs
-          git commit -m "ci-logs: test ${{ matrix.elixir }} on ${{ github.sha }}" || true
-          # Retry push up to 3x — matrix jobs may race
-          for i in 1 2 3; do
-            git pull --rebase origin ci-logs 2>/dev/null || true
-            if git push origin ci-logs 2>/dev/null; then break; fi
-            sleep $((i * 2))
-          done
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          BRANCH="ci-log/${{ github.sha }}-test-${{ matrix.elixir }}"
+          git checkout -B "$BRANCH"
+          mkdir -p .ci-logs
+          tail -300 /tmp/test.log > .ci-logs/test.log
+          git add -f .ci-logs/test.log
+          git commit -m "ci-log: test ${{ matrix.elixir }} on ${{ github.sha }}"
+          git push origin "$BRANCH" --force
+          echo "Pushed log to branch $BRANCH"
       - name: Fail if tests failed
         if: steps.test_step.outcome == 'failure'
         run: exit 1
