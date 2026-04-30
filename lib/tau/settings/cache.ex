@@ -5,6 +5,13 @@ defmodule Tau.Settings.Cache do
 
   On boot we call `Tau.Settings.Loader.load/1` once. `Tau.Settings.Watcher`
   notifies us of subsequent file changes; we re-load and re-publish.
+
+  Each republish broadcasts `{:settings_reloaded, settings}` on
+  `Phoenix.PubSub` topic `"settings"`, so processes (TUI panels,
+  long-lived sessions, integration consumers) can react to changes
+  without polling. The PubSub broadcast is guarded by
+  `Process.whereis/1` because `Tau.Settings.Cache` boots before
+  `Tau.PubSub` in the application supervisor.
   """
   use GenServer
 
@@ -42,6 +49,10 @@ defmodule Tau.Settings.Cache do
 
     if Process.whereis(Tau.Permissions.RuleSet) do
       send(Tau.Permissions.RuleSet, {:settings_reloaded, settings})
+    end
+
+    if Process.whereis(Tau.PubSub) do
+      Phoenix.PubSub.broadcast(Tau.PubSub, "settings", {:settings_reloaded, settings})
     end
 
     :telemetry.execute(
