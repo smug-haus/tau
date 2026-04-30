@@ -37,7 +37,6 @@ defmodule Tau.Memory.InjectionTest do
       File.rm_rf!(cwd)
       File.rm_rf!(fake_home)
       Application.delete_env(:tau, :data_dir)
-      Application.delete_env(:tau, Tau.Providers.Replay)
       if prior_home, do: System.put_env("HOME", prior_home), else: System.delete_env("HOME")
     end)
 
@@ -45,15 +44,13 @@ defmodule Tau.Memory.InjectionTest do
   end
 
   test "TAU.md is injected as a system-role user message at session start", %{cwd: cwd} do
-    Application.put_env(:tau, Tau.Providers.Replay,
-      fixture: [
-        %Event.Start{request_id: "r", model: "replay-test"},
-        %Event.TextStart{block_id: "b0"},
-        %Event.TextDelta{block_id: "b0", text: "ok"},
-        %Event.TextEnd{block_id: "b0"},
-        %Event.Done{stop_reason: :stop, usage: %{output_tokens: 1}}
-      ]
-    )
+    fixture = [
+      %Event.Start{request_id: "r", model: "replay-test"},
+      %Event.TextStart{block_id: "b0"},
+      %Event.TextDelta{block_id: "b0", text: "ok"},
+      %Event.TextEnd{block_id: "b0"},
+      %Event.Done{stop_reason: :stop, usage: %{output_tokens: 1}}
+    ]
 
     handler_id = "memory-injection-#{System.unique_integer([:positive])}"
     parent = self()
@@ -70,7 +67,12 @@ defmodule Tau.Memory.InjectionTest do
     on_exit(fn -> :telemetry.detach(handler_id) end)
 
     {:ok, sid} =
-      Tau.start_session(provider: Tau.Providers.Replay, model: "replay-test", cwd: cwd)
+      Tau.start_session(
+        provider: Tau.Providers.Replay,
+        model: "replay-test",
+        cwd: cwd,
+        provider_ctx: %{replay_fixture: fixture}
+      )
 
     assert_receive {:memory_loaded, %{file_count: 1, bytes: bytes}, %{cwd: ^cwd}}, 1_000
     assert bytes > 0
@@ -92,8 +94,6 @@ defmodule Tau.Memory.InjectionTest do
     File.mkdir_p!(Path.join(bare_cwd, ".git"))
     on_exit(fn -> File.rm_rf!(bare_cwd) end)
 
-    Application.put_env(:tau, Tau.Providers.Replay, fixture: [%Event.Done{stop_reason: :stop}])
-
     handler_id = "memory-empty-#{System.unique_integer([:positive])}"
     parent = self()
 
@@ -107,7 +107,12 @@ defmodule Tau.Memory.InjectionTest do
     on_exit(fn -> :telemetry.detach(handler_id) end)
 
     {:ok, sid} =
-      Tau.start_session(provider: Tau.Providers.Replay, model: "replay-test", cwd: bare_cwd)
+      Tau.start_session(
+        provider: Tau.Providers.Replay,
+        model: "replay-test",
+        cwd: bare_cwd,
+        provider_ctx: %{replay_fixture: [%Event.Done{stop_reason: :stop}]}
+      )
 
     [{pid, _}] = Registry.lookup(Tau.Sessions.Registry, sid)
     {_state, data} = :sys.get_state(pid)

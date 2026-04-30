@@ -39,21 +39,19 @@ defmodule Tau.Commands.ContextThreadingTest do
 
     {:ok, _} = Registry.register(Tau.Commands.Registry, "/stub-cmd", StubCmd)
 
-    Application.put_env(:tau, Tau.Providers.Replay, fixture: [%Event.Done{stop_reason: :stop}])
-
     capture_name = :"ctx_threading_capture_#{System.unique_integer([:positive])}"
     Process.register(self(), capture_name)
 
     on_exit(fn ->
       File.rm_rf!(tmp)
       Application.delete_env(:tau, :data_dir)
-      Application.delete_env(:tau, Tau.Providers.Replay)
     end)
 
-    %{capture_name: capture_name}
+    %{capture_name: capture_name, replay_fixture: [%Event.Done{stop_reason: :stop}]}
   end
 
-  test "slash command receives a populated Tau.Command.Context", %{capture_name: capture_name} do
+  test "slash command receives a populated Tau.Command.Context",
+       %{capture_name: capture_name, replay_fixture: replay_fixture} do
     cwd = Path.join(System.tmp_dir!(), "tau-cmd-ctx-cwd-#{System.unique_integer([:positive])}")
     File.mkdir_p!(Path.join(cwd, ".git"))
     on_exit(fn -> File.rm_rf!(cwd) end)
@@ -63,6 +61,7 @@ defmodule Tau.Commands.ContextThreadingTest do
         provider: Tau.Providers.Replay,
         model: "replay-test",
         cwd: cwd,
+        provider_ctx: %{replay_fixture: replay_fixture},
         metadata: %{
           test_parent_name: capture_name,
           permissions_mode: :plan,

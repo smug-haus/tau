@@ -32,8 +32,6 @@ defmodule Tau.Hooks.PayloadTest do
     File.mkdir_p!(tmp)
     Application.put_env(:tau, :data_dir, tmp)
 
-    Application.put_env(:tau, Tau.Providers.Replay, fixture: [%Event.Done{stop_reason: :stop}])
-
     {:ok, _} = Registry.register(Tau.Hooks.Registry, :user_prompt_submit, CapturingHook)
 
     capture_name = :"hook_payload_capture_#{System.unique_integer([:positive])}"
@@ -42,15 +40,19 @@ defmodule Tau.Hooks.PayloadTest do
     on_exit(fn ->
       File.rm_rf!(tmp)
       Application.delete_env(:tau, :data_dir)
-      Application.delete_env(:tau, Tau.Providers.Replay)
     end)
 
-    %{capture_name: capture_name, data_dir: tmp}
+    %{
+      capture_name: capture_name,
+      data_dir: tmp,
+      replay_fixture: [%Event.Done{stop_reason: :stop}]
+    }
   end
 
   test "user_prompt_submit payload includes the canonical fields", %{
     capture_name: capture_name,
-    data_dir: data_dir
+    data_dir: data_dir,
+    replay_fixture: replay_fixture
   } do
     cwd = Path.join(System.tmp_dir!(), "tau-hook-cwd-#{System.unique_integer([:positive])}")
     File.mkdir_p!(Path.join(cwd, ".git"))
@@ -61,6 +63,7 @@ defmodule Tau.Hooks.PayloadTest do
         provider: Tau.Providers.Replay,
         model: "replay-test",
         cwd: cwd,
+        provider_ctx: %{replay_fixture: replay_fixture},
         metadata: %{
           test_capture_name: capture_name,
           permissions_mode: :plan
@@ -84,7 +87,8 @@ defmodule Tau.Hooks.PayloadTest do
   end
 
   test "permission_mode defaults to :default when not set in metadata", %{
-    capture_name: capture_name
+    capture_name: capture_name,
+    replay_fixture: replay_fixture
   } do
     cwd =
       Path.join(System.tmp_dir!(), "tau-hook-cwd-default-#{System.unique_integer([:positive])}")
@@ -97,6 +101,7 @@ defmodule Tau.Hooks.PayloadTest do
         provider: Tau.Providers.Replay,
         model: "replay-test",
         cwd: cwd,
+        provider_ctx: %{replay_fixture: replay_fixture},
         metadata: %{test_capture_name: capture_name}
       )
 

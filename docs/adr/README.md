@@ -55,6 +55,7 @@ get rewritten away by the next refactor. ADRs survive.
 | ADR | Title | Status |
 |-----|-------|--------|
 | [0001](0001-issue-driven-backlog.md) | GitHub issues are the backlog | Accepted |
+| [0002](0002-provider-ctx-is-the-runtime-config-channel.md) | Provider runtime configuration goes through `:provider_ctx`, not `Application` env | Accepted |
 
 (New ADRs append here. Keep the table sorted by ADR number.)
 

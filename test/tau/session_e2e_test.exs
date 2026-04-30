@@ -12,22 +12,19 @@ defmodule Tau.SessionE2ETest do
     on_exit(fn ->
       File.rm_rf!(tmp)
       Application.delete_env(:tau, :data_dir)
-      Application.delete_env(:tau, Tau.Providers.Replay)
     end)
 
     %{data_dir: tmp}
   end
 
   test "drives a full session through the FSM and persists JSONL" do
-    Application.put_env(:tau, Tau.Providers.Replay,
-      fixture: [
-        %Event.Start{request_id: "r", model: "replay-test"},
-        %Event.TextStart{block_id: "b0"},
-        %Event.TextDelta{block_id: "b0", text: "hi from replay"},
-        %Event.TextEnd{block_id: "b0"},
-        %Event.Done{stop_reason: :stop, usage: %{output_tokens: 4}}
-      ]
-    )
+    fixture = [
+      %Event.Start{request_id: "r", model: "replay-test"},
+      %Event.TextStart{block_id: "b0"},
+      %Event.TextDelta{block_id: "b0", text: "hi from replay"},
+      %Event.TextEnd{block_id: "b0"},
+      %Event.Done{stop_reason: :stop, usage: %{output_tokens: 4}}
+    ]
 
     # Subscribe BEFORE start_session so we don't miss the SessionStart event
     # broadcast synchronously from Session.init/1. Pre-generate the id so
@@ -36,7 +33,12 @@ defmodule Tau.SessionE2ETest do
     Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{sid}")
 
     {:ok, ^sid} =
-      Tau.start_session(provider: Tau.Providers.Replay, model: "replay-test", session_id: sid)
+      Tau.start_session(
+        provider: Tau.Providers.Replay,
+        model: "replay-test",
+        session_id: sid,
+        provider_ctx: %{replay_fixture: fixture}
+      )
 
     Tau.send(sid, "hello?")
 

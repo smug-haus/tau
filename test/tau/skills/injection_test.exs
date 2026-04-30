@@ -50,21 +50,19 @@ defmodule Tau.Skills.InjectionTest do
     Body for the quiet skill.
     """)
 
-    Application.put_env(:tau, Tau.Providers.Replay, fixture: [%Event.Done{stop_reason: :stop}])
-
     on_exit(fn ->
       File.rm_rf!(tmp_data)
       File.rm_rf!(cwd)
       File.rm_rf!(fake_home)
       Application.delete_env(:tau, :data_dir)
-      Application.delete_env(:tau, Tau.Providers.Replay)
       if prior_home, do: System.put_env("HOME", prior_home), else: System.delete_env("HOME")
     end)
 
-    %{cwd: cwd}
+    %{cwd: cwd, replay_fixture: [%Event.Done{stop_reason: :stop}]}
   end
 
-  test "active skills are injected as system-role user messages", %{cwd: cwd} do
+  test "active skills are injected as system-role user messages",
+       %{cwd: cwd, replay_fixture: replay_fixture} do
     handler_id = "skills-loaded-#{System.unique_integer([:positive])}"
     parent = self()
 
@@ -78,7 +76,12 @@ defmodule Tau.Skills.InjectionTest do
     on_exit(fn -> :telemetry.detach(handler_id) end)
 
     {:ok, sid} =
-      Tau.start_session(provider: Tau.Providers.Replay, model: "replay-test", cwd: cwd)
+      Tau.start_session(
+        provider: Tau.Providers.Replay,
+        model: "replay-test",
+        cwd: cwd,
+        provider_ctx: %{replay_fixture: replay_fixture}
+      )
 
     assert_receive {:skills_loaded, measurements, %{cwd: ^cwd}}, 1_000
     assert measurements.count >= 2
@@ -107,9 +110,14 @@ defmodule Tau.Skills.InjectionTest do
   end
 
   test "disable-model-invocation skills are tracked on session data but not injected",
-       %{cwd: cwd} do
+       %{cwd: cwd, replay_fixture: replay_fixture} do
     {:ok, sid} =
-      Tau.start_session(provider: Tau.Providers.Replay, model: "replay-test", cwd: cwd)
+      Tau.start_session(
+        provider: Tau.Providers.Replay,
+        model: "replay-test",
+        cwd: cwd,
+        provider_ctx: %{replay_fixture: replay_fixture}
+      )
 
     [{pid, _}] = Registry.lookup(Tau.Sessions.Registry, sid)
     {_state, data} = :sys.get_state(pid)

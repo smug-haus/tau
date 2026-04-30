@@ -39,7 +39,14 @@ defmodule Tau do
     * `:permissions_mode` — `:default | :accept_edits | :plan | :auto | :dont_ask | :bypass`
     * `:persistence` — module implementing `Tau.Persistence`
     * `:resume_from` — event id to fork from (creates a new session branched off another)
-    * `:metadata` — arbitrary user metadata attached to the session
+    * `:metadata` — arbitrary user metadata attached to the session.
+      JSON-encodable values only — see `Tau.Session.Meta`.
+    * `:provider_ctx` — map merged into the `ctx` argument every time
+      this session calls `provider.stream/3`. Per-session, in-memory,
+      not persisted, not propagated to forks/resumes. Use this for
+      runtime provider config that must not bleed across sessions
+      (replay fixtures in tests, per-session routing tags, etc.).
+      See ADR-0002.
   """
   @spec start_session(keyword()) :: {:ok, session_id()} | {:error, term()}
   def start_session(opts \\ []) do

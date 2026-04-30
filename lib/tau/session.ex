@@ -291,6 +291,7 @@ defmodule Tau.Session do
     provider = opts[:provider] || Tau.Provider.default()
     model = opts[:model]
     metadata = opts[:metadata] || %{}
+    provider_ctx = opts[:provider_ctx] || %{}
     persistence = opts[:persistence] || Tau.Persistence.impl()
     preload = opts[:preload_events] || []
 
@@ -332,6 +333,7 @@ defmodule Tau.Session do
           provider: provider,
           model: model,
           metadata: metadata,
+          provider_ctx: provider_ctx,
           messages: messages,
           skills: skills,
           persistence: persistence,
@@ -399,7 +401,9 @@ defmodule Tau.Session do
 
     parent = self()
 
-    case data.provider.stream(data.messages, %{model: data.model}, %{session_id: data.id}) do
+    ctx = Map.merge(data.provider_ctx, %{session_id: data.id})
+
+    case data.provider.stream(data.messages, %{model: data.model}, ctx) do
       {:ok, stream} ->
         task =
           Task.async(fn ->

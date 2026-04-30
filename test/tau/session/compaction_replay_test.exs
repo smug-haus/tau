@@ -13,7 +13,6 @@ defmodule Tau.Session.CompactionReplayTest do
   use ExUnit.Case, async: false
 
   alias Tau.Persistence.Jsonl
-  alias Tau.Provider.Event
 
   setup do
     tmp =
@@ -25,15 +24,15 @@ defmodule Tau.Session.CompactionReplayTest do
     cwd = Path.join(System.tmp_dir!(), "tau-compaction-cwd-#{System.unique_integer([:positive])}")
     File.mkdir_p!(Path.join(cwd, ".git"))
 
-    Application.put_env(:tau, Tau.Providers.Replay, fixture: [%Event.Done{stop_reason: :stop}])
-
     on_exit(fn ->
       File.rm_rf!(tmp)
       File.rm_rf!(cwd)
       Application.delete_env(:tau, :data_dir)
-      Application.delete_env(:tau, Tau.Providers.Replay)
     end)
 
+    # No provider_ctx needed: this test exercises Tau.fork/2 only,
+    # which never drives the provider — it just reads the freshly-forked
+    # session's data.messages.
     %{cwd: cwd, data_dir: tmp}
   end
 
