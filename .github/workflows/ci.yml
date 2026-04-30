@@ -42,7 +42,7 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-lint-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('**/mix.lock') }}
+          key: ${{ runner.os }}-mix-lint-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('**/mix.lock', 'mix.exs') }}
           restore-keys: |
             ${{ runner.os }}-mix-lint-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-
 
@@ -78,7 +78,7 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-test-${{ matrix.elixir }}-${{ matrix.otp }}-${{ hashFiles('**/mix.lock') }}
+          key: ${{ runner.os }}-mix-test-${{ matrix.elixir }}-${{ matrix.otp }}-${{ hashFiles('**/mix.lock', 'mix.exs') }}
           restore-keys: |
             ${{ runner.os }}-mix-test-${{ matrix.elixir }}-${{ matrix.otp }}-
 
@@ -118,7 +118,7 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-dialyzer-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('**/mix.lock') }}
+          key: ${{ runner.os }}-mix-dialyzer-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('**/mix.lock', 'mix.exs') }}
           restore-keys: |
             ${{ runner.os }}-mix-dialyzer-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-
 
@@ -126,7 +126,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: priv/plts
-          key: ${{ runner.os }}-plt-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('**/mix.lock') }}
+          key: ${{ runner.os }}-plt-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('**/mix.lock', 'mix.exs') }}
           restore-keys: |
             ${{ runner.os }}-plt-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-
 
