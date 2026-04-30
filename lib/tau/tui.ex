@@ -30,7 +30,7 @@ defmodule Tau.TUI do
     @behaviour Ratatouille.App
 
     import Ratatouille.View
-    alias Ratatouille.Runtime.{Command, Subscription}
+    alias Ratatouille.Runtime.Subscription
 
     @tick_interval 250
 

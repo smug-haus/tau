@@ -9,8 +9,6 @@ defmodule Tau.MCP.Manager do
   """
   use GenServer
 
-  require Logger
-
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
   @impl true
