@@ -1,49 +1,10 @@
-defmodule Tau.Message do
-  @moduledoc """
-  Unified message types passed between sessions and providers.
-
-  The shape mirrors Pi's `pi-ai` types so cross-provider replay works out of
-  the box. Concrete structs:
-
-    * `Tau.Message.User`      — user input (text or content blocks)
-    * `Tau.Message.Assistant` — model output (text + thinking + tool calls)
-    * `Tau.Message.ToolResult` — result of a tool call, fed back to the model
-
-  Content blocks are tagged maps; pattern-match on `:type` to dispatch.
-  """
-
-  alias Tau.Message.{Assistant, ToolResult, User}
-
-  @type role :: :user | :assistant | :tool_result
-
-  @type text_block :: %{type: :text, text: String.t()}
-  @type image_block :: %{type: :image, data: binary(), media_type: String.t()}
-  @type thinking_block :: %{type: :thinking, text: String.t(), signature: String.t() | nil}
-  @type tool_call_block :: %{
-          type: :tool_call,
-          id: String.t(),
-          name: String.t(),
-          arguments: map(),
-          thought_signature: String.t() | nil
-        }
-
-  @type content_block :: text_block() | image_block() | thinking_block() | tool_call_block()
-
-  @type t :: User.t() | Assistant.t() | ToolResult.t()
-
-  @spec role(t()) :: role()
-  def role(%User{}), do: :user
-  def role(%Assistant{}), do: :assistant
-  def role(%ToolResult{}), do: :tool_result
-end
-
 defmodule Tau.Message.User do
   @moduledoc "User message: a string or a list of content blocks."
   @enforce_keys [:content, :timestamp]
   defstruct [:content, :timestamp, metadata: %{}]
 
   @type t :: %__MODULE__{
-          content: String.t() | [Tau.Message.content_block()],
+          content: String.t() | [map()],
           timestamp: DateTime.t(),
           metadata: map()
         }
@@ -85,7 +46,7 @@ defmodule Tau.Message.Assistant do
           :stop | :length | :tool_use | :error | :aborted | :stop_sequence
 
   @type t :: %__MODULE__{
-          content: [Tau.Message.content_block()],
+          content: [map()],
           timestamp: DateTime.t(),
           api: atom() | String.t() | nil,
           provider: module() | nil,
@@ -131,7 +92,7 @@ defmodule Tau.Message.ToolResult do
   @type t :: %__MODULE__{
           tool_call_id: String.t(),
           tool_name: String.t(),
-          content: String.t() | [Tau.Message.content_block()],
+          content: String.t() | [map()],
           details: map(),
           is_error: boolean(),
           timestamp: DateTime.t()
@@ -148,4 +109,43 @@ defmodule Tau.Message.ToolResult do
       is_error: Keyword.get(opts, :is_error, false)
     }
   end
+end
+
+defmodule Tau.Message do
+  @moduledoc """
+  Unified message types passed between sessions and providers.
+
+  The shape mirrors Pi's `pi-ai` types so cross-provider replay works out of
+  the box. Concrete structs:
+
+    * `Tau.Message.User`      — user input (text or content blocks)
+    * `Tau.Message.Assistant` — model output (text + thinking + tool calls)
+    * `Tau.Message.ToolResult` — result of a tool call, fed back to the model
+
+  Content blocks are tagged maps; pattern-match on `:type` to dispatch.
+  """
+
+  alias Tau.Message.{Assistant, ToolResult, User}
+
+  @type role :: :user | :assistant | :tool_result
+
+  @type text_block :: %{type: :text, text: String.t()}
+  @type image_block :: %{type: :image, data: binary(), media_type: String.t()}
+  @type thinking_block :: %{type: :thinking, text: String.t(), signature: String.t() | nil}
+  @type tool_call_block :: %{
+          type: :tool_call,
+          id: String.t(),
+          name: String.t(),
+          arguments: map(),
+          thought_signature: String.t() | nil
+        }
+
+  @type content_block :: text_block() | image_block() | thinking_block() | tool_call_block()
+
+  @type t :: User.t() | Assistant.t() | ToolResult.t()
+
+  @spec role(t()) :: role()
+  def role(%User{}), do: :user
+  def role(%Assistant{}), do: :assistant
+  def role(%ToolResult{}), do: :tool_result
 end

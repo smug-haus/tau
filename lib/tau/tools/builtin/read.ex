@@ -112,7 +112,7 @@ defmodule Tau.Tools.Builtin.Read do
   defp window(total, offset, nil),
     do: {clamp(offset - 1, 0, max(total - 1, 0)), min(offset - 1 + @max_lines, total) - 1}
 
-  defp window(total, nil, limit), do: {0, min(limit, @max_lines, total) - 1}
+  defp window(total, nil, limit), do: {0, Enum.min([limit, @max_lines, total]) - 1}
 
   defp window(total, offset, limit) do
     {clamp(offset - 1, 0, max(total - 1, 0)), min(offset - 1 + min(limit, @max_lines), total) - 1}
