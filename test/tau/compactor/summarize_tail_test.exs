@@ -15,7 +15,8 @@ defmodule Tau.Compactor.SummarizeTailTest do
 
     @impl true
     def stream(_messages, _opts, _ctx) do
-      {:ok, [%Event.TextDelta{block_id: "b", text: "summary text"}, %Event.Done{stop_reason: :stop}]}
+      {:ok,
+       [%Event.TextDelta{block_id: "b", text: "summary text"}, %Event.Done{stop_reason: :stop}]}
     end
 
     @impl true
@@ -29,7 +30,9 @@ defmodule Tau.Compactor.SummarizeTailTest do
 
   test "system-tagged messages survive compaction at the head of the list" do
     pinned =
-      User.new("Always reply in haiku.", metadata: %{role: :system, source: :memory, path: "TAU.md"})
+      User.new("Always reply in haiku.",
+        metadata: %{role: :system, source: :memory, path: "TAU.md"}
+      )
 
     conv =
       for i <- 1..10 do

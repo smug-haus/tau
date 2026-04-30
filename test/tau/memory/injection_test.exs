@@ -20,7 +20,9 @@ defmodule Tau.Memory.InjectionTest do
 
     # Pin HOME to an empty dir so an actual ~/.tau/TAU.md on the developer's
     # machine doesn't perturb the cascade.
-    fake_home = Path.join(System.tmp_dir!(), "tau-memory-home-#{System.unique_integer([:positive])}")
+    fake_home =
+      Path.join(System.tmp_dir!(), "tau-memory-home-#{System.unique_integer([:positive])}")
+
     File.mkdir_p!(fake_home)
     prior_home = System.get_env("HOME")
     System.put_env("HOME", fake_home)
@@ -90,9 +92,7 @@ defmodule Tau.Memory.InjectionTest do
     File.mkdir_p!(Path.join(bare_cwd, ".git"))
     on_exit(fn -> File.rm_rf!(bare_cwd) end)
 
-    Application.put_env(:tau, Tau.Providers.Replay,
-      fixture: [%Event.Done{stop_reason: :stop}]
-    )
+    Application.put_env(:tau, Tau.Providers.Replay, fixture: [%Event.Done{stop_reason: :stop}])
 
     handler_id = "memory-empty-#{System.unique_integer([:positive])}"
     parent = self()
@@ -112,7 +112,13 @@ defmodule Tau.Memory.InjectionTest do
     [{pid, _}] = Registry.lookup(Tau.Sessions.Registry, sid)
     {_state, data} = :sys.get_state(pid)
 
-    assert data.messages == []
+    memory_msgs =
+      Enum.filter(data.messages, fn
+        %Tau.Message.User{metadata: %{source: :memory}} -> true
+        _ -> false
+      end)
+
+    assert memory_msgs == []
     refute_receive :memory_loaded, 200
   end
 end

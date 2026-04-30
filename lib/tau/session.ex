@@ -273,7 +273,13 @@ defmodule Tau.Session do
           metadata: metadata
         })
 
-        messages = inject_memory(events_to_messages(preload), cwd)
+        skills = load_skills(cwd)
+
+        messages =
+          preload
+          |> events_to_messages()
+          |> prepend_skill_messages(skills)
+          |> inject_memory(cwd)
 
         data = %{
           id: id,
@@ -282,6 +288,7 @@ defmodule Tau.Session do
           model: model,
           metadata: metadata,
           messages: messages,
+          skills: skills,
           persistence: persistence,
           persist_handle: persist_handle,
           provider_task: nil,
@@ -814,6 +821,52 @@ defmodule Tau.Session do
     do: %{"type" => "thinking", "text" => t, "signature" => s}
 
   defp serialize_block(other), do: other
+
+  # --- Skill loading + injection --------------------------------------------
+
+  defp load_skills(cwd) do
+    Tau.Skills.Loader.load_all(cwd)
+    skills = Tau.Skills.Loader.list()
+
+    if skills != [] do
+      active_count = Enum.count(skills, fn {_n, s} -> not s.disable_model_invocation end)
+
+      :telemetry.execute(
+        [:tau, :skills, :loaded],
+        %{count: length(skills), active: active_count, skipped: length(skills) - active_count},
+        %{cwd: cwd}
+      )
+    end
+
+    skills
+  end
+
+  defp prepend_skill_messages(messages, skills) do
+    active = Enum.reject(skills, fn {_name, s} -> s.disable_model_invocation end)
+
+    case active do
+      [] ->
+        messages
+
+      list ->
+        Enum.map(list, fn {name, %Tau.Skill{} = s} ->
+          Tau.Message.User.new(render_skill(name, s),
+            metadata: %{role: :system, source: :skill, name: name, path: s.path}
+          )
+        end) ++ messages
+    end
+  end
+
+  defp render_skill(name, %Tau.Skill{description: desc, body: body}) do
+    header =
+      if is_binary(desc) and desc != "" do
+        "# Skill: #{name}\n\n_#{desc}_\n\n"
+      else
+        "# Skill: #{name}\n\n"
+      end
+
+    header <> body
+  end
 
   # --- Memory injection -----------------------------------------------------
 

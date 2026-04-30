@@ -66,4 +66,17 @@ defmodule Tau.Skills.Loader do
   defp parse_tools_field(s) when is_binary(s), do: String.split(s, ~r/\s+/, trim: true)
   defp parse_tools_field(list) when is_list(list), do: list
   defp parse_tools_field(_), do: []
+
+  @doc """
+  List every skill currently registered in `Tau.Skills.Registry`.
+
+  Returns a sorted list of `{name, %Tau.Skill{}}` tuples (sorted by name
+  for determinism).
+  """
+  @spec list() :: [{String.t(), Skill.t()}]
+  def list do
+    Tau.Skills.Registry
+    |> Registry.select([{{:"$1", :_, :"$3"}, [], [{{:"$1", :"$3"}}]}])
+    |> Enum.sort_by(fn {name, _} -> name end)
+  end
 end
