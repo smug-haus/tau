@@ -1,6 +1,7 @@
 defmodule Tau.Session.Events do
   @moduledoc """
-  Session-level events broadcast on `Phoenix.PubSub` topic `"session:#{id}"`.
+  Session-level events broadcast on `Phoenix.PubSub` topic
+  `"session:<id>"`.
 
   Distinct from `Tau.Provider.Event` (which is what providers yield); these
   are higher-level lifecycle events that subscribers (TUI, log, telemetry)
