@@ -1,24 +1,26 @@
 defmodule Tau.Providers.Shared.FinchStream do
   @moduledoc """
-  Shared SSE-streaming engine for provider clients.
+  Shared streaming engine for provider clients.
 
-  Handles the boilerplate of:
+  Two parsing modes:
 
-    * spawning a linked Task that drives `Finch.stream/4`
-    * forwarding `{:status, _}/{:headers, _}/{:data, _}/:done` chunks back
-      as messages
-    * incremental SSE parsing via `Tau.Providers.Shared.SSE`
-    * 60-second timeout with retryable error events
+    * `:sse` (default) — chunks fed through `Tau.Providers.Shared.SSE`,
+      decoder receives `%{event, data, id, retry}` events.
+    * `:raw` — chunks pass straight through to the decoder, which is
+      responsible for any framing it needs (used by Bedrock's AWS
+      event-stream binary framing).
 
-  Provider modules supply a `decode/3` callback that turns SSE events into
-  their normalised `Tau.Provider.Event` structs. The engine owns the
-  Stream.resource/3 lifecycle.
+  Handles the common boilerplate either way:
 
-  Usage:
+    * spawns a linked Task driving `Finch.stream/4`
+    * forwards `{:status, _}/{:headers, _}/{:data, _}/:done` chunks
+      back as messages
+    * 60-second receive timeout with retryable `%Event.Error{}`
+    * cleanup of the spawned task on Stream halt
 
-      Tau.Providers.Shared.FinchStream.run(request, fn evt, partial ->
-        Tau.Providers.OpenAI.Chat.decode(evt, partial)
-      end)
+  Provider modules supply a `decode/2` that turns parsed events (SSE map
+  or raw binary) into `Tau.Provider.Event` structs and an opaque partial
+  state.
   """
 
   alias Tau.Provider.Event
@@ -27,18 +29,23 @@ defmodule Tau.Providers.Shared.FinchStream do
   @doc """
   Returns a `Stream.resource/3` of `Tau.Provider.Event` structs.
 
-  `decoder` is `(sse_event, partial_state) -> {events, partial_state}`.
+  `decoder` is `(event, partial_state) -> {events, partial_state}`.
+  In `:sse` mode the decoder receives an SSE event map; in `:raw` mode
+  it receives the raw binary chunk.
   """
-  @spec run(Finch.Request.t(), (map(), term() -> {[Event.t()], term()})) :: Enumerable.t()
-  def run(request, decoder, init_partial \\ %{}) do
+  @spec run(Finch.Request.t(), (any(), term() -> {[Event.t()], term()}), term(), keyword()) ::
+          Enumerable.t()
+  def run(request, decoder, init_partial \\ %{}, opts \\ []) do
+    mode = Keyword.get(opts, :mode, :sse)
+
     Stream.resource(
-      fn -> open(request, init_partial) end,
+      fn -> open(request, init_partial, mode) end,
       fn s -> next(s, decoder) end,
       &cleanup/1
     )
   end
 
-  defp open(request, init_partial) do
+  defp open(request, init_partial, mode) do
     parent = self()
     ref = make_ref()
 
@@ -59,6 +66,7 @@ defmodule Tau.Providers.Shared.FinchStream do
     %{
       ref: ref,
       task: task,
+      mode: mode,
       sse: SSE.new(),
       partial: init_partial,
       pending: [],
@@ -101,7 +109,7 @@ defmodule Tau.Providers.Shared.FinchStream do
 
   defp handle({:headers, _}, s, _), do: s
 
-  defp handle({:data, chunk}, %{status: st} = s, decoder) when st in 200..299 do
+  defp handle({:data, chunk}, %{status: st, mode: :sse} = s, decoder) when st in 200..299 do
     {sse_events, sse} = SSE.feed(s.sse, chunk)
 
     {events, partial} =
@@ -111,6 +119,11 @@ defmodule Tau.Providers.Shared.FinchStream do
       end)
 
     %{s | sse: sse, partial: partial, pending: s.pending ++ events}
+  end
+
+  defp handle({:data, chunk}, %{status: st, mode: :raw} = s, decoder) when st in 200..299 do
+    {events, partial} = decoder.(chunk, s.partial)
+    %{s | partial: partial, pending: s.pending ++ events}
   end
 
   defp handle({:data, _chunk}, s, _decoder), do: s

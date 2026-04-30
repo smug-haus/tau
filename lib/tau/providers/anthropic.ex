@@ -2,8 +2,9 @@ defmodule Tau.Providers.Anthropic do
   @moduledoc """
   Anthropic Messages API client.
 
-  Streams `POST /v1/messages?stream=true` (SSE), parses content-block events,
-  and yields normalised `Tau.Provider.Event` structs.
+  Streams `POST /v1/messages?stream=true` (SSE). Uses the shared
+  `Tau.Providers.Shared.FinchStream` engine and parses Anthropic's
+  content-block events into normalised `Tau.Provider.Event` structs.
 
   ## Configuration
 
@@ -13,17 +14,13 @@ defmodule Tau.Providers.Anthropic do
       Application.get_env(:tau, Tau.Providers.Anthropic)[:api_key]
       System.get_env("ANTHROPIC_API_KEY")
 
+  Optional `:base_url` override for staging or self-hosted relays.
+
   ## Streaming
 
-  The returned `Stream.resource/3` opens a Finch streaming request and parses
-  SSE events incrementally. Cancellation is handled by the Stream halting:
-  when the consumer stops iterating, Finch's connection is released.
-
-  ## Notes
-
-  This module is **stateless** — there is no GenServer here. Concurrent
-  streams share the `Tau.Providers.Finch` pool. Errors arrive in-stream as
-  `%Tau.Provider.Event.Error{}`; only invalid configuration (missing API
+  Stateless — no GenServer. Concurrent streams share the
+  `Tau.Providers.Finch` pool. Errors arrive in-stream as
+  `%Tau.Provider.Event.Error{}`. Only invalid configuration (missing API
   key) returns `{:error, _}` synchronously.
   """
 
@@ -31,7 +28,7 @@ defmodule Tau.Providers.Anthropic do
 
   alias Tau.Message.{Assistant, ToolResult, User}
   alias Tau.Provider.Event
-  alias Tau.Providers.Shared.SSE
+  alias Tau.Providers.Shared.FinchStream
 
   @api_url "https://api.anthropic.com"
   @api_version "2023-06-01"
@@ -54,7 +51,7 @@ defmodule Tau.Providers.Anthropic do
   end
 
   @impl Tau.Provider
-  def stream(messages, opts \\ %{}, ctx \\ %{}) do
+  def stream(messages, opts \\ %{}, _ctx \\ %{}) do
     case api_key() do
       nil ->
         {:error, :missing_api_key}
@@ -71,223 +68,92 @@ defmodule Tau.Providers.Anthropic do
             Jason.encode!(body)
           )
 
-        stream =
-          Stream.resource(
-            fn -> start_stream(request, ctx) end,
-            &next_event/1,
-            &cleanup/1
-          )
-
-        {:ok, stream}
+        {:ok, FinchStream.run(request, &decode/2, %{partial: %{}, started?: false, model: nil})}
     end
   end
 
-  # --- Streaming engine -----------------------------------------------------
+  # --- SSE event decoding (called by FinchStream) ---------------------------
 
-  defp start_stream(request, ctx) do
-    parent = self()
-    ref = make_ref()
+  @doc false
+  def decode(%{event: nil, data: ""}, partial), do: {[], partial}
 
-    # Drive Finch in a linked task; events flow back as messages so we can
-    # interleave SSE parsing with cancellation checks in the Stream itself.
-    task =
-      Task.async(fn ->
-        Finch.stream(request, Tau.Providers.Finch, nil, fn
-          {:status, status}, _ -> Process.send(parent, {ref, {:status, status}}, [])
-          {:headers, headers}, _ -> Process.send(parent, {ref, {:headers, headers}}, [])
-          {:data, chunk}, _ -> Process.send(parent, {ref, {:data, chunk}}, [])
-          {:done}, _ -> Process.send(parent, {ref, :done}, [])
-        end)
-        |> case do
-          {:ok, _} -> Process.send(parent, {ref, :end}, [])
-          {:error, e} -> Process.send(parent, {ref, {:error, e}}, [])
-        end
-      end)
-
-    %{
-      ref: ref,
-      task: task,
-      ctx: ctx,
-      sse: SSE.new(),
-      partial: %{},
-      pending: [],
-      status: nil,
-      headers: [],
-      finished?: false,
-      emitted_start?: false,
-      model: nil,
-      request_id: nil
-    }
-  end
-
-  defp next_event(%{pending: [event | rest]} = state) do
-    {[event], %{state | pending: rest}}
-  end
-
-  defp next_event(%{finished?: true}) do
-    {:halt, :done}
-  end
-
-  defp next_event(state) do
-    receive do
-      {ref, msg} when ref == state.ref ->
-        handle_msg(msg, state) |> emit_or_continue()
-    after
-      60_000 ->
-        {[%Event.Error{reason: :timeout, retryable?: true}], %{state | finished?: true}}
-    end
-  end
-
-  defp emit_or_continue(%{pending: [], finished?: false} = state), do: next_event(state)
-  defp emit_or_continue(state), do: next_event(state)
-
-  defp cleanup(:done), do: :ok
-
-  defp cleanup(state) do
-    if state.task && Process.alive?(state.task.pid) do
-      Task.shutdown(state.task, :brutal_kill)
-    end
-
-    :ok
-  end
-
-  defp handle_msg({:status, status}, state) when status in 200..299 do
-    %{state | status: status}
-  end
-
-  defp handle_msg({:status, status}, state) do
-    err = %Event.Error{
-      reason: {:http_status, status},
-      retryable?: status in [408, 409, 429, 500, 502, 503, 504]
-    }
-
-    %{state | status: status, pending: state.pending ++ [err], finished?: true}
-  end
-
-  defp handle_msg({:headers, headers}, state) do
-    request_id =
-      Enum.find_value(headers, fn
-        {"request-id", v} -> v
-        {"x-request-id", v} -> v
-        _ -> nil
-      end)
-
-    %{state | headers: headers, request_id: request_id}
-  end
-
-  defp handle_msg({:data, chunk}, %{status: s} = state) when s in 200..299 do
-    {sse_events, sse} = SSE.feed(state.sse, chunk)
-    {events, partial, model} = decode_events(sse_events, state.partial, state.model)
-
-    pending =
-      if not state.emitted_start? and model do
-        [%Event.Start{request_id: state.request_id || "anth_unknown", model: model} | events]
-      else
-        events
-      end
-
-    %{
-      state
-      | sse: sse,
-        partial: partial,
-        model: model,
-        pending: state.pending ++ pending,
-        emitted_start?: state.emitted_start? || not is_nil(model)
-    }
-  end
-
-  defp handle_msg({:data, chunk}, state) do
-    # Non-2xx body — append to error accumulator (kept in partial[:error_body])
-    body = Map.get(state.partial, :error_body, "") <> chunk
-    %{state | partial: Map.put(state.partial, :error_body, body)}
-  end
-
-  defp handle_msg(:done, state), do: state
-
-  defp handle_msg(:end, state), do: %{state | finished?: true}
-
-  defp handle_msg({:error, reason}, state) do
-    err = %Event.Error{reason: reason, retryable?: true}
-    %{state | pending: state.pending ++ [err], finished?: true}
-  end
-
-  # --- SSE event decoding ---------------------------------------------------
-
-  defp decode_events(sse_events, partial, model) do
-    Enum.reduce(sse_events, {[], partial, model}, fn evt, {acc, p, m} ->
-      case decode_one(evt, p, m) do
-        {events, new_p, new_m} -> {acc ++ events, new_p, new_m}
-        :skip -> {acc, p, m}
-      end
-    end)
-  end
-
-  defp decode_one(%{event: nil, data: ""}, _p, _m), do: :skip
-
-  defp decode_one(%{data: data} = evt, partial, model) do
+  def decode(%{data: data} = evt, partial) do
     case Jason.decode(data) do
-      {:ok, json} -> dispatch(evt[:event] || json["type"], json, partial, model)
-      {:error, _} -> :skip
+      {:ok, json} -> dispatch(evt[:event] || json["type"], json, partial)
+      {:error, _} -> {[], partial}
     end
   end
 
-  defp dispatch("message_start", %{"message" => msg}, partial, _model) do
-    {[], Map.put(partial, :usage, msg["usage"] || %{}), msg["model"]}
+  defp dispatch("message_start", %{"message" => msg}, partial) do
+    model = msg["model"]
+
+    start_evts =
+      if not partial.started? and not is_nil(model) do
+        [%Event.Start{request_id: msg["id"] || "anth_unknown", model: model}]
+      else
+        []
+      end
+
+    {start_evts,
+     %{
+       partial
+       | started?: partial.started? or not is_nil(model),
+         model: model || partial.model,
+         partial: Map.put(partial.partial, :usage, msg["usage"] || %{})
+     }}
   end
 
-  defp dispatch("content_block_start", %{"index" => idx, "content_block" => cb}, partial, model) do
+  defp dispatch("content_block_start", %{"index" => idx, "content_block" => cb}, partial) do
     case cb["type"] do
       "text" ->
         block_id = "anth_text_#{idx}"
-
-        {[%Event.TextStart{block_id: block_id}],
-         Map.put(partial, idx, %{kind: :text, id: block_id}), model}
+        p = put_in(partial.partial[idx], %{kind: :text, id: block_id})
+        {[%Event.TextStart{block_id: block_id}], p}
 
       "thinking" ->
         block_id = "anth_think_#{idx}"
-
-        {[%Event.ThinkingStart{block_id: block_id}],
-         Map.put(partial, idx, %{kind: :thinking, id: block_id}), model}
+        p = put_in(partial.partial[idx], %{kind: :thinking, id: block_id})
+        {[%Event.ThinkingStart{block_id: block_id}], p}
 
       "tool_use" ->
         tool_id = cb["id"]
         name = cb["name"]
-
-        {[%Event.ToolCallStart{tool_call_id: tool_id, name: name}],
-         Map.put(partial, idx, %{kind: :tool_use, id: tool_id, name: name, args: ""}), model}
+        p = put_in(partial.partial[idx], %{kind: :tool_use, id: tool_id, name: name, args: ""})
+        {[%Event.ToolCallStart{tool_call_id: tool_id, name: name}], p}
 
       _ ->
-        :skip
+        {[], partial}
     end
   end
 
-  defp dispatch("content_block_delta", %{"index" => idx, "delta" => d}, partial, model) do
-    case Map.get(partial, idx) do
+  defp dispatch("content_block_delta", %{"index" => idx, "delta" => d}, partial) do
+    case Map.get(partial.partial, idx) do
       %{kind: :text, id: id} ->
-        {[%Event.TextDelta{block_id: id, text: d["text"] || ""}], partial, model}
+        {[%Event.TextDelta{block_id: id, text: d["text"] || ""}], partial}
 
       %{kind: :thinking, id: id} ->
         text = d["thinking"] || d["text"] || ""
-        {[%Event.ThinkingDelta{block_id: id, text: text}], partial, model}
+        {[%Event.ThinkingDelta{block_id: id, text: text}], partial}
 
       %{kind: :tool_use, id: id} = tu ->
         frag = d["partial_json"] || ""
-
-        {[%Event.ToolCallDelta{tool_call_id: id, json_fragment: frag}],
-         Map.put(partial, idx, %{tu | args: tu.args <> frag}), model}
+        p = put_in(partial.partial[idx], %{tu | args: tu.args <> frag})
+        {[%Event.ToolCallDelta{tool_call_id: id, json_fragment: frag}], p}
 
       _ ->
-        :skip
+        {[], partial}
     end
   end
 
-  defp dispatch("content_block_stop", %{"index" => idx}, partial, model) do
-    case Map.get(partial, idx) do
+  defp dispatch("content_block_stop", %{"index" => idx}, partial) do
+    case Map.get(partial.partial, idx) do
       %{kind: :text, id: id} ->
-        {[%Event.TextEnd{block_id: id}], Map.delete(partial, idx), model}
+        p = %{partial | partial: Map.delete(partial.partial, idx)}
+        {[%Event.TextEnd{block_id: id}], p}
 
       %{kind: :thinking, id: id} ->
-        {[%Event.ThinkingEnd{block_id: id, signature: nil}], Map.delete(partial, idx), model}
+        p = %{partial | partial: Map.delete(partial.partial, idx)}
+        {[%Event.ThinkingEnd{block_id: id, signature: nil}], p}
 
       %{kind: :tool_use, id: id, args: args} ->
         params =
@@ -296,30 +162,30 @@ defmodule Tau.Providers.Anthropic do
             _ -> %{}
           end
 
-        {[%Event.ToolCallEnd{tool_call_id: id, params: params}], Map.delete(partial, idx), model}
+        p = %{partial | partial: Map.delete(partial.partial, idx)}
+        {[%Event.ToolCallEnd{tool_call_id: id, params: params}], p}
 
       _ ->
-        :skip
+        {[], partial}
     end
   end
 
-  defp dispatch("message_delta", %{"delta" => d, "usage" => u}, partial, model) do
+  defp dispatch("message_delta", %{"delta" => d, "usage" => u}, partial) do
     stop_reason = normalise_stop(d["stop_reason"])
-    usage = merge_usage(Map.get(partial, :usage, %{}), u)
-    {[%Event.Done{stop_reason: stop_reason, usage: usage}], partial, model}
+    usage = merge_usage(Map.get(partial.partial, :usage, %{}), u)
+    {[%Event.Done{stop_reason: stop_reason, usage: usage}], partial}
   end
 
-  defp dispatch("message_stop", _data, partial, model), do: {[], partial, model}
-  defp dispatch("ping", _data, partial, model), do: {[], partial, model}
+  defp dispatch("message_stop", _data, partial), do: {[], partial}
+  defp dispatch("ping", _data, partial), do: {[], partial}
 
-  defp dispatch("error", %{"error" => err}, partial, model) do
+  defp dispatch("error", %{"error" => err}, partial) do
     reason = {err["type"] || "error", err["message"] || ""}
-
     retryable? = err["type"] in ["overloaded_error", "api_error", "rate_limit_error"]
-    {[%Event.Error{reason: reason, retryable?: retryable?}], partial, model}
+    {[%Event.Error{reason: reason, retryable?: retryable?}], partial}
   end
 
-  defp dispatch(_unknown, _data, partial, model), do: {[], partial, model}
+  defp dispatch(_unknown, _data, partial), do: {[], partial}
 
   defp normalise_stop("end_turn"), do: :stop
   defp normalise_stop("max_tokens"), do: :length
@@ -375,16 +241,11 @@ defmodule Tau.Providers.Anthropic do
     |> maybe_put(:stop_sequences, opts[:stop_sequences])
   end
 
-  defp system_field(_string_system = nil, opts) do
+  defp system_field(nil, opts) do
     case opts[:system] do
-      nil ->
-        nil
-
-      bin when is_binary(bin) ->
-        bin
-
-      blocks when is_list(blocks) ->
-        blocks
+      nil -> nil
+      bin when is_binary(bin) -> bin
+      blocks when is_list(blocks) -> blocks
     end
   end
 
@@ -426,20 +287,11 @@ defmodule Tau.Providers.Anthropic do
   defp to_anthropic(%Assistant{content: blocks}),
     do: %{role: "assistant", content: Enum.map(blocks, &block_out/1)}
 
-  defp to_anthropic(%ToolResult{
-         tool_call_id: id,
-         content: c,
-         is_error: e
-       }) do
+  defp to_anthropic(%ToolResult{tool_call_id: id, content: c, is_error: e}) do
     %{
       role: "user",
       content: [
-        %{
-          type: "tool_result",
-          tool_use_id: id,
-          content: tool_result_content(c),
-          is_error: e
-        }
+        %{type: "tool_result", tool_use_id: id, content: tool_result_content(c), is_error: e}
       ]
     }
   end

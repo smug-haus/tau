@@ -124,7 +124,53 @@ defmodule Tau.Session do
   end
 
   @spec fork(id(), String.t()) :: {:ok, id()} | {:error, term()}
-  def fork(_id, _event_id), do: {:error, :not_implemented}
+  def fork(parent_id, parent_event_id) do
+    persistence = Tau.Persistence.impl()
+
+    events = persistence.stream(parent_id) |> Enum.to_list()
+
+    case events do
+      [] ->
+        {:error, :parent_not_found}
+
+      [%{"kind" => "session_header", "data" => header} | rest] ->
+        # Find the cutoff: keep all events up to and including parent_event_id.
+        kept =
+          rest
+          |> Enum.reduce_while([], fn event, acc ->
+            new_acc = [event | acc]
+
+            if event["id"] == parent_event_id do
+              {:halt, new_acc}
+            else
+              {:cont, new_acc}
+            end
+          end)
+          |> Enum.reverse()
+
+        if kept == [] and parent_event_id != nil do
+          {:error, :parent_event_not_found}
+        else
+          new_id = generate_id()
+
+          opts = [
+            session_id: new_id,
+            cwd: header["cwd"],
+            provider: resolve_provider(header["provider"]),
+            model: header["model"],
+            metadata:
+              Map.put(header["metadata"] || %{}, :forked_from, %{
+                session: parent_id,
+                event: parent_event_id
+              }),
+            parent_event_id: parent_event_id,
+            preload_events: kept
+          ]
+
+          start(opts)
+        end
+    end
+  end
 
   @spec cancel(id()) :: :ok
   def cancel(id) do
@@ -203,6 +249,7 @@ defmodule Tau.Session do
     model = opts[:model]
     metadata = opts[:metadata] || %{}
     persistence = opts[:persistence] || Tau.Persistence.impl()
+    preload = opts[:preload_events] || []
 
     case persistence.open(id,
            cwd: cwd,
@@ -228,13 +275,15 @@ defmodule Tau.Session do
           metadata: metadata
         })
 
+        messages = events_to_messages(preload)
+
         data = %{
           id: id,
           cwd: cwd,
           provider: provider,
           model: model,
           metadata: metadata,
-          messages: [],
+          messages: messages,
           persistence: persistence,
           persist_handle: persist_handle,
           provider_task: nil,
@@ -731,4 +780,56 @@ defmodule Tau.Session do
     do: %{"type" => "thinking", "text" => t, "signature" => s}
 
   defp serialize_block(other), do: other
+
+  # --- Event replay (for fork/resume) ---------------------------------------
+
+  defp events_to_messages(events) do
+    events
+    |> Enum.map(&event_to_message/1)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp event_to_message(%{"kind" => "user_message", "data" => d}) do
+    Tau.Message.User.new(d["content"])
+  end
+
+  defp event_to_message(%{"kind" => "assistant_message", "data" => d}) do
+    Tau.Message.Assistant.new(
+      content: deserialize_blocks(d["content"]),
+      stop_reason: stop_reason_atom(d["stop_reason"]),
+      usage: d["usage"] || %{},
+      model: d["model"]
+    )
+  end
+
+  defp event_to_message(%{"kind" => "tool_result", "data" => d}) do
+    Tau.Message.ToolResult.new(
+      tool_call_id: d["tool_call_id"],
+      tool_name: d["tool_name"],
+      content: d["content"],
+      details: d["details"] || %{},
+      is_error: d["is_error"] || false
+    )
+  end
+
+  defp event_to_message(_), do: nil
+
+  defp deserialize_blocks(blocks) when is_list(blocks),
+    do: Enum.map(blocks, &deserialize_block/1)
+
+  defp deserialize_blocks(other), do: other
+
+  defp deserialize_block(%{"type" => "text", "text" => t}), do: %{type: :text, text: t}
+
+  defp deserialize_block(%{"type" => "tool_call", "id" => id, "name" => n, "arguments" => a}),
+    do: %{type: :tool_call, id: id, name: n, arguments: a}
+
+  defp deserialize_block(%{"type" => "thinking", "text" => t} = b),
+    do: %{type: :thinking, text: t, signature: b["signature"]}
+
+  defp deserialize_block(other), do: other
+
+  defp stop_reason_atom(nil), do: nil
+  defp stop_reason_atom(s) when is_binary(s), do: String.to_atom(s)
+  defp stop_reason_atom(s), do: s
 end

@@ -60,27 +60,23 @@ defmodule Tau.Providers.Bedrock do
 
         request = Finch.build(:post, url, headers, body)
 
-        # Use a Finch streaming engine but with a custom decoder that
-        # buffers AWS event-stream frames first.
         {:ok,
-         FinchStream.run(request, &decode_aws_frame/2, %{
-           aws: AwsEventStream.new(),
-           model: model,
-           started?: false
-         })}
+         FinchStream.run(
+           request,
+           &decode_aws_chunk/2,
+           %{aws: AwsEventStream.new(), model: model, started?: false},
+           mode: :raw
+         )}
     end
   end
 
-  defp decode_aws_frame(%{data: chunk}, partial) do
+  defp decode_aws_chunk(chunk, partial) when is_binary(chunk) do
     {frames, aws} = AwsEventStream.feed(partial.aws, chunk)
 
-    {events, partial} =
-      Enum.reduce(frames, {[], %{partial | aws: aws}}, fn frame, {acc, p} ->
-        {evs, p2} = decode_frame(frame, p)
-        {acc ++ evs, p2}
-      end)
-
-    {events, partial}
+    Enum.reduce(frames, {[], %{partial | aws: aws}}, fn frame, {acc, p} ->
+      {evs, p2} = decode_frame(frame, p)
+      {acc ++ evs, p2}
+    end)
   end
 
   defp decode_frame(%{payload: payload}, partial) do
