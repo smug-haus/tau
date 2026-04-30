@@ -29,8 +29,6 @@ defmodule Tau.Session do
   alias Tau.Session.Events
   alias Tau.Provider.Event, as: PEvent
 
-  require Logger
-
   @type id :: String.t()
 
   defmodule Meta do
