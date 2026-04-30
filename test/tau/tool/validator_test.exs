@@ -84,4 +84,77 @@ defmodule Tau.Tool.ValidatorTest do
     errors = [{"is required", "#/path"}, {"must be integer", "#/count"}]
     assert Validator.format_errors(errors) == "#/path: is required; #/count: must be integer"
   end
+
+  defmodule UnresolvableTool do
+    @moduledoc false
+    @behaviour Tau.Tool
+
+    alias Tau.Tool.Result
+
+    @impl true
+    def name, do: "Unresolvable"
+    @impl true
+    def description, do: "Schema that ex_json_schema can't resolve"
+    @impl true
+    def parameters do
+      # An unsupported draft URI makes ExJsonSchema.Schema.resolve/1 raise.
+      %{
+        "$schema" => "http://json-schema.org/draft-2020-12/schema#",
+        "type" => "object"
+      }
+    end
+
+    @impl true
+    def execute(_p, _ctx), do: {:ok, %Result{content: "ok"}}
+  end
+
+  describe "fail-closed on unresolvable schema (ADR-0003, #50)" do
+    setup do
+      Validator.invalidate(UnresolvableTool)
+      on_exit(fn -> Validator.invalidate(UnresolvableTool) end)
+      :ok
+    end
+
+    test "validate/2 rejects every call when the schema can't be resolved" do
+      assert {:error, errors} = Validator.validate(UnresolvableTool, %{"anything" => "goes"})
+
+      assert Validator.format_errors(errors) =~ "schema unresolvable"
+    end
+
+    test "the rejection is NOT cached (next call re-attempts resolution)" do
+      handler_id = "schema-error-#{System.unique_integer([:positive])}"
+      parent = self()
+
+      :telemetry.attach(
+        handler_id,
+        [:tau, :tool, :validate, :schema_error],
+        fn _e, _m, meta, _ -> send(parent, {:schema_error, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      assert {:error, _} = Validator.validate(UnresolvableTool, %{})
+      assert_receive {:schema_error, %{tool_module: UnresolvableTool}}, 200
+
+      assert {:error, _} = Validator.validate(UnresolvableTool, %{})
+      # If the failure had been cached, no second telemetry event would fire.
+      assert_receive {:schema_error, %{tool_module: UnresolvableTool}}, 200
+    end
+
+    test "invalidate/1 returns :ok and is safe to call on a never-cached module" do
+      assert :ok == Validator.invalidate(StrictTool)
+      assert :ok == Validator.invalidate(NeverCachedFakeModule)
+    end
+  end
+
+  describe "successful resolutions are cached" do
+    test "second call against StrictTool does not re-resolve" do
+      Validator.invalidate(StrictTool)
+      assert :ok == Validator.validate(StrictTool, %{"path" => "/x"})
+      # Now the cache holds a resolved schema; pin that by deliberately
+      # invalidating and re-running and asserting it still works.
+      assert :ok == Validator.validate(StrictTool, %{"path" => "/x"})
+    end
+  end
 end

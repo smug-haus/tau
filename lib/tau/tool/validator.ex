@@ -16,19 +16,27 @@ defmodule Tau.Tool.Validator do
       rejection.
 
   Resolved schemas are cached in `:persistent_term` keyed by module —
-  `parameters/0` is effectively compile-time constant. If a tool's
-  schema can't be resolved (uses features `ex_json_schema` doesn't
-  support, or is malformed), validation is bypassed rather than blocking
-  the tool entirely; a one-shot
-  `[:tau, :tool, :validate, :schema_error]` telemetry event fires for
-  visibility.
+  `parameters/0` is effectively compile-time constant. **Failures are
+  not cached** (ADR-0003): a tool whose schema can't be resolved
+  fails closed (every call is rejected with a clear error) until the
+  schema becomes resolvable or `invalidate/1` is called. This is the
+  security boundary — a hostile MCP server can't ship a malformed
+  schema once and have it permanently bypass validation. Each
+  failure does emit `[:tau, :tool, :validate, :schema_error]`
+  telemetry for visibility.
   """
 
   @type validation_error :: {String.t(), String.t()}
 
   @doc """
-  Validate `args` against `mod.parameters/0`. Returns `:ok` if the
-  schema is empty/missing/unresolvable.
+  Validate `args` against `mod.parameters/0`.
+
+  Returns:
+
+    * `:ok` if the schema is empty / the tool has no `parameters/0`
+      callback / args satisfies the resolved schema.
+    * `{:error, [{msg, path}]}` if args fails validation, OR if the
+      schema can't be resolved (tool fails closed, ADR-0003).
   """
   @spec validate(module(), term()) :: :ok | {:error, [validation_error()]}
   def validate(mod, args) when is_atom(mod) do
@@ -37,8 +45,11 @@ defmodule Tau.Tool.Validator do
 
     if is_map(schema) and map_size(schema) > 0 do
       case resolve_cached(mod, schema) do
-        {:ok, resolved} -> ExJsonSchema.Validator.validate(resolved, args)
-        {:error, _} -> :ok
+        {:ok, resolved} ->
+          ExJsonSchema.Validator.validate(resolved, args)
+
+        {:error, reason} ->
+          {:error, [{"schema unresolvable: #{reason}", "#"}]}
       end
     else
       :ok
@@ -59,6 +70,17 @@ defmodule Tau.Tool.Validator do
     |> Enum.join("; ")
   end
 
+  @doc """
+  Evict `mod`'s cached resolved schema. Useful after a tool
+  re-registers in the same BEAM with corrected `parameters/0` (for
+  example, a hot-reloaded MCP tool whose server fixed its manifest).
+  """
+  @spec invalidate(module()) :: :ok
+  def invalidate(mod) when is_atom(mod) do
+    _ = :persistent_term.erase({__MODULE__, mod})
+    :ok
+  end
+
   defp safe_parameters(mod) do
     if function_exported?(mod, :parameters, 0), do: mod.parameters(), else: %{}
   end
@@ -68,25 +90,35 @@ defmodule Tau.Tool.Validator do
 
     case :persistent_term.get(key, :undefined) do
       :undefined ->
-        result =
-          try do
-            {:ok, ExJsonSchema.Schema.resolve(schema)}
-          rescue
-            e ->
-              :telemetry.execute(
-                [:tau, :tool, :validate, :schema_error],
-                %{system_time: System.system_time()},
-                %{tool_module: mod, error: Exception.message(e)}
-              )
+        case try_resolve(mod, schema) do
+          {:ok, resolved} = ok ->
+            # Only successful resolutions are cached. Failures
+            # re-attempt next call (cheap; failing tools stop being
+            # invoked once the model sees the error).
+            :persistent_term.put(key, ok)
+            {:ok, resolved}
 
-              {:error, Exception.message(e)}
-          end
-
-        :persistent_term.put(key, result)
-        result
+          {:error, _} = err ->
+            err
+        end
 
       cached ->
         cached
     end
+  end
+
+  defp try_resolve(mod, schema) do
+    {:ok, ExJsonSchema.Schema.resolve(schema)}
+  rescue
+    e ->
+      msg = Exception.message(e)
+
+      :telemetry.execute(
+        [:tau, :tool, :validate, :schema_error],
+        %{system_time: System.system_time()},
+        %{tool_module: mod, error: msg}
+      )
+
+      {:error, msg}
   end
 end

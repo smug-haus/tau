@@ -56,6 +56,7 @@ get rewritten away by the next refactor. ADRs survive.
 |-----|-------|--------|
 | [0001](0001-issue-driven-backlog.md) | GitHub issues are the backlog | Accepted |
 | [0002](0002-provider-ctx-is-the-runtime-config-channel.md) | Provider runtime configuration goes through `:provider_ctx`, not `Application` env | Accepted |
+| [0003](0003-tool-validator-fails-closed-on-unresolvable-schemas.md) | `Tau.Tool.Validator` fails closed on unresolvable schemas | Accepted |
 
 (New ADRs append here. Keep the table sorted by ADR number.)
 
