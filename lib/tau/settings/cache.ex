@@ -1,40 +1,53 @@
 defmodule Tau.Settings.Cache do
   @moduledoc """
-  Owns the merged settings struct and writes it through to `:persistent_term`
-  for lock-free reads from the hot path.
+  Owns the merged settings map and writes it through to `:persistent_term`
+  so any process can read it lock-free.
 
-  Loader order (later overrides earlier; arrays concat; deny always wins):
-
-    1. Managed (`/etc/tau/managed.json`, OS-specific elsewhere)
-    2. User (`~/.tau/settings.json`)
-    3. Project (`<cwd>/.tau/settings.json`)
-    4. Local (`<cwd>/.tau/settings.local.json`)
-
-  On boot we read once. `Tau.Settings.Watcher` informs us of subsequent file
-  changes and we re-publish. The merged struct lives in `:persistent_term`
-  under `{Tau, :settings}` so any process can `:persistent_term.get/1` it
-  without a GenServer call.
-
-  M0 stub: stores an empty `%Tau.Settings{}` and emits `:reloaded` once.
+  On boot we call `Tau.Settings.Loader.load/1` once. `Tau.Settings.Watcher`
+  notifies us of subsequent file changes; we re-load and re-publish.
   """
   use GenServer
 
   @persistent_key {Tau, :settings}
 
+  def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+
+  @doc "Reload from disk and republish."
+  @spec reload() :: :ok
+  def reload, do: GenServer.cast(__MODULE__, :reload)
+
   @doc "Get the current merged settings (lock-free)."
   @spec get() :: map()
   def get, do: :persistent_term.get(@persistent_key, %{})
 
-  def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
-
   @impl true
   def init(_opts) do
-    :persistent_term.put(@persistent_key, %{})
-
-    :telemetry.execute([:tau, :settings, :reloaded], %{count: 1}, %{
-      sources: []
-    })
-
+    publish(load())
     {:ok, %{}}
+  end
+
+  @impl true
+  def handle_cast(:reload, state) do
+    publish(load())
+    {:noreply, state}
+  end
+
+  defp load do
+    cwd = File.cwd!()
+    Tau.Settings.Loader.load(cwd)
+  end
+
+  defp publish(%{settings: settings, sources: sources}) do
+    :persistent_term.put(@persistent_key, settings)
+
+    if Process.whereis(Tau.Permissions.RuleSet) do
+      send(Tau.Permissions.RuleSet, {:settings_reloaded, settings})
+    end
+
+    :telemetry.execute(
+      [:tau, :settings, :reloaded],
+      %{count: length(sources)},
+      %{sources: sources}
+    )
   end
 end
