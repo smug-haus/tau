@@ -103,27 +103,34 @@ jobs:
         id: test_step
         run: mix test --cover 2>&1 | tee /tmp/test.log
         continue-on-error: true
-      - name: Post test log on failure (via gh api)
+      - name: Push test log to ci-logs branch on failure
         if: steps.test_step.outcome == 'failure'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          # Find the PR number from the event or via search.
-          PR=${{ github.event.pull_request.number }}
-          if [ -z "$PR" ]; then
-            PR=$(gh pr list --head "${{ github.ref_name }}" --json number -q '.[0].number' || echo "")
-          fi
-          BODY=$(printf '## test job (Elixir %s / OTP %s) — failure on `%s`\n\n```\n%s\n```\n' \
-            "${{ matrix.elixir }}" "${{ matrix.otp }}" "${{ github.sha }}" \
-            "$(tail -200 /tmp/test.log)")
-          if [ -n "$PR" ]; then
-            jq -n --arg body "$BODY" '{body: $body}' > /tmp/payload.json
-            gh api -X POST "/repos/${{ github.repository }}/issues/$PR/comments" --input /tmp/payload.json
+          mkdir -p /tmp/logwork && cd /tmp/logwork
+          git init -q
+          git config user.email "ci@local"
+          git config user.name "ci"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          # Try to fetch existing ci-logs branch; create orphan if missing
+          if git fetch --depth=1 origin ci-logs 2>/dev/null; then
+            git checkout ci-logs
           else
-            echo "No PR found; dumping log to step output instead:"
-            tail -200 /tmp/test.log
+            git checkout --orphan ci-logs
+            git rm -rf . 2>/dev/null || true
           fi
+          mkdir -p "logs/${{ github.sha }}"
+          tail -300 /tmp/test.log > "logs/${{ github.sha }}/test-${{ matrix.elixir }}.log"
+          git add logs
+          git commit -m "ci-logs: test ${{ matrix.elixir }} on ${{ github.sha }}" || true
+          # Retry push up to 3x — matrix jobs may race
+          for i in 1 2 3; do
+            git pull --rebase origin ci-logs 2>/dev/null || true
+            if git push origin ci-logs 2>/dev/null; then break; fi
+            sleep $((i * 2))
+          done
       - name: Fail if tests failed
         if: steps.test_step.outcome == 'failure'
         run: exit 1
