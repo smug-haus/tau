@@ -11,6 +11,14 @@ defmodule Tau.Permissions.RuleSet do
   """
   use GenServer
 
+  @typedoc """
+  Permissions mode that gates tool dispatch and slash-command
+  execution. Single source of truth — `Tau.Command.Context`,
+  `Tau.Tool.Context`, `Tau.Session.Meta`, and the hook payload all
+  use this type (M12).
+  """
+  @type mode :: :default | :accept_edits | :plan | :auto | :dont_ask | :bypass
+
   @persistent_key {Tau.Permissions, :rule_set}
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)

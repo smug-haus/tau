@@ -6,7 +6,10 @@ defmodule Tau.CLI do
 
       tau                              # interactive TUI (M6+)
       tau run "prompt" [opts]          # one-shot non-interactive
-      tau resume <session-id>          # continue a saved session
+      tau resume <session-id>          # replay <session-id>'s JSONL into
+                                       # a NEW session (returns the new
+                                       # session's id; the original is
+                                       # untouched on disk)
       tau sessions list|show           # inspect persisted sessions
       tau version                      # print version
       tau doctor                       # diagnose environment, providers, MCP

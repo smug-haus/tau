@@ -66,6 +66,7 @@ defmodule Tau.Tool.Validator do
     |> Enum.map(fn
       {msg, path} when is_binary(path) and path != "" -> "#{path}: #{msg}"
       {msg, _path} -> msg
+      msg when is_binary(msg) -> msg
     end)
     |> Enum.join("; ")
   end

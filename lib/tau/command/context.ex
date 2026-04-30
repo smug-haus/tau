@@ -30,7 +30,7 @@ defmodule Tau.Command.Context do
   @type t :: %__MODULE__{
           session_id: String.t(),
           cwd: String.t() | nil,
-          permissions_mode: atom(),
+          permissions_mode: Tau.Permissions.RuleSet.mode(),
           emit: (term() -> :ok) | nil,
           metadata: map()
         }

@@ -1,11 +1,13 @@
 defmodule Tau.Settings.SchemaTest do
   @moduledoc """
   Validates that `Tau.Settings.Schema.json_schema/0` is a well-formed
-  JSON Schema (Draft 2020-12), parses cleanly via `ex_json_schema`, and
-  accepts realistic settings inputs while rejecting obviously bad ones.
+  JSON Schema (Draft 7 — `ex_json_schema 0.11` doesn't support
+  newer drafts), parses cleanly via `ex_json_schema`, and accepts
+  realistic settings inputs while rejecting obviously bad ones.
 
-  Also smoke-tests `priv/scripts/gen_settings_schema.exs` end-to-end so
-  the `mix tau.gen.schema` alias's first invocation cannot regress.
+  Also pins `priv/scripts/gen_settings_schema.exs` as a path the
+  `mix tau.gen.schema` alias can reach (we don't run the script —
+  that would require `File.cd!` which mutates OS-global cwd).
   """
   use ExUnit.Case, async: true
 

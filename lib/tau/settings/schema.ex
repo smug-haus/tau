@@ -16,10 +16,15 @@ defmodule Tau.Settings.Schema do
     * (future) the interactive `tau init` wizard, see the onboarding
       feature request.
 
-  The schema is intentionally permissive (`additionalProperties: true`
-  at every level) so an out-of-band setting added in a feature branch
-  doesn't immediately make stable releases red. Tighten field-by-field
-  as subsystems freeze their config surface.
+  ## additionalProperties policy
+
+  The top level uses `additionalProperties: false`: editors flag
+  typos like `extentions` against the canonical key list, and the
+  schema documents the API surface honestly. Sub-objects under
+  `permissions`, individual MCP server entries, and individual
+  hook entries keep `additionalProperties: true` so vendor-specific
+  fields (e.g. an MCP server with a custom `auth` block) don't
+  trip validation while we're still iterating on those shapes.
 
   Known top-level keys are kept in lockstep with `Tau.Settings.Loader` —
   in particular, every key listed here as `type: "array"` should appear
@@ -33,82 +38,81 @@ defmodule Tau.Settings.Schema do
   @mcp_transports ~w(stdio sse http)
   @themes ~w(light dark auto)
 
+  # Compile-time-built schema map (M13). json_schema/0 returns the
+  # same literal map on every call without rebuilding it.
+  @schema %{
+    "$schema" => @schema_uri,
+    "$id" => @schema_id,
+    "title" => "Tau Settings",
+    "description" => "Configuration for the Tau OTP/BEAM agentic coding harness.",
+    "type" => "object",
+    # M14: top-level keys are an enumerated set; typos in editors get
+    # flagged. Sub-schemas stay permissive while their shapes settle.
+    "additionalProperties" => false,
+    "properties" => %{
+      "model" => %{"type" => "string"},
+      "provider" => %{"type" => "string"},
+      "data_dir" => %{"type" => "string"},
+      "theme" => %{"type" => "string", "enum" => @themes},
+      "permissions" => %{
+        "type" => "object",
+        "additionalProperties" => true,
+        "properties" => %{
+          "mode" => %{"type" => "string", "enum" => @permissions_modes},
+          "rules" => %{"type" => "array", "items" => %{"type" => "string"}}
+        }
+      },
+      "mcp" => %{
+        "type" => "array",
+        "items" => %{
+          "type" => "object",
+          "additionalProperties" => true,
+          "required" => ["name"],
+          "properties" => %{
+            "name" => %{"type" => "string"},
+            "transport" => %{"type" => "string", "enum" => @mcp_transports},
+            "command" => %{"type" => "string"},
+            "args" => %{"type" => "array", "items" => %{"type" => "string"}},
+            "env" => %{
+              "type" => "object",
+              "additionalProperties" => %{"type" => "string"}
+            },
+            "url" => %{"type" => "string"}
+          }
+        }
+      },
+      "hooks" => %{
+        "type" => "array",
+        "items" => %{
+          "type" => "object",
+          "additionalProperties" => true,
+          "required" => ["event"],
+          "properties" => %{
+            "event" => %{"type" => "string"},
+            "match" => %{"type" => "object"},
+            "command" => %{"type" => "string"},
+            "module" => %{"type" => "string"}
+          }
+        }
+      },
+      "extensions" => %{"type" => "array", "items" => %{"type" => "string"}},
+      "allow" => %{"type" => "array", "items" => %{"type" => "string"}},
+      "deny" => %{"type" => "array", "items" => %{"type" => "string"}},
+      "ask" => %{"type" => "array", "items" => %{"type" => "string"}}
+    }
+  }
+
+  @known_top_level_keys @schema |> Map.fetch!("properties") |> Map.keys() |> Enum.sort()
+
   @doc """
   Return the JSON Schema as a plain map. Serialise via
   `Jason.encode_to_iodata!(schema, pretty: true)` to get the on-disk
   artifact.
   """
   @spec json_schema() :: map()
-  def json_schema do
-    %{
-      "$schema" => @schema_uri,
-      "$id" => @schema_id,
-      "title" => "Tau Settings",
-      "description" => "Configuration for the Tau OTP/BEAM agentic coding harness.",
-      "type" => "object",
-      "additionalProperties" => true,
-      "properties" => %{
-        "model" => %{"type" => "string"},
-        "provider" => %{"type" => "string"},
-        "data_dir" => %{"type" => "string"},
-        "theme" => %{"type" => "string", "enum" => @themes},
-        "permissions" => permissions_schema(),
-        "mcp" => array_of(mcp_server_schema()),
-        "hooks" => array_of(hook_schema()),
-        "extensions" => array_of(%{"type" => "string"}),
-        "allow" => array_of(%{"type" => "string"}),
-        "deny" => array_of(%{"type" => "string"}),
-        "ask" => array_of(%{"type" => "string"})
-      }
-    }
-  end
+  def json_schema, do: @schema
 
   @doc "List of known top-level keys (useful for tests / drift checks)."
   @spec known_top_level_keys() :: [String.t()]
-  def known_top_level_keys do
-    json_schema() |> Map.fetch!("properties") |> Map.keys() |> Enum.sort()
-  end
-
-  defp permissions_schema do
-    %{
-      "type" => "object",
-      "additionalProperties" => true,
-      "properties" => %{
-        "mode" => %{"type" => "string", "enum" => @permissions_modes},
-        "rules" => array_of(%{"type" => "string"})
-      }
-    }
-  end
-
-  defp mcp_server_schema do
-    %{
-      "type" => "object",
-      "additionalProperties" => true,
-      "required" => ["name"],
-      "properties" => %{
-        "name" => %{"type" => "string"},
-        "transport" => %{"type" => "string", "enum" => @mcp_transports},
-        "command" => %{"type" => "string"},
-        "args" => array_of(%{"type" => "string"}),
-        "env" => %{"type" => "object", "additionalProperties" => %{"type" => "string"}},
-        "url" => %{"type" => "string"}
-      }
-    }
-  end
-
-  defp hook_schema do
-    %{
-      "type" => "object",
-      "additionalProperties" => true,
-      "required" => ["event"],
-      "properties" => %{
-        "event" => %{"type" => "string"},
-        "match" => %{"type" => "object"},
-        "command" => %{"type" => "string"},
-        "module" => %{"type" => "string"}
-      }
-    }
-  end
-
-  defp array_of(item_schema), do: %{"type" => "array", "items" => item_schema}
+  def known_top_level_keys, do: @known_top_level_keys
 end
