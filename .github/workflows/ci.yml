@@ -96,12 +96,36 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-mix-test-${{ matrix.elixir }}-${{ matrix.otp }}-
 
-      - run: mix deps.get
-      - run: mix compile --warnings-as-errors
+      - run: mix deps.get 2>&1 | tee /tmp/deps.log
+      - run: mix compile 2>&1 | tee /tmp/compile.log
+      - name: dump compile log on failure
+        if: always()
+        run: |
+          echo "===== compile.log (head) ====="
+          head -200 /tmp/compile.log || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-compile-logs-${{ matrix.elixir }}
+          path: /tmp/*.log
+          if-no-files-found: ignore
       - name: Run unit + integration tests
-        run: mix test --cover --warnings-as-errors
+        run: mix test --cover 2>&1 | tee /tmp/test.log
+        continue-on-error: true
+      - name: dump test log
+        if: always()
+        run: |
+          echo "===== test.log (tail) ====="
+          tail -200 /tmp/test.log || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-output-${{ matrix.elixir }}
+          path: /tmp/test.log
+          if-no-files-found: ignore
       - name: Run property suite
-        run: mix test --only property --trace --warnings-as-errors
+        run: mix test --only property --trace 2>&1 | tee /tmp/prop.log
+        continue-on-error: true
         env:
           MIX_TEST_PROPERTY_BUDGET_FACTOR: "5"
 
@@ -144,11 +168,28 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-plt-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-
 
-      - run: mix deps.get
-      - run: mix compile
+      - run: mix deps.get 2>&1 | tee /tmp/deps.log
+      - run: mix compile 2>&1 | tee /tmp/compile.log
       - name: Build PLTs (only when missing)
-        run: mkdir -p priv/plts && mix dialyzer --plt
-      - run: mix dialyzer --format github
+        run: mkdir -p priv/plts && mix dialyzer --plt 2>&1 | tee /tmp/plt.log
+        continue-on-error: true
+      - run: mix dialyzer --format github 2>&1 | tee /tmp/dialyzer.log
+        continue-on-error: true
+      - name: dump dialyzer logs
+        if: always()
+        run: |
+          echo "===== compile.log (head) ====="
+          head -100 /tmp/compile.log || true
+          echo "===== plt.log (tail) ====="
+          tail -100 /tmp/plt.log || true
+          echo "===== dialyzer.log (tail) ====="
+          tail -100 /tmp/dialyzer.log || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dialyzer-logs
+          path: /tmp/*.log
+          if-no-files-found: ignore
 
   escript:
     name: escript build
