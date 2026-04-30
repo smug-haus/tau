@@ -64,23 +64,15 @@ defmodule Tau.Settings.SchemaTest do
   end
 
   describe "priv/scripts/gen_settings_schema.exs" do
-    test "writes priv/schemas/settings.schema.json with a Jason-encodable schema" do
-      tmp = Path.join(System.tmp_dir!(), "tau-gen-schema-#{System.unique_integer([:positive])}")
-      File.mkdir_p!(tmp)
-      on_exit(fn -> File.rm_rf!(tmp) end)
-
+    test "the script exists where the mix alias expects it and parses cleanly" do
       script = Path.join(File.cwd!(), "priv/scripts/gen_settings_schema.exs")
       assert File.exists?(script), "script must exist for `mix tau.gen.schema` to work"
 
-      # Run the script with cwd=tmp so it writes into the tmp dir, not the repo.
-      File.cd!(tmp, fn -> Code.eval_file(script) end)
-
-      out_path = Path.join(tmp, "priv/schemas/settings.schema.json")
-      assert File.exists?(out_path)
-
-      decoded = out_path |> File.read!() |> Jason.decode!()
-      assert decoded["type"] == "object"
-      assert decoded["$schema"] == "http://json-schema.org/draft-07/schema#"
+      # We don't run the script here — File.cd! mutates OS-global cwd and
+      # races with the parallel test compiler. The schema's content is
+      # covered by the other tests in this file; this one just pins the
+      # path the alias references.
+      assert {:ok, _ast} = script |> File.read!() |> Code.string_to_quoted()
     end
   end
 end
