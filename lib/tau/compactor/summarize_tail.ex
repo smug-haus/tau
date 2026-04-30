@@ -32,18 +32,22 @@ defmodule Tau.Compactor.SummarizeTail do
 
   @impl Tau.Compactor
   def compact(messages, ctx) do
-    cutoff = max(div(length(messages) * 6, 10), 1)
-    {old, recent} = Enum.split(messages, cutoff)
+    {pinned, conv} = Enum.split_with(messages, &pinned?/1)
+    cutoff = max(div(length(conv) * 6, 10), 1)
+    {old, recent} = Enum.split(conv, cutoff)
 
     case summarise(old, ctx) do
       {:ok, summary_text} ->
         synth = Message.User.new("<conversation_summary>\n#{summary_text}\n</conversation_summary>")
-        {:ok, [synth | recent]}
+        {:ok, pinned ++ [synth | recent]}
 
       {:error, _} = err ->
         err
     end
   end
+
+  defp pinned?(%Message.User{metadata: %{role: :system}}), do: true
+  defp pinned?(_), do: false
 
   defp summarise([], _ctx), do: {:ok, ""}
 

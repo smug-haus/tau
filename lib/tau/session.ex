@@ -273,7 +273,7 @@ defmodule Tau.Session do
           metadata: metadata
         })
 
-        messages = events_to_messages(preload)
+        messages = inject_memory(events_to_messages(preload), cwd)
 
         data = %{
           id: id,
@@ -814,6 +814,31 @@ defmodule Tau.Session do
     do: %{"type" => "thinking", "text" => t, "signature" => s}
 
   defp serialize_block(other), do: other
+
+  # --- Memory injection -----------------------------------------------------
+
+  defp inject_memory(messages, cwd) do
+    case Tau.Memory.Loader.load(cwd) do
+      [] ->
+        messages
+
+      cascade ->
+        bytes = Enum.reduce(cascade, 0, fn {_p, b}, acc -> acc + byte_size(b) end)
+
+        :telemetry.execute(
+          [:tau, :memory, :loaded],
+          %{file_count: length(cascade), bytes: bytes},
+          %{cwd: cwd}
+        )
+
+        memory_messages =
+          Enum.map(cascade, fn {path, body} ->
+            Tau.Message.User.new(body, metadata: %{role: :system, source: :memory, path: path})
+          end)
+
+        memory_messages ++ messages
+    end
+  end
 
   # --- Event replay (for fork/resume) ---------------------------------------
 
