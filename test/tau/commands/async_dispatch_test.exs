@@ -22,11 +22,25 @@ defmodule Tau.Commands.AsyncDispatchTest do
 
     @impl true
     def execute(_args, _ctx) do
-      # Block "forever" — Task.shutdown(:brutal_kill) from the FSM's
+      # Block "forever" — Process.exit(:brutal_kill) from the FSM's
       # cancel handler must terminate this task.
       Process.sleep(60_000)
       :ignore
     end
+  end
+
+  defmodule CrashCmd do
+    @moduledoc false
+    @behaviour Tau.Command
+
+    @impl true
+    def name, do: "/crash-cmd"
+
+    @impl true
+    def description, do: "raises immediately"
+
+    @impl true
+    def execute(_args, _ctx), do: raise("boom")
   end
 
   setup do
@@ -35,6 +49,7 @@ defmodule Tau.Commands.AsyncDispatchTest do
     Application.put_env(:tau, :data_dir, tmp)
 
     {:ok, _} = Registry.register(Tau.Commands.Registry, "/slow-cmd", SlowCmd)
+    {:ok, _} = Registry.register(Tau.Commands.Registry, "/crash-cmd", CrashCmd)
 
     on_exit(fn ->
       File.rm_rf!(tmp)
@@ -77,19 +92,6 @@ defmodule Tau.Commands.AsyncDispatchTest do
   end
 
   test "a slash command that crashes surfaces as a synthetic message, not an FSM crash" do
-    defmodule CrashCmd do
-      @moduledoc false
-      @behaviour Tau.Command
-      @impl true
-      def name, do: "/crash-cmd"
-      @impl true
-      def description, do: "raises immediately"
-      @impl true
-      def execute(_args, _ctx), do: raise("boom")
-    end
-
-    {:ok, _} = Registry.register(Tau.Commands.Registry, "/crash-cmd", CrashCmd)
-
     cwd = Path.join(System.tmp_dir!(), "tau-async-cmd-crash-#{System.unique_integer([:positive])}")
     File.mkdir_p!(Path.join(cwd, ".git"))
     on_exit(fn -> File.rm_rf!(cwd) end)

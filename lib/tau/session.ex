@@ -444,29 +444,21 @@ defmodule Tau.Session do
     process_user_message(msg, %{data | command_task: nil})
   end
 
-  defp process_user_message(msg, data) do
-    case Tau.Hooks.Dispatcher.run(
-           :user_prompt_submit,
-           hook_payload(data, :user_prompt_submit, %{message: msg})
-         ) do
-      {:halt, reason} ->
-        broadcast(data.id, %Events.Cancelled{session_id: data.id, reason: {:hook_halt, reason}})
-        {:keep_state, data}
+  def handle_event(
+        :info,
+        {:command_timeout, pid, original_msg, ms},
+        _state,
+        %{command_task: pid} = data
+      ) do
+    if Process.alive?(pid), do: Process.exit(pid, :brutal_kill)
+    msg = apply_command_result({:timeout, ms}, original_msg)
+    process_user_message(msg, %{data | command_task: nil})
+  end
 
-      {:deny, reason} ->
-        broadcast(data.id, %Events.Cancelled{session_id: data.id, reason: {:hook_deny, reason}})
-        {:keep_state, data}
-
-      {:cont, payload} ->
-        msg = Map.get(payload, :message, msg)
-
-        data =
-          data
-          |> append_message(msg)
-          |> persist_event("user_message", message_to_data(msg))
-
-        handle_event(:internal, :start_provider, :provider_streaming, data)
-    end
+  def handle_event(:info, {:command_timeout, _pid, _msg, _ms}, _state, data) do
+    # Late timeout — task already completed and {:command_done, ...}
+    # has already been processed. Drop.
+    {:keep_state, data}
   end
 
   def handle_event(:internal, :start_provider, :provider_streaming, data) do
@@ -548,8 +540,8 @@ defmodule Tau.Session do
       if Process.alive?(t.pid), do: Task.shutdown(t, :brutal_kill)
     end)
 
-    if data.command_task && Process.alive?(data.command_task.pid) do
-      Task.shutdown(data.command_task, :brutal_kill)
+    if data.command_task && Process.alive?(data.command_task) do
+      Process.exit(data.command_task, :brutal_kill)
     end
 
     broadcast(data.id, %Events.Cancelled{session_id: data.id, reason: :user})
@@ -587,6 +579,37 @@ defmodule Tau.Session do
   def handle_event(_type, _event, _state, data), do: {:keep_state, data}
 
   # --- Helpers --------------------------------------------------------------
+
+  # Common path that handles a user_message after any slash-command
+  # expansion has resolved. Called both by the synchronous
+  # handle_event(:cast, {:user_message, _}, _, _) clause (no slash
+  # command, or file-command) and by the
+  # handle_event(:info, {:command_done, _, _}, _, _) clause when the
+  # slash-command Task delivers its result (ADR-0008).
+  defp process_user_message(msg, data) do
+    case Tau.Hooks.Dispatcher.run(
+           :user_prompt_submit,
+           hook_payload(data, :user_prompt_submit, %{message: msg})
+         ) do
+      {:halt, reason} ->
+        broadcast(data.id, %Events.Cancelled{session_id: data.id, reason: {:hook_halt, reason}})
+        {:keep_state, data}
+
+      {:deny, reason} ->
+        broadcast(data.id, %Events.Cancelled{session_id: data.id, reason: {:hook_deny, reason}})
+        {:keep_state, data}
+
+      {:cont, payload} ->
+        msg = Map.get(payload, :message, msg)
+
+        data =
+          data
+          |> append_message(msg)
+          |> persist_event("user_message", message_to_data(msg))
+
+        handle_event(:internal, :start_provider, :provider_streaming, data)
+    end
+  end
 
   defp finalize_assistant(assembler, data) do
     msg = Assembler.assistant(assembler)
@@ -1200,29 +1223,28 @@ defmodule Tau.Session do
     ctx = build_command_ctx(data)
     timeout_ms = Application.get_env(:tau, :slash_command_timeout_ms, 30_000)
 
-    task =
-      Task.Supervisor.async_nolink(Tau.Tools.TaskSupervisor, fn ->
-        try do
-          mod.execute(args, ctx)
-        rescue
-          e -> {:crashed, Exception.message(e)}
-        catch
-          kind, value -> {:crashed, "uncaught #{kind}: #{inspect(value)}"}
-        end
+    # Use start_child (not async_nolink) so we can deliver the result
+    # from *inside* the worker via Process.send. async_nolink's Task
+    # struct is owner-locked; querying it from a watcher pid raises
+    # ArgumentError. The session FSM tracks the worker pid directly
+    # for cancel/timeout purposes.
+    {:ok, pid} =
+      Task.Supervisor.start_child(Tau.Tools.TaskSupervisor, fn ->
+        result =
+          try do
+            mod.execute(args, ctx)
+          rescue
+            e -> {:crashed, Exception.message(e)}
+          catch
+            kind, value -> {:crashed, "uncaught #{kind}: #{inspect(value)}"}
+          end
+
+        Process.send(parent, {:command_done, result, msg}, [])
       end)
 
-    spawn_link(fn ->
-      result =
-        case Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) do
-          {:ok, r} -> r
-          nil -> {:timeout, timeout_ms}
-          {:exit, reason} -> {:crashed, inspect(reason)}
-        end
+    Process.send_after(self(), {:command_timeout, pid, msg, timeout_ms}, timeout_ms)
 
-      Process.send(parent, {:command_done, result, msg}, [])
-    end)
-
-    {:keep_state, %{data | command_task: task}}
+    {:keep_state, %{data | command_task: pid}}
   end
 
   defp apply_command_result(result, msg) do

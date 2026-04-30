@@ -111,8 +111,12 @@ defmodule Tau.Compactor.SummarizeTailTest do
             summary_text} =
              SummarizeTail.compact([prior_summary | conv], %{provider: StubProvider})
 
+    # synth is a NEW summary message — different content (it summarised
+    # the post-prior-summary conv), but carrying the same
+    # :compaction_summary marker so it'll also survive the next round.
     refute synth == prior_summary
-    refute synth.metadata == prior_summary.metadata
+    refute synth.content == prior_summary.content
+    assert synth.metadata == %{role: :compaction_summary}
     assert is_binary(summary_text)
   end
 end
