@@ -20,13 +20,15 @@ defmodule TauTest do
     end
   end
 
-  describe "public API surface (M0 — stubs)" do
-    test "start_session returns :not_implemented" do
-      assert Tau.start_session() == {:error, :not_implemented}
+  describe "public API surface" do
+    test "list_sessions reads from the configured persistence backend" do
+      # In test env data_dir points at a tmp path (config/test.exs), so this
+      # is empty unless a test writes something. Just assert the call succeeds.
+      assert is_list(Tau.list_sessions())
     end
 
-    test "list_sessions returns []" do
-      assert Tau.list_sessions() == []
+    test "fork is not yet implemented" do
+      assert Tau.fork("any", "any") == {:error, :not_implemented}
     end
   end
 end
