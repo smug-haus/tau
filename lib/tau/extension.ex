@@ -74,10 +74,45 @@ defmodule Tau.Extension.DSL do
     end
   end
 
-  @doc "Register a skill by name and `SKILL.md` path."
+  @doc """
+  Register a skill by name and `SKILL.md` path.
+
+  The path is checked at compile time. Relative paths are resolved
+  against the directory of the file that called the macro
+  (`__CALLER__.file`), not the runtime cwd — extensions are usually
+  compiled into escripts where the cwd at run time is unrelated to
+  where the source lived. A non-existent path emits a compile-time
+  warning so a typo (e.g. `priv/skils/...`) fails fast instead of
+  silently registering a path the loader can't read.
+  """
   defmacro skill(name, path) do
+    if is_binary(path) do
+      caller_dir = Path.dirname(__CALLER__.file)
+      resolved = resolve_skill_path(path, caller_dir)
+
+      unless File.exists?(resolved) do
+        IO.warn(
+          "Tau.Extension skill #{inspect(name)}: path #{inspect(path)} " <>
+            "does not exist (resolved against the caller's directory to " <>
+            "#{inspect(resolved)}). Typos in skill paths fail silently at " <>
+            "registration time — fix this before shipping.",
+          __CALLER__
+        )
+      end
+    end
+
     quote do
       @tau_skills {unquote(name), unquote(path)}
+    end
+  end
+
+  @doc false
+  @spec resolve_skill_path(String.t(), String.t()) :: String.t()
+  def resolve_skill_path(path, caller_dir) do
+    if Path.type(path) == :absolute do
+      Path.expand(path)
+    else
+      Path.expand(path, caller_dir)
     end
   end
 end
