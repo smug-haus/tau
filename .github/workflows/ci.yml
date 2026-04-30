@@ -46,24 +46,10 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-mix-lint-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-
 
-      - run: mix deps.get 2>&1 | tee /tmp/deps.log
-      - run: mix format --check-formatted 2>&1 | tee /tmp/format.log
-      - run: mix compile --warnings-as-errors 2>&1 | tee /tmp/compile.log
-        continue-on-error: true
-      - name: dump compile log on failure
-        if: always()
-        run: |
-          echo "===== compile.log ====="
-          cat /tmp/compile.log || true
-          echo "===== deps.log ====="
-          cat /tmp/deps.log || true
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: lint-logs
-          path: /tmp/*.log
-          if-no-files-found: ignore
-      - run: mix credo --strict || true
+      - run: mix deps.get
+      - run: mix format --check-formatted
+      - run: mix compile
+      - run: mix credo --strict
 
   test:
     name: test (Elixir ${{ matrix.elixir }} · OTP ${{ matrix.otp }})
@@ -96,36 +82,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-mix-test-${{ matrix.elixir }}-${{ matrix.otp }}-
 
-      - run: mix deps.get 2>&1 | tee /tmp/deps.log
-      - run: mix compile 2>&1 | tee /tmp/compile.log
-      - name: dump compile log on failure
-        if: always()
-        run: |
-          echo "===== compile.log (head) ====="
-          head -200 /tmp/compile.log || true
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: test-compile-logs-${{ matrix.elixir }}
-          path: /tmp/*.log
-          if-no-files-found: ignore
+      - run: mix deps.get
+      - run: mix compile
       - name: Run unit + integration tests
-        run: mix test --cover 2>&1 | tee /tmp/test.log
-        continue-on-error: true
-      - name: dump test log
-        if: always()
-        run: |
-          echo "===== test.log (tail) ====="
-          tail -200 /tmp/test.log || true
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: test-output-${{ matrix.elixir }}
-          path: /tmp/test.log
-          if-no-files-found: ignore
+        run: mix test --cover
       - name: Run property suite
-        run: mix test --only property --trace 2>&1 | tee /tmp/prop.log
-        continue-on-error: true
+        run: mix test --only property --trace
         env:
           MIX_TEST_PROPERTY_BUDGET_FACTOR: "5"
 
@@ -168,28 +130,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-plt-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-
 
-      - run: mix deps.get 2>&1 | tee /tmp/deps.log
-      - run: mix compile 2>&1 | tee /tmp/compile.log
+      - run: mix deps.get
+      - run: mix compile
       - name: Build PLTs (only when missing)
-        run: mkdir -p priv/plts && mix dialyzer --plt 2>&1 | tee /tmp/plt.log
-        continue-on-error: true
-      - run: mix dialyzer --format github 2>&1 | tee /tmp/dialyzer.log
-        continue-on-error: true
-      - name: dump dialyzer logs
-        if: always()
-        run: |
-          echo "===== compile.log (head) ====="
-          head -100 /tmp/compile.log || true
-          echo "===== plt.log (tail) ====="
-          tail -100 /tmp/plt.log || true
-          echo "===== dialyzer.log (tail) ====="
-          tail -100 /tmp/dialyzer.log || true
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: dialyzer-logs
-          path: /tmp/*.log
-          if-no-files-found: ignore
+        run: mkdir -p priv/plts && mix dialyzer --plt
+      - run: mix dialyzer --format github
 
   escript:
     name: escript build
@@ -204,28 +149,15 @@ jobs:
           version-file: .tool-versions
           version-type: strict
 
-      - run: mix deps.get 2>&1 | tee /tmp/deps.log
-      - run: MIX_ENV=prod mix escript.build 2>&1 | tee /tmp/build.log
-        continue-on-error: true
+      - run: mix deps.get
+      - run: MIX_ENV=prod mix escript.build
       - name: Sanity-run the escript
-        run: ./tau version 2>&1 | tee /tmp/run.log
-        continue-on-error: true
+        run: ./tau version
         env:
           ELIXIR_ERL_OPTIONS: "+fnu"
-      - name: dump escript logs
-        if: always()
-        run: |
-          echo "===== build.log ====="
-          cat /tmp/build.log || true
-          echo "===== run.log ====="
-          cat /tmp/run.log || true
 
       - uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: escript-logs
-          path: |
-            /tmp/*.log
-            tau
+          name: tau-escript
+          path: tau
           retention-days: 7
-          if-no-files-found: ignore
