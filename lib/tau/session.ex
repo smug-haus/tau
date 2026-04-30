@@ -851,7 +851,8 @@ defmodule Tau.Session do
         cwd: data.cwd,
         permission_mode: Map.get(data.metadata, :permissions_mode, :default),
         hook_event_name: to_string(event),
-        transcript_path: transcript_path(data)
+        transcript_path: transcript_path(data),
+        metadata: data.metadata || %{}
       },
       extras
     )
