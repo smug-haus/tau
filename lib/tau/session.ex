@@ -269,12 +269,29 @@ defmodule Tau.Session do
 
   @impl :gen_statem
   def handle_event(:cast, {:user_message, msg}, _state, data) do
-    data =
-      data
-      |> append_message(msg)
-      |> persist_event("user_message", message_to_data(msg))
+    case Tau.Hooks.Dispatcher.run(:user_prompt_submit, %{
+           session_id: data.id,
+           message: msg,
+           cwd: data.cwd
+         }) do
+      {:halt, reason} ->
+        broadcast(data.id, %Events.Cancelled{session_id: data.id, reason: {:hook_halt, reason}})
+        {:keep_state, data}
 
-    handle_event(:internal, :start_provider, :provider_streaming, data)
+      {:deny, reason} ->
+        broadcast(data.id, %Events.Cancelled{session_id: data.id, reason: {:hook_deny, reason}})
+        {:keep_state, data}
+
+      {:cont, payload} ->
+        msg = Map.get(payload, :message, msg)
+
+        data =
+          data
+          |> append_message(msg)
+          |> persist_event("user_message", message_to_data(msg))
+
+        handle_event(:internal, :start_provider, :provider_streaming, data)
+    end
   end
 
   def handle_event(:internal, :start_provider, :provider_streaming, data) do
@@ -409,44 +426,135 @@ defmodule Tau.Session do
   defp dispatch_tools(tool_calls, data) do
     transition(data.id, data, :tool_executing)
     parent = self()
+    rule_set = Tau.Permissions.RuleSet.get()
+    mode = Map.get(data.metadata, :permissions_mode, :default)
 
-    tasks =
-      Enum.into(tool_calls, %{}, fn %{id: id, name: name, arguments: args} ->
-        task =
-          Task.Supervisor.async_nolink(Tau.Tools.TaskSupervisor, fn ->
-            run_tool(name, id, args, data)
-          end)
-
-        broadcast(data.id, %Events.ToolStart{
-          session_id: data.id,
-          tool_call_id: id,
-          name: name,
-          arguments: args
-        })
-
-        # Convert task completion into our :tool_done message.
-        spawn_link(fn ->
-          result =
-            try do
-              Task.await(task, :infinity)
-            catch
-              :exit, reason ->
-                ToolResult.new(
-                  tool_call_id: id,
-                  tool_name: name,
-                  content: "Tool task crashed: #{inspect(reason)}",
-                  is_error: true
-                )
-            end
-
-          Process.send(parent, {:tool_done, id, result}, [])
-        end)
-
-        {id, task}
+    {gated, allowed} =
+      Enum.split_with(tool_calls, fn %{name: name, arguments: args} ->
+        Tau.Permissions.Evaluator.evaluate(rule_set, name, args, %{cwd: data.cwd}, mode) ==
+          :deny
       end)
 
+    # Synthesise tool_results for denied calls — model sees them as is_error.
+    Enum.each(gated, fn %{id: id, name: name} ->
+      result =
+        ToolResult.new(
+          tool_call_id: id,
+          tool_name: name,
+          content: "Permission denied: #{name} blocked by deny rule",
+          is_error: true
+        )
+
+      Process.send(parent, {:tool_done, id, result}, [])
+
+      :telemetry.execute([:tau, :permissions, :decision], %{system_time: System.system_time()}, %{
+        tool: name,
+        decision: :deny,
+        session_id: data.id
+      })
+    end)
+
+    tasks =
+      Enum.into(allowed, %{}, fn %{id: id, name: name, arguments: args} ->
+        # :pre_tool_use hook may rewrite args or veto.
+        case Tau.Hooks.Dispatcher.run(:pre_tool_use, %{
+               session_id: data.id,
+               tool_name: name,
+               tool_call_id: id,
+               tool_input: args,
+               cwd: data.cwd
+             }) do
+          {:halt, reason} ->
+            denied =
+              ToolResult.new(
+                tool_call_id: id,
+                tool_name: name,
+                content: "Hook blocked: #{inspect(reason)}",
+                is_error: true
+              )
+
+            Process.send(parent, {:tool_done, id, denied}, [])
+            {id, :hook_blocked}
+
+          {:deny, reason} ->
+            denied =
+              ToolResult.new(
+                tool_call_id: id,
+                tool_name: name,
+                content: "Hook denied: #{reason}",
+                is_error: true
+              )
+
+            Process.send(parent, {:tool_done, id, denied}, [])
+            {id, :hook_denied}
+
+          {:cont, payload} ->
+            args = Map.get(payload, :tool_input, args)
+            spawn_tool_task(name, id, args, data, parent)
+        end
+      end)
+
+    # Filter out the synthesised :hook_blocked / :hook_denied entries — they
+    # already reported via :tool_done.
+    real_tasks =
+      tasks
+      |> Enum.reject(fn {_id, v} -> v in [:hook_blocked, :hook_denied] end)
+      |> Enum.into(%{})
+
+    initial_in_flight =
+      Map.merge(real_tasks, Enum.into(gated, %{}, fn %{id: id} -> {id, :denied} end))
+
     {:next_state, :tool_executing,
-     %{data | tools_in_flight: tasks, provider_task: nil, assembler: nil}}
+     %{data | tools_in_flight: initial_in_flight, provider_task: nil, assembler: nil}}
+  end
+
+  defp spawn_tool_task(name, id, args, data, parent) do
+    task =
+      Task.Supervisor.async_nolink(Tau.Tools.TaskSupervisor, fn ->
+        run_tool(name, id, args, data)
+      end)
+
+    broadcast(data.id, %Events.ToolStart{
+      session_id: data.id,
+      tool_call_id: id,
+      name: name,
+      arguments: args
+    })
+
+    # Convert task completion into our :tool_done message.
+    spawn_link(fn ->
+      result =
+        try do
+          Task.await(task, :infinity)
+        catch
+          :exit, reason ->
+            ToolResult.new(
+              tool_call_id: id,
+              tool_name: name,
+              content: "Tool task crashed: #{inspect(reason)}",
+              is_error: true
+            )
+        end
+
+      # :post_tool_use hook may rewrite the result.
+      result =
+        case Tau.Hooks.Dispatcher.run(
+               if(result.is_error, do: :post_tool_use_failure, else: :post_tool_use),
+               %{
+                 session_id: data.id,
+                 tool_name: name,
+                 tool_call_id: id,
+                 result: result
+               }
+             ) do
+          {:cont, %{result: rewritten}} when is_struct(rewritten, ToolResult) -> rewritten
+          _ -> result
+        end
+
+      Process.send(parent, {:tool_done, id, result}, [])
+    end)
+
+    {id, task}
   end
 
   defp run_tool(name, call_id, args, data) do
