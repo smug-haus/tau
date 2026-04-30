@@ -2,19 +2,25 @@ defmodule Tau.CLI do
   @moduledoc """
   Escript entry point.
 
-  Subcommands:
+  Subcommands currently registered in `spec/0`:
 
       tau                              # interactive TUI (M6+)
       tau run "prompt" [opts]          # one-shot non-interactive
       tau resume <session-id>          # continue a saved session
-      tau sessions list|show|delete
-      tau config get|set|edit|path|validate
-      tau mcp list|add|remove|test
-      tau extensions list|reload
-      tau version
-      tau doctor                       # diagnose env, providers, tools
+      tau sessions list|show           # inspect persisted sessions
+      tau version                      # print version
+      tau doctor                       # diagnose environment, providers, MCP
 
   Argument parsing uses `Optimus`. Subcommands return integer exit codes.
+
+  ### Not yet implemented
+
+  Earlier drafts of this moduledoc advertised `tau config`, `tau mcp`,
+  and `tau extensions` subcommands plus `tau sessions delete`, none of
+  which are wired to `spec/0` — invoking them would error with
+  "unknown subcommand". They are tracked together in the CLI
+  subcommands feature request so users hitting the doc first don't
+  trip on the gap.
   """
 
   alias Tau.Provider.Event
