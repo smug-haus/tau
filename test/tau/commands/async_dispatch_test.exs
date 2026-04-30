@@ -118,10 +118,18 @@ defmodule Tau.Commands.AsyncDispatchTest do
     assert {:ok, snap} = Tau.snapshot(sid)
     assert snap.id == sid
 
-    # The persisted user message starts with the crash marker.
+    # The user-typed message (NOT the system-role skill/memory injections)
+    # starts with the crash marker.
     user_msg =
-      Enum.find(snap.messages, &match?(%Tau.Message.User{content: c} when is_binary(c), &1))
+      Enum.find(snap.messages, fn
+        %Tau.Message.User{content: c, metadata: meta} when is_binary(c) ->
+          Map.get(meta || %{}, :role) != :system
 
+        _ ->
+          false
+      end)
+
+    assert user_msg, "expected to find a non-system user message"
     assert user_msg.content =~ "(slash command crashed:"
     assert user_msg.content =~ "boom"
   end
