@@ -55,7 +55,12 @@ defmodule Tau.Settings.SchemaTest do
     bad = %{"permissions" => %{"mode" => "godmode"}}
 
     assert {:error, errors} = ExJsonSchema.Validator.validate(resolved, bad)
-    assert Enum.any?(errors, fn {msg, _} -> String.contains?(msg, "godmode") end)
+
+    # ex_json_schema doesn't echo the offending value into the message;
+    # assert on path + message keyword instead.
+    assert Enum.any?(errors, fn {msg, path} ->
+             path == "#/permissions/mode" and msg =~ "enum"
+           end)
   end
 
   describe "priv/scripts/gen_settings_schema.exs" do
