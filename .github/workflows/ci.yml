@@ -47,9 +47,29 @@ jobs:
 
       - run: mix deps.get 2>&1 | tee /tmp/deps.log
       - run: mix format --check-formatted 2>&1 | tee /tmp/format.log
-      - run: mix compile 2>&1 | tee /tmp/compile.log
+      - run: mix compile --warnings-as-errors 2>&1 | tee /tmp/compile.log
         id: compile_step
         continue-on-error: true
+      - run: mix credo --strict 2>&1 | tee /tmp/credo.log
+        id: credo_step
+        continue-on-error: true
+      - name: Push lint logs to ci-log branch on failure
+        if: steps.compile_step.outcome == 'failure' || steps.credo_step.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -ex
+          git config user.email "ci@local"
+          git config user.name "ci"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          mkdir -p .ci-logs
+          tail -300 /tmp/compile.log > .ci-logs/lint-compile.log || echo "no compile log"
+          tail -300 /tmp/credo.log   > .ci-logs/lint-credo.log   || echo "no credo log"
+          git checkout --orphan ci-log/lint 2>&1 || true
+          git rm -rf --cached . 2>&1 || true
+          git add -f .ci-logs/lint-compile.log .ci-logs/lint-credo.log
+          git commit -m "ci-log: lint on ${{ github.sha }} (compile=${{ steps.compile_step.outcome }} credo=${{ steps.credo_step.outcome }})" 2>&1 || true
+          git push origin ci-log/lint --force 2>&1 || true
       - name: Comment compile log on PR (on failure)
         if: steps.compile_step.outcome == 'failure' && github.event_name == 'pull_request'
         env:
@@ -63,10 +83,25 @@ jobs:
             echo '```'
           } > /tmp/comment.md
           gh pr comment ${{ github.event.pull_request.number }} --body-file /tmp/comment.md
+      - name: Comment credo log on PR (on failure)
+        if: steps.credo_step.outcome == 'failure' && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "## Lint job — credo --strict failure on \`${{ github.sha }}\`"
+            echo
+            echo '```'
+            tail -120 /tmp/credo.log
+            echo '```'
+          } > /tmp/comment.md
+          gh pr comment ${{ github.event.pull_request.number }} --body-file /tmp/comment.md
       - name: Fail the job if compile failed
         if: steps.compile_step.outcome == 'failure'
         run: exit 1
-      - run: mix credo --strict || true
+      - name: Fail the job if credo failed
+        if: steps.credo_step.outcome == 'failure'
+        run: exit 1
 
   test:
     name: test (Elixir ${{ matrix.elixir }} · OTP ${{ matrix.otp }})
