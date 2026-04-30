@@ -62,7 +62,14 @@ defmodule Tau.Compactor.SummarizeTail do
     end
   end
 
+  # Pinned messages are preserved verbatim across compaction.
+  # `:system`           — memory cascade + skill bodies (ADR-0005).
+  # `:compaction_summary` — output of an earlier compaction round
+  #                       (ADR-0007); preserved so we don't
+  #                       re-summarise a summary and lose fidelity
+  #                       geometrically.
   defp pinned?(%Message.User{metadata: %{role: :system}}), do: true
+  defp pinned?(%Message.User{metadata: %{role: :compaction_summary}}), do: true
   defp pinned?(_), do: false
 
   defp summarise([], _ctx), do: {:ok, ""}

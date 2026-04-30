@@ -89,4 +89,20 @@ defmodule Tau.Compactor.SummarizeTailTest do
     refute SummarizeTail.should_compact?([], %{})
     refute SummarizeTail.should_compact?([], %{input_tokens: 1_000_000})
   end
+
+  test "compaction_summary messages survive a subsequent compaction (ADR-0007)" do
+    prior_summary =
+      User.new(
+        "<conversation_summary>\nrun 1 summary\n</conversation_summary>",
+        metadata: %{role: :compaction_summary}
+      )
+
+    conv = for i <- 1..6, do: User.new("after-summary turn #{i}")
+
+    assert {:ok, [^prior_summary, %User{content: "<conversation_summary>" <> _} = synth | _]} =
+             SummarizeTail.compact([prior_summary | conv], %{provider: StubProvider})
+
+    refute synth == prior_summary
+    refute synth.metadata == prior_summary.metadata
+  end
 end

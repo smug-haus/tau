@@ -93,8 +93,10 @@ defmodule Tau.Tools.Operations.Local do
         ]
       )
 
+    deadline = if timeout, do: started + timeout, else: nil
+
     try do
-      case collect_port(port, "", timeout) do
+      case collect_port(port, "", deadline) do
         {:ok, stdout, status} ->
           duration = System.monotonic_time(:millisecond) - started
           stderr = read_stderr(stderr_path)
@@ -141,12 +143,13 @@ defmodule Tau.Tools.Operations.Local do
     )
   end
 
-  defp collect_port(port, acc, timeout) do
-    deadline = if timeout, do: System.monotonic_time(:millisecond) + timeout, else: nil
-
+  # Deadline is computed once in bash/2 and passed through unchanged
+  # so the timeout's wall-clock budget doesn't drift across many
+  # small chunks (#60).
+  defp collect_port(port, acc, deadline) do
     receive do
       {^port, {:data, data}} ->
-        collect_port(port, acc <> data, remaining(deadline))
+        collect_port(port, acc <> data, deadline)
 
       {^port, {:exit_status, n}} ->
         {:ok, acc, n}
@@ -160,12 +163,6 @@ defmodule Tau.Tools.Operations.Local do
 
         {:error, :timeout}
     end
-  end
-
-  defp remaining(nil), do: nil
-
-  defp remaining(deadline) do
-    max(deadline - System.monotonic_time(:millisecond), 0)
   end
 
   defp remaining_or_inf(nil), do: :infinity
