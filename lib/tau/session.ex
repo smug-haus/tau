@@ -318,6 +318,8 @@ defmodule Tau.Session do
 
   @impl :gen_statem
   def handle_event(:cast, {:user_message, msg}, _state, data) do
+    msg = expand_slash_command(msg)
+
     case Tau.Hooks.Dispatcher.run(:user_prompt_submit, %{
            session_id: data.id,
            message: msg,
@@ -461,6 +463,8 @@ defmodule Tau.Session do
     data = data |> append_message(msg) |> persist_event("assistant_message", message_to_data(msg))
     broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: msg})
 
+    data = maybe_compact(data, msg.usage || %{})
+
     tool_calls = Enum.filter(msg.content, &match?(%{type: :tool_call}, &1))
 
     cond do
@@ -469,6 +473,38 @@ defmodule Tau.Session do
 
       true ->
         dispatch_tools(tool_calls, data)
+    end
+  end
+
+  defp maybe_compact(data, usage) do
+    compactor = Tau.Compactor.impl()
+
+    if compactor.should_compact?(data.messages, usage) do
+      :telemetry.execute([:tau, :compaction, :start], %{system_time: System.system_time()}, %{
+        session_id: data.id,
+        message_count: length(data.messages)
+      })
+
+      case compactor.compact(data.messages, %{provider: data.provider, model: data.model}) do
+        {:ok, new_messages} ->
+          data =
+            persist_event(data, "compaction", %{
+              before_count: length(data.messages),
+              after_count: length(new_messages)
+            })
+
+          :telemetry.execute([:tau, :compaction, :stop], %{system_time: System.system_time()}, %{
+            session_id: data.id,
+            after_count: length(new_messages)
+          })
+
+          %{data | messages: new_messages}
+
+        {:error, _} ->
+          data
+      end
+    else
+      data
     end
   end
 
@@ -832,4 +868,50 @@ defmodule Tau.Session do
   defp stop_reason_atom(nil), do: nil
   defp stop_reason_atom(s) when is_binary(s), do: String.to_atom(s)
   defp stop_reason_atom(s), do: s
+
+  # --- Slash commands -------------------------------------------------------
+
+  defp expand_slash_command(%Tau.Message.User{content: c} = msg) when is_binary(c) do
+    case Tau.Commands.Parser.parse(c) do
+      {:command, name, args} ->
+        case Tau.Commands.Parser.lookup(name) do
+          {:ok, mod} when is_atom(mod) ->
+            invoke_command(mod, name, args, msg)
+
+          {:ok, path} when is_binary(path) ->
+            invoke_file_command(path, args, msg)
+
+          :error ->
+            # Unknown slash command; pass through verbatim — the model can
+            # handle it as a stylistic preface or report that it's unknown.
+            msg
+        end
+
+      _ ->
+        msg
+    end
+  end
+
+  defp expand_slash_command(msg), do: msg
+
+  defp invoke_command(mod, _name, args, msg) do
+    if function_exported?(mod, :execute, 2) do
+      case mod.execute(args, %{}) do
+        {:inject, prefix} -> %Tau.Message.User{msg | content: prefix <> "\n\n" <> msg.content}
+        {:replace, replacement} -> %Tau.Message.User{msg | content: replacement}
+        {:run, replacement} -> %Tau.Message.User{msg | content: replacement}
+        :ignore -> msg
+        _ -> msg
+      end
+    else
+      msg
+    end
+  end
+
+  defp invoke_file_command(path, args, msg) do
+    case File.read(path) do
+      {:ok, body} -> %Tau.Message.User{msg | content: body <> "\n\n" <> args}
+      _ -> msg
+    end
+  end
 end
