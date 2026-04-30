@@ -103,19 +103,27 @@ jobs:
         id: test_step
         run: mix test --cover 2>&1 | tee /tmp/test.log
         continue-on-error: true
-      - name: Comment test log on PR (on failure)
-        if: steps.test_step.outcome == 'failure' && github.event_name == 'pull_request'
+      - name: Post test log on failure (via gh api)
+        if: steps.test_step.outcome == 'failure'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          {
-            echo "## test job (Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }}) — failure on \`${{ github.sha }}\`"
-            echo
-            echo '```'
-            tail -160 /tmp/test.log
-            echo '```'
-          } > /tmp/comment.md
-          gh pr comment ${{ github.event.pull_request.number }} --body-file /tmp/comment.md
+          set -e
+          # Find the PR number from the event or via search.
+          PR=${{ github.event.pull_request.number }}
+          if [ -z "$PR" ]; then
+            PR=$(gh pr list --head "${{ github.ref_name }}" --json number -q '.[0].number' || echo "")
+          fi
+          BODY=$(printf '## test job (Elixir %s / OTP %s) — failure on `%s`\n\n```\n%s\n```\n' \
+            "${{ matrix.elixir }}" "${{ matrix.otp }}" "${{ github.sha }}" \
+            "$(tail -200 /tmp/test.log)")
+          if [ -n "$PR" ]; then
+            jq -n --arg body "$BODY" '{body: $body}' > /tmp/payload.json
+            gh api -X POST "/repos/${{ github.repository }}/issues/$PR/comments" --input /tmp/payload.json
+          else
+            echo "No PR found; dumping log to step output instead:"
+            tail -200 /tmp/test.log
+          fi
       - name: Fail if tests failed
         if: steps.test_step.outcome == 'failure'
         run: exit 1
