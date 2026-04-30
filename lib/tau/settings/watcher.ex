@@ -36,8 +36,8 @@ defmodule Tau.Settings.Watcher do
         {:ok, pid} ->
           %{watcher: pid, dirs: dirs, debounce: nil}
 
-        {:error, reason} ->
-          Logger.debug("Tau.Settings.Watcher disabled: #{inspect(reason)}")
+        other ->
+          Logger.debug("Tau.Settings.Watcher disabled: #{inspect(other)}")
           %{watcher: nil, dirs: dirs, debounce: nil}
       end
 
@@ -53,13 +53,20 @@ defmodule Tau.Settings.Watcher do
         {:error, :no_dirs}
 
       true ->
-        case FileSystem.start_link(dirs: dirs) do
-          {:ok, pid} ->
-            FileSystem.subscribe(pid)
-            {:ok, pid}
+        try do
+          case FileSystem.start_link(dirs: dirs) do
+            {:ok, pid} ->
+              FileSystem.subscribe(pid)
+              {:ok, pid}
 
-          err ->
-            err
+            other ->
+              {:error, other}
+          end
+        rescue
+          e -> {:error, Exception.message(e)}
+        catch
+          :exit, reason -> {:error, reason}
+          kind, reason -> {:error, {kind, reason}}
         end
     end
   end
