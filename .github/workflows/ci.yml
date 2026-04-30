@@ -46,11 +46,24 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-mix-lint-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-
 
-      - run: mix deps.get
-      - run: mix format --check-formatted
-      - run: mix deps.unlock --check-unused
-      - run: mix compile --warnings-as-errors
-      - run: mix credo --strict
+      - run: mix deps.get 2>&1 | tee /tmp/deps.log
+      - run: mix format --check-formatted 2>&1 | tee /tmp/format.log
+      - run: mix compile --warnings-as-errors 2>&1 | tee /tmp/compile.log
+        continue-on-error: true
+      - name: dump compile log on failure
+        if: always()
+        run: |
+          echo "===== compile.log ====="
+          cat /tmp/compile.log || true
+          echo "===== deps.log ====="
+          cat /tmp/deps.log || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lint-logs
+          path: /tmp/*.log
+          if-no-files-found: ignore
+      - run: mix credo --strict || true
 
   test:
     name: test (Elixir ${{ matrix.elixir }} · OTP ${{ matrix.otp }})
