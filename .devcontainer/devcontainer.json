@@ -1,0 +1,21 @@
+{
+  "name": "tau",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "containerEnv": {
+    "ELIXIR_ERL_OPTIONS": "+fnu",
+    "LANG": "en_US.UTF-8",
+    "LC_ALL": "en_US.UTF-8"
+  },
+  "remoteUser": "vscode",
+  "postCreateCommand": "mix local.hex --force && mix local.rebar --force && mix deps.get",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "JakeBecker.elixir-ls",
+        "phoenixframework.phoenix"
+      ]
+    }
+  }
+}

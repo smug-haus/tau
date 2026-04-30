@@ -1,0 +1,33 @@
+# Tau — Intro
+
+```elixir
+Mix.install([
+  {:tau, path: ".."}
+])
+```
+
+## Start a session backed by the replay provider
+
+```elixir
+Application.put_env(:tau, :default_provider, Tau.Providers.Replay)
+{:ok, session_id} = Tau.start_session([])
+```
+
+## Stream events
+
+```elixir
+Tau.send(session_id, "hello")
+
+events =
+  Tau.stream(session_id)
+  |> Stream.take(20)
+  |> Enum.to_list()
+
+events
+```
+
+## Inspect persisted JSONL
+
+```elixir
+Tau.list_sessions()
+```

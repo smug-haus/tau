@@ -5,27 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [Unreleased] — 0.1.0 candidate
 
-### Added
-- M0: Mix project skeleton, supervision tree, telemetry handler attachments,
-  empty `Tau.Settings.Cache` / `Tau.Permissions.RuleSet` publishing through
-  to `:persistent_term`. Public API surface declared as stubs returning
-  `{:error, :not_implemented}`.
-- `CLAUDE.md` and `TAU.md` bootstrap files.
-- Apache-2.0 license.
-- GitHub Actions:
-  - `ci.yml` — lint (format · credo · compile-warnings-as-errors),
-    test matrix (Elixir 1.18.1/OTP 27.2 and 1.17.3/OTP 26.2), property
-    suite, dialyzer with PLT cache, and an escript build sanity check.
-  - `release.yml` — Burrito matrix (Linux x86_64/arm64, macOS Intel/Apple
-    Silicon, Windows x86_64), `mix hex.publish`, ex_doc → gh-pages, and
-    a GitHub Release that bundles all artefacts with SHA256SUMS.
+### Added (milestones M0 — M8)
+
+- **M0** — Mix scaffold, supervision tree, telemetry handlers, settings &
+  permissions caches publishing to `:persistent_term`, registry container,
+  CLAUDE.md + TAU.md, Apache-2.0 license, CI/CD workflows.
+- **M1** — `Tau.Provider` + `Tau.Provider.Event` + `Tau.Message.{User,Assistant,ToolResult}`
+  + `Tau.Providers.Anthropic` (Messages API streaming) + shared SSE parser
+  + cross-provider id sanitizer + `mix tau.hello` smoke task.
+- **M2** — `Tau.Tool` + four built-ins (Read/Write/Edit/Bash), pluggable
+  `Tau.Tools.Operations.Local`, JSONL persistence with ULID events,
+  `Tau.Message.Assembler`, the real `Tau.Session` `:gen_statem`,
+  `Tau.Session.Events` for PubSub broadcasting.
+- **M3** — settings cascade loader (managed/user/project/local) with
+  watcher reload, permission rule compilation + evaluation, hook
+  behaviour + dispatcher + shell-hook generator, TAU.md memory cascade
+  with @import resolution.
+- **M4** — MCP transports (stdio with `{:line, _}` framing, HTTP via
+  Finch, SSE via Mint+shared SSE parser), `Tau.MCP.Server` GenServer,
+  `Tau.MCP.ToolAdapter` runtime module generation, manager with
+  reconciliation against settings.
+- **M5** — `Tau.Extension` behaviour + DSL, `Tau.Extensions.Loader` with
+  hot-reload hooks, slash command parser, skills with YAML frontmatter
+  parser.
+- **M6** — Ratatouille TUI MVU app subscribing to session PubSub topics,
+  Optimus-based escript CLI (run/resume/sessions/version/doctor/tui),
+  bundled default system prompt under 1k tokens.
+- **M7** — OpenAI Chat (with widened OpenAI-compatible coverage),
+  OpenAI Responses (with reasoning effort), Gemini
+  (streamGenerateContent SSE), AWS Bedrock with full SigV4 signing
+  and the AWS event-stream binary framing parser.
+- **M8** — Burrito release-step wrapping for macOS/Linux/Windows x86_64
+  & arm64, devcontainer (Elixir 1.18.1 / OTP 27.2), bundled example
+  skill, intro Livebook, README and CHANGELOG polish, replay-provider
+  for offline tests.
 
 ### Changed
 - Repo wiped of unrelated Clojure AoC2020 content.
-- Reformatted `mix.exs`, `config/test.exs`, `lib/tau/registries.ex` to
-  conform to `mix format` defaults.
+
+### Notes
+- Local toolchain in the dev sandbox is Elixir 1.17.3 / OTP 25.3.
+  `mix format --check-formatted` is clean across all 80+ files.
+  Full compile and test runs in CI on Elixir 1.18.1 / OTP 27.2.
 
 ### Notes
 - Implementation milestones M1 — M8 are tracked in

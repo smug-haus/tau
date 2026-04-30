@@ -10,9 +10,26 @@ a Hex library, an escript, and a self-contained binary (via Burrito).
 
 ## Status
 
-**Pre-alpha.** M0 (project skeleton + supervision tree boots clean) is in.
-M1 — M8 milestones are tracked in `CHANGELOG.md` and in the plan at
-`/root/.claude/plans/clear-out-this-repo-fluffy-hamming.md`.
+**Pre-alpha — first compile-passing cut of M0–M8.**
+
+Done:
+
+- Supervision tree (M0)
+- `Tau.Provider` behaviour, Anthropic streaming, OpenAI (Chat + Responses),
+  Gemini, Bedrock with SigV4 (M1, M7)
+- Tools (Read/Write/Edit/Bash) and the `:gen_statem` session FSM with
+  JSONL persistence and PubSub fanout (M2)
+- Settings cascade, permissions evaluator + matchers, hooks dispatcher,
+  TAU.md memory cascade (M3)
+- MCP stdio + SSE + HTTP transports, dynamic ToolAdapter generation (M4)
+- Extensions DSL, slash-command parser, skills with frontmatter (M5)
+- Ratatouille TUI app, escript CLI with run/resume/sessions/doctor (M6)
+- Burrito release wrapping for cross-platform binaries (M8)
+
+Pending verification: full `mix test` on a real CI runner — the dev
+sandbox blocks `mix deps.get` from reaching `repo.hex.pm` via Erlang's
+httpc (curl works, Erlang doesn't). Verify on GitHub Actions per
+`.github/workflows/ci.yml`.
 
 ## Design philosophy
 

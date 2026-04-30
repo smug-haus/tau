@@ -109,9 +109,41 @@ defmodule Tau.MixProject do
       tau: [
         include_executables_for: [:unix],
         applications: [tau: :permanent],
-        steps: [:assemble]
+        steps: [:assemble, &maybe_burrito/1]
       ]
     ]
+  end
+
+  defp maybe_burrito(release) do
+    if Code.ensure_loaded?(Burrito) and System.get_env("BURRITO_TARGET") do
+      target = System.get_env("BURRITO_TARGET")
+
+      target_atom =
+        target
+        |> String.split(",")
+        |> Enum.map(&String.to_atom/1)
+
+      release
+      |> Map.put(:steps, [&Burrito.wrap/1])
+      |> Map.put(:burrito,
+        targets: target_atoms_to_keyword(target_atom),
+        debug: false
+      )
+    else
+      release
+    end
+  end
+
+  defp target_atoms_to_keyword(targets) do
+    targets
+    |> Enum.map(fn
+      :linux_amd64 -> {:linux_amd64, [os: :linux, cpu: :x86_64]}
+      :linux_arm64 -> {:linux_arm64, [os: :linux, cpu: :aarch64]}
+      :macos_amd64 -> {:macos_amd64, [os: :darwin, cpu: :x86_64]}
+      :macos_arm64 -> {:macos_arm64, [os: :darwin, cpu: :aarch64]}
+      :windows_amd64 -> {:windows_amd64, [os: :windows, cpu: :x86_64]}
+      other -> {other, []}
+    end)
   end
 
   defp aliases do
