@@ -78,8 +78,7 @@ defmodule Tau.Memory.InjectionTest do
     assert_receive {:memory_loaded, %{file_count: 1, bytes: bytes}, %{cwd: ^cwd}}, 1_000
     assert bytes > 0
 
-    [{pid, _}] = Registry.lookup(Tau.Sessions.Registry, sid)
-    {_state, data} = :sys.get_state(pid)
+    {:ok, data} = Tau.snapshot(sid)
 
     assert [%Tau.Message.User{} = sys_msg | _] = data.messages
     assert sys_msg.metadata.role == :system
@@ -115,8 +114,7 @@ defmodule Tau.Memory.InjectionTest do
         provider_ctx: %{replay_fixture: [%Event.Done{stop_reason: :stop}]}
       )
 
-    [{pid, _}] = Registry.lookup(Tau.Sessions.Registry, sid)
-    {_state, data} = :sys.get_state(pid)
+    {:ok, data} = Tau.snapshot(sid)
 
     memory_msgs =
       Enum.filter(data.messages, fn

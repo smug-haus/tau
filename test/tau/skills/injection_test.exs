@@ -89,8 +89,7 @@ defmodule Tau.Skills.InjectionTest do
     assert measurements.active >= 1
     assert measurements.skipped >= 1
 
-    [{pid, _}] = Registry.lookup(Tau.Sessions.Registry, sid)
-    {_state, data} = :sys.get_state(pid)
+    {:ok, data} = Tau.snapshot(sid)
 
     skill_msgs =
       Enum.filter(data.messages, fn
@@ -120,8 +119,7 @@ defmodule Tau.Skills.InjectionTest do
         provider_ctx: %{replay_fixture: replay_fixture}
       )
 
-    [{pid, _}] = Registry.lookup(Tau.Sessions.Registry, sid)
-    {_state, data} = :sys.get_state(pid)
+    {:ok, data} = Tau.snapshot(sid)
 
     skill_names = Enum.map(data.skills, fn {name, _} -> name end)
     assert "haiku-bot" in skill_names

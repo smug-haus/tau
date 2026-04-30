@@ -101,8 +101,7 @@ defmodule Tau.Session.CompactionReplayTest do
     on_exit(fn -> Tau.stop(child_sid) end)
     assert child_sid != parent_sid
 
-    [{pid, _}] = Registry.lookup(Tau.Sessions.Registry, child_sid)
-    {_state, data} = :sys.get_state(pid)
+    {:ok, data} = Tau.snapshot(child_sid)
 
     summary_msg =
       Enum.find(data.messages, fn
@@ -173,8 +172,7 @@ defmodule Tau.Session.CompactionReplayTest do
 
     {:ok, child_sid} = Tau.fork(parent_sid, cutoff_event_id)
     on_exit(fn -> Tau.stop(child_sid) end)
-    [{pid, _}] = Registry.lookup(Tau.Sessions.Registry, child_sid)
-    {_state, data} = :sys.get_state(pid)
+    {:ok, data} = Tau.snapshot(child_sid)
 
     refute Enum.any?(data.messages, fn
              %Tau.Message.User{metadata: %{role: :compaction_summary}} -> true

@@ -103,4 +103,12 @@ defmodule Tau do
   """
   @spec list_sessions(map()) :: [Tau.Session.Meta.t()]
   defdelegate list_sessions(filters \\ %{}), to: Session
+
+  @doc """
+  Return a read-only snapshot of a live session — useful for tests,
+  TUI panels, and debugging. The shape is stable across internal
+  refactors. See `Tau.Session.snapshot/1`.
+  """
+  @spec snapshot(session_id()) :: {:ok, Tau.Session.snapshot()} | {:error, :not_found}
+  defdelegate snapshot(session_id), to: Session
 end

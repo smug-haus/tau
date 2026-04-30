@@ -236,6 +236,55 @@ defmodule Tau.Session do
   @spec list_sessions(map()) :: [Meta.t()]
   def list_sessions(filters \\ %{}), do: Tau.Persistence.impl().list(filters)
 
+  @typedoc """
+  Curated read-only view of a live session, returned by `snapshot/1`.
+
+  The shape is **stable** across internal refactors — adding a field
+  is allowed; renaming or repurposing one isn't. Callers (tests,
+  TUI panels, debug tools) depend on this contract.
+  """
+  @type snapshot :: %{
+          id: String.t(),
+          state: atom(),
+          cwd: String.t(),
+          provider: module() | nil,
+          model: String.t() | nil,
+          messages: [Tau.Message.t()],
+          message_count: non_neg_integer(),
+          skills: [{String.t(), Tau.Skill.t()}],
+          metadata: map(),
+          permissions_mode: atom()
+        }
+
+  @doc """
+  Return a read-only snapshot of a live session's data (#58).
+
+  Tests and inspection tools should call this instead of reaching
+  into the FSM via `:sys.get_state/1` — it insulates callers from
+  internal data-shape refactors. Returns `{:error, :not_found}`
+  for a session id that isn't currently registered.
+  """
+  @spec snapshot(id()) :: {:ok, snapshot()} | {:error, :not_found}
+  def snapshot(id) do
+    with {:ok, pid} <- whereis(id) do
+      {state, data} = :sys.get_state(pid)
+
+      {:ok,
+       %{
+         id: data.id,
+         state: state,
+         cwd: data.cwd,
+         provider: data.provider,
+         model: data.model,
+         messages: data.messages,
+         message_count: length(data.messages),
+         skills: data.skills,
+         metadata: data.metadata,
+         permissions_mode: Map.get(data.metadata, :permissions_mode, :default)
+       }}
+    end
+  end
+
   defp whereis(id) do
     case Registry.lookup(Tau.Sessions.Registry, id) do
       [{pid, _}] -> {:ok, pid}
