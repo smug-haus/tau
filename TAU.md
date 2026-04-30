@@ -71,9 +71,22 @@ Plans start from issues. Sub-agents must consult issue state before
 proposing new design — see `CLAUDE.md` for the full rules and the
 canonical area-label list.
 
+## Architectural decisions: ADRs in `docs/adr/`
+
+The non-negotiables above tell you what's _forbidden_. ADRs in
+`docs/adr/` tell you what was _chosen_, and why a future change
+would need fresh justification. Read `docs/adr/README.md` before
+proposing any change that touches the supervision tree, a
+behaviour contract, a public struct's hidden contract, or a
+layering decision the obvious refactor would invert.
+
+New decision → copy `docs/adr/0000-template.md` to the next
+number, fill it in, link it from the PR.
+
 ## Pointers
 
 - **GitHub issues** — the live backlog.
+- **`docs/adr/`** — architectural decisions.
 - Plan: `/root/.claude/plans/clear-out-this-repo-fluffy-hamming.md` (M0–M8 only).
 - Reference: `https://github.com/badlogic/pi-mono`
 - Erlang/Elixir stdlib: `:gen_statem`, `Registry`, `Task.Supervisor`,
