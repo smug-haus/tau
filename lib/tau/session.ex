@@ -323,7 +323,7 @@ defmodule Tau.Session do
 
   @impl :gen_statem
   def handle_event(:cast, {:user_message, msg}, _state, data) do
-    msg = expand_slash_command(msg)
+    msg = expand_slash_command(msg, data)
 
     case Tau.Hooks.Dispatcher.run(:user_prompt_submit, %{
            session_id: data.id,
@@ -947,12 +947,12 @@ defmodule Tau.Session do
 
   # --- Slash commands -------------------------------------------------------
 
-  defp expand_slash_command(%Tau.Message.User{content: c} = msg) when is_binary(c) do
+  defp expand_slash_command(%Tau.Message.User{content: c} = msg, data) when is_binary(c) do
     case Tau.Commands.Parser.parse(c) do
       {:command, name, args} ->
         case Tau.Commands.Parser.lookup(name) do
           {:ok, mod} when is_atom(mod) ->
-            invoke_command(mod, name, args, msg)
+            invoke_command(mod, name, args, msg, data)
 
           {:ok, path} when is_binary(path) ->
             invoke_file_command(path, args, msg)
@@ -968,11 +968,13 @@ defmodule Tau.Session do
     end
   end
 
-  defp expand_slash_command(msg), do: msg
+  defp expand_slash_command(msg, _data), do: msg
 
-  defp invoke_command(mod, _name, args, msg) do
+  defp invoke_command(mod, _name, args, msg, data) do
     if function_exported?(mod, :execute, 2) do
-      case mod.execute(args, %{}) do
+      ctx = build_command_ctx(data)
+
+      case mod.execute(args, ctx) do
         {:inject, prefix} -> %Tau.Message.User{msg | content: prefix <> "\n\n" <> msg.content}
         {:replace, replacement} -> %Tau.Message.User{msg | content: replacement}
         {:run, replacement} -> %Tau.Message.User{msg | content: replacement}
@@ -989,5 +991,19 @@ defmodule Tau.Session do
       {:ok, body} -> %Tau.Message.User{msg | content: body <> "\n\n" <> args}
       _ -> msg
     end
+  end
+
+  defp build_command_ctx(data) do
+    sid = data.id
+
+    Tau.Command.Context.new(
+      session_id: sid,
+      cwd: data.cwd,
+      permissions_mode: Map.get(data.metadata, :permissions_mode, :default),
+      emit: fn payload ->
+        Phoenix.PubSub.broadcast(Tau.PubSub, "session:#{sid}", payload)
+      end,
+      metadata: data.metadata
+    )
   end
 end
