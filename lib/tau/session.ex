@@ -652,71 +652,26 @@ defmodule Tau.Session do
 
     case Tau.Tool.lookup(name) do
       {:ok, mod} ->
-        ctx =
-          Tau.Tool.Context.new(
-            tool_call_id: call_id,
-            session_id: data.id,
-            cwd: data.cwd,
-            emit: fn payload ->
-              broadcast(data.id, %Events.ToolUpdate{
-                session_id: data.id,
-                tool_call_id: call_id,
-                payload: payload
-              })
+        case Tau.Tool.Validator.validate(mod, args) do
+          :ok ->
+            run_tool_validated(name, call_id, args, data, mod, started)
 
-              :ok
-            end
-          )
+          {:error, errors} ->
+            summary = Tau.Tool.Validator.format_errors(errors)
 
-        :telemetry.execute(
-          [:tau, :tool, :execute, :start],
-          %{system_time: System.system_time()},
-          %{tool: name, tool_call_id: call_id}
-        )
+            :telemetry.execute(
+              [:tau, :tool, :validate, :error],
+              %{system_time: System.system_time()},
+              %{tool: name, tool_call_id: call_id, errors: summary}
+            )
 
-        result =
-          try do
-            case mod.execute(args || %{}, ctx) do
-              {:ok, %Tau.Tool.Result{} = r} ->
-                ToolResult.new(
-                  tool_call_id: call_id,
-                  tool_name: name,
-                  content: r.content,
-                  details: r.details,
-                  is_error: r.is_error
-                )
-
-              {:error, reason} ->
-                ToolResult.new(
-                  tool_call_id: call_id,
-                  tool_name: name,
-                  content: "Tool error: #{inspect(reason)}",
-                  is_error: true
-                )
-            end
-          rescue
-            e ->
-              :telemetry.execute(
-                [:tau, :tool, :execute, :exception],
-                %{duration: System.monotonic_time(:millisecond) - started},
-                %{tool: name, error: Exception.message(e)}
-              )
-
-              ToolResult.new(
-                tool_call_id: call_id,
-                tool_name: name,
-                content: "Tool exception: #{Exception.message(e)}",
-                is_error: true
-              )
-          end
-
-        :telemetry.execute(
-          [:tau, :tool, :execute, :stop],
-          %{duration: System.monotonic_time(:millisecond) - started},
-          %{tool: name, tool_call_id: call_id, is_error: result.is_error}
-        )
-
-        result
+            ToolResult.new(
+              tool_call_id: call_id,
+              tool_name: name,
+              content: "Invalid arguments for tool #{name}: #{summary}",
+              is_error: true
+            )
+        end
 
       :error ->
         ToolResult.new(
@@ -726,6 +681,74 @@ defmodule Tau.Session do
           is_error: true
         )
     end
+  end
+
+  defp run_tool_validated(name, call_id, args, data, mod, started) do
+    ctx =
+      Tau.Tool.Context.new(
+        tool_call_id: call_id,
+        session_id: data.id,
+        cwd: data.cwd,
+        emit: fn payload ->
+          broadcast(data.id, %Events.ToolUpdate{
+            session_id: data.id,
+            tool_call_id: call_id,
+            payload: payload
+          })
+
+          :ok
+        end
+      )
+
+    :telemetry.execute(
+      [:tau, :tool, :execute, :start],
+      %{system_time: System.system_time()},
+      %{tool: name, tool_call_id: call_id}
+    )
+
+    result =
+      try do
+        case mod.execute(args || %{}, ctx) do
+          {:ok, %Tau.Tool.Result{} = r} ->
+            ToolResult.new(
+              tool_call_id: call_id,
+              tool_name: name,
+              content: r.content,
+              details: r.details,
+              is_error: r.is_error
+            )
+
+          {:error, reason} ->
+            ToolResult.new(
+              tool_call_id: call_id,
+              tool_name: name,
+              content: "Tool error: #{inspect(reason)}",
+              is_error: true
+            )
+        end
+      rescue
+        e ->
+          :telemetry.execute(
+            [:tau, :tool, :execute, :exception],
+            %{duration: System.monotonic_time(:millisecond) - started},
+            %{tool: name, error: Exception.message(e)}
+          )
+
+          ToolResult.new(
+            tool_call_id: call_id,
+            tool_name: name,
+            content: "Tool exception: #{Exception.message(e)}",
+            is_error: true
+          )
+      end
+
+    :telemetry.execute(
+      [:tau, :tool, :execute, :stop],
+      %{duration: System.monotonic_time(:millisecond) - started},
+      %{tool: name, tool_call_id: call_id, is_error: result.is_error}
+    )
+
+    result
   end
 
   defp append_message(data, msg), do: %{data | messages: data.messages ++ [msg]}
