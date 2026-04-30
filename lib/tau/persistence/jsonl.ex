@@ -137,6 +137,7 @@ defmodule Tau.Persistence.Jsonl do
   end
 
   @doc "Compute the JSONL path for a session id."
+  @impl Tau.Persistence
   @spec path_for(String.t(), Path.t()) :: Path.t()
   def path_for(session_id, cwd) do
     hash = :crypto.hash(:sha256, cwd) |> Base.encode16(case: :lower) |> binary_part(0, 16)
