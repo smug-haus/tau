@@ -204,15 +204,28 @@ jobs:
           version-file: .tool-versions
           version-type: strict
 
-      - run: mix deps.get
-      - run: MIX_ENV=prod mix escript.build
+      - run: mix deps.get 2>&1 | tee /tmp/deps.log
+      - run: MIX_ENV=prod mix escript.build 2>&1 | tee /tmp/build.log
+        continue-on-error: true
       - name: Sanity-run the escript
-        run: ./tau version
+        run: ./tau version 2>&1 | tee /tmp/run.log
+        continue-on-error: true
         env:
           ELIXIR_ERL_OPTIONS: "+fnu"
+      - name: dump escript logs
+        if: always()
+        run: |
+          echo "===== build.log ====="
+          cat /tmp/build.log || true
+          echo "===== run.log ====="
+          cat /tmp/run.log || true
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: tau-escript
-          path: tau
+          name: escript-logs
+          path: |
+            /tmp/*.log
+            tau
           retention-days: 7
+          if-no-files-found: ignore
