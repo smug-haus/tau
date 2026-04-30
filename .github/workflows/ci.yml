@@ -103,21 +103,30 @@ jobs:
         id: test_step
         run: mix test --cover 2>&1 | tee /tmp/test.log
         continue-on-error: true
-      - name: Push test log to per-job branch on failure
+      - name: Print log + push to debug ref on failure
         if: steps.test_step.outcome == 'failure'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Loud diagnostic printout
+          echo "===== /tmp/test.log (last 300) ====="
+          tail -300 /tmp/test.log
+          echo "===== end ====="
+
+          # Sync the log file into the workspace and create a
+          # branch ci-log/<elixir-version> that ALWAYS exists post-failure.
           set -ex
-          # Use the existing checked-out repo (actions/checkout@v4 above).
           git config user.email "ci@local"
           git config user.name "ci"
+          git remote -v
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
-          BRANCH="ci-log/${{ github.sha }}-test-${{ matrix.elixir }}"
-          git checkout -B "$BRANCH"
+          BRANCH="ci-log/test-${{ matrix.elixir }}"
           mkdir -p .ci-logs
-          tail -300 /tmp/test.log > .ci-logs/test.log
-          git add -f .ci-logs/test.log
+          tail -300 /tmp/test.log > ".ci-logs/test-${{ matrix.elixir }}.log"
+          # Single-commit orphan branch with just the log (no rebase / pull needed)
+          git checkout --orphan "$BRANCH"
+          git rm -rf --cached . 2>/dev/null || true
+          git add -f ".ci-logs/test-${{ matrix.elixir }}.log"
           git commit -m "ci-log: test ${{ matrix.elixir }} on ${{ github.sha }}"
           git push origin "$BRANCH" --force
           echo "Pushed log to branch $BRANCH"
