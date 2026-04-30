@@ -11,9 +11,9 @@ defmodule Tau.Settings.SchemaTest do
 
   alias Tau.Settings.Schema
 
-  test "json_schema/0 returns a Draft 2020-12 object schema" do
+  test "json_schema/0 returns a Draft 7 object schema" do
     s = Schema.json_schema()
-    assert s["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+    assert s["$schema"] == "http://json-schema.org/draft-07/schema#"
     assert s["type"] == "object"
     assert is_map(s["properties"])
     assert is_binary(s["title"])
@@ -26,7 +26,7 @@ defmodule Tau.Settings.SchemaTest do
     Enum.each(list_keys, fn k -> assert k in schema_keys end)
   end
 
-  test "the schema is parseable by ex_json_schema and accepts a realistic settings doc" do
+  test "the schema is parseable by ex_json_schema (Draft 7) and accepts a realistic settings doc" do
     resolved =
       Schema.json_schema()
       |> ExJsonSchema.Schema.resolve()
@@ -75,7 +75,7 @@ defmodule Tau.Settings.SchemaTest do
 
       decoded = out_path |> File.read!() |> Jason.decode!()
       assert decoded["type"] == "object"
-      assert decoded["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+      assert decoded["$schema"] == "http://json-schema.org/draft-07/schema#"
     end
   end
 end

@@ -1,6 +1,12 @@
 defmodule Tau.Settings.Schema do
   @moduledoc """
-  Canonical JSON Schema (Draft 2020-12) for Tau settings files.
+  Canonical JSON Schema (Draft 7) for Tau settings files.
+
+  Draft 7 (not 2020-12) because Tau pins `ex_json_schema ~> 0.10`, which
+  only supports drafts 4/6/7. The features we rely on (`type`,
+  `properties`, `additionalProperties`, `enum`, `items`, `required`,
+  `$id`) are all available in Draft 7. Bump when the validator gets
+  newer-draft support.
 
   Single source of truth shared by:
 
@@ -20,7 +26,7 @@ defmodule Tau.Settings.Schema do
   in `Tau.Settings.Loader`'s list-merge set so cascade semantics match.
   """
 
-  @schema_uri "https://json-schema.org/draft/2020-12/schema"
+  @schema_uri "http://json-schema.org/draft-07/schema#"
   @schema_id "https://raw.githubusercontent.com/smug-haus/tau/main/priv/schemas/settings.schema.json"
 
   @permissions_modes ~w(default accept_edits plan auto dont_ask bypass)
