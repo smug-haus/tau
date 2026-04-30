@@ -539,12 +539,12 @@ defmodule Tau.Session do
       })
 
       case compactor.compact(data.messages, %{provider: data.provider, model: data.model}) do
-        {:ok, new_messages} ->
+        {:ok, new_messages, summary_text} ->
           data =
             persist_event(data, "compaction", %{
               before_count: length(data.messages),
               after_count: length(new_messages),
-              summary: extract_summary_content(new_messages)
+              summary: format_summary_for_persist(summary_text)
             })
 
           :telemetry.execute([:tau, :compaction, :stop], %{system_time: System.system_time()}, %{
@@ -1043,16 +1043,18 @@ defmodule Tau.Session do
   defp event_to_message(_), do: nil
 
   # --- Compaction helpers --------------------------------------------------
+  #
+  # We persist the full <conversation_summary>...</conversation_summary>
+  # block as the JSONL "summary" field so events_to_messages/1's
+  # "compaction" clause can reconstruct the synthetic message verbatim
+  # on Tau.fork/2 / Tau.resume/1. The compactor returns just the inner
+  # text via the new tri-tuple contract (#57); we wrap it here.
 
-  defp extract_summary_content(messages) do
-    case Enum.find(messages, &compaction_summary?/1) do
-      %Tau.Message.User{content: c} when is_binary(c) -> c
-      _ -> nil
-    end
+  defp format_summary_for_persist(nil), do: nil
+
+  defp format_summary_for_persist(summary_text) when is_binary(summary_text) do
+    "<conversation_summary>\n#{summary_text}\n</conversation_summary>"
   end
-
-  defp compaction_summary?(%Tau.Message.User{metadata: %{role: :compaction_summary}}), do: true
-  defp compaction_summary?(_), do: false
 
   defp deserialize_blocks(blocks) when is_list(blocks),
     do: Enum.map(blocks, &deserialize_block/1)

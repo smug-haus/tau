@@ -40,7 +40,7 @@ defmodule Tau.Compactor.SummarizeTail do
       [] ->
         # Nothing conversational to summarise — emitting an empty
         # <conversation_summary> block would just be noise.
-        {:ok, pinned}
+        {:ok, pinned, nil}
 
       _ ->
         cutoff = max(div(length(conv) * 6, 10), 1)
@@ -54,7 +54,7 @@ defmodule Tau.Compactor.SummarizeTail do
                 metadata: %{role: :compaction_summary}
               )
 
-            {:ok, pinned ++ [synth | recent]}
+            {:ok, pinned ++ [synth | recent], summary_text}
 
           {:error, _} = err ->
             err

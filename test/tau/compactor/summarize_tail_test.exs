@@ -43,11 +43,18 @@ defmodule Tau.Compactor.SummarizeTailTest do
         end
       end
 
-    assert {:ok, compacted} = SummarizeTail.compact([pinned | conv], %{provider: StubProvider})
+    assert {:ok, compacted, summary_text} =
+             SummarizeTail.compact([pinned | conv], %{provider: StubProvider})
 
     assert [^pinned, %User{content: "<conversation_summary>" <> _} = synth | tail] = compacted
     refute pinned in tail
     refute synth in tail
+
+    # The third tuple element is the raw summary text (#57); the
+    # synth message wraps it in <conversation_summary>...</conversation_summary>.
+    assert is_binary(summary_text)
+    assert summary_text != ""
+    assert synth.content =~ summary_text
 
     # 60% of 10 = 6 oldest dropped; 4 newest preserved.
     assert length(tail) == 4
@@ -60,17 +67,18 @@ defmodule Tau.Compactor.SummarizeTailTest do
         User.new("turn #{i}")
       end
 
-    assert {:ok, [%User{content: "<conversation_summary>" <> _} | recent]} =
+    assert {:ok, [%User{content: "<conversation_summary>" <> _} | recent], summary_text} =
              SummarizeTail.compact(conv, %{provider: StubProvider})
 
+    assert is_binary(summary_text)
     refute Enum.any?(recent, &match?(%User{metadata: %{role: :system}}, &1))
   end
 
-  test "compact/2 on an empty list returns {:ok, []} without a synthetic summary" do
-    assert {:ok, []} = SummarizeTail.compact([], %{provider: StubProvider})
+  test "compact/2 on an empty list returns {:ok, [], nil} without a synthetic summary" do
+    assert {:ok, [], nil} = SummarizeTail.compact([], %{provider: StubProvider})
   end
 
-  test "compact/2 on a list of only pinned system messages preserves them as-is" do
+  test "compact/2 on a list of only pinned system messages preserves them; summary nil" do
     pinned =
       User.new("Always reply in haiku.",
         metadata: %{role: :system, source: :memory, path: "TAU.md"}
@@ -81,7 +89,7 @@ defmodule Tau.Compactor.SummarizeTailTest do
         metadata: %{role: :system, source: :skill, name: "foo", path: "skill.md"}
       )
 
-    assert {:ok, [^pinned, ^skill]} =
+    assert {:ok, [^pinned, ^skill], nil} =
              SummarizeTail.compact([pinned, skill], %{provider: StubProvider})
   end
 
@@ -99,10 +107,12 @@ defmodule Tau.Compactor.SummarizeTailTest do
 
     conv = for i <- 1..6, do: User.new("after-summary turn #{i}")
 
-    assert {:ok, [^prior_summary, %User{content: "<conversation_summary>" <> _} = synth | _]} =
+    assert {:ok, [^prior_summary, %User{content: "<conversation_summary>" <> _} = synth | _],
+            summary_text} =
              SummarizeTail.compact([prior_summary | conv], %{provider: StubProvider})
 
     refute synth == prior_summary
     refute synth.metadata == prior_summary.metadata
+    assert is_binary(summary_text)
   end
 end
