@@ -29,10 +29,14 @@ defmodule Tau.SessionE2ETest do
       ]
     )
 
-    {:ok, sid} = Tau.start_session(provider: Tau.Providers.Replay, model: "replay-test")
-
-    # Subscribe BEFORE sending so we don't miss events.
+    # Subscribe BEFORE start_session so we don't miss the SessionStart event
+    # broadcast synchronously from Session.init/1. Pre-generate the id so
+    # subscription can happen before init runs.
+    sid = "test-#{System.unique_integer([:positive])}"
     Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{sid}")
+
+    {:ok, ^sid} =
+      Tau.start_session(provider: Tau.Providers.Replay, model: "replay-test", session_id: sid)
 
     Tau.send(sid, "hello?")
 

@@ -24,7 +24,10 @@ defmodule Tau.Commands.ContextThreadingTest do
 
     @impl true
     def execute(args, ctx) do
-      send(ctx.metadata[:test_parent], {:stub_executed, args, ctx})
+      # Metadata is Jason-encoded into the persistence header, so we can't
+      # stash a raw pid there. Resolve a registered name to a pid instead.
+      pid = Process.whereis(ctx.metadata.test_parent_name)
+      if pid, do: send(pid, {:stub_executed, args, ctx})
       :ignore
     end
   end
@@ -38,16 +41,19 @@ defmodule Tau.Commands.ContextThreadingTest do
 
     Application.put_env(:tau, Tau.Providers.Replay, fixture: [%Event.Done{stop_reason: :stop}])
 
+    capture_name = :"ctx_threading_capture_#{System.unique_integer([:positive])}"
+    Process.register(self(), capture_name)
+
     on_exit(fn ->
       File.rm_rf!(tmp)
       Application.delete_env(:tau, :data_dir)
       Application.delete_env(:tau, Tau.Providers.Replay)
     end)
 
-    :ok
+    %{capture_name: capture_name}
   end
 
-  test "slash command receives a populated Tau.Command.Context" do
+  test "slash command receives a populated Tau.Command.Context", %{capture_name: capture_name} do
     cwd = Path.join(System.tmp_dir!(), "tau-cmd-ctx-cwd-#{System.unique_integer([:positive])}")
     File.mkdir_p!(Path.join(cwd, ".git"))
     on_exit(fn -> File.rm_rf!(cwd) end)
@@ -58,7 +64,7 @@ defmodule Tau.Commands.ContextThreadingTest do
         model: "replay-test",
         cwd: cwd,
         metadata: %{
-          test_parent: self(),
+          test_parent_name: capture_name,
           permissions_mode: :plan,
           custom: "hello"
         }
@@ -71,7 +77,7 @@ defmodule Tau.Commands.ContextThreadingTest do
     assert ctx.session_id == sid
     assert ctx.cwd == cwd
     assert ctx.permissions_mode == :plan
-    assert ctx.metadata.test_parent == self()
+    assert ctx.metadata.test_parent_name == capture_name
     assert ctx.metadata.custom == "hello"
     assert is_function(ctx.emit, 1)
 
