@@ -863,7 +863,10 @@ defmodule Tau.Session do
   end
 
   defp transcript_path(%{persistence: p, id: id, cwd: cwd}) do
-    if function_exported?(p, :path_for, 2), do: p.path_for(id, cwd), else: nil
+    # path_for/2 is a required Tau.Persistence callback (#61). Backends
+    # without an on-disk file return a pseudo-URI; the field on the
+    # hook payload is always a non-nil binary.
+    p.path_for(id, cwd)
   end
 
   defp register_builtins do

@@ -15,6 +15,27 @@ defmodule Tau.Hook do
     * `:file_changed`         — extension/settings file watcher fired
     * `:notification`         — generic event, used by the TUI
 
+  ## Payload contract
+
+  Every payload carries the canonical Phase-10 fields (set by
+  `Tau.Session.hook_payload/3`):
+
+    * `:session_id` — the owning session id (binary)
+    * `:cwd` — working directory the session operates from (binary)
+    * `:permission_mode` — atom (`:default | :accept_edits | …`)
+    * `:hook_event_name` — string form of the event name
+    * `:transcript_path` — non-nil binary identifying where the
+      transcript can be retrieved. For file backends this is an
+      absolute path; for others, a backend-specific pseudo-URI
+      (see `Tau.Persistence.path_for/2`). Hooks reading the path
+      while the session is still appending may see partially-flushed
+      JSONL — treat parse failures on the trailing line as
+      "in-flight, retry later" rather than fatal.
+    * `:metadata` — the session's user-supplied metadata map
+
+  Plus event-specific extras (`:message`, `:tool_name`,
+  `:tool_call_id`, `:tool_input`, `:result`, …).
+
   Hook return values:
 
     * `:cont`             — proceed normally
