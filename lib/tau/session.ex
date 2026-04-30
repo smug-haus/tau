@@ -370,11 +370,10 @@ defmodule Tau.Session do
   def handle_event(:cast, {:user_message, msg}, _state, data) do
     msg = expand_slash_command(msg, data)
 
-    case Tau.Hooks.Dispatcher.run(:user_prompt_submit, %{
-           session_id: data.id,
-           message: msg,
-           cwd: data.cwd
-         }) do
+    case Tau.Hooks.Dispatcher.run(
+           :user_prompt_submit,
+           hook_payload(data, :user_prompt_submit, %{message: msg})
+         ) do
       {:halt, reason} ->
         broadcast(data.id, %Events.Cancelled{session_id: data.id, reason: {:hook_halt, reason}})
         {:keep_state, data}
@@ -592,13 +591,14 @@ defmodule Tau.Session do
     tasks =
       Enum.into(allowed, %{}, fn %{id: id, name: name, arguments: args} ->
         # :pre_tool_use hook may rewrite args or veto.
-        case Tau.Hooks.Dispatcher.run(:pre_tool_use, %{
-               session_id: data.id,
-               tool_name: name,
-               tool_call_id: id,
-               tool_input: args,
-               cwd: data.cwd
-             }) do
+        case Tau.Hooks.Dispatcher.run(
+               :pre_tool_use,
+               hook_payload(data, :pre_tool_use, %{
+                 tool_name: name,
+                 tool_call_id: id,
+                 tool_input: args
+               })
+             ) do
           {:halt, reason} ->
             denied =
               ToolResult.new(
@@ -672,15 +672,16 @@ defmodule Tau.Session do
         end
 
       # :post_tool_use hook may rewrite the result.
+      post_event = if result.is_error, do: :post_tool_use_failure, else: :post_tool_use
+
       result =
         case Tau.Hooks.Dispatcher.run(
-               if(result.is_error, do: :post_tool_use_failure, else: :post_tool_use),
-               %{
-                 session_id: data.id,
+               post_event,
+               hook_payload(data, post_event, %{
                  tool_name: name,
                  tool_call_id: id,
                  result: result
-               }
+               })
              ) do
           {:cont, %{result: rewritten}} when is_struct(rewritten, ToolResult) -> rewritten
           _ -> result
@@ -833,6 +834,30 @@ defmodule Tau.Session do
 
   defp broadcast(id, event) do
     Phoenix.PubSub.broadcast(Tau.PubSub, "session:#{id}", event)
+  end
+
+  # --- Hook payload --------------------------------------------------------
+  #
+  # Phase 10's hook contract (mirroring Claude Code's): every hook payload
+  # carries session_id, cwd, permission_mode, hook_event_name, and
+  # transcript_path in addition to event-specific fields. Callers pass only
+  # the event-specific extras; the canonical fields are always present.
+
+  defp hook_payload(data, event, extras) when is_map(extras) do
+    Map.merge(
+      %{
+        session_id: data.id,
+        cwd: data.cwd,
+        permission_mode: Map.get(data.metadata, :permissions_mode, :default),
+        hook_event_name: to_string(event),
+        transcript_path: transcript_path(data)
+      },
+      extras
+    )
+  end
+
+  defp transcript_path(%{persistence: p, id: id, cwd: cwd}) do
+    if function_exported?(p, :path_for, 2), do: p.path_for(id, cwd), else: nil
   end
 
   defp register_builtins do

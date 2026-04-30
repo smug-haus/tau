@@ -22,6 +22,18 @@ defmodule Tau.Persistence do
   @callback close(handle :: term()) :: :ok
   @callback list(filters :: map()) :: [Tau.Session.Meta.t()]
 
+  @doc """
+  Optional. Resolve the on-disk path that holds the session transcript.
+
+  Used by `Tau.Session` to populate the `transcript_path` field in hook
+  payloads. Backends that don't materialise to a single file may return
+  `nil`. Implementations are free to return a path that does not yet
+  exist (callers treat the field as informational).
+  """
+  @callback path_for(session_id(), Path.t()) :: Path.t() | nil
+
+  @optional_callbacks [path_for: 2]
+
   @doc "Look up the configured persistence module."
   @spec impl() :: module()
   def impl, do: Application.get_env(:tau, :persistence, Tau.Persistence.Jsonl)

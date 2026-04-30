@@ -69,11 +69,12 @@ defmodule Tau.Hooks.Shell do
       else: do_run(cmd, timeout_ms, event, payload)
   end
 
-  defp do_run(cmd, timeout_ms, event, payload) do
-    json =
-      payload
-      |> Map.put("hook_event_name", to_string(event))
-      |> Jason.encode!()
+  defp do_run(cmd, timeout_ms, _event, payload) do
+    # `:hook_event_name` is already set on the payload by
+    # `Tau.Session.hook_payload/3` for every event the session itself
+    # dispatches. We keep the parameter for callers that build a payload
+    # from outside the FSM.
+    json = Jason.encode!(payload)
 
     port =
       Port.open({:spawn, cmd}, [
