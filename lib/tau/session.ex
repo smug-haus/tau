@@ -32,7 +32,52 @@ defmodule Tau.Session do
   @type id :: String.t()
 
   defmodule Meta do
-    @moduledoc "Session metadata returned by `Tau.list_sessions/1`."
+    @moduledoc """
+    Session metadata returned by `Tau.list_sessions/1`.
+
+    ## The `:metadata` field — contract
+
+    `:metadata` is an arbitrary user-supplied map propagated from
+    `Tau.start_session/1`'s `:metadata` opt. It travels with the
+    session through fork/resume, is persisted in the JSONL session
+    header, and is reachable by tools (`Tau.Tool.Context.metadata`)
+    and slash commands (`Tau.Command.Context.metadata`).
+
+    Two consequences for callers:
+
+      * **Values must be JSON-encodable.** The session's persistence
+        layer (`Tau.Persistence.Jsonl`) writes the header via
+        `Jason.encode!/2`. PIDs, references, anonymous functions,
+        ports, tuples (other than the ones Jason supports natively),
+        and module structs without a `Jason.Encoder` impl will crash
+        the session at init time. Stick to: maps, lists, strings,
+        numbers, booleans, `nil`, and atoms (encoded as strings).
+        For things that need a process handle, register a name with
+        `Process.register/2` and put the atom in metadata.
+
+      * **Namespace your keys.** Tau itself reserves a small set of
+        keys; future versions may grow that set. To avoid collisions,
+        put your keys under a project-specific prefix (e.g.
+        `"my_app__foo"`) or use a tagged tuple as a value.
+
+    ### Reserved metadata keys
+
+    Read or written by Tau today:
+
+      * `:permissions_mode` — atom controlling tool permissions
+        evaluation. Read by `Tau.Session.dispatch_tools/2` and
+        plumbed through to `Tau.Command.Context.permissions_mode`.
+        Defaults to `:default` if unset. Valid values:
+        `:default | :accept_edits | :plan | :auto | :dont_ask | :bypass`.
+
+      * `:forked_from` — `%{session: parent_id, event: parent_event_id}`
+        map, written by `Tau.fork/2` onto the new session's metadata
+        so the JSONL header records its provenance. Do not set this
+        manually.
+
+    Both keys live under the atom namespace; do not shadow them with
+    string-keyed equivalents.
+    """
     @enforce_keys [:id, :cwd, :created_at]
     defstruct [:id, :cwd, :created_at, :updated_at, :provider, :model, :metadata]
 
