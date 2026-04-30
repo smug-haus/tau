@@ -151,7 +151,7 @@ defmodule Tau.MixProject do
       extras: ["README.md", "CHANGELOG.md", "TAU.md"],
       groups_for_modules: [
         "Public API": [Tau],
-        "Behaviours": [
+        Behaviours: [
           Tau.Tool,
           Tau.Provider,
           Tau.Hook,
@@ -161,21 +161,21 @@ defmodule Tau.MixProject do
           Tau.Compactor,
           Tau.Extension
         ],
-        "Session": [Tau.Session, Tau.Message, Tau.Message.Assembler],
-        "Providers": [
+        Session: [Tau.Session, Tau.Message, Tau.Message.Assembler],
+        Providers: [
           Tau.Providers.Anthropic,
           Tau.Providers.Gemini,
           Tau.Providers.Bedrock,
           Tau.Providers.OpenAI.Responses,
           Tau.Providers.OpenAI.Chat
         ],
-        "Tools": [
+        Tools: [
           Tau.Tools.Builtin.Read,
           Tau.Tools.Builtin.Write,
           Tau.Tools.Builtin.Edit,
           Tau.Tools.Builtin.Bash
         ],
-        "MCP": [Tau.MCP.Manager, Tau.MCP.Server, Tau.MCP.ToolAdapter]
+        MCP: [Tau.MCP.Manager, Tau.MCP.Server, Tau.MCP.ToolAdapter]
       ]
     ]
   end
