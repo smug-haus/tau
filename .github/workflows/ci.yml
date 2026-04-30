@@ -13,13 +13,11 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 env:
   MIX_ENV: test
   ELIXIR_ERL_OPTIONS: "+fnu"
-  # Smaller Hex retry / parallelism so flaky CDNs don't cascade-fail.
   HEX_HTTP_CONCURRENCY: "1"
   HEX_HTTP_TIMEOUT: "120"
 
@@ -45,28 +43,10 @@ jobs:
             _build
           key: ${{ runner.os }}-mix-lint-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('**/mix.lock', 'mix.exs') }}
 
-      - run: mix deps.get 2>&1 | tee /tmp/deps.log
-      - run: mix format --check-formatted 2>&1 | tee /tmp/format.log
-      - run: mix compile 2>&1 | tee /tmp/compile.log
-        id: compile_step
-        continue-on-error: true
-      - name: Comment compile log on PR (on failure)
-        if: steps.compile_step.outcome == 'failure' && github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          {
-            echo "## Lint job — compile failure on \`${{ github.sha }}\`"
-            echo
-            echo '```'
-            tail -120 /tmp/compile.log
-            echo '```'
-          } > /tmp/comment.md
-          gh pr comment ${{ github.event.pull_request.number }} --body-file /tmp/comment.md
-      - name: Fail the job if compile failed
-        if: steps.compile_step.outcome == 'failure'
-        run: exit 1
-      - run: mix credo --strict || true
+      - run: mix deps.get
+      - run: mix format --check-formatted
+      - run: mix compile --warnings-as-errors
+      - run: mix credo --strict
 
   test:
     name: test (Elixir ${{ matrix.elixir }} · OTP ${{ matrix.otp }})
@@ -100,36 +80,7 @@ jobs:
       - run: mix deps.get
       - run: mix compile
       - name: Run unit + integration tests
-        id: test_step
-        run: mix test --cover 2>&1 | tee /tmp/test.log
-        continue-on-error: true
-      - name: ALWAYS push test log to ci-log branch
-        if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -ex
-          echo "test_step outcome: ${{ steps.test_step.outcome }}"
-          echo "test_step conclusion: ${{ steps.test_step.conclusion }}"
-          echo "===== /tmp/test.log (tail 300) ====="
-          tail -300 /tmp/test.log || true
-          echo "===== end ====="
-          git config user.email "ci@local"
-          git config user.name "ci"
-          git remote -v
-          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
-          BRANCH="ci-log/test-${{ matrix.elixir }}"
-          mkdir -p .ci-logs
-          tail -300 /tmp/test.log > ".ci-logs/test-${{ matrix.elixir }}.log" || echo "no log"
-          git checkout --orphan "$BRANCH" 2>&1 || true
-          git rm -rf --cached . 2>&1 || true
-          git add -f ".ci-logs/test-${{ matrix.elixir }}.log"
-          git commit -m "ci-log: test ${{ matrix.elixir }} on ${{ github.sha }} (outcome=${{ steps.test_step.outcome }})" 2>&1 || true
-          git push origin "$BRANCH" --force 2>&1 || true
-          echo "Pushed log to branch $BRANCH"
-      - name: Fail if tests failed
-        if: steps.test_step.outcome == 'failure'
-        run: exit 1
+        run: mix test --cover
       - name: Run property suite
         run: mix test --only property --trace
         env:
@@ -173,27 +124,8 @@ jobs:
       - run: mix deps.get
       - run: mix compile
       - name: Build PLTs (only when missing)
-        run: mkdir -p priv/plts && mix dialyzer --plt 2>&1 | tee /tmp/plt.log
-      - name: Run dialyzer
-        id: dialyzer_step
-        run: mix dialyzer --format github 2>&1 | tee /tmp/dialyzer.log
-        continue-on-error: true
-      - name: Comment dialyzer log on PR (on failure)
-        if: steps.dialyzer_step.outcome == 'failure' && github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          {
-            echo "## dialyzer — failure on \`${{ github.sha }}\`"
-            echo
-            echo '```'
-            tail -120 /tmp/dialyzer.log
-            echo '```'
-          } > /tmp/comment.md
-          gh pr comment ${{ github.event.pull_request.number }} --body-file /tmp/comment.md
-      - name: Fail if dialyzer failed
-        if: steps.dialyzer_step.outcome == 'failure'
-        run: exit 1
+        run: mkdir -p priv/plts && mix dialyzer --plt
+      - run: mix dialyzer --format github
 
   escript:
     name: escript build
