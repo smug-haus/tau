@@ -66,7 +66,7 @@ defmodule Tau.Tools.Builtin.Edit do
          applied = apply_plan(original, plan),
          :ok <- ctx.operations.write(full, applied) do
       diff = unified_diff(full, original, applied)
-      first_line = first_changed_line(plan)
+      first_line = first_changed_line(plan, original)
 
       {:ok,
        Result.text("Applied #{length(edits)} edit(s) to #{full}",
@@ -135,14 +135,16 @@ defmodule Tau.Tools.Builtin.Edit do
     IO.iodata_to_binary(Enum.reverse([suffix | acc]))
   end
 
-  defp first_changed_line(plan) do
-    case plan do
-      [] -> nil
-      [{pos, _, _, _} | _] -> 1 + count_newlines_before(pos)
-    end
+  defp first_changed_line([], _original), do: nil
+
+  defp first_changed_line([{pos, _, _, _} | _], original) do
+    prefix = binary_part(original, 0, pos)
+    1 + count_newlines(prefix)
   end
 
-  defp count_newlines_before(_pos), do: 0
+  defp count_newlines(<<>>), do: 0
+  defp count_newlines(<<?\n, rest::binary>>), do: 1 + count_newlines(rest)
+  defp count_newlines(<<_, rest::binary>>), do: count_newlines(rest)
 
   defp unified_diff(path, a, b) do
     a_lines = String.split(a, "\n")
