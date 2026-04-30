@@ -138,9 +138,57 @@ iex -S mix                         # REPL: Tau.start_session/1 etc.
 - Function names are verbs; module names are nouns; behaviours are nouns
   describing the role (`Tau.Tool`, not `Tau.IExecuteTools`).
 
+## Workflow: GitHub issues are the backlog
+
+Every feature, bug, polish item, and doc gap lives as a GitHub issue
+on this repo. **Before writing code, file an issue (or find one) and
+reference it.** Plans live in issue comments; PRs link back to issues;
+commits close them.
+
+1. **Triage on entry.** A new finding becomes an issue with:
+   - title: `<type>: <one-liner>`, where `<type>` ∈ `bug | feature |
+     polish | docs | chore | refactor | perf | test`,
+   - labels: a GitHub-built-in (`bug` / `enhancement` / `documentation`)
+     plus at least one `area:<subsystem>` label (see list below),
+   - body: problem statement, reproducer or evidence, optional fix
+     direction. No design discussion in PR descriptions — link to the
+     issue.
+
+2. **Plans start from issues.** When asked to implement something, the
+   first step is to scan the relevant open issues
+   (`mcp__github__list_issues` / `mcp__github__search_issues` for
+   sub-agents, the GitHub web UI for humans). Any milestone-scale plan
+   that lands in `/root/.claude/plans/` references issue numbers and
+   identifies which commits close which issues.
+
+3. **Commits and PRs reference issues.** Commit messages end with
+   `Closes #N` (or `Refs #N` for partial work). PR descriptions enumerate
+   every issue the PR closes so the auto-link populates.
+
+4. **Area labels.** Use these consistently so filters like
+   `is:open label:area:session` work:
+   `area:session`, `area:cli`, `area:tui`, `area:tools`,
+   `area:providers`, `area:mcp`, `area:skills`, `area:extensions`,
+   `area:permissions`, `area:hooks`, `area:memory`, `area:settings`,
+   `area:persistence`, `area:telemetry`, `area:ci`, `area:docs`,
+   `area:onboarding`. (Until labels are pre-created in the repo, embed
+   them as a `**Area:**` line in the issue body — issue search supports
+   that too.)
+
+5. **Sub-agent rules.** `Explore` and `Plan` subagents must consult
+   issue state before proposing new design. If a finding doesn't have an
+   issue yet, the subagent files one (or returns a "needs to be filed"
+   line in its report so the parent agent files it).
+
+6. **No backlog parking lots in code.** Avoid `# TODO` comments. If
+   something needs to happen later, file the issue and reference its
+   number from the source line: `# See #42`.
+
 ## Where to find more
 
-- `/root/.claude/plans/` — full implementation plan, milestones M0 — M8.
+- **GitHub issues** — the live backlog. `is:open` for active work.
+- `/root/.claude/plans/` — milestone-scale plans (M0–M8 implementation
+  plan, large refactors). Smaller decisions live in issue comments.
 - `priv/livebooks/` — walkthroughs that double as smoke tests.
 - `https://github.com/badlogic/pi-mono` — reference implementation we ported from.
 - `https://hexdocs.pm/elixir/` — stdlib docs (`:gen_statem`, `Registry`,

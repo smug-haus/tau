@@ -63,9 +63,18 @@ mix escript.build && ./tau     # local TUI run
 - No `IO.puts` for logging — use telemetry or `Logger`.
 - No new event format mid-loop — extend `Tau.Provider.Event`.
 
+## Workflow: issues are the backlog
+
+Every feature, bug, polish item, doc gap lives as a GitHub issue.
+File one before writing code; reference it in commits (`Closes #N`).
+Plans start from issues. Sub-agents must consult issue state before
+proposing new design — see `CLAUDE.md` for the full rules and the
+canonical area-label list.
+
 ## Pointers
 
-- Plan: `/root/.claude/plans/clear-out-this-repo-fluffy-hamming.md`
+- **GitHub issues** — the live backlog.
+- Plan: `/root/.claude/plans/clear-out-this-repo-fluffy-hamming.md` (M0–M8 only).
 - Reference: `https://github.com/badlogic/pi-mono`
 - Erlang/Elixir stdlib: `:gen_statem`, `Registry`, `Task.Supervisor`,
   `:persistent_term`.

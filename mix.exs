@@ -2,7 +2,7 @@ defmodule Tau.MixProject do
   use Mix.Project
 
   @version "0.1.0"
-  @source_url "https://github.com/smug-haus/aoc2020"
+  @source_url "https://github.com/smug-haus/tau"
 
   def project do
     [
