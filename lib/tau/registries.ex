@@ -9,7 +9,9 @@ defmodule Tau.Registries do
 
     * `Tau.Tools.Registry` — `:unique`, partitioned by scheduler count.
       Built-in tools, MCP-derived tools, and extension tools all register
-      here under their public name. MCP tools use `mcp__server__name`.
+      here under their public name. MCP-derived tools register under
+      `mcp__<server_name>__<tool_name>` (double-underscore separator;
+      both segments are dynamic — see `Tau.MCP.Server`).
 
     * `Tau.Hooks.Registry` — `:duplicate`, keyed by event atom. Multiple
       hooks may listen on the same event; dispatch is deterministic by

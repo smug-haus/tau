@@ -6,9 +6,21 @@ defmodule Tau.Providers.Replay do
   Useful for end-to-end session tests and the `mix tau.hello` smoke task
   when no real provider key is available.
 
-  Configure via `Application.put_env/3`:
+  ## Configuration
 
-      Application.put_env(:tau, Tau.Providers.Replay, fixture: "test/fixtures/foo.jsonl")
+  Prefer `config/test.exs`:
+
+      # config/test.exs
+      config :tau, Tau.Providers.Replay, fixture: "test/fixtures/foo.jsonl"
+
+  Tau's "no `Application.put_env/3` for runtime state" non-negotiable
+  (see CLAUDE.md / TAU.md) applies here too — even though Replay is
+  test-only, configuring it with `Application.put_env/3` from inside
+  `setup` blocks bleeds state across tests and breaks `async: true`.
+  Tests that need per-test fixture switching should pass the fixture
+  through the `ctx` argument that `stream/3` already accepts:
+
+      stream(messages, opts, %{replay_fixture: events})
 
   Each line of the fixture is a JSON object with an event `type` and the
   remaining fields used to build the corresponding event struct.
