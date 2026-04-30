@@ -100,7 +100,25 @@ jobs:
       - run: mix deps.get
       - run: mix compile
       - name: Run unit + integration tests
-        run: mix test --cover
+        id: test_step
+        run: mix test --cover 2>&1 | tee /tmp/test.log
+        continue-on-error: true
+      - name: Comment test log on PR (on failure)
+        if: steps.test_step.outcome == 'failure' && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "## test job (Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }}) — failure on \`${{ github.sha }}\`"
+            echo
+            echo '```'
+            tail -160 /tmp/test.log
+            echo '```'
+          } > /tmp/comment.md
+          gh pr comment ${{ github.event.pull_request.number }} --body-file /tmp/comment.md
+      - name: Fail if tests failed
+        if: steps.test_step.outcome == 'failure'
+        run: exit 1
       - name: Run property suite
         run: mix test --only property --trace
         env:
@@ -144,8 +162,27 @@ jobs:
       - run: mix deps.get
       - run: mix compile
       - name: Build PLTs (only when missing)
-        run: mkdir -p priv/plts && mix dialyzer --plt
-      - run: mix dialyzer --format github
+        run: mkdir -p priv/plts && mix dialyzer --plt 2>&1 | tee /tmp/plt.log
+      - name: Run dialyzer
+        id: dialyzer_step
+        run: mix dialyzer --format github 2>&1 | tee /tmp/dialyzer.log
+        continue-on-error: true
+      - name: Comment dialyzer log on PR (on failure)
+        if: steps.dialyzer_step.outcome == 'failure' && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "## dialyzer — failure on \`${{ github.sha }}\`"
+            echo
+            echo '```'
+            tail -120 /tmp/dialyzer.log
+            echo '```'
+          } > /tmp/comment.md
+          gh pr comment ${{ github.event.pull_request.number }} --body-file /tmp/comment.md
+      - name: Fail if dialyzer failed
+        if: steps.dialyzer_step.outcome == 'failure'
+        run: exit 1
 
   escript:
     name: escript build
