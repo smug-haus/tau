@@ -43,8 +43,6 @@ jobs:
             deps
             _build
           key: ${{ runner.os }}-mix-lint-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('**/mix.lock', 'mix.exs') }}
-          restore-keys: |
-            ${{ runner.os }}-mix-lint-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-
 
       - run: mix deps.get
       - run: mix format --check-formatted
@@ -79,8 +77,6 @@ jobs:
             deps
             _build
           key: ${{ runner.os }}-mix-test-${{ matrix.elixir }}-${{ matrix.otp }}-${{ hashFiles('**/mix.lock', 'mix.exs') }}
-          restore-keys: |
-            ${{ runner.os }}-mix-test-${{ matrix.elixir }}-${{ matrix.otp }}-
 
       - run: mix deps.get
       - run: mix compile
@@ -119,16 +115,12 @@ jobs:
             deps
             _build
           key: ${{ runner.os }}-mix-dialyzer-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('**/mix.lock', 'mix.exs') }}
-          restore-keys: |
-            ${{ runner.os }}-mix-dialyzer-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-
 
       - name: Cache PLTs
         uses: actions/cache@v4
         with:
           path: priv/plts
           key: ${{ runner.os }}-plt-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('**/mix.lock', 'mix.exs') }}
-          restore-keys: |
-            ${{ runner.os }}-plt-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-
 
       - run: mix deps.get
       - run: mix compile
