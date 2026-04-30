@@ -37,7 +37,8 @@ defmodule Tau.Registries do
       {Registry, keys: :duplicate, name: Tau.Hooks.Registry},
       {Registry, keys: :unique, name: Tau.Commands.Registry},
       {Registry, keys: :unique, name: Tau.Skills.Registry},
-      {Registry, keys: :unique, name: Tau.Sessions.Registry}
+      {Registry, keys: :unique, name: Tau.Sessions.Registry},
+      {Registry, keys: :unique, name: Tau.MCP.Registry}
     ]
 
     Supervisor.init(children, strategy: :one_for_one)
