@@ -33,10 +33,7 @@ defmodule Tau.Registries do
   @impl true
   def init(_opts) do
     children = [
-      {Registry,
-       keys: :unique,
-       name: Tau.Tools.Registry,
-       partitions: System.schedulers_online()},
+      {Registry, keys: :unique, name: Tau.Tools.Registry, partitions: System.schedulers_online()},
       {Registry, keys: :duplicate, name: Tau.Hooks.Registry},
       {Registry, keys: :unique, name: Tau.Commands.Registry},
       {Registry, keys: :unique, name: Tau.Skills.Registry},

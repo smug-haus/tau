@@ -1,0 +1,196 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  ELIXIR_ERL_OPTIONS: "+fnu"
+
+jobs:
+  # Build the standalone Burrito binary for each target platform.
+  burrito:
+    name: burrito (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux_amd64
+            os: ubuntu-24.04
+          - target: linux_arm64
+            os: ubuntu-24.04-arm
+          - target: macos_amd64
+            os: macos-13
+          - target: macos_arm64
+            os: macos-14
+          - target: windows_amd64
+            os: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup BEAM (Unix)
+        if: runner.os != 'Windows'
+        uses: erlef/setup-beam@v1
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
+      - name: Setup BEAM (Windows)
+        if: runner.os == 'Windows'
+        uses: erlef/setup-beam@v1
+        with:
+          version-file: .tool-versions
+          version-type: strict
+          install-hex: true
+          install-rebar: true
+
+      - name: Setup Zig (Burrito needs it for cross-compilation of the launcher)
+        uses: mlugg/setup-zig@v1
+        with:
+          version: "0.13.0"
+
+      - name: Setup 7zip (Windows)
+        if: runner.os == 'Windows'
+        uses: milliewalky/setup-7-zip@v2
+
+      - name: Cache deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-${{ matrix.target }}-mix-burrito-${{ hashFiles('**/mix.lock') }}
+
+      - name: Fetch deps
+        run: mix deps.get
+        env:
+          MIX_ENV: prod
+
+      - name: Build Burrito release
+        run: mix release tau --overwrite
+        env:
+          MIX_ENV: prod
+          BURRITO_TARGET: ${{ matrix.target }}
+
+      - name: Locate artifact (Unix)
+        if: runner.os != 'Windows'
+        id: artifact_unix
+        run: |
+          path=$(find burrito_out -maxdepth 2 -type f -name "tau_${{ matrix.target }}*" | head -1)
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$path")" >> "$GITHUB_OUTPUT"
+
+      - name: Locate artifact (Windows)
+        if: runner.os == 'Windows'
+        id: artifact_win
+        shell: pwsh
+        run: |
+          $path = Get-ChildItem -Path burrito_out -Recurse -File -Filter "tau_*.exe" | Select-Object -First 1
+          "path=$($path.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "name=$($path.Name)"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Upload artifact (Unix)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact_unix.outputs.name }}
+          path: ${{ steps.artifact_unix.outputs.path }}
+          if-no-files-found: error
+
+      - name: Upload artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact_win.outputs.name }}
+          path: ${{ steps.artifact_win.outputs.path }}
+          if-no-files-found: error
+
+  # Publish the Hex package (library distribution).
+  hex:
+    name: hex.publish
+    runs-on: ubuntu-24.04
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup BEAM
+        uses: erlef/setup-beam@v1
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
+      - run: mix deps.get
+      - run: mix compile --warnings-as-errors
+      - name: hex.publish (auth via HEX_API_KEY)
+        run: mix hex.publish --yes
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+
+  # Publish ex_doc to GitHub Pages on each tagged release.
+  docs:
+    name: docs (ex_doc → gh-pages)
+    runs-on: ubuntu-24.04
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup BEAM
+        uses: erlef/setup-beam@v1
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
+      - run: mix deps.get
+      - run: MIX_ENV=docs mix docs
+
+      - name: Deploy
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: doc
+          force_orphan: true
+
+  # Bundle every artefact into the GitHub Release.
+  release:
+    name: github-release
+    needs: [burrito]
+    runs-on: ubuntu-24.04
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artefacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artefacts
+
+      - name: Flatten artefact tree
+        run: |
+          mkdir -p ./release_assets
+          find ./artefacts -type f -exec mv {} ./release_assets/ \;
+          ls -la ./release_assets
+
+      - name: Create checksums
+        working-directory: ./release_assets
+        run: |
+          sha256sum * > SHA256SUMS
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ./release_assets/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

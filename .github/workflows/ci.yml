@@ -1,0 +1,164 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel in-progress runs for the same branch when a new push lands.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MIX_ENV: test
+  ELIXIR_ERL_OPTIONS: "+fnu"
+  # Smaller Hex retry / parallelism so flaky CDNs don't cascade-fail.
+  HEX_HTTP_CONCURRENCY: "1"
+  HEX_HTTP_TIMEOUT: "120"
+
+jobs:
+  lint:
+    name: lint (format · credo · compile-warnings)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup BEAM
+        id: beam
+        uses: erlef/setup-beam@v1
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
+      - name: Cache deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-lint-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-lint-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-
+
+      - run: mix deps.get
+      - run: mix format --check-formatted
+      - run: mix deps.unlock --check-unused
+      - run: mix compile --warnings-as-errors
+      - run: mix credo --strict
+
+  test:
+    name: test (Elixir ${{ matrix.elixir }} · OTP ${{ matrix.otp }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - elixir: "1.18.1"
+            otp: "27.2"
+          - elixir: "1.17.3"
+            otp: "26.2"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup BEAM
+        id: beam
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ matrix.elixir }}
+          otp-version: ${{ matrix.otp }}
+
+      - name: Cache deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-test-${{ matrix.elixir }}-${{ matrix.otp }}-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-test-${{ matrix.elixir }}-${{ matrix.otp }}-
+
+      - run: mix deps.get
+      - run: mix compile --warnings-as-errors
+      - name: Run unit + integration tests
+        run: mix test --cover --warnings-as-errors
+      - name: Run property suite
+        run: mix test --only property --trace --warnings-as-errors
+        env:
+          MIX_TEST_PROPERTY_BUDGET_FACTOR: "5"
+
+      - name: Upload coverage
+        if: matrix.elixir == '1.18.1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.elixir }}-${{ matrix.otp }}
+          path: cover/
+          if-no-files-found: ignore
+
+  dialyzer:
+    name: dialyzer
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup BEAM
+        id: beam
+        uses: erlef/setup-beam@v1
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
+      - name: Cache deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-dialyzer-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-dialyzer-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-
+
+      - name: Cache PLTs
+        uses: actions/cache@v4
+        with:
+          path: priv/plts
+          key: ${{ runner.os }}-plt-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-plt-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-
+
+      - run: mix deps.get
+      - run: mix compile
+      - name: Build PLTs (only when missing)
+        run: mkdir -p priv/plts && mix dialyzer --plt
+      - run: mix dialyzer --format github
+
+  escript:
+    name: escript build
+    runs-on: ubuntu-24.04
+    needs: [lint]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup BEAM
+        uses: erlef/setup-beam@v1
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
+      - run: mix deps.get
+      - run: MIX_ENV=prod mix escript.build
+      - name: Sanity-run the escript
+        run: ./tau version
+        env:
+          ELIXIR_ERL_OPTIONS: "+fnu"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tau-escript
+          path: tau
+          retention-days: 7
