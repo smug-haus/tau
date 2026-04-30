@@ -11,6 +11,7 @@ defmodule Tau.Memory.InjectionTest do
   """
   use ExUnit.Case, async: false
 
+  import Tau.Test.SessionHelper, only: [start_session_for_test: 1]
   alias Tau.Provider.Event
 
   setup do
@@ -67,7 +68,7 @@ defmodule Tau.Memory.InjectionTest do
     on_exit(fn -> :telemetry.detach(handler_id) end)
 
     {:ok, sid} =
-      Tau.start_session(
+      start_session_for_test(
         provider: Tau.Providers.Replay,
         model: "replay-test",
         cwd: cwd,
@@ -107,7 +108,7 @@ defmodule Tau.Memory.InjectionTest do
     on_exit(fn -> :telemetry.detach(handler_id) end)
 
     {:ok, sid} =
-      Tau.start_session(
+      start_session_for_test(
         provider: Tau.Providers.Replay,
         model: "replay-test",
         cwd: bare_cwd,

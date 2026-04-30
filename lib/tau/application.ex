@@ -15,18 +15,21 @@ defmodule Tau.Application do
        skills, sessions, MCP servers.
     4. **Settings.Cache + Watcher** — persistent_term-backed
        config.
-    5. **Memory.Cache** — ETS-backed `TAU.md` cache (today a
-       no-op; tracked in #53).
-    6. **Permissions.RuleSet** — subscribes to settings PubSub,
+    5. **Permissions.RuleSet** — subscribes to settings PubSub,
        compiles rules from Settings.Cache.
-    7. **Finch** — HTTP client, used by providers.
-    8. **Task supervisors** — for tool dispatch.
-    9. **Extensions.Loader** — registers tools/hooks/commands
+    6. **Finch** — HTTP client, used by providers.
+    7. **Task supervisors** — for tool dispatch.
+    8. **Extensions.Loader** — registers tools/hooks/commands
        defined by extensions.
-    10. **MCP.Supervisor** — MCP server connections.
-    11. **Sessions.Supervisor** — dynamic supervisor for session
+    9. **MCP.Supervisor** — MCP server connections.
+    10. **Sessions.Supervisor** — dynamic supervisor for session
         FSMs (must be last; it's the only consumer of all the
         above).
+
+  `Tau.Memory.Cache` was removed (ADR-0006) — the ETS-backed
+  memory cache it implied was never wired up. `Tau.Memory.Loader`
+  reads from disk on each call until profiling shows that's a
+  bottleneck.
   """
   use Application
 
@@ -38,7 +41,6 @@ defmodule Tau.Application do
       Tau.Registries,
       Tau.Settings.Cache,
       Tau.Settings.Watcher,
-      Tau.Memory.Cache,
       Tau.Permissions.RuleSet,
       {Finch, name: Tau.Providers.Finch},
       {Task.Supervisor, name: Tau.Tools.TaskSupervisor},

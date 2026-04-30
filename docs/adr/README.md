@@ -58,6 +58,8 @@ get rewritten away by the next refactor. ADRs survive.
 | [0002](0002-provider-ctx-is-the-runtime-config-channel.md) | Provider runtime configuration goes through `:provider_ctx`, not `Application` env | Accepted |
 | [0003](0003-tool-validator-fails-closed-on-unresolvable-schemas.md) | `Tau.Tool.Validator` fails closed on unresolvable schemas | Accepted |
 | [0004](0004-pubsub-at-the-top-of-the-supervision-tree.md) | `Phoenix.PubSub` is at the top of the supervision tree | Accepted |
+| [0005](0005-skills-discovery-is-per-session-and-pure.md) | Skills discovery is per-session and side-effect-free | Accepted |
+| [0006](0006-defer-tau-memory-cache-until-measured.md) | Defer `Tau.Memory.Cache` until measurements justify it | Accepted |
 
 (New ADRs append here. Keep the table sorted by ADR number.)
 

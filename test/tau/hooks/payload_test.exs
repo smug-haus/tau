@@ -10,6 +10,7 @@ defmodule Tau.Hooks.PayloadTest do
   """
   use ExUnit.Case, async: false
 
+  import Tau.Test.SessionHelper, only: [start_session_for_test: 1]
   alias Tau.Provider.Event
 
   defmodule CapturingHook do
@@ -59,7 +60,7 @@ defmodule Tau.Hooks.PayloadTest do
     on_exit(fn -> File.rm_rf!(cwd) end)
 
     {:ok, sid} =
-      Tau.start_session(
+      start_session_for_test(
         provider: Tau.Providers.Replay,
         model: "replay-test",
         cwd: cwd,
@@ -97,7 +98,7 @@ defmodule Tau.Hooks.PayloadTest do
     on_exit(fn -> File.rm_rf!(cwd) end)
 
     {:ok, sid} =
-      Tau.start_session(
+      start_session_for_test(
         provider: Tau.Providers.Replay,
         model: "replay-test",
         cwd: cwd,

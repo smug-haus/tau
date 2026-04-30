@@ -95,7 +95,10 @@ defmodule Tau.Session.CompactionReplayTest do
     )
 
     # Fork at the post-compaction user event — should pull all four events in.
+    # The fork spawns a fresh session FSM; stop it on test exit so it doesn't
+    # leak across the suite (#52).
     {:ok, child_sid} = Tau.fork(parent_sid, cutoff_event_id)
+    on_exit(fn -> Tau.stop(child_sid) end)
     assert child_sid != parent_sid
 
     [{pid, _}] = Registry.lookup(Tau.Sessions.Registry, child_sid)
@@ -169,6 +172,7 @@ defmodule Tau.Session.CompactionReplayTest do
     )
 
     {:ok, child_sid} = Tau.fork(parent_sid, cutoff_event_id)
+    on_exit(fn -> Tau.stop(child_sid) end)
     [{pid, _}] = Registry.lookup(Tau.Sessions.Registry, child_sid)
     {_state, data} = :sys.get_state(pid)
 

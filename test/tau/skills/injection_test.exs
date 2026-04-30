@@ -12,6 +12,7 @@ defmodule Tau.Skills.InjectionTest do
   """
   use ExUnit.Case, async: false
 
+  import Tau.Test.SessionHelper, only: [start_session_for_test: 1]
   alias Tau.Provider.Event
 
   setup do
@@ -76,7 +77,7 @@ defmodule Tau.Skills.InjectionTest do
     on_exit(fn -> :telemetry.detach(handler_id) end)
 
     {:ok, sid} =
-      Tau.start_session(
+      start_session_for_test(
         provider: Tau.Providers.Replay,
         model: "replay-test",
         cwd: cwd,
@@ -112,7 +113,7 @@ defmodule Tau.Skills.InjectionTest do
   test "disable-model-invocation skills are tracked on session data but not injected",
        %{cwd: cwd, replay_fixture: replay_fixture} do
     {:ok, sid} =
-      Tau.start_session(
+      start_session_for_test(
         provider: Tau.Providers.Replay,
         model: "replay-test",
         cwd: cwd,

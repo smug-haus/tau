@@ -111,8 +111,20 @@ defmodule Tau.Extensions.Loader do
         Registry.register(Tau.Commands.Registry, name, c)
       end)
 
+      # Parse the skill at registration time so the registry value is a
+      # %Tau.Skill{} struct — same shape sessions get from filesystem
+      # discovery via Tau.Skills.Loader.discover/1 (ADR-0005). A bad
+      # path is logged + skipped rather than crashing the loader.
       Enum.each(mod.skills(), fn {name, path} ->
-        Registry.register(Tau.Skills.Registry, name, path)
+        case Tau.Skills.Loader.parse(path) do
+          {:ok, skill} ->
+            Registry.register(Tau.Skills.Registry, name, %{skill | name: name})
+
+          {:error, reason} ->
+            Logger.warning(
+              "Tau.Extensions.Loader: skipping skill #{inspect(name)} at #{inspect(path)}: #{inspect(reason)}"
+            )
+        end
       end)
 
       {:ok, mod, %{module: mod}}

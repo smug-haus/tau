@@ -922,10 +922,22 @@ defmodule Tau.Session do
   defp serialize_block(other), do: other
 
   # --- Skill loading + injection --------------------------------------------
+  #
+  # Per ADR-0005 the session is a read-only consumer of skill data:
+  # filesystem-discovered skills come from the pure
+  # Tau.Skills.Loader.discover/1, extension-provided skills come
+  # from the registry that Tau.Extensions.Loader populates once at
+  # boot. We merge both, deduplicating by name (filesystem wins on
+  # conflict, since cwd-local should mask priv/bundled).
 
   defp load_skills(cwd) do
-    Tau.Skills.Loader.load_all(cwd)
-    skills = Tau.Skills.Loader.list()
+    discovered = Tau.Skills.Loader.discover(cwd)
+    extension = Tau.Skills.Loader.list_extension_skills()
+
+    skills =
+      (extension ++ discovered)
+      |> Enum.uniq_by(fn {name, _} -> name end)
+      |> Enum.sort_by(fn {name, _} -> name end)
 
     if skills != [] do
       active_count = Enum.count(skills, fn {_n, s} -> not s.disable_model_invocation end)

@@ -10,6 +10,7 @@ defmodule Tau.Commands.ContextThreadingTest do
   """
   use ExUnit.Case, async: false
 
+  import Tau.Test.SessionHelper, only: [start_session_for_test: 1]
   alias Tau.Provider.Event
 
   defmodule StubCmd do
@@ -57,7 +58,7 @@ defmodule Tau.Commands.ContextThreadingTest do
     on_exit(fn -> File.rm_rf!(cwd) end)
 
     {:ok, sid} =
-      Tau.start_session(
+      start_session_for_test(
         provider: Tau.Providers.Replay,
         model: "replay-test",
         cwd: cwd,

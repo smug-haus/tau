@@ -1,6 +1,7 @@
 defmodule Tau.SessionE2ETest do
   use ExUnit.Case, async: false
 
+  import Tau.Test.SessionHelper, only: [start_session_for_test: 1]
   alias Tau.Provider.Event
 
   setup do
@@ -33,7 +34,7 @@ defmodule Tau.SessionE2ETest do
     Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{sid}")
 
     {:ok, ^sid} =
-      Tau.start_session(
+      start_session_for_test(
         provider: Tau.Providers.Replay,
         model: "replay-test",
         session_id: sid,

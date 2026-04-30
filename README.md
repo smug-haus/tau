@@ -69,17 +69,16 @@ mix escript.build
 ```
 Tau.Supervisor                                  (:rest_for_one)
 ├── Tau.Telemetry.Supervisor
-├── Tau.Settings.Cache              (->:persistent_term)
-├── Tau.Settings.Watcher            (file_system)
-├── Tau.Memory.Cache                (ETS)
-├── Tau.Permissions.RuleSet         (->:persistent_term)
+├── Tau.PubSub                      (Phoenix.PubSub — ADR-0004: at the top)
 ├── Tau.Registries
 │   ├── Tau.Tools.Registry
 │   ├── Tau.Hooks.Registry
 │   ├── Tau.Commands.Registry
-│   ├── Tau.Skills.Registry
+│   ├── Tau.Skills.Registry         (extension-provided skills only — ADR-0005)
 │   └── Tau.Sessions.Registry
-├── Tau.PubSub                      (Phoenix.PubSub)
+├── Tau.Settings.Cache              (->:persistent_term)
+├── Tau.Settings.Watcher            (file_system)
+├── Tau.Permissions.RuleSet         (->:persistent_term, subscribes to "settings")
 ├── Tau.Providers.Finch
 ├── Tau.Tools.TaskSupervisor
 ├── Tau.Extensions.Loader
@@ -89,6 +88,9 @@ Tau.Supervisor                                  (:rest_for_one)
 └── Tau.Sessions.Supervisor
     └── Tau.Session                 (:gen_statem, one per active session)
 ```
+
+(`Tau.Memory.Cache` was removed in ADR-0006 until measurements
+justify a per-session memory-file cache.)
 
 ## Extending
 
