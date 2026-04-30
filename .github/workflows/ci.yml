@@ -103,32 +103,29 @@ jobs:
         id: test_step
         run: mix test --cover 2>&1 | tee /tmp/test.log
         continue-on-error: true
-      - name: Print log + push to debug ref on failure
-        if: steps.test_step.outcome == 'failure'
+      - name: ALWAYS push test log to ci-log branch
+        if: always() && hashFiles('/tmp/test.log') != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Loud diagnostic printout
-          echo "===== /tmp/test.log (last 300) ====="
-          tail -300 /tmp/test.log
-          echo "===== end ====="
-
-          # Sync the log file into the workspace and create a
-          # branch ci-log/<elixir-version> that ALWAYS exists post-failure.
           set -ex
+          echo "test_step outcome: ${{ steps.test_step.outcome }}"
+          echo "test_step conclusion: ${{ steps.test_step.conclusion }}"
+          echo "===== /tmp/test.log (tail 300) ====="
+          tail -300 /tmp/test.log || true
+          echo "===== end ====="
           git config user.email "ci@local"
           git config user.name "ci"
           git remote -v
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
           BRANCH="ci-log/test-${{ matrix.elixir }}"
           mkdir -p .ci-logs
-          tail -300 /tmp/test.log > ".ci-logs/test-${{ matrix.elixir }}.log"
-          # Single-commit orphan branch with just the log (no rebase / pull needed)
-          git checkout --orphan "$BRANCH"
-          git rm -rf --cached . 2>/dev/null || true
+          tail -300 /tmp/test.log > ".ci-logs/test-${{ matrix.elixir }}.log" || echo "no log"
+          git checkout --orphan "$BRANCH" 2>&1 || true
+          git rm -rf --cached . 2>&1 || true
           git add -f ".ci-logs/test-${{ matrix.elixir }}.log"
-          git commit -m "ci-log: test ${{ matrix.elixir }} on ${{ github.sha }}"
-          git push origin "$BRANCH" --force
+          git commit -m "ci-log: test ${{ matrix.elixir }} on ${{ github.sha }} (outcome=${{ steps.test_step.outcome }})" 2>&1 || true
+          git push origin "$BRANCH" --force 2>&1 || true
           echo "Pushed log to branch $BRANCH"
       - name: Fail if tests failed
         if: steps.test_step.outcome == 'failure'
