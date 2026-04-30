@@ -65,4 +65,28 @@ defmodule Tau.Compactor.SummarizeTailTest do
 
     refute Enum.any?(recent, &match?(%User{metadata: %{role: :system}}, &1))
   end
+
+  test "compact/2 on an empty list returns {:ok, []} without a synthetic summary" do
+    assert {:ok, []} = SummarizeTail.compact([], %{provider: StubProvider})
+  end
+
+  test "compact/2 on a list of only pinned system messages preserves them as-is" do
+    pinned =
+      User.new("Always reply in haiku.",
+        metadata: %{role: :system, source: :memory, path: "TAU.md"}
+      )
+
+    skill =
+      User.new("# Skill: foo\n\nbody",
+        metadata: %{role: :system, source: :skill, name: "foo", path: "skill.md"}
+      )
+
+    assert {:ok, [^pinned, ^skill]} =
+             SummarizeTail.compact([pinned, skill], %{provider: StubProvider})
+  end
+
+  test "should_compact?/2 on an empty list returns false regardless of usage" do
+    refute SummarizeTail.should_compact?([], %{})
+    refute SummarizeTail.should_compact?([], %{input_tokens: 1_000_000})
+  end
 end

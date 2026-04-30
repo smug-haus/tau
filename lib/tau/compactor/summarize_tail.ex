@@ -22,6 +22,8 @@ defmodule Tau.Compactor.SummarizeTail do
   alias Tau.Provider.Event
 
   @impl Tau.Compactor
+  def should_compact?([], _usage), do: false
+
   def should_compact?(messages, usage) do
     msg_count_threshold = Application.get_env(:tau, :compaction_threshold_messages, 50)
     token_threshold = Application.get_env(:tau, :compaction_threshold_tokens, 120_000)
@@ -33,16 +35,27 @@ defmodule Tau.Compactor.SummarizeTail do
   @impl Tau.Compactor
   def compact(messages, ctx) do
     {pinned, conv} = Enum.split_with(messages, &pinned?/1)
-    cutoff = max(div(length(conv) * 6, 10), 1)
-    {old, recent} = Enum.split(conv, cutoff)
 
-    case summarise(old, ctx) do
-      {:ok, summary_text} ->
-        synth = Message.User.new("<conversation_summary>\n#{summary_text}\n</conversation_summary>")
-        {:ok, pinned ++ [synth | recent]}
+    case conv do
+      [] ->
+        # Nothing conversational to summarise — emitting an empty
+        # <conversation_summary> block would just be noise.
+        {:ok, pinned}
 
-      {:error, _} = err ->
-        err
+      _ ->
+        cutoff = max(div(length(conv) * 6, 10), 1)
+        {old, recent} = Enum.split(conv, cutoff)
+
+        case summarise(old, ctx) do
+          {:ok, summary_text} ->
+            synth =
+              Message.User.new("<conversation_summary>\n#{summary_text}\n</conversation_summary>")
+
+            {:ok, pinned ++ [synth | recent]}
+
+          {:error, _} = err ->
+            err
+        end
     end
   end
 
