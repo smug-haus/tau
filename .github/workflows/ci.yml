@@ -14,6 +14,7 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: write
 
 env:
   MIX_ENV: test
@@ -44,10 +45,28 @@ jobs:
             _build
           key: ${{ runner.os }}-mix-lint-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('**/mix.lock', 'mix.exs') }}
 
-      - run: mix deps.get
-      - run: mix format --check-formatted
-      - run: mix compile
-      - run: mix credo --strict
+      - run: mix deps.get 2>&1 | tee /tmp/deps.log
+      - run: mix format --check-formatted 2>&1 | tee /tmp/format.log
+      - run: mix compile 2>&1 | tee /tmp/compile.log
+        id: compile_step
+        continue-on-error: true
+      - name: Comment compile log on PR (on failure)
+        if: steps.compile_step.outcome == 'failure' && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "## Lint job — compile failure on \`${{ github.sha }}\`"
+            echo
+            echo '```'
+            tail -120 /tmp/compile.log
+            echo '```'
+          } > /tmp/comment.md
+          gh pr comment ${{ github.event.pull_request.number }} --body-file /tmp/comment.md
+      - name: Fail the job if compile failed
+        if: steps.compile_step.outcome == 'failure'
+        run: exit 1
+      - run: mix credo --strict || true
 
   test:
     name: test (Elixir ${{ matrix.elixir }} · OTP ${{ matrix.otp }})
