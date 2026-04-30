@@ -1,0 +1,43 @@
+# Build artefacts
+/_build/
+/cover/
+/deps/
+/doc/
+/.fetch
+erl_crash.dump
+*.ez
+*.beam
+
+# Releases & escripts
+/tau
+/tau.bat
+/release/
+/burrito_out/
+
+# Mix
+/.elixir_ls/
+/.lexical/
+
+# Dialyzer
+/priv/plts/*.plt
+/priv/plts/*.plt.hash
+
+# Local config / secrets
+/config/*.local.exs
+.env
+.env.*
+!.env.example
+
+# Editor noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Test coverage
+/cover/
+coverage.json
+
+# Tau runtime data (when developing against the local cwd)
+/.tau/settings.local.json
