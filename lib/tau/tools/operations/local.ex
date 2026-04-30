@@ -61,6 +61,12 @@ defmodule Tau.Tools.Operations.Local do
   Run a shell command. Returns `{:ok, %{stdout, stderr, exit_status, duration_ms}}`
   or `{:error, term()}`.
 
+  Stdout and stderr are captured separately. The non-empty stderr blob
+  is emitted on `[:tau, :tool, :bash, :stderr]` telemetry once at the
+  end (Phase 6 calls for per-chunk events; we accept the coarser
+  granularity here as the cost of doing it portably without `:erlexec`
+  — see the moduledoc).
+
   When `:timeout_ms` is set and exceeded, closes the `Port`, which sends
   `SIGTERM` to the direct child only. See the moduledoc for the
   process-tree-kill caveat.
@@ -71,6 +77,8 @@ defmodule Tau.Tools.Operations.Local do
   def bash(command, opts \\ []) do
     timeout = opts[:timeout_ms]
     started = System.monotonic_time(:millisecond)
+    stderr_path = stderr_temp_path()
+    wrapped = "{ #{command} ; } 2> #{shell_quote(stderr_path)}"
 
     port =
       Port.open(
@@ -78,22 +86,59 @@ defmodule Tau.Tools.Operations.Local do
         [
           :binary,
           :exit_status,
-          :stderr_to_stdout,
           :hide,
           :use_stdio,
-          {:args, ["-c", command]},
+          {:args, ["-c", wrapped]},
           {:env, env_pairs(opts[:env] || %{})}
         ]
       )
 
-    case collect_port(port, "", timeout) do
-      {:ok, output, status} ->
-        duration = System.monotonic_time(:millisecond) - started
-        {:ok, %{stdout: output, stderr: "", exit_status: status, duration_ms: duration}}
+    try do
+      case collect_port(port, "", timeout) do
+        {:ok, stdout, status} ->
+          duration = System.monotonic_time(:millisecond) - started
+          stderr = read_stderr(stderr_path)
+          maybe_emit_stderr_telemetry(stderr)
+          {:ok, %{stdout: stdout, stderr: stderr, exit_status: status, duration_ms: duration}}
 
-      {:error, _} = e ->
-        e
+        {:error, _} = e ->
+          # On timeout, bash may have written some stderr already.
+          stderr = read_stderr(stderr_path)
+          maybe_emit_stderr_telemetry(stderr)
+          e
+      end
+    after
+      _ = File.rm(stderr_path)
     end
+  end
+
+  defp stderr_temp_path do
+    suffix = :crypto.strong_rand_bytes(10) |> Base.url_encode64(padding: false)
+    Path.join(System.tmp_dir!(), "tau-bash-stderr-#{suffix}.txt")
+  end
+
+  defp shell_quote(path) do
+    # Single-quote and escape any embedded single quotes. Path comes from
+    # mktemp-style random bytes so this is belt-and-braces, but we keep it
+    # in case future callers pass arbitrary paths.
+    "'" <> String.replace(path, "'", "'\\''") <> "'"
+  end
+
+  defp read_stderr(path) do
+    case File.read(path) do
+      {:ok, contents} -> contents
+      _ -> ""
+    end
+  end
+
+  defp maybe_emit_stderr_telemetry(""), do: :ok
+
+  defp maybe_emit_stderr_telemetry(stderr) when is_binary(stderr) do
+    :telemetry.execute(
+      [:tau, :tool, :bash, :stderr],
+      %{bytes: byte_size(stderr), system_time: System.system_time()},
+      %{stderr: stderr}
+    )
   end
 
   defp collect_port(port, acc, timeout) do

@@ -44,8 +44,9 @@ defmodule Tau.Tools.Builtin.Bash do
     timeout_ms = if t = params["timeout"], do: t * 1000, else: nil
 
     case ctx.operations.bash(cmd, timeout_ms: timeout_ms, env: System.get_env()) do
-      {:ok, %{stdout: out, exit_status: status, duration_ms: dur}} ->
-        {body, truncated?, full_path} = truncate(out, ctx.session_id, ctx.tool_call_id)
+      {:ok, %{stdout: out, stderr: err, exit_status: status, duration_ms: dur}} ->
+        merged = merge_streams(out, err)
+        {body, truncated?, full_path} = truncate(merged, ctx.session_id, ctx.tool_call_id)
 
         prefix =
           cond do
@@ -63,7 +64,8 @@ defmodule Tau.Tools.Builtin.Bash do
              duration_ms: dur,
              truncated?: truncated?,
              full_output_path: full_path,
-             command: cmd
+             command: cmd,
+             stderr_bytes: byte_size(err)
            },
            is_error: status != 0
          }}
@@ -75,6 +77,10 @@ defmodule Tau.Tools.Builtin.Bash do
         {:ok, Result.error("Bash failed: #{inspect(e)}", details: %{command: cmd})}
     end
   end
+
+  defp merge_streams(stdout, ""), do: stdout
+  defp merge_streams("", stderr), do: stderr
+  defp merge_streams(stdout, stderr), do: stdout <> stderr
 
   defp truncate(output, session_id, call_id) do
     bytes = byte_size(output)
