@@ -539,7 +539,8 @@ defmodule Tau.Session do
           data =
             persist_event(data, "compaction", %{
               before_count: length(data.messages),
-              after_count: length(new_messages)
+              after_count: length(new_messages),
+              summary: extract_summary_content(new_messages)
             })
 
           :telemetry.execute([:tau, :compaction, :stop], %{system_time: System.system_time()}, %{
@@ -1017,7 +1018,24 @@ defmodule Tau.Session do
     )
   end
 
+  defp event_to_message(%{"kind" => "compaction", "data" => %{"summary" => s}})
+       when is_binary(s) and s != "" do
+    Tau.Message.User.new(s, metadata: %{role: :compaction_summary})
+  end
+
   defp event_to_message(_), do: nil
+
+  # --- Compaction helpers --------------------------------------------------
+
+  defp extract_summary_content(messages) do
+    case Enum.find(messages, &compaction_summary?/1) do
+      %Tau.Message.User{content: c} when is_binary(c) -> c
+      _ -> nil
+    end
+  end
+
+  defp compaction_summary?(%Tau.Message.User{metadata: %{role: :compaction_summary}}), do: true
+  defp compaction_summary?(_), do: false
 
   defp deserialize_blocks(blocks) when is_list(blocks),
     do: Enum.map(blocks, &deserialize_block/1)

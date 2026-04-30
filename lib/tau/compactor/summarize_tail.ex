@@ -49,7 +49,10 @@ defmodule Tau.Compactor.SummarizeTail do
         case summarise(old, ctx) do
           {:ok, summary_text} ->
             synth =
-              Message.User.new("<conversation_summary>\n#{summary_text}\n</conversation_summary>")
+              Message.User.new(
+                "<conversation_summary>\n#{summary_text}\n</conversation_summary>",
+                metadata: %{role: :compaction_summary}
+              )
 
             {:ok, pinned ++ [synth | recent]}
 
