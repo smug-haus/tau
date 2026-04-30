@@ -389,7 +389,10 @@ defmodule Tau.Session do
           persist_handle: persist_handle,
           provider_task: nil,
           assembler: nil,
-          tools_in_flight: %{}
+          tools_in_flight: %{},
+          # ADR-0008: slash-command tasks (user code) run isolated under
+          # Tau.Tools.TaskSupervisor, never inline in the FSM.
+          command_task: nil
         }
 
         {:ok, :awaiting_user, data}
@@ -418,9 +421,30 @@ defmodule Tau.Session do
   # --- Event handlers -------------------------------------------------------
 
   @impl :gen_statem
-  def handle_event(:cast, {:user_message, msg}, _state, data) do
-    msg = expand_slash_command(msg, data)
+  # ADR-0008: while a slash-command task is in flight, postpone any
+  # subsequent user_message casts. They get re-delivered when the FSM
+  # next transitions, which guarantees order without dropping input.
+  def handle_event(:cast, {:user_message, _}, _state, %{command_task: t} = _data)
+      when t != nil do
+    {:keep_state_and_data, [{:postpone, true}]}
+  end
 
+  def handle_event(:cast, {:user_message, msg}, _state, data) do
+    case classify_slash_command(msg) do
+      {:async, mod, args, msg} ->
+        spawn_command_task(mod, args, msg, data)
+
+      {:sync, msg} ->
+        process_user_message(msg, data)
+    end
+  end
+
+  def handle_event(:info, {:command_done, result, original_msg}, _state, data) do
+    msg = apply_command_result(result, original_msg)
+    process_user_message(msg, %{data | command_task: nil})
+  end
+
+  defp process_user_message(msg, data) do
     case Tau.Hooks.Dispatcher.run(
            :user_prompt_submit,
            hook_payload(data, :user_prompt_submit, %{message: msg})
@@ -524,11 +548,15 @@ defmodule Tau.Session do
       if Process.alive?(t.pid), do: Task.shutdown(t, :brutal_kill)
     end)
 
+    if data.command_task && Process.alive?(data.command_task.pid) do
+      Task.shutdown(data.command_task, :brutal_kill)
+    end
+
     broadcast(data.id, %Events.Cancelled{session_id: data.id, reason: :user})
     persist_event(data, "cancellation", %{reason: "user"})
 
     {:next_state, :awaiting_user,
-     %{data | provider_task: nil, tools_in_flight: %{}, assembler: nil}}
+     %{data | provider_task: nil, tools_in_flight: %{}, assembler: nil, command_task: nil}}
   end
 
   def handle_event(:cast, :stop, _state, data) do
@@ -1127,44 +1155,104 @@ defmodule Tau.Session do
   defp stop_reason_atom(s) when is_binary(s), do: String.to_atom(s)
   defp stop_reason_atom(s), do: s
 
-  # --- Slash commands -------------------------------------------------------
+  # --- Slash commands (ADR-0008) -------------------------------------------
+  #
+  # Programmatic slash-command bodies (Tau.Command modules) run in a
+  # supervised Task — never inline in the FSM — so a misbehaving
+  # extension can't deadlock the session. File-commands stay
+  # synchronous; they're bounded File.read/1s with no user code.
+  #
+  # classify_slash_command/1 is a pure parser: it returns
+  # `{:async, mod, args, msg}` (caller spawns the task) or
+  # `{:sync, msg}` (caller proceeds directly with the rewritten
+  # message).
 
-  defp expand_slash_command(%Tau.Message.User{content: c} = msg, data) when is_binary(c) do
+  defp classify_slash_command(%Tau.Message.User{content: c} = msg) when is_binary(c) do
     case Tau.Commands.Parser.parse(c) do
       {:command, name, args} ->
         case Tau.Commands.Parser.lookup(name) do
           {:ok, mod} when is_atom(mod) ->
-            invoke_command(mod, name, args, msg, data)
+            if function_exported?(mod, :execute, 2) do
+              {:async, mod, args, msg}
+            else
+              {:sync, msg}
+            end
 
           {:ok, path} when is_binary(path) ->
-            invoke_file_command(path, args, msg)
+            {:sync, invoke_file_command(path, args, msg)}
 
           :error ->
-            # Unknown slash command; pass through verbatim — the model can
-            # handle it as a stylistic preface or report that it's unknown.
-            msg
+            # Unknown slash command; pass through verbatim — the model
+            # can handle it as a stylistic preface or report that it's
+            # unknown.
+            {:sync, msg}
         end
 
       _ ->
-        msg
+        {:sync, msg}
     end
   end
 
-  defp expand_slash_command(msg, _data), do: msg
+  defp classify_slash_command(msg), do: {:sync, msg}
 
-  defp invoke_command(mod, _name, args, msg, data) do
-    if function_exported?(mod, :execute, 2) do
-      ctx = build_command_ctx(data)
+  defp spawn_command_task(mod, args, msg, data) do
+    parent = self()
+    ctx = build_command_ctx(data)
+    timeout_ms = Application.get_env(:tau, :slash_command_timeout_ms, 30_000)
 
-      case mod.execute(args, ctx) do
-        {:inject, prefix} -> %Tau.Message.User{msg | content: prefix <> "\n\n" <> msg.content}
-        {:replace, replacement} -> %Tau.Message.User{msg | content: replacement}
-        {:run, replacement} -> %Tau.Message.User{msg | content: replacement}
-        :ignore -> msg
-        _ -> msg
-      end
-    else
-      msg
+    task =
+      Task.Supervisor.async_nolink(Tau.Tools.TaskSupervisor, fn ->
+        try do
+          mod.execute(args, ctx)
+        rescue
+          e -> {:crashed, Exception.message(e)}
+        catch
+          kind, value -> {:crashed, "uncaught #{kind}: #{inspect(value)}"}
+        end
+      end)
+
+    spawn_link(fn ->
+      result =
+        case Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) do
+          {:ok, r} -> r
+          nil -> {:timeout, timeout_ms}
+          {:exit, reason} -> {:crashed, inspect(reason)}
+        end
+
+      Process.send(parent, {:command_done, result, msg}, [])
+    end)
+
+    {:keep_state, %{data | command_task: task}}
+  end
+
+  defp apply_command_result(result, msg) do
+    case result do
+      {:inject, prefix} when is_binary(prefix) ->
+        %Tau.Message.User{msg | content: prefix <> "\n\n" <> msg.content}
+
+      {:replace, replacement} when is_binary(replacement) ->
+        %Tau.Message.User{msg | content: replacement}
+
+      {:run, replacement} when is_binary(replacement) ->
+        %Tau.Message.User{msg | content: replacement}
+
+      :ignore ->
+        msg
+
+      {:crashed, reason} ->
+        %Tau.Message.User{
+          msg
+          | content: "(slash command crashed: #{reason})\n\n" <> msg.content
+        }
+
+      {:timeout, ms} ->
+        %Tau.Message.User{
+          msg
+          | content: "(slash command timed out after #{ms}ms)\n\n" <> msg.content
+        }
+
+      _ ->
+        msg
     end
   end
 

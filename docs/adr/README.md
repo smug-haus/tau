@@ -61,6 +61,7 @@ get rewritten away by the next refactor. ADRs survive.
 | [0005](0005-skills-discovery-is-per-session-and-pure.md) | Skills discovery is per-session and side-effect-free | Accepted |
 | [0006](0006-defer-tau-memory-cache-until-measured.md) | Defer `Tau.Memory.Cache` until measurements justify it | Accepted |
 | [0007](0007-compaction-summaries-survive-recompaction.md) | Compaction summaries are pinned across re-compaction | Accepted |
+| [0008](0008-user-code-never-runs-synchronously-in-the-fsm.md) | User code never runs synchronously inside the session FSM | Accepted |
 
 (New ADRs append here. Keep the table sorted by ADR number.)
 
