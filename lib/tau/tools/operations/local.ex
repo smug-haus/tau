@@ -1,12 +1,29 @@
 defmodule Tau.Tools.Operations.Local do
   @moduledoc """
   Default file/process backend for built-in tools. Operates on the local
-  filesystem and spawns subprocesses via `Port` (Bash falls back to
-  `:erlexec` for proper process-tree kill when available).
+  filesystem and spawns subprocesses via `Port`.
 
   This is the *only* place that touches `File`, `Path`, `:os.cmd`, and
   process spawning. Tools call into this module so a future SSH/sandboxed
   backend just needs to implement the same functions.
+
+  ## Process-tree cancellation: known limitation
+
+  Bash commands run via `Port.open/2` with `{:spawn_executable, bash}`.
+  The BEAM only owns the direct child (the `bash` PID), not the
+  descendant tree the script may fan out into (`sleep 30 & sleep 30 &
+  wait`, `make -j8`, `npm run build`, ...). When `Tau.cancel/1` or a
+  timeout closes the port, only `bash` is killed; surviving descendants
+  become orphans reparented to PID 1.
+
+  An earlier prototype used `:erlexec` to send `SIGTERM` to the whole
+  process group via `setpgid` + `kill(-pgid)`. That dep was dropped
+  during the M0–M8 cleanup to keep CI portable; restoring it is tracked
+  in issue #12. Until then, callers should not assume `cancel/1` is
+  sufficient for resource cleanup of long-running shell scripts on
+  Linux/macOS — wrap user commands in a parent that propagates signals
+  (`exec` chaining, `setsid`, or `trap`) if it matters for the use case.
+  Windows has no equivalent of process groups regardless.
   """
 
   @doc "Read a file as binary. Returns `{:ok, binary}` or `{:error, posix}`."
@@ -44,8 +61,9 @@ defmodule Tau.Tools.Operations.Local do
   Run a shell command. Returns `{:ok, %{stdout, stderr, exit_status, duration_ms}}`
   or `{:error, term()}`.
 
-  When `:timeout_ms` is set and exceeded, kills the entire process group
-  (via `:erlexec` if loaded, otherwise via `Port.close/1`).
+  When `:timeout_ms` is set and exceeded, closes the `Port`, which sends
+  `SIGTERM` to the direct child only. See the moduledoc for the
+  process-tree-kill caveat.
   """
   @spec bash(String.t(), keyword()) ::
           {:ok, %{stdout: binary, stderr: binary, exit_status: integer, duration_ms: integer}}
