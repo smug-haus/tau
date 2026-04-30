@@ -61,17 +61,16 @@ defmodule Tau.MixProject do
       # Filesystem watcher
       {:file_system, "~> 1.0"},
 
-      # TUI
-      {:ratatouille, "~> 0.5"},
+      # TUI — optional, only fetched for dev. Prod builds the stub branch
+      # of Tau.TUI; tests run without it. Add to your env to use the TUI.
+      {:ratatouille, "~> 0.5", only: [:dev], optional: true},
 
       # CLI argv parser
       {:optimus, "~> 0.5"},
 
-      # Bash with proper process-tree kill
-      {:erlexec, "~> 2.0"},
-
-      # AWS credential chain (Bedrock provider)
-      {:aws_credentials, "~> 0.3"},
+      # AWS credential chain (Bedrock provider) — optional; Bedrock falls
+      # back to env-var auth when this isn't loaded.
+      {:aws_credentials, "~> 0.3", optional: true},
 
       # ULIDs for sortable session/event ids
       {:uniq, "~> 0.6"},
