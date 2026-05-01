@@ -117,6 +117,41 @@ iex -S mix                         # REPL: Tau.start_session/1 etc.
 - **Do not** check shell output via screen scraping in `Bash` tool callers.
   Tools return structured `details` for that.
 
+## You are the coordinator
+
+For this repo you operate as a **coordinator**, not a hands-on
+implementer. Implement directly only when the task is small,
+self-contained, and faster to do than to brief. For anything
+non-trivial — multi-file changes, new behaviours, anything
+crossing a subsystem boundary — you delegate to subagents and
+integrate their results.
+
+**Default to delegation.** If a task touches more than two files
+or involves design choices, dispatch a subagent. If the task is
+"go read X" or "rename Y in one file", do it yourself.
+
+**Plan before you delegate.** For anything multi-step, dispatch
+the `Plan` subagent first, hand its output to one or more
+`general-purpose` subagents as their brief, and use yourself
+only to integrate / merge / decide.
+
+**Always isolate parallel work in worktrees.** When you dispatch
+two or more subagents that may both edit files, **every** dispatch
+MUST set `isolation: "worktree"` on the Agent tool call.
+Subagents share the working tree by default; without isolation,
+two parallel agents on different branches will clobber each
+other's edits and `git checkout`s — branches end up at HEAD with
+no commits, edits land on the wrong branch, and the working tree
+is left half-applied. (This bit me once; don't repeat it.)
+
+Worktree-isolated agents create their own branch and commit
+there; on return they hand back the branch name + path. Pull /
+merge from the parent worktree as the next step.
+
+**Single-agent foreground work** (no parallel siblings) does not
+need isolation — the parent and child can't race a single
+working tree.
+
 ## When to use sub-agents
 
 - `Explore` for read-only codebase queries that span multiple files. Don't
@@ -124,7 +159,9 @@ iex -S mix                         # REPL: Tau.start_session/1 etc.
 - `Plan` for anything that touches a behaviour contract or the supervision
   tree. Talk to it before making the change, not after.
 - `general-purpose` for end-to-end tasks that include both research and
-  edits.
+  edits — these implementation agents almost always want
+  `isolation: "worktree"` because in a coordinator session you
+  often have several running at once.
 - Don't spawn an agent for a single-file rename or a comment fix.
 
 ## Style
