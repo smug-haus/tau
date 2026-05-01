@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `Tau.Provider.chat/4` — provider-agnostic non-streaming entry point
+  that drains `stream/3` through `Tau.Message.Assembler` and returns
+  the assembled `%Assistant{}`. Provider modules can override via the
+  optional `@callback chat/3` for native non-SSE endpoints. (Refs #19,
+  closes #36.)
+
 ## [0.1.0] — 2026-05-01
 
 ### Added (milestones M0 — M8)
