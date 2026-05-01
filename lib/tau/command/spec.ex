@@ -178,21 +178,22 @@ defmodule Tau.Command.Spec do
   defp lookup_named(raw_name, spec) do
     atom_name = atomise(raw_name)
 
-    cond do
-      entry = Enum.find(spec, fn e -> e.kind in [:flag, :option] and e.name == atom_name end) ->
-        {entry, false}
-
-      String.starts_with?(raw_name, "no-") and
-          (entry =
-             Enum.find(spec, fn e ->
-               e.kind == :flag and e.name == atomise(String.replace_prefix(raw_name, "no-", ""))
-             end)) ->
-        {entry, true}
-
-      true ->
-        {nil, false}
+    case Enum.find(spec, fn e -> e.kind in [:flag, :option] and e.name == atom_name end) do
+      %{} = entry -> {entry, false}
+      nil -> lookup_no_prefix(raw_name, spec)
     end
   end
+
+  defp lookup_no_prefix("no-" <> rest, spec) do
+    flag_name = atomise(rest)
+
+    case Enum.find(spec, fn e -> e.kind == :flag and e.name == flag_name end) do
+      %{} = entry -> {entry, true}
+      nil -> {nil, false}
+    end
+  end
+
+  defp lookup_no_prefix(_, _), do: {nil, false}
 
   defp atomise(name) when is_binary(name) do
     name
