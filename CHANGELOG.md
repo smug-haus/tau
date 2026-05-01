@@ -29,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the status bar continues to work. (Closes #26.)
 
 ### Changed
+- `:accept_edits` permissions mode is now argument-aware for Bash:
+  destructive commands (`rm -rf`, `sudo`, `dd`, `mkfs`, `shred`, fork
+  bombs, raw disk writes) deny; non-destructive commands auto-allow.
+  Other tools under `:accept_edits` retain `:ask` semantics. New
+  pure helper `Tau.Permissions.Heuristics.destructive_bash?/1`.
+  (Closes #22.)
 - `Tau.Session` now dispatches a turn's parallel tool calls through a
   single `Task.Supervisor.async_stream_nolink/4` iterator under
   `Tau.Tools.TaskSupervisor` instead of one `async_nolink/2` Task per

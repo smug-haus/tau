@@ -10,7 +10,9 @@ defmodule Tau.Permissions.Evaluator do
 
     * `:default`        — fall through to `:ask` when no rule matches
     * `:accept_edits`   — auto-allow tool calls that don't include
-                         destructive shells; deny rules still apply
+                         destructive shells (Bash commands run through
+                         `Tau.Permissions.Heuristics.destructive_bash?/1`);
+                         deny rules still apply
     * `:plan`           — read-only: only Read/Grep/etc. allowed
     * `:auto`           — auto-allow non-destructive; ask on writes
     * `:dont_ask`       — only pre-approved tools; default deny otherwise
@@ -65,7 +67,7 @@ defmodule Tau.Permissions.Evaluator do
         :ask
 
       true ->
-        default_for_mode(mode, tool_name)
+        default_for_mode(mode, tool_name, args)
     end
   end
 
@@ -86,16 +88,19 @@ defmodule Tau.Permissions.Evaluator do
     end)
   end
 
-  defp default_for_mode(:default, _), do: :ask
-  defp default_for_mode(:dont_ask, _), do: :deny
-  defp default_for_mode(:plan, tool) when tool in ["Read", "Grep", "Glob"], do: :allow
-  defp default_for_mode(:plan, _), do: :deny
+  defp default_for_mode(:default, _, _), do: :ask
+  defp default_for_mode(:dont_ask, _, _), do: :deny
+  defp default_for_mode(:plan, tool, _) when tool in ["Read", "Grep", "Glob"], do: :allow
+  defp default_for_mode(:plan, _, _), do: :deny
 
-  defp default_for_mode(:accept_edits, tool) when tool in ["Read", "Write", "Edit", "Grep"],
+  defp default_for_mode(:accept_edits, tool, _) when tool in ["Read", "Write", "Edit", "Grep"],
     do: :allow
 
-  defp default_for_mode(:accept_edits, "Bash"), do: :ask
-  defp default_for_mode(:auto, tool) when tool in ["Read", "Grep", "Glob"], do: :allow
-  defp default_for_mode(:auto, _), do: :ask
-  defp default_for_mode(_, _), do: :ask
+  defp default_for_mode(:accept_edits, "Bash", args) do
+    if Tau.Permissions.Heuristics.destructive_bash?(args), do: :deny, else: :allow
+  end
+
+  defp default_for_mode(:auto, tool, _) when tool in ["Read", "Grep", "Glob"], do: :allow
+  defp default_for_mode(:auto, _, _), do: :ask
+  defp default_for_mode(_, _, _), do: :ask
 end
