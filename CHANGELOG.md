@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `Tau.Providers.Shared.ToolSpec.adapt/2` — pure cross-provider tool-schema
+  normaliser. Each provider's `build_body` now hands its tools list through
+  `adapt/2` so callers pass `Tau.Tool` modules or raw normalised maps and the
+  helper produces the provider-native shape. Gemini's reduced JSON-Schema
+  subset is handled by a dedicated down-shifter; lossy transforms log a
+  warning once. (Refs #19, closes #37.)
 - `Tau.Cost` / `Tau.Cost.Tracker` — per-provider token aggregation. The
   tracker is a lifecycle anchor for the `:tau_cost_counters` ETS table
   and a telemetry handler on `[:tau, :provider, :request, :stop]`;

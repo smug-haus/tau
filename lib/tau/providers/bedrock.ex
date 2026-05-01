@@ -20,7 +20,7 @@ defmodule Tau.Providers.Bedrock do
 
   alias Tau.Message.{Assistant, ToolResult, User}
   alias Tau.Provider.Event
-  alias Tau.Providers.Shared.{AwsEventStream, FinchStream}
+  alias Tau.Providers.Shared.{AwsEventStream, FinchStream, ToolSpec}
 
   @default_model "anthropic.claude-3-5-sonnet-20241022-v2:0"
 
@@ -108,11 +108,17 @@ defmodule Tau.Providers.Bedrock do
   # --- Body -----------------------------------------------------------------
 
   defp build_payload(messages, opts) do
-    %{
+    base = %{
       anthropic_version: "bedrock-2023-05-31",
       max_tokens: opts[:max_tokens] || 8192,
       messages: Enum.map(messages, &to_anthropic/1)
     }
+
+    case ToolSpec.adapt(opts[:tools], __MODULE__) do
+      nil -> base
+      [] -> base
+      tools -> Map.put(base, :tools, tools)
+    end
   end
 
   defp to_anthropic(%User{content: c}) when is_binary(c), do: %{role: "user", content: c}
