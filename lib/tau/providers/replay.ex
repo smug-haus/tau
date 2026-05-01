@@ -46,6 +46,17 @@ defmodule Tau.Providers.Replay do
   - A list of `%Tau.Provider.Event{}` structs (in-memory), or
   - A path to a JSONL file where each line is a JSON object with a
     `type` field and event-specific keys.
+
+  ## Test-only ctx knobs (ADR-0017)
+
+  - `:replay_delay_ms` — `Process.sleep/1` between events. Tests use
+    this to keep the stream "open" long enough for a `:cancel` cast
+    to race in.
+  - `:replay_ignore_cancel` — when `true`, the provider does NOT
+    check the `:cancel_flag`. Drives the brutal-kill fallback path
+    in cancellation tests.
+
+  Both are no-ops in production; do not set them outside tests.
   """
 
   @behaviour Tau.Provider
@@ -61,9 +72,37 @@ defmodule Tau.Providers.Replay do
 
   @impl Tau.Provider
   def stream(_messages, _opts \\ %{}, ctx \\ %{}) do
-    events = resolve_fixture(ctx)
-    {:ok, Stream.map(events, & &1)}
+    events = resolve_fixture(ctx) |> Enum.to_list()
+    cancel_flag = ctx[:cancel_flag]
+    delay_ms = ctx[:replay_delay_ms] || 0
+    ignore_cancel? = ctx[:replay_ignore_cancel] == true
+
+    stream =
+      Stream.resource(
+        fn -> events end,
+        fn
+          [] ->
+            {:halt, []}
+
+          [head | tail] = _remaining ->
+            if delay_ms > 0, do: Process.sleep(delay_ms)
+
+            if not ignore_cancel? and cancelled?(cancel_flag) do
+              # ADR-0017: cooperative cancellation. Emit the marker
+              # and stop drawing from the fixture.
+              {[%Event.Error{reason: :cancelled, retryable?: false}], []}
+            else
+              {[head], tail}
+            end
+        end,
+        fn _ -> :ok end
+      )
+
+    {:ok, stream}
   end
+
+  defp cancelled?(nil), do: false
+  defp cancelled?(ref), do: :counters.get(ref, 1) > 0
 
   defp resolve_fixture(ctx) do
     cond do

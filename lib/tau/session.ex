@@ -416,6 +416,10 @@ defmodule Tau.Session do
           persistence: persistence,
           persist_handle: persist_handle,
           provider_task: nil,
+          # ADR-0017: per-stream cooperative-cancel flag (a `:counters`
+          # ref). Allocated freshly in `:start_provider`; consulted by the
+          # `:cancel` handler before falling back to brutal-kill.
+          cancel_flag: nil,
           assembler: nil,
           # ADR-0012: per-turn fallback queue. Re-derived from
           # Tau.Settings.Cache at the start of every :start_provider so a
@@ -555,7 +559,25 @@ defmodule Tau.Session do
 
     parent = self()
 
-    ctx = Map.merge(data.provider_ctx, %{session_id: data.id})
+    # ADR-0017: cooperative cancellation. Allocate a fresh per-stream
+    # `:counters` ref and thread it through the provider ctx. The
+    # `:cancel` handler flips slot 1 to signal abort; the streaming
+    # engine (and Replay, for tests) checks it at every chunk boundary.
+    cancel_flag = :counters.new(1, [])
+
+    ctx =
+      data.provider_ctx
+      |> Map.merge(%{session_id: data.id, cancel_flag: cancel_flag})
+
+    :telemetry.execute(
+      [:tau, :provider, :request, :start],
+      %{system_time: System.system_time()},
+      %{
+        provider: data.provider,
+        model: data.model,
+        session_id: data.id
+      }
+    )
 
     stream_opts =
       %{model: data.model}
@@ -576,13 +598,14 @@ defmodule Tau.Session do
         assembler = Assembler.new(provider: data.provider, model: data.model)
         broadcast(data.id, %Events.MessageStart{session_id: data.id, message: assembler.message})
 
-        {:next_state, :provider_streaming, %{data | provider_task: task, assembler: assembler}}
+        {:next_state, :provider_streaming,
+         %{data | provider_task: task, assembler: assembler, cancel_flag: cancel_flag}}
 
       {:error, reason} ->
         # Synchronous provider error — emit and return to awaiting_user.
         msg = Assistant.new(stop_reason: :error, error_message: inspect(reason))
         broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: msg})
-        {:next_state, :awaiting_user, data}
+        {:next_state, :awaiting_user, %{data | cancel_flag: nil}}
     end
   end
 
@@ -726,9 +749,13 @@ defmodule Tau.Session do
     # the parent — their cleanup happens on their own scheduler slot.
     cascade_to_children(data, :cancel)
 
-    if data.provider_task && Process.alive?(data.provider_task.pid) do
-      Task.shutdown(data.provider_task, :brutal_kill)
-    end
+    # ADR-0017: cooperative-first cancellation of the provider stream.
+    # Set the per-stream `:counters` flag and yield up to 250ms for the
+    # streaming task to halt cleanly via `%Event.Error{reason: :cancelled}`.
+    # Brutal-kill is the fallback path only — preserves clean upstream
+    # socket release in the common case while keeping a hard escape
+    # hatch for wedged providers.
+    cancel_mechanism = cancel_provider_task(data)
 
     # #33: with async_stream_nolink the dispatcher owns the tool tasks.
     # Brutal-killing it stops the iterator; in-flight tool processes under
@@ -743,12 +770,20 @@ defmodule Tau.Session do
     end
 
     broadcast(data.id, %Events.Cancelled{session_id: data.id, reason: :user})
-    persist_event(data, "cancellation", %{reason: "user"})
+
+    persist_event(data, "cancellation", %{
+      cause: "user",
+      # ADR-0017: distinguishes the cooperative path (clean socket
+      # release, partial content captured) from the brutal-kill
+      # fallback (provider task didn't yield within 250ms).
+      reason: Atom.to_string(cancel_mechanism)
+    })
 
     {:next_state, :awaiting_user,
      %{
        data
        | provider_task: nil,
+         cancel_flag: nil,
          tools_in_flight: %{},
          tool_dispatcher: nil,
          assembler: nil,
@@ -757,6 +792,43 @@ defmodule Tau.Session do
          # active skill alongside it.
          active_skill: nil
      }}
+  end
+
+  # ADR-0017: drive the cooperative-then-brutal cancellation handshake
+  # for the in-flight provider stream task. Returns `:cooperative` if
+  # the task drained on its own within the 250ms grace period (in
+  # which case the stream observed the flag, halted, and Stream.resource
+  # called its cleanup hook), `:brutal_kill` if we had to shut it
+  # down forcibly, or `:noop` if no provider task was active.
+  # Pairs with `[:tau, :provider, :request, :start]`.
+  defp cancel_provider_task(%{provider_task: nil}), do: :noop
+
+  defp cancel_provider_task(%{provider_task: task} = data) do
+    if not Process.alive?(task.pid) do
+      :noop
+    else
+      if data.cancel_flag, do: :counters.add(data.cancel_flag, 1, 1)
+
+      mechanism =
+        case Task.yield(task, 250) do
+          {:ok, _} -> :cooperative
+          {:exit, _} -> :cooperative
+          nil -> brutal_kill_provider_task(task)
+        end
+
+      :telemetry.execute(
+        [:tau, :provider, :request, mechanism],
+        %{system_time: System.system_time()},
+        %{provider: data.provider, model: data.model, session_id: data.id}
+      )
+
+      mechanism
+    end
+  end
+
+  defp brutal_kill_provider_task(task) do
+    Task.shutdown(task, :brutal_kill)
+    :brutal_kill
   end
 
   def handle_event(:cast, :stop, _state, data) do
@@ -897,7 +969,11 @@ defmodule Tau.Session do
 
     cond do
       tool_calls == [] ->
-        {:next_state, :awaiting_user, %{data | provider_task: nil, assembler: nil}}
+        # ADR-0017: drop the now-stale cancel flag — the stream that
+        # owned it has finished. The next turn's :start_provider
+        # allocates a fresh one.
+        {:next_state, :awaiting_user,
+         %{data | provider_task: nil, assembler: nil, cancel_flag: nil}}
 
       true ->
         dispatch_tools(tool_calls, data)

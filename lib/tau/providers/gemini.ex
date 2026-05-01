@@ -27,7 +27,7 @@ defmodule Tau.Providers.Gemini do
   end
 
   @impl Tau.Provider
-  def stream(messages, opts \\ %{}, _ctx \\ %{}) do
+  def stream(messages, opts \\ %{}, ctx \\ %{}) do
     case api_key() do
       nil ->
         {:error, :missing_api_key}
@@ -55,7 +55,13 @@ defmodule Tau.Providers.Gemini do
              FinchStream.run(
                request,
                &decode/2,
-               %{model: model, started?: false, provider: __MODULE__}
+               %{
+                 model: model,
+                 started?: false,
+                 provider: __MODULE__,
+                 # ADR-0017: cooperative cancellation flag.
+                 cancel_flag: ctx[:cancel_flag]
+               }
              )}
         end
     end

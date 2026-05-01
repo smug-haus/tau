@@ -17,6 +17,11 @@ defmodule Tau.Providers.Shared.FinchStream do
       back as messages
     * 60-second receive timeout with retryable `%Event.Error{}`
     * cleanup of the spawned task on Stream halt
+    * cooperative cancellation (ADR-0017): if `init_partial` carries
+      a `:cancel_flag` (a `:counters` ref), the receive loop checks
+      the counter at every boundary and exits cleanly with a
+      `%Event.Error{reason: :cancelled, retryable?: false}` when the
+      flag is non-zero.
 
   Provider modules supply a `decode/2` that turns parsed events (SSE map
   or raw binary) into `Tau.Provider.Event` structs and an opaque partial
@@ -71,6 +76,12 @@ defmodule Tau.Providers.Shared.FinchStream do
         end
       end)
 
+    cancel_flag =
+      case init_partial do
+        %{cancel_flag: r} when not is_nil(r) -> r
+        _ -> nil
+      end
+
     %{
       ref: ref,
       task: task,
@@ -79,7 +90,8 @@ defmodule Tau.Providers.Shared.FinchStream do
       partial: init_partial,
       pending: [],
       finished?: false,
-      status: nil
+      status: nil,
+      cancel_flag: cancel_flag
     }
   end
 
@@ -90,10 +102,36 @@ defmodule Tau.Providers.Shared.FinchStream do
   defp next(%{finished?: true}, _), do: {:halt, :done}
 
   defp next(s, decoder) do
+    # ADR-0017: cooperative cancellation. Check the flag before
+    # blocking on the next chunk. The counter is set by
+    # `Tau.Session` on a `:cancel` cast; observing it here lets the
+    # stream halt within one chunk boundary so the upstream socket
+    # is released promptly via `cleanup/1`.
+    if cancelled?(s) do
+      {[%Event.Error{reason: :cancelled, retryable?: false}], %{s | finished?: true}}
+    else
+      receive do
+        {ref, msg} when ref == s.ref -> handle(msg, s, decoder) |> recur(decoder)
+      after
+        250 ->
+          if cancelled?(s) do
+            {[%Event.Error{reason: :cancelled, retryable?: false}], %{s | finished?: true}}
+          else
+            wait_remainder(s, decoder)
+          end
+      end
+    end
+  end
+
+  # If we hit the 250ms cancel-poll window without a cancel and without
+  # a chunk message, fall through to the original 60s receive that
+  # yields a retryable timeout error. We've already burned 250ms;
+  # budget the remainder.
+  defp wait_remainder(s, decoder) do
     receive do
       {ref, msg} when ref == s.ref -> handle(msg, s, decoder) |> recur(decoder)
     after
-      60_000 ->
+      59_750 ->
         {[%Event.Error{reason: :timeout, retryable?: true}], %{s | finished?: true}}
     end
   end
@@ -150,4 +188,14 @@ defmodule Tau.Providers.Shared.FinchStream do
   end
 
   defp maybe_notify_rate_limiter(_, _), do: :ok
+
+  # ADR-0017: returns true iff the cancel-flag counter has been
+  # incremented from the FSM. A `nil` flag means the caller opted out
+  # of cooperative cancellation (e.g. a third-party provider that
+  # didn't thread the ctx key through).
+  defp cancelled?(%{cancel_flag: nil}), do: false
+
+  defp cancelled?(%{cancel_flag: ref}) do
+    :counters.get(ref, 1) > 0
+  end
 end

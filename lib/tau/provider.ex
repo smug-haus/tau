@@ -20,9 +20,14 @@ defmodule Tau.Provider do
   Hard configuration errors (missing API key, malformed model id) may be
   returned synchronously as `{:error, reason}` from `stream/3` itself.
 
-  Cancellation is cooperative: the caller passes an MFA or pid in `ctx`
-  that will be `Process.exit/2`'d (or otherwise signalled) to abort
-  in-flight work.
+  Cancellation is cooperative (ADR-0017). When the caller threads a
+  `:cancel_flag` (a `:counters` reference) through `ctx`, the
+  streaming engine checks it at every chunk boundary; a non-zero
+  counter aborts the stream cleanly, releasing the upstream socket
+  and emitting a final `%Tau.Provider.Event.Error{reason: :cancelled}`.
+  Providers that don't honour the flag continue to work — the
+  session falls back to a brutal kill of the streaming task after
+  a 250ms grace period.
   """
 
   @type messages :: [Tau.Message.t()]
@@ -42,6 +47,7 @@ defmodule Tau.Provider do
         }
 
   @type ctx :: %{
+          optional(:cancel_flag) => :counters.counters_ref(),
           optional(:cancel_pid) => pid(),
           optional(:request_id) => String.t(),
           optional(:session_id) => String.t()
