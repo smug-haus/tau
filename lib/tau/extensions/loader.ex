@@ -56,6 +56,22 @@ defmodule Tau.Extensions.Loader do
   """
   def reload(entry), do: GenServer.cast(__MODULE__, {:reload, entry})
 
+  @doc """
+  Reload every entry currently configured in `settings.extensions`.
+  Used by `tau extensions reload`.
+  """
+  @spec reload_all() :: :ok
+  def reload_all, do: GenServer.cast(__MODULE__, :reload_all)
+
+  @doc """
+  List loaded extensions. Each entry is `%{key: term(), info: map()}`,
+  where `key` is the module (for `module` / `{module, opts}` entries)
+  or path string (for directory/file entries) and `info` carries the
+  modules registered from that entry.
+  """
+  @spec list() :: [%{key: term(), info: map()}]
+  def list, do: GenServer.call(__MODULE__, :list)
+
   @impl true
   def handle_cast({:reload, entry}, state) do
     state =
@@ -67,6 +83,33 @@ defmodule Tau.Extensions.Loader do
     :telemetry.execute([:tau, :extensions, :reloaded], %{count: 1}, %{entry: entry})
 
     {:noreply, state}
+  end
+
+  def handle_cast(:reload_all, state) do
+    settings = Tau.Settings.Cache.get()
+    entries = Map.get(settings, :extensions, [])
+
+    state =
+      Enum.reduce(entries, state, fn entry, acc ->
+        case load_entry(entry) do
+          {:ok, key, info} -> %{acc | loaded: Map.put(acc.loaded, key, info)}
+          _ -> acc
+        end
+      end)
+
+    :telemetry.execute([:tau, :extensions, :reloaded], %{count: length(entries)}, %{
+      reason: :reload_all
+    })
+
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_call(:list, _from, state) do
+    entries =
+      Enum.map(state.loaded, fn {key, info} -> %{key: key, info: info} end)
+
+    {:reply, entries, state}
   end
 
   defp load_entry(mod) when is_atom(mod), do: register_module(mod)

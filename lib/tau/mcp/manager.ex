@@ -11,6 +11,29 @@ defmodule Tau.MCP.Manager do
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
+  @doc """
+  List the configured MCP servers along with the currently-running pid (if
+  any). Returned shape:
+
+      [%{name: name, config: config, pid: pid_or_nil, alive?: bool}]
+
+  `pid` is `nil` for desired-but-not-yet-started servers (Manager hasn't
+  reconciled yet) or for entries the manager couldn't start. CLI / TUI
+  callers want this to render server status without poking GenServer
+  internals.
+  """
+  @spec list() :: [
+          %{name: String.t(), config: map(), pid: pid() | nil, alive?: boolean()}
+        ]
+  def list, do: GenServer.call(__MODULE__, :list)
+
+  @doc """
+  Force a reconcile pass against the current settings. Useful after
+  editing `.tau/settings.json` from the CLI.
+  """
+  @spec reload() :: :ok
+  def reload, do: GenServer.cast(__MODULE__, :reload)
+
   @impl true
   def init(_opts) do
     Process.send_after(self(), :reconcile, 0)
@@ -27,6 +50,32 @@ defmodule Tau.MCP.Manager do
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
+
+  @impl true
+  def handle_cast(:reload, state) do
+    desired = Tau.Settings.Cache.get() |> Map.get(:mcp, [])
+    desired = if is_list(desired), do: desired, else: []
+
+    state = reconcile(desired, state)
+    :telemetry.execute([:tau, :mcp, :manager, :reloaded], %{count: length(desired)}, %{})
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_call(:list, _from, state) do
+    desired = Tau.Settings.Cache.get() |> Map.get(:mcp, [])
+    desired = if is_list(desired), do: desired, else: []
+
+    entries =
+      Enum.map(desired, fn config ->
+        name = server_name(config)
+        pid = Map.get(state.started, name)
+        alive? = is_pid(pid) and Process.alive?(pid)
+        %{name: name, config: config, pid: pid, alive?: alive?}
+      end)
+
+    {:reply, entries, state}
+  end
 
   defp reconcile(desired, %{started: started} = state) do
     desired_names = Enum.map(desired, &server_name/1) |> MapSet.new()
