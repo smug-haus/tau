@@ -10,6 +10,7 @@ defmodule Tau.Telemetry.Handlers do
       [:tau, :provider, :request, :start | :stop | :exception]
       [:tau, :provider, :event]
       [:tau, :provider, :rate_limit, :acquired | :throttled | :rejected | :halved]
+      [:tau, :provider, :fallback]
       [:tau, :tool, :execute, :start | :stop | :exception]
       [:tau, :tool, :bash, :stderr]
       [:tau, :hook, :run, :start | :stop | :exception]
@@ -69,6 +70,7 @@ defmodule Tau.Telemetry.Handlers do
       [:tau, :provider, :rate_limit, :throttled],
       [:tau, :provider, :rate_limit, :rejected],
       [:tau, :provider, :rate_limit, :halved],
+      [:tau, :provider, :fallback],
       [:tau, :tool, :execute, :start],
       [:tau, :tool, :execute, :stop],
       [:tau, :tool, :execute, :exception],

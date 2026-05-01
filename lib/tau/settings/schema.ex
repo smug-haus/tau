@@ -38,6 +38,21 @@ defmodule Tau.Settings.Schema do
   @mcp_transports ~w(stdio sse http)
   @themes ~w(light dark auto)
 
+  # ADR-0012: known providers for fallback-chain validation. The schema
+  # itself stays permissive (additionalProperties: true on the outer
+  # `providers` object so future keys land softly), but the
+  # `resolve_fallback_chains/1` post-processor rejects unknown modules
+  # fail-closed so a typo in `.tau/settings.json` doesn't produce a
+  # silent no-op chain.
+  @known_providers [
+    Tau.Providers.Anthropic,
+    Tau.Providers.OpenAI.Chat,
+    Tau.Providers.OpenAI.Responses,
+    Tau.Providers.Gemini,
+    Tau.Providers.Bedrock,
+    Tau.Providers.Replay
+  ]
+
   # Compile-time-built schema map (M13). json_schema/0 returns the
   # same literal map on every call without rebuilding it.
   @schema %{
@@ -98,7 +113,35 @@ defmodule Tau.Settings.Schema do
       "extensions" => %{"type" => "array", "items" => %{"type" => "string"}},
       "allow" => %{"type" => "array", "items" => %{"type" => "string"}},
       "deny" => %{"type" => "array", "items" => %{"type" => "string"}},
-      "ask" => %{"type" => "array", "items" => %{"type" => "string"}}
+      "ask" => %{"type" => "array", "items" => %{"type" => "string"}},
+      # ADR-0012: per-provider fallback chains for retryable errors.
+      # Shape: %{"<primary-provider>" => ["<fallback1>", ...]}.
+      # Strings are resolved to provider modules at load time by
+      # `resolve_fallback_chains/1`; unknown modules fail closed.
+      "providers" => %{
+        "type" => "object",
+        "additionalProperties" => true,
+        "properties" => %{
+          "fallback_chains" => %{
+            "type" => "object",
+            "additionalProperties" => %{
+              "type" => "array",
+              "items" => %{"type" => "string"}
+            }
+          }
+        }
+      },
+      "rate_limits" => %{
+        "type" => "object",
+        "additionalProperties" => %{
+          "type" => "object",
+          "additionalProperties" => true,
+          "properties" => %{
+            "rpm" => %{"type" => "integer", "minimum" => 0},
+            "tpm" => %{"type" => "integer", "minimum" => 0}
+          }
+        }
+      }
     }
   }
 
@@ -115,4 +158,81 @@ defmodule Tau.Settings.Schema do
   @doc "List of known top-level keys (useful for tests / drift checks)."
   @spec known_top_level_keys() :: [String.t()]
   def known_top_level_keys, do: @known_top_level_keys
+
+  @doc "List of provider modules recognised by `resolve_fallback_chains/1`."
+  @spec known_providers() :: [module()]
+  def known_providers, do: @known_providers
+
+  @doc """
+  Resolve a `%{"providers" => %{"fallback_chains" => %{...}}}` block
+  into atom-keyed maps with module-list values, rejecting any string
+  that doesn't resolve to a known provider module.
+
+  Mirrors the tone of `Tau.Providers.RateLimiter.sizes_from_settings/2`:
+  accepts both atom and string keys (Settings.Loader uses
+  `Jason.decode(_, keys: :atoms)`, so atoms are the common case;
+  string keys are tolerated for hand-built test fixtures).
+
+  Returns `{:ok, chains}` on success, where `chains` is
+  `%{provider_atom => [provider_module]}`. Returns
+  `{:error, {:unknown_provider, str}}` when any module reference
+  doesn't resolve — fail-closed: a typo upstream is loud here, not
+  a silent no-op chain at session-start time.
+  """
+  @spec resolve_fallback_chains(map()) ::
+          {:ok, %{module() => [module()]}} | {:error, {:unknown_provider, String.t()}}
+  def resolve_fallback_chains(settings) when is_map(settings) do
+    providers = Map.get(settings, :providers) || Map.get(settings, "providers") || %{}
+
+    chains =
+      Map.get(providers, :fallback_chains) || Map.get(providers, "fallback_chains") || %{}
+
+    Enum.reduce_while(chains, {:ok, %{}}, fn {key, list}, {:ok, acc} ->
+      with {:ok, key_mod} <- to_known_module(key),
+           {:ok, list_mods} <- resolve_module_list(list) do
+        {:cont, {:ok, Map.put(acc, key_mod, list_mods)}}
+      else
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp resolve_module_list(list) when is_list(list) do
+    Enum.reduce_while(list, {:ok, []}, fn entry, {:ok, acc} ->
+      case to_known_module(entry) do
+        {:ok, mod} -> {:cont, {:ok, acc ++ [mod]}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  # An atom passed in programmatically is already a resolved module
+  # reference; trust it iff it implements `Tau.Provider` (or is one of
+  # our `@known_providers` for the test-only Replay case). String input
+  # — the .tau/settings.json path — is strict: only `@known_providers`
+  # are accepted, otherwise it's a typo and we fail closed.
+  defp to_known_module(mod) when is_atom(mod) do
+    cond do
+      mod in @known_providers -> {:ok, mod}
+      implements_provider?(mod) -> {:ok, mod}
+      true -> {:error, {:unknown_provider, inspect(mod)}}
+    end
+  end
+
+  defp to_known_module(str) when is_binary(str) do
+    try do
+      mod = String.to_existing_atom("Elixir." <> str)
+      if mod in @known_providers, do: {:ok, mod}, else: {:error, {:unknown_provider, str}}
+    rescue
+      ArgumentError -> {:error, {:unknown_provider, str}}
+    end
+  end
+
+  defp implements_provider?(mod) do
+    Code.ensure_loaded(mod)
+
+    function_exported?(mod, :stream, 3) and
+      function_exported?(mod, :capabilities, 0) and
+      function_exported?(mod, :default_model, 0)
+  end
 end
