@@ -148,6 +148,15 @@ Worktree-isolated agents create their own branch and commit
 there; on return they hand back the branch name + path. Pull /
 merge from the parent worktree as the next step.
 
+**Worktree isolation is leaky for absolute paths.** Isolation
+isolates the git refs (HEAD, commits, branches) but file-system
+writes on absolute paths like `/home/user/tau/lib/...` bypass the
+worktree CWD and land on the **parent** tree. Brief isolated
+agents to use **relative paths** for `Read`/`Edit`/`Write`. As a
+coordinator, periodically `git checkout main && git reset --hard
+origin/main` between dispatches to discard any leaked edits in
+the parent.
+
 **Single-agent foreground work** (no parallel siblings) does not
 need isolation — the parent and child can't race a single
 working tree.
