@@ -803,43 +803,6 @@ defmodule Tau.Session do
      }}
   end
 
-  # ADR-0017: drive the cooperative-then-brutal cancellation handshake
-  # for the in-flight provider stream task. Returns `:cooperative` if
-  # the task drained on its own within the 250ms grace period (in
-  # which case the stream observed the flag, halted, and Stream.resource
-  # called its cleanup hook), `:brutal_kill` if we had to shut it
-  # down forcibly, or `:noop` if no provider task was active.
-  # Pairs with `[:tau, :provider, :request, :start]`.
-  defp cancel_provider_task(%{provider_task: nil}), do: :noop
-
-  defp cancel_provider_task(%{provider_task: task} = data) do
-    if not Process.alive?(task.pid) do
-      :noop
-    else
-      if data.cancel_flag, do: :counters.add(data.cancel_flag, 1, 1)
-
-      mechanism =
-        case Task.yield(task, 250) do
-          {:ok, _} -> :cooperative
-          {:exit, _} -> :cooperative
-          nil -> brutal_kill_provider_task(task)
-        end
-
-      :telemetry.execute(
-        [:tau, :provider, :request, mechanism],
-        %{system_time: System.system_time()},
-        %{provider: data.provider, model: data.model, session_id: data.id}
-      )
-
-      mechanism
-    end
-  end
-
-  defp brutal_kill_provider_task(task) do
-    Task.shutdown(task, :brutal_kill)
-    :brutal_kill
-  end
-
   def handle_event(:cast, :stop, _state, data) do
     # ADR-0014 (#92): cascade `Tau.stop/1` to children before terminating.
     # Each child runs its own `terminate/3` which broadcasts `%SessionEnd{}`
@@ -906,6 +869,43 @@ defmodule Tau.Session do
   def handle_event(_type, _event, _state, data), do: {:keep_state, data}
 
   # --- Helpers --------------------------------------------------------------
+
+  # ADR-0017: drive the cooperative-then-brutal cancellation handshake
+  # for the in-flight provider stream task. Returns `:cooperative` if
+  # the task drained on its own within the 250ms grace period (in
+  # which case the stream observed the flag, halted, and Stream.resource
+  # called its cleanup hook), `:brutal_kill` if we had to shut it
+  # down forcibly, or `:noop` if no provider task was active.
+  # Pairs with `[:tau, :provider, :request, :start]`.
+  defp cancel_provider_task(%{provider_task: nil}), do: :noop
+
+  defp cancel_provider_task(%{provider_task: task} = data) do
+    if not Process.alive?(task.pid) do
+      :noop
+    else
+      if data.cancel_flag, do: :counters.add(data.cancel_flag, 1, 1)
+
+      mechanism =
+        case Task.yield(task, 250) do
+          {:ok, _} -> :cooperative
+          {:exit, _} -> :cooperative
+          nil -> brutal_kill_provider_task(task)
+        end
+
+      :telemetry.execute(
+        [:tau, :provider, :request, mechanism],
+        %{system_time: System.system_time()},
+        %{provider: data.provider, model: data.model, session_id: data.id}
+      )
+
+      mechanism
+    end
+  end
+
+  defp brutal_kill_provider_task(task) do
+    Task.shutdown(task, :brutal_kill)
+    :brutal_kill
+  end
 
   # Common path that handles a user_message after any slash-command
   # expansion has resolved. Called both by the synchronous
