@@ -347,7 +347,7 @@ defmodule Tau.Providers.Anthropic do
 
   # --- Auth & transport plumbing -------------------------------------------
 
-  defp api_key(opts \\ %{}) do
+  defp api_key(opts) do
     # Resolution order (first non-nil wins):
     #
     #   1. `opts[:api_key]` — per-call override; literal string or

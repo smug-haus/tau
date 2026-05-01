@@ -26,7 +26,7 @@ defmodule Tau.Tools.Builtin.Agent do
        `provider_ctx`; `:tools_whitelist` from the skill's `allowed_tools`
        (or `:all`); `:active_skill` + `:persona_lifetime: :session` per
        ADR-0015 so the persona stays pinned for the child's life.
-    5. Subscribe to `"session:#{child_id}"` PubSub, register the child
+    5. Subscribe to `"session:\#{child_id}"` PubSub, register the child
        with the parent FSM (cascade-cancel via `Tau.register_child/2`),
        monitor the parent's pid (cascade in the OTHER direction —
        parent dies → cancel child), send the brief.
