@@ -15,7 +15,9 @@ config :tau,
     Tau.Tools.Builtin.Read,
     Tau.Tools.Builtin.Write,
     Tau.Tools.Builtin.Edit,
-    Tau.Tools.Builtin.Bash
+    Tau.Tools.Builtin.Bash,
+    # ADR-0014/0015 — sub-agent spawn primitive (#32).
+    Tau.Tools.Builtin.Agent
   ]
 
 config :logger, :console,
