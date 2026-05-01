@@ -44,3 +44,6 @@ coverage.json
 
 # Tau runtime data (when developing against the local cwd)
 /.tau/settings.local.json
+
+# Claude Code agent worktrees (created by Agent calls with isolation: "worktree")
+/.claude/worktrees/
