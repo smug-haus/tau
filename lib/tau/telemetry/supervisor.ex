@@ -15,7 +15,8 @@ defmodule Tau.Telemetry.Supervisor do
   @impl true
   def init(_opts) do
     children = [
-      Tau.Telemetry.Handlers
+      Tau.Telemetry.Handlers,
+      Tau.Cost.Tracker
     ]
 
     Supervisor.init(children, strategy: :one_for_one)
