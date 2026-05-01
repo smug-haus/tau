@@ -434,9 +434,18 @@ defmodule Tau.Session do
           # ADR-0013 (#16): currently-active skill, or nil. When set,
           # `Tau.Permissions.Evaluator` denies any tool not on
           # `active_skill.allowed_tools` before consulting the rule set.
-          # Per-turn lifetime: cleared in `finalize_assistant/2` when the
-          # assistant returns `stop_reason == :end_turn` and on `:cancel`.
-          active_skill: nil,
+          # Per-turn lifetime by default: cleared in `finalize_assistant/2`
+          # when the assistant returns `stop_reason == :end_turn` and on
+          # `:cancel`. ADR-0015 sub-agents may pre-pin a persona at start
+          # time via the `:active_skill` opt + `:persona_lifetime: :session`
+          # so the persona survives `:end_turn` and stays live for the
+          # session's whole life (the child can't dismiss it).
+          active_skill: opts[:active_skill],
+          # ADR-0015: `:turn` (default) clears `active_skill` on
+          # `:end_turn`; `:session` pins it for the session's life. Only
+          # the `Agent` tool sets `:session` today; everything else
+          # behaves exactly like ADR-0013.
+          persona_lifetime: opts[:persona_lifetime] || :turn,
           # #91: spawn-time tool whitelist (`:all` or `[String.t()]`).
           # Filter applies in `dispatch_tools/2` before
           # `Tau.Permissions.Evaluator`; calls outside the list synthesise
@@ -887,11 +896,22 @@ defmodule Tau.Session do
     # that asked for the call.
     data = %{data | provider: data.original_provider, fallback_chain_remaining: []}
 
-    # ADR-0013 (#16): skill activation is per-turn. The skill's lifetime
-    # ends when the model decides the task is complete (`:end_turn`).
-    # Tool-call turns keep the active skill so subsequent dispatch is
-    # still gated; only `:end_turn` clears it.
-    data = if msg.stop_reason == :end_turn, do: %{data | active_skill: nil}, else: data
+    # ADR-0013 (#16): skill activation is per-turn by default. The
+    # skill's lifetime ends when the model decides the task is complete
+    # (`:end_turn`). Tool-call turns keep the active skill so subsequent
+    # dispatch is still gated; only `:end_turn` clears it.
+    #
+    # ADR-0015 sub-agent persona: when `:persona_lifetime` is `:session`
+    # (set by `Tau.Tools.Builtin.Agent` at start time) the persona is
+    # pinned for the session's whole life — `:end_turn` does NOT clear
+    # it. The child can't dismiss its own persona this way, which is
+    # the safety property the ADR demands.
+    data =
+      if msg.stop_reason == :end_turn and Map.get(data, :persona_lifetime, :turn) == :turn do
+        %{data | active_skill: nil}
+      else
+        data
+      end
 
     tool_calls = Enum.filter(msg.content, &match?(%{type: :tool_call}, &1))
 

@@ -9,6 +9,7 @@ defmodule Tau.Telemetry.Handlers do
       [:tau, :session, :transition]
       [:tau, :session, :tool_whitelisted]
       [:tau, :session, :child_registered | :child_unregistered]
+      [:tau, :session, :subagent, :start | :stop | :exception]
       [:tau, :provider, :request, :start | :stop | :exception]
       [:tau, :provider, :event]
       [:tau, :provider, :rate_limit, :acquired | :throttled | :rejected | :halved]
@@ -19,6 +20,7 @@ defmodule Tau.Telemetry.Handlers do
       [:tau, :mcp, :rpc, :start | :stop | :exception]
       [:tau, :mcp, :stderr]
       [:tau, :permissions, :decision]
+      [:tau, :permissions, :ceiling_clamped]
       [:tau, :compaction, :start | :stop]
       [:tau, :settings, :reloaded]
       [:tau, :extensions, :reloaded]
@@ -67,6 +69,9 @@ defmodule Tau.Telemetry.Handlers do
       [:tau, :session, :tool_whitelisted],
       [:tau, :session, :child_registered],
       [:tau, :session, :child_unregistered],
+      [:tau, :session, :subagent, :start],
+      [:tau, :session, :subagent, :stop],
+      [:tau, :session, :subagent, :exception],
       [:tau, :provider, :request, :start],
       [:tau, :provider, :request, :stop],
       [:tau, :provider, :request, :exception],
@@ -88,6 +93,7 @@ defmodule Tau.Telemetry.Handlers do
       [:tau, :mcp, :rpc, :exception],
       [:tau, :mcp, :stderr],
       [:tau, :permissions, :decision],
+      [:tau, :permissions, :ceiling_clamped],
       [:tau, :compaction, :start],
       [:tau, :compaction, :stop],
       [:tau, :settings, :reloaded],

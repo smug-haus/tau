@@ -53,6 +53,15 @@ defmodule Tau do
       runtime provider config that must not bleed across sessions
       (replay fixtures in tests, per-session routing tags, etc.).
       See ADR-0002.
+    * `:active_skill` — `%Tau.Skill{}` to pin as the session's active
+      skill from turn one. Used by `Tau.Tools.Builtin.Agent` (ADR-0015)
+      to pre-install a sub-agent persona without round-tripping
+      through `__activate_skill__`. Defaults to `nil`.
+    * `:persona_lifetime` — `:turn` (default, ADR-0013) or `:session`
+      (ADR-0015). `:turn` clears `data.active_skill` on `:end_turn`;
+      `:session` pins it for the session's life so a sub-agent cannot
+      dismiss its own persona. Has no effect when `:active_skill` is
+      `nil`.
   """
   @spec start_session(keyword()) :: {:ok, session_id()} | {:error, term()}
   def start_session(opts \\ []) do
