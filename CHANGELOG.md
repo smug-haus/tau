@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the assembled `%Assistant{}`. Provider modules can override via the
   optional `@callback chat/3` for native non-SSE endpoints. (Refs #19,
   closes #36.)
+- `Tau.update_provider/2` — reconfigure a live session's provider,
+  model, or `provider_ctx` without restart. The change applies on
+  the next provider call; in-flight streams keep using the previous
+  provider. Persisted as a `"reconfigure"` JSONL event; new
+  telemetry `[:tau, :session, :reconfigure]`. (Refs #19, closes
+  #38.)
 
 ## [0.1.0] — 2026-05-01
 
