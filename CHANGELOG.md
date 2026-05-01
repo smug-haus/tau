@@ -16,6 +16,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is stringified before storage so the existing `to_string/1` call in
   the status bar continues to work. (Closes #26.)
 
+### Changed
+- `Tau.Session` now dispatches a turn's parallel tool calls through a
+  single `Task.Supervisor.async_stream_nolink/4` iterator under
+  `Tau.Tools.TaskSupervisor` instead of one `async_nolink/2` Task per
+  call plus an ad-hoc `spawn_link` watcher. Honours
+  `max_concurrency: System.schedulers_online()` and `on_timeout: :kill_task`;
+  the `:tool_done` mailbox-message contract is unchanged. Tool worker
+  exits (`{:exit, _}` from the stream) still synthesise an
+  `is_error: true` `ToolResult` so the FSM never loses a
+  `tool_call → tool_result` correspondence. (Closes #33.)
+
 ### Added
 - Provider fallback chains — sessions retry against the next provider
   in `settings.providers.fallback_chains[primary]` on a retryable
