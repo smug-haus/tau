@@ -51,6 +51,47 @@ defmodule Tau.Permissions.EvaluatorTest do
     test ":dont_ask defaults to deny on no match" do
       assert Evaluator.evaluate({}, "Bash", %{}, %{}, :dont_ask) == :deny
     end
+
+    test ":accept_edits + non-Bash tool retains :ask for unknown tools" do
+      # Read/Write/Edit/Grep auto-allow under :accept_edits; anything
+      # else (here: WebFetch) falls through to :ask.
+      assert Evaluator.evaluate({}, "WebFetch", %{}, %{}, :accept_edits) == :ask
+    end
+
+    test ":accept_edits + Bash + destructive command denies" do
+      assert Evaluator.evaluate({}, "Bash", %{"command" => "rm -rf /"}, %{}, :accept_edits) ==
+               :deny
+
+      assert Evaluator.evaluate({}, "Bash", %{"command" => "sudo apt install"}, %{},
+               :accept_edits
+             ) == :deny
+
+      assert Evaluator.evaluate({}, "Bash", %{"command" => ":(){ :|:&};:"}, %{}, :accept_edits) ==
+               :deny
+    end
+
+    test ":accept_edits + Bash + non-destructive command allows" do
+      assert Evaluator.evaluate({}, "Bash", %{"command" => "npm test"}, %{}, :accept_edits) ==
+               :allow
+
+      assert Evaluator.evaluate({}, "Bash", %{"command" => "ls -la"}, %{}, :accept_edits) ==
+               :allow
+    end
+
+    test ":accept_edits + Bash + missing command falls through to allow" do
+      # No command argument means nothing to inspect; the heuristic
+      # returns false, so the auto-allow fires. Higher layers should
+      # have already rejected calls without a command via the tool
+      # schema.
+      assert Evaluator.evaluate({}, "Bash", %{}, %{}, :accept_edits) == :allow
+    end
+
+    test ":accept_edits respects rule-set deny ahead of heuristic" do
+      rs = rule_set(%{deny: ["Bash(npm *)"]})
+
+      assert Evaluator.evaluate(rs, "Bash", %{"command" => "npm test"}, %{}, :accept_edits) ==
+               :deny
+    end
   end
 
   describe "matchers" do
