@@ -21,6 +21,14 @@ defmodule Tau.Providers.Shared.FinchStream do
   Provider modules supply a `decode/2` that turns parsed events (SSE map
   or raw binary) into `Tau.Provider.Event` structs and an opaque partial
   state.
+
+  ## Rate-limiter feedback
+
+  If `init_partial` carries a `:provider` key (a module that implements
+  `Tau.Provider`), the engine fire-and-forgets a
+  `Tau.Providers.RateLimiter.record_response/2` call when an HTTP 429 is
+  observed (per ADR-0011). Providers that don't want this behaviour
+  simply omit `:provider` from their partial state.
   """
 
   alias Tau.Provider.Event
@@ -104,6 +112,7 @@ defmodule Tau.Providers.Shared.FinchStream do
 
   defp handle({:status, n}, s, _decoder) do
     err = %Event.Error{reason: {:http_status, n}, retryable?: n in [408, 429, 500, 502, 503, 504]}
+    maybe_notify_rate_limiter(s, n)
     %{s | status: n, pending: s.pending ++ [err], finished?: true}
   end
 
@@ -135,4 +144,10 @@ defmodule Tau.Providers.Shared.FinchStream do
   defp handle({:error, reason}, s, _) do
     %{s | pending: s.pending ++ [%Event.Error{reason: reason, retryable?: true}], finished?: true}
   end
+
+  defp maybe_notify_rate_limiter(%{partial: %{provider: provider}}, status) when is_atom(provider) do
+    Tau.Providers.RateLimiter.record_response(provider, %{status: status})
+  end
+
+  defp maybe_notify_rate_limiter(_, _), do: :ok
 end

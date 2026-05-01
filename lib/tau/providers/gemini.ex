@@ -33,18 +33,31 @@ defmodule Tau.Providers.Gemini do
         {:error, :missing_api_key}
 
       key ->
-        model = opts[:model] || @default_model
-        body = build_body(messages, opts)
+        est = Tau.Providers.Shared.TokenEstimate.estimate(messages)
 
-        request =
-          Finch.build(
-            :post,
-            "#{base_url()}/v1beta/models/#{model}:streamGenerateContent?alt=sse&key=#{key}",
-            [{"content-type", "application/json"}, {"accept", "text/event-stream"}],
-            Jason.encode!(body)
-          )
+        case Tau.Providers.RateLimiter.acquire(__MODULE__, est) do
+          {:error, :rate_limit_timeout} ->
+            {:error, :rate_limited}
 
-        {:ok, FinchStream.run(request, &decode/2, %{model: model, started?: false})}
+          :ok ->
+            model = opts[:model] || @default_model
+            body = build_body(messages, opts)
+
+            request =
+              Finch.build(
+                :post,
+                "#{base_url()}/v1beta/models/#{model}:streamGenerateContent?alt=sse&key=#{key}",
+                [{"content-type", "application/json"}, {"accept", "text/event-stream"}],
+                Jason.encode!(body)
+              )
+
+            {:ok,
+             FinchStream.run(
+               request,
+               &decode/2,
+               %{model: model, started?: false, provider: __MODULE__}
+             )}
+        end
     end
   end
 

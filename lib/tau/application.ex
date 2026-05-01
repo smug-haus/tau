@@ -18,11 +18,14 @@ defmodule Tau.Application do
     5. **Permissions.RuleSet** — subscribes to settings PubSub,
        compiles rules from Settings.Cache.
     6. **Finch** — HTTP client, used by providers.
-    7. **Task supervisors** — for tool dispatch.
-    8. **Extensions.Loader** — registers tools/hooks/commands
+    7. **Providers.RateLimiter.Supervisor** — per-provider token-bucket
+       limiters (ADR-0011). Boots after Finch (limiters wrap Finch
+       sends) and before the task supervisors.
+    8. **Task supervisors** — for tool dispatch.
+    9. **Extensions.Loader** — registers tools/hooks/commands
        defined by extensions.
-    9. **MCP.Supervisor** — MCP server connections.
-    10. **Sessions.Supervisor** — dynamic supervisor for session
+    10. **MCP.Supervisor** — MCP server connections.
+    11. **Sessions.Supervisor** — dynamic supervisor for session
         FSMs (must be last; it's the only consumer of all the
         above).
 
@@ -43,6 +46,7 @@ defmodule Tau.Application do
       Tau.Settings.Watcher,
       Tau.Permissions.RuleSet,
       {Finch, name: Tau.Providers.Finch},
+      Tau.Providers.RateLimiter.Supervisor,
       {Task.Supervisor, name: Tau.Tools.TaskSupervisor},
       Tau.Extensions.Loader,
       Tau.MCP.Supervisor,
