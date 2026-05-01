@@ -8,11 +8,19 @@ defmodule Tau.Providers.Anthropic do
 
   ## Configuration
 
-  Auth precedence (per call → settings → app env → process env):
+  Auth precedence (per call → settings → app env → vault):
 
       :api_key in opts
       Application.get_env(:tau, Tau.Providers.Anthropic)[:api_key]
-      System.get_env("ANTHROPIC_API_KEY")
+      Tau.Settings.Vault.resolve({:vault, "ANTHROPIC_API_KEY"})
+
+  The vault tail of the chain dispatches through the configured
+  `Tau.Settings.Vault` backend (defaults to the `Env` passthrough,
+  which preserves today's `System.get_env("ANTHROPIC_API_KEY")`
+  behaviour). See ADR-0016.
+
+  An `:api_key` value of the form `{:vault, name}` is resolved
+  through the vault before being sent.
 
   Optional `:base_url` override for staging or self-hosted relays.
 
@@ -52,7 +60,7 @@ defmodule Tau.Providers.Anthropic do
 
   @impl Tau.Provider
   def stream(messages, opts \\ %{}, _ctx \\ %{}) do
-    case api_key() do
+    case api_key(opts) do
       nil ->
         {:error, :missing_api_key}
 
@@ -332,9 +340,20 @@ defmodule Tau.Providers.Anthropic do
 
   # --- Auth & transport plumbing -------------------------------------------
 
-  defp api_key do
-    Application.get_env(:tau, __MODULE__, [])[:api_key] ||
-      System.get_env("ANTHROPIC_API_KEY")
+  defp api_key(opts \\ %{}) do
+    # Resolution order (first non-nil wins):
+    #
+    #   1. `opts[:api_key]` — per-call override; literal string or
+    #      `{:vault, name}` reference.
+    #   2. `Application.get_env(:tau, __MODULE__)[:api_key]` — kept
+    #      for backwards compatibility with the pre-ADR-0016 path.
+    #   3. `Tau.Settings.Vault.resolve({:vault, "ANTHROPIC_API_KEY"})`
+    #      — dispatches through the configured vault backend (defaults
+    #      to `Env`, which is `System.get_env/1`, preserving today's
+    #      behaviour).
+    Tau.Settings.Vault.resolve(opts[:api_key]) ||
+      Application.get_env(:tau, __MODULE__, [])[:api_key] ||
+      Tau.Settings.Vault.resolve({:vault, "ANTHROPIC_API_KEY"})
   end
 
   defp base_url do

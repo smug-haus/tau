@@ -54,6 +54,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tool_call → tool_result` correspondence. (Closes #33.)
 
 ### Added
+- `Tau.Settings.Vault` behaviour with backends for OS keychains
+  (macOS Security framework via `security(1)`, Linux libsecret via
+  `secret-tool`, Windows DPAPI [stubbed]) plus an `Env` passthrough
+  default. Settings reference credentials by name (`{vault: "..."}`)
+  and the resolver dispatches to the configured backend. The Env
+  backend preserves today's headless/CI behaviour. Telemetry
+  `[:tau, :vault, :get]` (never the value). See ADR-0016.
+  (Closes #66.)
 - Parent session FSM tracks `child_session_ids`; `Tau.cancel/1` and
   `Tau.stop/1` cascade to children before tearing down the parent's
   own work. New API: `Tau.register_child/2`, `Tau.unregister_child/2`
