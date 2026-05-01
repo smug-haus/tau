@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- TUI: `Tau.TUI.App.update/2` now handles
+  `%Tau.Session.Events.Cancelled{}` and
+  `%Tau.Session.Events.SessionEnd{}`. Previously both fell through to
+  the catch-all clause, so pressing ESC produced no UI feedback and a
+  terminating session left the status bar reading `streaming`. Status
+  is stringified before storage so the existing `to_string/1` call in
+  the status bar continues to work. (Closes #26.)
+
 ### Added
 - Provider fallback chains — sessions retry against the next provider
   in `settings.providers.fallback_chains[primary]` on a retryable
