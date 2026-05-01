@@ -63,6 +63,7 @@ get rewritten away by the next refactor. ADRs survive.
 | [0007](0007-compaction-summaries-survive-recompaction.md) | Compaction summaries are pinned across re-compaction | Accepted |
 | [0008](0008-user-code-never-runs-synchronously-in-the-fsm.md) | User code never runs synchronously inside the session FSM | Accepted |
 | [0009](0009-user-messages-queue-during-active-turn.md) | User messages queue (postpone) during an active turn | Accepted |
+| [0010](0010-cost-tracker-owns-ets-not-state.md) | Cost tracker owns an ETS table, not GenServer state | Accepted |
 
 (New ADRs append here. Keep the table sorted by ADR number.)
 

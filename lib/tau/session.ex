@@ -665,6 +665,20 @@ defmodule Tau.Session do
     data = data |> append_message(msg) |> persist_event("assistant_message", message_to_data(msg))
     broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: msg})
 
+    # #40: feed Tau.Cost.Tracker (ADR-0010). The tracker subscribes to this
+    # event and folds the per-turn usage into ETS counters keyed by
+    # {date, provider, model, session_id}.
+    :telemetry.execute(
+      [:tau, :provider, :request, :stop],
+      %{system_time: System.system_time(), usage: msg.usage || %{}},
+      %{
+        provider: data.provider,
+        model: data.model,
+        session_id: data.id,
+        stop_reason: msg.stop_reason
+      }
+    )
+
     data = maybe_compact(data, msg.usage || %{})
 
     tool_calls = Enum.filter(msg.content, &match?(%{type: :tool_call}, &1))

@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `Tau.Cost` / `Tau.Cost.Tracker` — per-provider token aggregation. The
+  tracker is a lifecycle anchor for the `:tau_cost_counters` ETS table
+  and a telemetry handler on `[:tau, :provider, :request, :stop]`;
+  writers `:ets.update_counter/3` directly, readers
+  (`Tau.Cost.summary/1`, `Tau.Cost.for_session/1`) do table scans —
+  no GenServer mailbox in the hot path. `Tau.Session` emits the stop
+  event after every assistant turn. Token counts only; dollar pricing
+  deferred to a follow-up. See ADR-0010. (Refs #19, closes #40.)
 - `Tau.Provider.chat/4` — provider-agnostic non-streaming entry point
   that drains `stream/3` through `Tau.Message.Assembler` and returns
   the assembled `%Assistant{}`. Provider modules can override via the
