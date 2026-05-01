@@ -11,19 +11,14 @@ defmodule Tau.CLI do
                                        # session's id; the original is
                                        # untouched on disk)
       tau sessions list|show           # inspect persisted sessions
+      tau config [get|set]             # inspect/edit settings cascade
+      tau mcp list|status|reload       # inspect MCP server connections
+      tau extensions list|reload       # inspect loaded extensions
       tau version                      # print version
       tau doctor                       # diagnose environment, providers, MCP
 
   Argument parsing uses `Optimus`. Subcommands return integer exit codes.
-
-  ### Not yet implemented
-
-  Earlier drafts of this moduledoc advertised `tau config`, `tau mcp`,
-  and `tau extensions` subcommands plus `tau sessions delete`, none of
-  which are wired to `spec/0` — invoking them would error with
-  "unknown subcommand". They are tracked together in the CLI
-  subcommands feature request so users hitting the doc first don't
-  trip on the gap.
+  Most read-oriented subcommands also support `--json` for piping.
   """
 
   alias Tau.Provider.Event
@@ -36,6 +31,17 @@ defmodule Tau.CLI do
       {[:resume], parsed} -> resume_cmd(parsed) |> halt()
       {[:sessions, :list], _} -> sessions_list() |> halt()
       {[:sessions, :show], parsed} -> sessions_show(parsed) |> halt()
+      {[:config], parsed} -> Tau.CLI.Config.show(opts_with_json(parsed)) |> halt()
+      {[:config, :get], parsed} -> config_get(parsed) |> halt()
+      {[:config, :set], parsed} -> config_set(parsed) |> halt()
+      {[:mcp], parsed} -> Tau.CLI.MCP.list(opts_with_json(parsed)) |> halt()
+      {[:mcp, :list], parsed} -> Tau.CLI.MCP.list(opts_with_json(parsed)) |> halt()
+      {[:mcp, :status], parsed} -> Tau.CLI.MCP.status(opts_with_json(parsed)) |> halt()
+      {[:mcp, :reload], parsed} -> Tau.CLI.MCP.reload(opts_with_json(parsed)) |> halt()
+      {[:extensions], parsed} -> Tau.CLI.Extensions.list(opts_with_json(parsed)) |> halt()
+      {[:extensions, :list], parsed} -> Tau.CLI.Extensions.list(opts_with_json(parsed)) |> halt()
+      {[:extensions, :reload], parsed} ->
+        Tau.CLI.Extensions.reload(opts_with_json(parsed)) |> halt()
       {[:version], _} -> version_cmd() |> halt()
       {[:doctor], _} -> doctor_cmd() |> halt()
       {[:tui], _} -> tui_cmd() |> halt()
@@ -44,7 +50,24 @@ defmodule Tau.CLI do
     end
   end
 
-  defp spec do
+  defp opts_with_json(parsed) do
+    [json: !!(parsed.flags[:json] || (parsed.options[:json] in [true, "true"]))]
+  end
+
+  defp config_get(parsed) do
+    Tau.CLI.Config.get(parsed.args.key, opts_with_json(parsed))
+  end
+
+  defp config_set(parsed) do
+    Tau.CLI.Config.set(parsed.args.key, parsed.args.value, opts_with_json(parsed))
+  end
+
+  @doc """
+  The Optimus parser spec. Public so tests can drive `Optimus.parse/2`
+  with hand-built argv without going through `main/1` (which calls
+  `System.halt/1`).
+  """
+  def spec do
     Optimus.new!(
       name: "tau",
       description: "Tau — an OTP/BEAM agentic coding harness.",
@@ -71,6 +94,64 @@ defmodule Tau.CLI do
           subcommands: [
             list: [name: "list", about: "List sessions"],
             show: [name: "show", args: [id: [required: true]]]
+          ]
+        ],
+        config: [
+          name: "config",
+          about: "Show / edit the merged settings cascade.",
+          flags: [json: [long: "--json", help: "Emit JSON"]],
+          subcommands: [
+            get: [
+              name: "get",
+              about: "Read a top-level setting from the cascade.",
+              args: [key: [required: true]],
+              flags: [json: [long: "--json", help: "Emit JSON"]]
+            ],
+            set: [
+              name: "set",
+              about: "Write a top-level setting to .tau/settings.local.json.",
+              args: [key: [required: true], value: [required: true]],
+              flags: [json: [long: "--json", help: "Emit JSON"]]
+            ]
+          ]
+        ],
+        mcp: [
+          name: "mcp",
+          about: "Inspect MCP server connections.",
+          flags: [json: [long: "--json", help: "Emit JSON"]],
+          subcommands: [
+            list: [
+              name: "list",
+              about: "List configured MCP servers.",
+              flags: [json: [long: "--json", help: "Emit JSON"]]
+            ],
+            status: [
+              name: "status",
+              about: "Show health of configured MCP servers.",
+              flags: [json: [long: "--json", help: "Emit JSON"]]
+            ],
+            reload: [
+              name: "reload",
+              about: "Force MCP manager to reconcile against settings.",
+              flags: [json: [long: "--json", help: "Emit JSON"]]
+            ]
+          ]
+        ],
+        extensions: [
+          name: "extensions",
+          about: "Inspect loaded extensions.",
+          flags: [json: [long: "--json", help: "Emit JSON"]],
+          subcommands: [
+            list: [
+              name: "list",
+              about: "List loaded extensions.",
+              flags: [json: [long: "--json", help: "Emit JSON"]]
+            ],
+            reload: [
+              name: "reload",
+              about: "Reload all configured extensions.",
+              flags: [json: [long: "--json", help: "Emit JSON"]]
+            ]
           ]
         ],
         version: [name: "version", about: "Print Tau version"],

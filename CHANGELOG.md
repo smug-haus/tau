@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `tau config` / `tau mcp` / `tau extensions` CLI subcommands —
+  inspect and modify settings, list MCP servers, manage extensions
+  from the command line. JSON output via `--json` for scripting.
+  (Closes #21.)
 - `Tau.Command.command_spec/1` macro for declarative argument parsing
   on slash commands (positional `arg`, boolean `flag`, keyword `option`).
   Pre-parser tokenises the tail string and binds it to the spec before
