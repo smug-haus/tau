@@ -31,6 +31,13 @@ sandbox blocks `mix deps.get` from reaching `repo.hex.pm` via Erlang's
 httpc (curl works, Erlang doesn't). Verify on GitHub Actions per
 `.github/workflows/ci.yml`.
 
+Known limitations: cancelling a `Bash` tool call kills only the direct
+`bash` PID — descendants survive on every platform until `:erlexec`
+returns (Linux/macOS, #12), and Windows has no equivalent at all
+(#27). If descendant cleanup matters, wrap your script in a
+`taskkill`/`trap`-aware shim. See `lib/tau/tools/builtin/bash.ex`
+moduledoc.
+
 ## Design philosophy
 
 - **No shortcuts.** Every stateful subsystem is a process under a supervisor.
