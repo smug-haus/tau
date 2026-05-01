@@ -42,6 +42,8 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         %Tau.Session.Events.MessageEnd{} = e -> on_message_end(model, e)
         %Tau.Session.Events.ToolStart{} = e -> on_tool_start(model, e)
         %Tau.Session.Events.ToolEnd{} = e -> on_tool_end(model, e)
+        %Tau.Session.Events.Cancelled{} = e -> on_cancelled(model, e)
+        %Tau.Session.Events.SessionEnd{} = e -> on_session_end(model, e)
         _ -> model
       end
     end
@@ -160,6 +162,28 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
           else: c |> inspect() |> String.slice(0..160)
 
       %{model | tool_output: model.tool_output ++ [prefix <> " " <> summary]}
+    end
+
+    defp on_cancelled(model, %{reason: reason}) do
+      reason_str = inspect(reason)
+
+      %{
+        model
+        | status: "cancelled: " <> reason_str,
+          transcript: model.transcript ++ ["[cancelled: " <> reason_str <> "]"],
+          last_assistant: nil
+      }
+    end
+
+    defp on_session_end(model, %{reason: reason}) do
+      reason_str = inspect(reason)
+
+      %{
+        model
+        | status: "ended: " <> reason_str,
+          transcript: model.transcript ++ ["[session ended: " <> reason_str <> "]"],
+          last_assistant: nil
+      }
     end
   end
 end
