@@ -62,6 +62,7 @@ get rewritten away by the next refactor. ADRs survive.
 | [0006](0006-defer-tau-memory-cache-until-measured.md) | Defer `Tau.Memory.Cache` until measurements justify it | Accepted |
 | [0007](0007-compaction-summaries-survive-recompaction.md) | Compaction summaries are pinned across re-compaction | Accepted |
 | [0008](0008-user-code-never-runs-synchronously-in-the-fsm.md) | User code never runs synchronously inside the session FSM | Accepted |
+| [0009](0009-user-messages-queue-during-active-turn.md) | User messages queue (postpone) during an active turn | Accepted |
 
 (New ADRs append here. Keep the table sorted by ADR number.)
 
