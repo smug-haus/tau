@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Tests
+- Property suite: thinking-block signature byte-exact preservation audit
+  (`test/tau/persistence/thinking_roundtrip_property_test.exs`). Pins
+  Anthropic's signed-thinking contract — signatures must round-trip
+  byte-for-byte through both the JSONL persistence write path
+  (Replay session → `Tau.Session.message_to_data/1` →
+  `Tau.Persistence.Jsonl` → `Jason.encode!`) and the read path
+  (`File.stream!` → `Jason.decode!` → `Tau.Session.events_to_messages/1`
+  via `Tau.fork/2`). Driven with `StreamData` over the base64 alphabet
+  and printable-Unicode signatures, with explicit edge-case anchors
+  (whitespace, newlines, non-ASCII, empty). (Closes #68.)
+
 ### Fixed
 - TUI: `Tau.TUI.App.update/2` now handles
   `%Tau.Session.Events.Cancelled{}` and
