@@ -69,6 +69,7 @@ get rewritten away by the next refactor. ADRs survive.
 | [0013](0013-skill-activation-is-fsm-scoped.md) | Skill activation lives on the session FSM, scoped to one turn | Accepted |
 | [0014](0014-subagents-are-sessions.md) | Subagents are sessions, spawned by the `Agent` tool | Proposed |
 | [0015](0015-subagent-persona-is-a-skill.md) | Subagent persona is a `Tau.Skill`; permissions inherit and may only tighten | Proposed |
+| [0016](0016-credential-custody-is-the-os-not-tau.md) | Credential custody is the OS, not Tau | Accepted |
 
 (New ADRs append here. Keep the table sorted by ADR number.)
 

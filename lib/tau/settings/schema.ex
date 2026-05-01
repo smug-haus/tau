@@ -141,6 +141,20 @@ defmodule Tau.Settings.Schema do
             "tpm" => %{"type" => "integer", "minimum" => 0}
           }
         }
+      },
+      # ADR-0016: credential custody is the OS, not Tau. The
+      # `backend` enum picks a `Tau.Settings.Vault` implementation;
+      # `auto` resolves at runtime via `:os.type/0`. Defaults to
+      # `env` (`System.get_env/1` passthrough) when omitted.
+      "vault" => %{
+        "type" => "object",
+        "additionalProperties" => true,
+        "properties" => %{
+          "backend" => %{
+            "type" => "string",
+            "enum" => ~w(env keychain_mac keychain_linux keychain_windows auto)
+          }
+        }
       }
     }
   }
