@@ -392,6 +392,12 @@ defmodule Tau.Session do
           id: id,
           cwd: cwd,
           provider: provider,
+          # ADR-0012: original_provider is the user-configured provider for
+          # the lifetime of the session. data.provider shape-shifts during
+          # a fallback turn; finalize_assistant/2 restores it from
+          # original_provider so the next turn always starts against the
+          # primary (per-message fallback semantics).
+          original_provider: provider,
           model: model,
           metadata: metadata,
           provider_ctx: provider_ctx,
@@ -401,6 +407,10 @@ defmodule Tau.Session do
           persist_handle: persist_handle,
           provider_task: nil,
           assembler: nil,
+          # ADR-0012: per-turn fallback queue. Re-derived from
+          # Tau.Settings.Cache at the start of every :start_provider so a
+          # settings reload between turns is picked up automatically.
+          fallback_chain_remaining: [],
           tools_in_flight: %{},
           # ADR-0008: slash-command tasks (user code) run isolated under
           # Tau.Tools.TaskSupervisor, never inline in the FSM.
@@ -488,6 +498,19 @@ defmodule Tau.Session do
   def handle_event(:internal, :start_provider, :provider_streaming, data) do
     transition(data.id, data, :provider_streaming)
 
+    # ADR-0012: re-derive the fallback chain from settings on every fresh
+    # turn (i.e. only when the chain hasn't already been seeded by a
+    # previous fallback within this same turn). data.provider here is
+    # always the original_provider for the first call of a turn — by
+    # construction, fallback iterations rebuild data with a non-empty
+    # remaining list and do NOT re-enter via this branch's seeding.
+    data =
+      if data.fallback_chain_remaining == [] and data.provider == data.original_provider do
+        %{data | fallback_chain_remaining: lookup_fallback_chain(data.original_provider)}
+      else
+        data
+      end
+
     parent = self()
 
     ctx = Map.merge(data.provider_ctx, %{session_id: data.id})
@@ -515,6 +538,70 @@ defmodule Tau.Session do
         broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: msg})
         {:next_state, :awaiting_user, data}
     end
+  end
+
+  # ADR-0012: retryable mid-stream errors fall back to the next provider
+  # in `data.fallback_chain_remaining`. Inserted *before* the generic
+  # :provider_event clause so a non-empty chain takes over before the
+  # error reaches the assembler. Empty chain → fall through to the
+  # generic clause, which records the error and finalises the message.
+  def handle_event(
+        :info,
+        {:provider_event, %PEvent.Error{retryable?: true} = ev},
+        :provider_streaming,
+        %{fallback_chain_remaining: [next | rest]} = data
+      ) do
+    from_provider = data.provider
+
+    :telemetry.execute(
+      [:tau, :provider, :fallback],
+      %{system_time: System.system_time()},
+      %{
+        from_provider: from_provider,
+        to_provider: next,
+        reason: ev.reason,
+        session_id: data.id
+      }
+    )
+
+    broadcast(data.id, %Events.ProviderFallback{
+      session_id: data.id,
+      from_provider: from_provider,
+      to_provider: next,
+      reason: ev.reason
+    })
+
+    data =
+      persist_event(data, "provider_fallback", %{
+        from_provider: inspect(from_provider),
+        to_provider: inspect(next),
+        reason: inspect(ev.reason)
+      })
+
+    # Shut down the still-running provider task (it might still be
+    # emitting events or about to send :provider_done). Subsequent
+    # stragglers in the mailbox are absorbed by the catch-all
+    # handle_event clause at the bottom of the module.
+    if data.provider_task && Process.alive?(data.provider_task.pid) do
+      Task.shutdown(data.provider_task, :brutal_kill)
+    end
+
+    transformed =
+      Tau.Providers.Shared.ContentTransform.transform(data.messages, from_provider, next)
+
+    handle_event(
+      :internal,
+      :start_provider,
+      :provider_streaming,
+      %{
+        data
+        | provider: next,
+          messages: transformed,
+          fallback_chain_remaining: rest,
+          assembler: nil,
+          provider_task: nil
+      }
+    )
   end
 
   def handle_event(:info, {:provider_event, ev}, :provider_streaming, data) do
@@ -586,6 +673,10 @@ defmodule Tau.Session do
     data =
       data
       |> maybe_replace(:provider, opts[:provider])
+      # ADR-0012: keep original_provider in lockstep with the user-
+      # configured provider. Reconfigure replaces both — fallback chains
+      # are looked up keyed by the *new* primary on the next turn.
+      |> maybe_replace(:original_provider, opts[:provider])
       |> maybe_replace(:model, opts[:model])
       |> merge_provider_ctx(opts[:provider_ctx])
 
@@ -680,6 +771,15 @@ defmodule Tau.Session do
     )
 
     data = maybe_compact(data, msg.usage || %{})
+
+    # ADR-0012: per-message fallback semantics. Restore the working
+    # provider to the user-configured original_provider so the next
+    # turn's :start_provider re-derives the chain freshly and starts
+    # against the primary. A still-running tool call keeps using the
+    # provider that produced *this* message until the next provider
+    # turn — that's correct: the tool result feeds the same model
+    # that asked for the call.
+    data = %{data | provider: data.original_provider, fallback_chain_remaining: []}
 
     tool_calls = Enum.filter(msg.content, &match?(%{type: :tool_call}, &1))
 
@@ -1000,6 +1100,21 @@ defmodule Tau.Session do
   end
 
   defp parent_event_id(_data), do: nil
+
+  # ADR-0012: read the per-original-provider fallback list from settings.
+  # Returns [] when no chain is configured or when settings carry a typo
+  # (fail-closed via Tau.Settings.Schema.resolve_fallback_chains/1).
+  # Both atom and string keys are accepted (Settings.Loader uses
+  # `keys: :atoms`; Jason leaves *values* as strings, so the resolver
+  # is the canonical str → module step).
+  defp lookup_fallback_chain(original_provider) when is_atom(original_provider) do
+    settings = Tau.Settings.Cache.get()
+
+    case Tau.Settings.Schema.resolve_fallback_chains(settings) do
+      {:ok, chains} -> Map.get(chains, original_provider, [])
+      {:error, _} -> []
+    end
+  end
 
   defp transition(id, _data, to) do
     :telemetry.execute([:tau, :session, :transition], %{system_time: System.system_time()}, %{

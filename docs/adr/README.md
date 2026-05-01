@@ -65,6 +65,7 @@ get rewritten away by the next refactor. ADRs survive.
 | [0009](0009-user-messages-queue-during-active-turn.md) | User messages queue (postpone) during an active turn | Accepted |
 | [0010](0010-cost-tracker-owns-ets-not-state.md) | Cost tracker owns an ETS table, not GenServer state | Accepted |
 | [0011](0011-per-provider-rate-limiter-is-stateful-genserver.md) | Per-provider rate limiter is a stateful GenServer (not an ETS-owner) | Accepted |
+| [0012](0012-provider-fallback-is-fsm-internal-retry.md) | Provider fallback is an FSM-internal retry, not a wrapper provider | Accepted |
 
 (New ADRs append here. Keep the table sorted by ADR number.)
 

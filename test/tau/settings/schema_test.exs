@@ -65,6 +65,52 @@ defmodule Tau.Settings.SchemaTest do
            end)
   end
 
+  describe "resolve_fallback_chains/1 (ADR-0012)" do
+    test "resolves string-keyed chains to atom modules from the known set" do
+      settings = %{
+        providers: %{
+          fallback_chains: %{
+            "Tau.Providers.Anthropic" => ["Tau.Providers.OpenAI.Chat", "Tau.Providers.Gemini"]
+          }
+        }
+      }
+
+      assert {:ok, chains} = Schema.resolve_fallback_chains(settings)
+
+      assert chains == %{
+               Tau.Providers.Anthropic => [
+                 Tau.Providers.OpenAI.Chat,
+                 Tau.Providers.Gemini
+               ]
+             }
+    end
+
+    test "rejects unknown providers fail-closed" do
+      settings = %{
+        providers: %{fallback_chains: %{"Tau.Providers.Anthropic" => ["NotARealProvider"]}}
+      }
+
+      assert {:error, {:unknown_provider, "NotARealProvider"}} =
+               Schema.resolve_fallback_chains(settings)
+    end
+
+    test "atom keys + atom values (programmatic API) round-trip" do
+      settings = %{
+        providers: %{
+          fallback_chains: %{Tau.Providers.Anthropic => [Tau.Providers.OpenAI.Chat]}
+        }
+      }
+
+      assert {:ok,
+              %{Tau.Providers.Anthropic => [Tau.Providers.OpenAI.Chat]}} =
+               Schema.resolve_fallback_chains(settings)
+    end
+
+    test "missing :providers key returns an empty chain map" do
+      assert {:ok, %{}} = Schema.resolve_fallback_chains(%{})
+    end
+  end
+
   describe "priv/scripts/gen_settings_schema.exs" do
     test "the script exists where the mix alias expects it and parses cleanly" do
       script = Path.join(File.cwd!(), "priv/scripts/gen_settings_schema.exs")
