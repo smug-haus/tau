@@ -28,7 +28,7 @@ defmodule Tau.Providers.Anthropic do
 
   alias Tau.Message.{Assistant, ToolResult, User}
   alias Tau.Provider.Event
-  alias Tau.Providers.Shared.FinchStream
+  alias Tau.Providers.Shared.{FinchStream, ToolSpec}
 
   @api_url "https://api.anthropic.com"
   @api_version "2023-06-01"
@@ -235,7 +235,7 @@ defmodule Tau.Providers.Anthropic do
     body
     |> maybe_put(:system, system_field(system, opts))
     |> maybe_put(:temperature, opts[:temperature])
-    |> maybe_put(:tools, opts[:tools])
+    |> maybe_put(:tools, ToolSpec.adapt(opts[:tools], __MODULE__))
     |> maybe_put(:tool_choice, tool_choice(opts[:tool_choice]))
     |> maybe_put(:thinking, thinking(opts))
     |> maybe_put(:stop_sequences, opts[:stop_sequences])

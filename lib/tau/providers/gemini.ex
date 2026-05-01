@@ -13,7 +13,7 @@ defmodule Tau.Providers.Gemini do
 
   alias Tau.Message.{Assistant, ToolResult, User}
   alias Tau.Provider.Event
-  alias Tau.Providers.Shared.FinchStream
+  alias Tau.Providers.Shared.{FinchStream, ToolSpec}
 
   @api_url "https://generativelanguage.googleapis.com"
   @default_model "gemini-2.0-flash"
@@ -103,10 +103,10 @@ defmodule Tau.Providers.Gemini do
       contents: Enum.map(messages, &to_gemini/1)
     }
 
-    case opts[:tools] do
+    case ToolSpec.adapt(opts[:tools], __MODULE__) do
       nil -> body
       [] -> body
-      tools -> Map.put(body, :tools, [%{functionDeclarations: tools}])
+      decls -> Map.put(body, :tools, [%{functionDeclarations: decls}])
     end
   end
 

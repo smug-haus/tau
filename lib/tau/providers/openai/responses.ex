@@ -12,7 +12,7 @@ defmodule Tau.Providers.OpenAI.Responses do
 
   alias Tau.Message.{Assistant, ToolResult, User}
   alias Tau.Provider.Event
-  alias Tau.Providers.Shared.FinchStream
+  alias Tau.Providers.Shared.{FinchStream, ToolSpec}
 
   @api_url "https://api.openai.com"
   @default_model "gpt-4o-mini"
@@ -84,7 +84,7 @@ defmodule Tau.Providers.OpenAI.Responses do
     |> maybe_put(:temperature, opts[:temperature])
     |> maybe_put(:max_output_tokens, opts[:max_tokens])
     |> maybe_put(:reasoning, reasoning(opts[:reasoning]))
-    |> maybe_put(:tools, opts[:tools])
+    |> maybe_put(:tools, ToolSpec.adapt(opts[:tools], __MODULE__))
   end
 
   defp reasoning(nil), do: nil
