@@ -139,4 +139,35 @@ defmodule Tau do
   """
   @spec snapshot(session_id()) :: {:ok, Tau.Session.snapshot()} | {:error, :not_found}
   defdelegate snapshot(session_id), to: Session
+
+  @doc """
+  Register `child_id` as a child of `parent_id` so that `Tau.cancel/1`
+  and `Tau.stop/1` on the parent cascade to it (ADR-0014, issue #92).
+
+  Intended for the upcoming `Agent` tool: after a successful
+  `Tau.start_session/1` for a sub-agent, the spawn task casts
+  `{:register_child, child_id}` to its parent FSM via this helper. Returns
+  `:ok` even if the parent isn't currently registered (cast semantics).
+  """
+  @spec register_child(session_id(), session_id()) :: :ok
+  def register_child(parent_id, child_id) when is_binary(parent_id) and is_binary(child_id) do
+    case Registry.lookup(Tau.Sessions.Registry, parent_id) do
+      [{pid, _}] -> :gen_statem.cast(pid, {:register_child, child_id})
+      _ -> :ok
+    end
+  end
+
+  @doc """
+  Drop `child_id` from `parent_id`'s child-cascade set. Called by the
+  `Agent` tool's spawn task when it observes the child's
+  `%Tau.Session.Events.SessionEnd{}` so a subsequent `Tau.cancel/1` on
+  the parent doesn't `Tau.cancel/1` an already-stopped session.
+  """
+  @spec unregister_child(session_id(), session_id()) :: :ok
+  def unregister_child(parent_id, child_id) when is_binary(parent_id) and is_binary(child_id) do
+    case Registry.lookup(Tau.Sessions.Registry, parent_id) do
+      [{pid, _}] -> :gen_statem.cast(pid, {:unregister_child, child_id})
+      _ -> :ok
+    end
+  end
 end

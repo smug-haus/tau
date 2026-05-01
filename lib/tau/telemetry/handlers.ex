@@ -8,6 +8,7 @@ defmodule Tau.Telemetry.Handlers do
       [:tau, :session, :start | :stop]
       [:tau, :session, :transition]
       [:tau, :session, :tool_whitelisted]
+      [:tau, :session, :child_registered | :child_unregistered]
       [:tau, :provider, :request, :start | :stop | :exception]
       [:tau, :provider, :event]
       [:tau, :provider, :rate_limit, :acquired | :throttled | :rejected | :halved]
@@ -64,6 +65,8 @@ defmodule Tau.Telemetry.Handlers do
       [:tau, :session, :stop],
       [:tau, :session, :transition],
       [:tau, :session, :tool_whitelisted],
+      [:tau, :session, :child_registered],
+      [:tau, :session, :child_unregistered],
       [:tau, :provider, :request, :start],
       [:tau, :provider, :request, :stop],
       [:tau, :provider, :request, :exception],

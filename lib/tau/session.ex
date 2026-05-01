@@ -272,7 +272,8 @@ defmodule Tau.Session do
           skills: [{String.t(), Tau.Skill.t()}],
           metadata: map(),
           permissions_mode: atom(),
-          tools_whitelist: [String.t()] | :all
+          tools_whitelist: [String.t()] | :all,
+          child_session_ids: MapSet.t(String.t())
         }
 
   @doc """
@@ -300,7 +301,8 @@ defmodule Tau.Session do
          skills: data.skills,
          metadata: data.metadata,
          permissions_mode: Map.get(data.metadata, :permissions_mode, :default),
-         tools_whitelist: data.tools_whitelist
+         tools_whitelist: data.tools_whitelist,
+         child_session_ids: data.child_session_ids
        }}
     end
   end
@@ -442,7 +444,19 @@ defmodule Tau.Session do
           # Foundation for ADR-0014/15 subagent personas (the parent's
           # `Agent` tool plumbs the child skill's `allowed_tools` through
           # this opt). `:all` preserves today's behaviour.
-          tools_whitelist: opts[:tools_whitelist] || :all
+          tools_whitelist: opts[:tools_whitelist] || :all,
+          # ADR-0014 (#92): set of currently-running child session ids
+          # spawned by this session via the `Agent` tool. Populated by
+          # `{:register_child, _}` casts from the spawn task and emptied
+          # by `{:unregister_child, _}` when a child reports `%SessionEnd{}`.
+          # `Tau.cancel/1` and `Tau.stop/1` cascade across this set before
+          # tearing down the parent's own provider/tool/command tasks so
+          # children get a clean shutdown path (flush JSONL, emit
+          # `%SessionEnd{reason: :user}`) rather than being reaped from
+          # above. Supervisor is `:one_for_one`; a parent crash does *not*
+          # propagate to children — that's the whole point of explicit
+          # cascade on the user-driven shutdown paths.
+          child_session_ids: MapSet.new()
         }
 
         {:ok, :awaiting_user, data}
@@ -674,7 +688,44 @@ defmodule Tau.Session do
     finalize_assistant(assembler, data)
   end
 
+  # ADR-0014 (#92): bookkeeping casts from the (future) `Agent` tool task.
+  # On a successful `Tau.start_session/1` for a child, the spawn task casts
+  # `{:register_child, child_id}` to its parent FSM. When the child's
+  # `%SessionEnd{}` is observed (the spawn task is subscribed to the child
+  # topic), it casts `{:unregister_child, child_id}` so the cancel cascade
+  # doesn't `Tau.cancel/1` an already-stopped session. Both clauses are
+  # state-agnostic — child wiring is independent of the parent's turn state.
+  def handle_event(:cast, {:register_child, child_id}, _state, data)
+      when is_binary(child_id) do
+    :telemetry.execute(
+      [:tau, :session, :child_registered],
+      %{system_time: System.system_time()},
+      %{session_id: data.id, child_id: child_id}
+    )
+
+    {:keep_state, %{data | child_session_ids: MapSet.put(data.child_session_ids, child_id)}}
+  end
+
+  def handle_event(:cast, {:unregister_child, child_id}, _state, data)
+      when is_binary(child_id) do
+    :telemetry.execute(
+      [:tau, :session, :child_unregistered],
+      %{system_time: System.system_time()},
+      %{session_id: data.id, child_id: child_id}
+    )
+
+    {:keep_state, %{data | child_session_ids: MapSet.delete(data.child_session_ids, child_id)}}
+  end
+
   def handle_event(:cast, :cancel, _state, data) do
+    # ADR-0014 (#92): cascade to children first so each child's FSM gets
+    # a chance to flush persistence and emit `%SessionEnd{reason: :user}`
+    # on its own topic before this parent's tools/provider are torn down.
+    # Casts are fire-and-forget; children live under
+    # `Tau.Sessions.Supervisor` (`:one_for_one`) and are not linked to
+    # the parent — their cleanup happens on their own scheduler slot.
+    cascade_to_children(data, :cancel)
+
     if data.provider_task && Process.alive?(data.provider_task.pid) do
       Task.shutdown(data.provider_task, :brutal_kill)
     end
@@ -709,6 +760,10 @@ defmodule Tau.Session do
   end
 
   def handle_event(:cast, :stop, _state, data) do
+    # ADR-0014 (#92): cascade `Tau.stop/1` to children before terminating.
+    # Each child runs its own `terminate/3` which broadcasts `%SessionEnd{}`
+    # on the child's topic.
+    cascade_to_children(data, :stop)
     {:stop, :normal, data}
   end
 
@@ -1290,6 +1345,22 @@ defmodule Tau.Session do
 
   defp broadcast(id, event) do
     Phoenix.PubSub.broadcast(Tau.PubSub, "session:#{id}", event)
+  end
+
+  # ADR-0014 (#92): walk the child set and cast the chosen lifecycle
+  # operation. Both `Tau.cancel/1` and `Tau.stop/1` are :ok-or-:ok casts
+  # against a registry lookup — a child id that's already gone is a
+  # silent no-op (this is exactly the case we want when a child finished
+  # naturally between its `%SessionEnd{}` broadcast and the parent's
+  # cancel landing). Recursion is implicit: each child runs the same
+  # cascade against its own descendants.
+  defp cascade_to_children(%{child_session_ids: ids}, op) when op in [:cancel, :stop] do
+    Enum.each(ids, fn child_id ->
+      case op do
+        :cancel -> Tau.cancel(child_id)
+        :stop -> Tau.stop(child_id)
+      end
+    end)
   end
 
   # ADR-0009: telemetry pairs but does not span — postponed events
