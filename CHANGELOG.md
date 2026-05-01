@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Cooperative cancellation of in-flight provider streams. The
+  `:cancel` cast now sets a per-stream atomic flag; the chunk
+  loop checks it at every boundary and exits cleanly via Finch's
+  cancel primitive within ~one chunk. Brutal-kill remains the
+  fallback if the task doesn't yield within 250ms. New telemetry:
+  `[:tau, :provider, :request, :cancelled | :brutal_kill]`. See
+  ADR-0017. (Closes #69.)
+
 ### Added
 - `tau init` interactive onboarding subcommand — guides first-time
   users through provider credentials (via `Tau.Settings.Vault`),

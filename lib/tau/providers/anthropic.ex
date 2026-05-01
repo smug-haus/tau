@@ -59,7 +59,7 @@ defmodule Tau.Providers.Anthropic do
   end
 
   @impl Tau.Provider
-  def stream(messages, opts \\ %{}, _ctx \\ %{}) do
+  def stream(messages, opts \\ %{}, ctx \\ %{}) do
     case api_key(opts) do
       nil ->
         {:error, :missing_api_key}
@@ -87,7 +87,14 @@ defmodule Tau.Providers.Anthropic do
              FinchStream.run(
                request,
                &decode/2,
-               %{partial: %{}, started?: false, model: nil, provider: __MODULE__}
+               %{
+                 partial: %{},
+                 started?: false,
+                 model: nil,
+                 provider: __MODULE__,
+                 # ADR-0017: cooperative cancellation flag.
+                 cancel_flag: ctx[:cancel_flag]
+               }
              )}
         end
     end

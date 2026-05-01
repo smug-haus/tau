@@ -33,7 +33,7 @@ defmodule Tau.Providers.Bedrock do
   end
 
   @impl Tau.Provider
-  def stream(messages, opts \\ %{}, _ctx \\ %{}) do
+  def stream(messages, opts \\ %{}, ctx \\ %{}) do
     case credentials() do
       nil ->
         {:error, :missing_aws_credentials}
@@ -75,7 +75,9 @@ defmodule Tau.Providers.Bedrock do
                  aws: AwsEventStream.new(),
                  model: model,
                  started?: false,
-                 provider: __MODULE__
+                 provider: __MODULE__,
+                 # ADR-0017: cooperative cancellation flag.
+                 cancel_flag: ctx[:cancel_flag]
                },
                mode: :raw
              )}
