@@ -101,8 +101,7 @@ defmodule Tau.Settings.SchemaTest do
         }
       }
 
-      assert {:ok,
-              %{Tau.Providers.Anthropic => [Tau.Providers.OpenAI.Chat]}} =
+      assert {:ok, %{Tau.Providers.Anthropic => [Tau.Providers.OpenAI.Chat]}} =
                Schema.resolve_fallback_chains(settings)
     end
 

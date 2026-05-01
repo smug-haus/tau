@@ -57,6 +57,7 @@ defmodule Tau.Permissions.HeuristicsPropertyTest do
             suffix <- StreamData.string(:alphanumeric, max_length: 8)
           ) do
       cmd = "#{prefix} #{base} #{suffix}"
+
       assert Heuristics.destructive_bash?(%{"command" => cmd}),
              "expected destructive flag for: #{inspect(cmd)}"
     end

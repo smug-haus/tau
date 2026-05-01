@@ -139,7 +139,6 @@ defmodule Tau.CLI.InitTest do
       body = File.read!(Path.join([cwd, ".tau", "settings.local.json"]))
       refute body =~ "sk-test-123"
     end
-
   end
 
   describe "schema validation" do

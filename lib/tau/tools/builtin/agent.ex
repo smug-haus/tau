@@ -98,8 +98,7 @@ defmodule Tau.Tools.Builtin.Agent do
       "properties" => %{
         "description" => %{
           "type" => "string",
-          "description" =>
-            "The brief sent as the sub-agent's first user message. Required."
+          "description" => "The brief sent as the sub-agent's first user message. Required."
         },
         "system_prompt" => %{
           "type" => "string",
@@ -175,8 +174,7 @@ defmodule Tau.Tools.Builtin.Agent do
           # the global rule set is the only gate (modulo the clamped
           # mode + whitelist).
           active_skill: skill,
-          persona_lifetime:
-            if(skill, do: :session, else: :turn)
+          persona_lifetime: if(skill, do: :session, else: :turn)
         ]
         |> maybe_inherit_provider_ctx(ctx, parent_snap)
 

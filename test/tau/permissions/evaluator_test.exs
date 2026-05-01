@@ -62,9 +62,8 @@ defmodule Tau.Permissions.EvaluatorTest do
       assert Evaluator.evaluate({}, "Bash", %{"command" => "rm -rf /"}, %{}, :accept_edits) ==
                :deny
 
-      assert Evaluator.evaluate({}, "Bash", %{"command" => "sudo apt install"}, %{},
-               :accept_edits
-             ) == :deny
+      assert Evaluator.evaluate({}, "Bash", %{"command" => "sudo apt install"}, %{}, :accept_edits) ==
+               :deny
 
       assert Evaluator.evaluate({}, "Bash", %{"command" => ":(){ :|:&};:"}, %{}, :accept_edits) ==
                :deny

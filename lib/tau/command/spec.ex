@@ -90,7 +90,9 @@ defmodule Tau.Command.Spec do
 
   defp tokenize(<<?', rest::binary>>, :bare, acc, toks), do: tokenize(rest, :sq, acc, toks)
   defp tokenize(<<?", rest::binary>>, :bare, acc, toks), do: tokenize(rest, :dq, acc, toks)
-  defp tokenize(<<c::utf8, rest::binary>>, :bare, acc, toks), do: tokenize(rest, :bare, [c | acc], toks)
+
+  defp tokenize(<<c::utf8, rest::binary>>, :bare, acc, toks),
+    do: tokenize(rest, :bare, [c | acc], toks)
 
   defp tokenize(<<?', rest::binary>>, :sq, acc, toks), do: tokenize(rest, :bare, acc, toks)
   defp tokenize(<<c::utf8, rest::binary>>, :sq, acc, toks), do: tokenize(rest, :sq, [c | acc], toks)

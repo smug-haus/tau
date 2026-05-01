@@ -28,15 +28,17 @@ defmodule Tau.Session.SkillActivationPropertyTest do
         )
       }),
       fn {name, desc, body, disabled?, allowed} ->
-        StreamData.constant({name,
-         %Skill{
-           name: name,
-           description: desc,
-           body: body,
-           path: "/tmp/" <> name <> "/SKILL.md",
-           disable_model_invocation: disabled?,
-           allowed_tools: allowed
-         }})
+        StreamData.constant(
+          {name,
+           %Skill{
+             name: name,
+             description: desc,
+             body: body,
+             path: "/tmp/" <> name <> "/SKILL.md",
+             disable_model_invocation: disabled?,
+             allowed_tools: allowed
+           }}
+        )
       end
     )
   end
