@@ -142,11 +142,13 @@ defmodule Tau.Providers.RateLimiter do
   @impl true
   def handle_call({:acquire, est_tokens, timeout, started_at}, from, state) do
     now = monotonic_now()
-    {request_status, rpm} = TokenBucket.take(state.rpm_bucket, 1, now)
-    {token_status, tpm} = TokenBucket.take(state.tpm_bucket, est_tokens, now)
+    request_result = TokenBucket.take(state.rpm_bucket, 1, now)
+    token_result = TokenBucket.take(state.tpm_bucket, est_tokens, now)
 
     cond do
-      request_status == :ok and token_status == :ok ->
+      elem(request_result, 0) == :ok and elem(token_result, 0) == :ok ->
+        {:ok, rpm} = request_result
+        {:ok, tpm} = token_result
         wait_ms = now - started_at
         new_state = %{state | rpm_bucket: rpm, tpm_bucket: tpm}
         emit_acquired(state.provider, wait_ms, est_tokens, rpm, tpm, wait_ms > 0)
@@ -154,7 +156,7 @@ defmodule Tau.Providers.RateLimiter do
 
       true ->
         wait_ms =
-          [wait_for(request_status), wait_for(token_status)]
+          [wait_for(request_result), wait_for(token_result)]
           |> Enum.reject(&is_nil/1)
           |> max_wait()
 
@@ -209,10 +211,12 @@ defmodule Tau.Providers.RateLimiter do
   @impl true
   def handle_info({:retry_acquire, from, est_tokens, timeout, started_at}, state) do
     now = monotonic_now()
-    {request_status, rpm} = TokenBucket.take(state.rpm_bucket, 1, now)
-    {token_status, tpm} = TokenBucket.take(state.tpm_bucket, est_tokens, now)
+    request_result = TokenBucket.take(state.rpm_bucket, 1, now)
+    token_result = TokenBucket.take(state.tpm_bucket, est_tokens, now)
 
-    if request_status == :ok and token_status == :ok do
+    if elem(request_result, 0) == :ok and elem(token_result, 0) == :ok do
+      {:ok, rpm} = request_result
+      {:ok, tpm} = token_result
       wait_ms = now - started_at
       emit_acquired(state.provider, wait_ms, est_tokens, rpm, tpm, true)
       GenServer.reply(from, :ok)
@@ -227,7 +231,7 @@ defmodule Tau.Providers.RateLimiter do
         {:noreply, state}
       else
         next_wait =
-          [wait_for(request_status), wait_for(token_status)]
+          [wait_for(request_result), wait_for(token_result)]
           |> Enum.reject(&is_nil/1)
           |> max_wait()
 
