@@ -233,6 +233,18 @@ defmodule Tau.Session do
     :ok
   end
 
+  @spec update_provider(id(), keyword()) :: :ok | {:error, :not_found}
+  def update_provider(id, opts) when is_list(opts) do
+    case whereis(id) do
+      {:ok, pid} ->
+        :gen_statem.cast(pid, {:reconfigure, opts})
+        :ok
+
+      err ->
+        err
+    end
+  end
+
   @spec list_sessions(map()) :: [Meta.t()]
   def list_sessions(filters \\ %{}), do: Tau.Persistence.impl().list(filters)
 
@@ -565,6 +577,31 @@ defmodule Tau.Session do
 
   def handle_event(:cast, :stop, _state, data) do
     {:stop, :normal, data}
+  end
+
+  # #38: in-place provider/model/provider_ctx update. The change applies
+  # to the next provider call — an in-flight :provider_streaming keeps
+  # using the previous provider until it completes.
+  def handle_event(:cast, {:reconfigure, opts}, _state, data) do
+    data =
+      data
+      |> maybe_replace(:provider, opts[:provider])
+      |> maybe_replace(:model, opts[:model])
+      |> merge_provider_ctx(opts[:provider_ctx])
+
+    :telemetry.execute(
+      [:tau, :session, :reconfigure],
+      %{system_time: System.system_time()},
+      %{session_id: data.id, provider: data.provider, model: data.model}
+    )
+
+    data =
+      persist_event(data, "reconfigure", %{
+        provider: inspect(data.provider),
+        model: data.model
+      })
+
+    {:keep_state, data}
   end
 
   def handle_event(:info, {:tool_done, call_id, result_msg}, :tool_executing, data) do
@@ -915,6 +952,16 @@ defmodule Tau.Session do
   end
 
   defp append_message(data, msg), do: %{data | messages: data.messages ++ [msg]}
+
+  # #38 helpers — in-place data updates for {:reconfigure, opts}.
+  defp maybe_replace(data, _key, nil), do: data
+  defp maybe_replace(data, key, value), do: Map.put(data, key, value)
+
+  defp merge_provider_ctx(data, nil), do: data
+
+  defp merge_provider_ctx(data, ctx) when is_map(ctx) do
+    %{data | provider_ctx: Map.merge(data.provider_ctx || %{}, ctx)}
+  end
 
   defp persist_event(data, kind, payload) do
     event = %{

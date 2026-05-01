@@ -92,6 +92,28 @@ defmodule Tau do
   defdelegate cancel(session_id), to: Session
 
   @doc """
+  Reconfigure a live session's provider, model, or `provider_ctx`
+  without restarting it. Any keys absent from `opts` keep their
+  current value; `provider_ctx` is *merged* (not replaced).
+
+  The change applies to the **next** turn the session starts. An
+  in-flight `:provider_streaming` keeps using the previous
+  provider/model — there is no mid-stream swap. The reconfiguration
+  is persisted as a `"reconfigure"` event in the JSONL transcript so
+  fork/resume can replay the history accurately.
+
+  ## Options
+
+    * `:provider` — module implementing `Tau.Provider`.
+    * `:model` — provider-specific model id.
+    * `:provider_ctx` — map merged into the session's existing
+      `provider_ctx` (per-key replacement; values not in the new map
+      are preserved).
+  """
+  @spec update_provider(session_id(), keyword()) :: :ok | {:error, :not_found}
+  defdelegate update_provider(session_id, opts), to: Session
+
+  @doc """
   Stop a session entirely. Runs `:stop` hooks (which may veto), flushes
   persistence, and removes the session process.
   """
