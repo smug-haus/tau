@@ -45,6 +45,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Repo wiped of unrelated Clojure AoC2020 content.
 
+### Fixed
+- Session FSM: `{:user_message, _}` casts that arrive while the session
+  is mid-turn (`:provider_streaming` / `:tool_executing`) are now
+  postponed via `:gen_statem`'s built-in `:postpone` action and
+  re-delivered on return to `:awaiting_user`, preserving cast order
+  and preventing interleaving with the active provider stream or
+  tool execution. New telemetry:
+  `[:tau, :session, :user_message, :enqueued | :delivered]`. See
+  ADR-0009. (Closes #64.)
+
 ### Notes
 - Local toolchain in the dev sandbox is Elixir 1.17.3 / OTP 25.3.
   `mix format --check-formatted` is clean across all 80+ files.

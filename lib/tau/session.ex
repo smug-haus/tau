@@ -424,12 +424,24 @@ defmodule Tau.Session do
   # ADR-0008: while a slash-command task is in flight, postpone any
   # subsequent user_message casts. They get re-delivered when the FSM
   # next transitions, which guarantees order without dropping input.
-  def handle_event(:cast, {:user_message, _}, _state, %{command_task: t} = _data)
+  def handle_event(:cast, {:user_message, _}, state, %{command_task: t} = data)
       when t != nil do
+    emit_user_message_telemetry(:enqueued, data, state)
     {:keep_state_and_data, [{:postpone, true}]}
   end
 
-  def handle_event(:cast, {:user_message, msg}, _state, data) do
+  # ADR-0009: outside :awaiting_user (provider streaming or tool
+  # executing) postpone the cast so the next provider turn doesn't
+  # interleave with the current one.
+  def handle_event(:cast, {:user_message, _}, state, data)
+      when state != :awaiting_user do
+    emit_user_message_telemetry(:enqueued, data, state)
+    {:keep_state_and_data, [{:postpone, true}]}
+  end
+
+  def handle_event(:cast, {:user_message, msg}, :awaiting_user, %{command_task: nil} = data) do
+    emit_user_message_telemetry(:delivered, data, :awaiting_user)
+
     case classify_slash_command(msg) do
       {:async, mod, args, msg} ->
         spawn_command_task(mod, args, msg, data)
@@ -939,6 +951,18 @@ defmodule Tau.Session do
 
   defp broadcast(id, event) do
     Phoenix.PubSub.broadcast(Tau.PubSub, "session:#{id}", event)
+  end
+
+  # ADR-0009: telemetry pairs but does not span — postponed events
+  # may emit :enqueued multiple times if the FSM transitions through
+  # several non-idle states before reaching :awaiting_user. Each
+  # :enqueued reflects a real postpone-and-rewind decision.
+  defp emit_user_message_telemetry(event, data, state) do
+    :telemetry.execute(
+      [:tau, :session, :user_message, event],
+      %{system_time: System.system_time()},
+      %{session_id: data.id, from_state: state}
+    )
   end
 
   # --- Hook payload --------------------------------------------------------
