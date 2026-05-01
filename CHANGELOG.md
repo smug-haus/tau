@@ -46,6 +46,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tool_call → tool_result` correspondence. (Closes #33.)
 
 ### Added
+- Parent session FSM tracks `child_session_ids`; `Tau.cancel/1` and
+  `Tau.stop/1` cascade to children before tearing down the parent's
+  own work. New API: `Tau.register_child/2`, `Tau.unregister_child/2`
+  (cast helpers used by the upcoming Agent tool). `Tau.snapshot/1`
+  surfaces the set. New telemetry:
+  `[:tau, :session, :child_registered | :child_unregistered]`.
+  Foundation for ADR-0014 (subagents are sessions). (Refs #18,
+  closes #92.)
 - `Tau.start_session(tools_whitelist: ["Read", "Grep"])` restricts a
   session's tools at spawn time. The whitelist filter applies before
   the permissions evaluator; missing tools synthesise an `is_error`
