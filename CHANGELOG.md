@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `tau init` interactive onboarding subcommand — guides first-time
+  users through provider credentials (via `Tau.Settings.Vault`),
+  permissions mode, and basic MCP/skill setup. Validates against
+  the settings schema before writing `.tau/settings.local.json`.
+  Works with non-TTY stdin (CI / scripted setup). (Closes #31.)
 - `tau config` / `tau mcp` / `tau extensions` CLI subcommands —
   inspect and modify settings, list MCP servers, manage extensions
   from the command line. JSON output via `--json` for scripting.

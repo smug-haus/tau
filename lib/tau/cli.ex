@@ -16,9 +16,13 @@ defmodule Tau.CLI do
       tau extensions list|reload       # inspect loaded extensions
       tau version                      # print version
       tau doctor                       # diagnose environment, providers, MCP
+      tau init                         # interactive onboarding wizard
 
   Argument parsing uses `Optimus`. Subcommands return integer exit codes.
   Most read-oriented subcommands also support `--json` for piping.
+
+  `tau init` walks a fresh user from a clean clone to a working
+  `.tau/settings.local.json`; see `Tau.CLI.Init`.
   """
 
   alias Tau.Provider.Event
@@ -44,6 +48,7 @@ defmodule Tau.CLI do
         Tau.CLI.Extensions.reload(opts_with_json(parsed)) |> halt()
       {[:version], _} -> version_cmd() |> halt()
       {[:doctor], _} -> doctor_cmd() |> halt()
+      {[:init], parsed} -> init_cmd(parsed) |> halt()
       {[:tui], _} -> tui_cmd() |> halt()
       {[], _} -> tui_cmd() |> halt()
       _ -> :ok
@@ -156,6 +161,20 @@ defmodule Tau.CLI do
         ],
         version: [name: "version", about: "Print Tau version"],
         doctor: [name: "doctor", about: "Diagnose environment, providers, MCP"],
+        init: [
+          name: "init",
+          about: "Interactive onboarding wizard (providers, permissions, MCP, skills).",
+          flags: [
+            reconfigure: [
+              long: "--reconfigure",
+              help: "Re-run the wizard against existing settings (start clean)."
+            ],
+            non_interactive: [
+              long: "--non-interactive",
+              help: "Skip prompts, accept defaults (CI / scripted setup)."
+            ]
+          ]
+        ],
         tui: [name: "tui", about: "Launch the interactive TUI"]
       ]
     )
@@ -244,6 +263,27 @@ defmodule Tau.CLI do
     end)
 
     0
+  end
+
+  defp init_cmd(parsed) do
+    opts = [
+      reconfigure: parsed.flags[:reconfigure] || false,
+      non_interactive: parsed.flags[:non_interactive] || false
+    ]
+
+    case Tau.CLI.Init.run(File.cwd!(), opts) do
+      {:ok, :no_write} ->
+        IO.puts("init: declined to write — no changes made.")
+        0
+
+      {:ok, path} ->
+        IO.puts("init: wrote #{path}.")
+        0
+
+      {:error, reason} ->
+        IO.puts(:stderr, "init failed: #{inspect(reason)}")
+        1
+    end
   end
 
   defp tui_cmd do
