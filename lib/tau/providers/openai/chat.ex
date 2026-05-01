@@ -32,17 +32,30 @@ defmodule Tau.Providers.OpenAI.Chat do
         {:error, :missing_api_key}
 
       key ->
-        body = build_body(messages, opts)
+        est = Tau.Providers.Shared.TokenEstimate.estimate(messages)
 
-        request =
-          Finch.build(
-            :post,
-            base_url() <> "/v1/chat/completions",
-            headers(key),
-            Jason.encode!(body)
-          )
+        case Tau.Providers.RateLimiter.acquire(__MODULE__, est) do
+          {:error, :rate_limit_timeout} ->
+            {:error, :rate_limited}
 
-        {:ok, FinchStream.run(request, &decode/2, %{tool_calls: %{}, model: nil})}
+          :ok ->
+            body = build_body(messages, opts)
+
+            request =
+              Finch.build(
+                :post,
+                base_url() <> "/v1/chat/completions",
+                headers(key),
+                Jason.encode!(body)
+              )
+
+            {:ok,
+             FinchStream.run(
+               request,
+               &decode/2,
+               %{tool_calls: %{}, model: nil, provider: __MODULE__}
+             )}
+        end
     end
   end
 

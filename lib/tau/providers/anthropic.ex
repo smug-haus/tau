@@ -57,18 +57,31 @@ defmodule Tau.Providers.Anthropic do
         {:error, :missing_api_key}
 
       key ->
-        {system, user_messages} = split_system(messages)
-        body = build_body(system, user_messages, opts)
+        est = Tau.Providers.Shared.TokenEstimate.estimate(messages)
 
-        request =
-          Finch.build(
-            :post,
-            "#{base_url()}/v1/messages",
-            headers(key),
-            Jason.encode!(body)
-          )
+        case Tau.Providers.RateLimiter.acquire(__MODULE__, est) do
+          {:error, :rate_limit_timeout} ->
+            {:error, :rate_limited}
 
-        {:ok, FinchStream.run(request, &decode/2, %{partial: %{}, started?: false, model: nil})}
+          :ok ->
+            {system, user_messages} = split_system(messages)
+            body = build_body(system, user_messages, opts)
+
+            request =
+              Finch.build(
+                :post,
+                "#{base_url()}/v1/messages",
+                headers(key),
+                Jason.encode!(body)
+              )
+
+            {:ok,
+             FinchStream.run(
+               request,
+               &decode/2,
+               %{partial: %{}, started?: false, model: nil, provider: __MODULE__}
+             )}
+        end
     end
   end
 

@@ -25,6 +25,10 @@ defmodule Tau.Registries do
     * `Tau.Sessions.Registry` — `:unique`, keyed by `session_id`. Session
       FSMs register themselves here on init so callers can address them
       by id without holding pid references.
+
+    * `Tau.Providers.RateLimiter.Registry` — `:unique`, keyed by provider
+      module. One `Tau.Providers.RateLimiter` GenServer registers per
+      configured provider (ADR-0011).
   """
   use Supervisor
 
@@ -40,7 +44,8 @@ defmodule Tau.Registries do
       {Registry, keys: :unique, name: Tau.Commands.Registry},
       {Registry, keys: :unique, name: Tau.Skills.Registry},
       {Registry, keys: :unique, name: Tau.Sessions.Registry},
-      {Registry, keys: :unique, name: Tau.MCP.Registry}
+      {Registry, keys: :unique, name: Tau.MCP.Registry},
+      {Registry, keys: :unique, name: Tau.Providers.RateLimiter.Registry}
     ]
 
     Supervisor.init(children, strategy: :one_for_one)

@@ -39,34 +39,47 @@ defmodule Tau.Providers.Bedrock do
         {:error, :missing_aws_credentials}
 
       creds ->
-        region = region()
-        model = opts[:model] || @default_model
+        est = Tau.Providers.Shared.TokenEstimate.estimate(messages)
 
-        url =
-          "https://bedrock-runtime.#{region}.amazonaws.com/model/#{model}/invoke-with-response-stream"
+        case Tau.Providers.RateLimiter.acquire(__MODULE__, est) do
+          {:error, :rate_limit_timeout} ->
+            {:error, :rate_limited}
 
-        body = Jason.encode!(build_payload(messages, opts))
+          :ok ->
+            region = region()
+            model = opts[:model] || @default_model
 
-        headers =
-          sigv4_sign(
-            :post,
-            url,
-            [{"content-type", "application/json"}],
-            body,
-            creds,
-            region,
-            "bedrock"
-          )
+            url =
+              "https://bedrock-runtime.#{region}.amazonaws.com/model/#{model}/invoke-with-response-stream"
 
-        request = Finch.build(:post, url, headers, body)
+            body = Jason.encode!(build_payload(messages, opts))
 
-        {:ok,
-         FinchStream.run(
-           request,
-           &decode_aws_chunk/2,
-           %{aws: AwsEventStream.new(), model: model, started?: false},
-           mode: :raw
-         )}
+            headers =
+              sigv4_sign(
+                :post,
+                url,
+                [{"content-type", "application/json"}],
+                body,
+                creds,
+                region,
+                "bedrock"
+              )
+
+            request = Finch.build(:post, url, headers, body)
+
+            {:ok,
+             FinchStream.run(
+               request,
+               &decode_aws_chunk/2,
+               %{
+                 aws: AwsEventStream.new(),
+                 model: model,
+                 started?: false,
+                 provider: __MODULE__
+               },
+               mode: :raw
+             )}
+        end
     end
   end
 

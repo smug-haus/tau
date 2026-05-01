@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Per-provider token-bucket rate limiter — one `Tau.Providers.RateLimiter`
+  GenServer per configured provider, supervised by
+  `Tau.Providers.RateLimiter.Supervisor`. Provider `stream/3` calls now
+  acquire a permit before sending; 429 responses halve the bucket; settings
+  reload re-sizes buckets without restart. New telemetry:
+  `[:tau, :provider, :rate_limit, :acquired | :throttled | :rejected | :halved]`.
+  See ADR-0011. (Refs #19, closes #39.)
 - `Tau.Providers.Shared.ToolSpec.adapt/2` — pure cross-provider tool-schema
   normaliser. Each provider's `build_body` now hands its tools list through
   `adapt/2` so callers pass `Tau.Tool` modules or raw normalised maps and the
