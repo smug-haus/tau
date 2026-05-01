@@ -46,6 +46,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tool_call → tool_result` correspondence. (Closes #33.)
 
 ### Added
+- `Tau.start_session(tools_whitelist: ["Read", "Grep"])` restricts a
+  session's tools at spawn time. The whitelist filter applies before
+  the permissions evaluator; missing tools synthesise an `is_error`
+  ToolResult the same way deny rules do. `:all` (default) preserves
+  current behaviour. Surfaced via `Tau.snapshot/1`. New telemetry:
+  `[:tau, :session, :tool_whitelisted]`. Foundation for ADR-0014
+  subagent personas. (Refs #18, closes #91.)
 - Model-invokable skills: the model can activate a discovered skill
   by emitting a tool_call to the synthetic `__activate_skill__` tool.
   Skills with `disable_model_invocation: true` are excluded from the

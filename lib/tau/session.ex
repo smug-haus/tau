@@ -271,7 +271,8 @@ defmodule Tau.Session do
           message_count: non_neg_integer(),
           skills: [{String.t(), Tau.Skill.t()}],
           metadata: map(),
-          permissions_mode: atom()
+          permissions_mode: atom(),
+          tools_whitelist: [String.t()] | :all
         }
 
   @doc """
@@ -298,7 +299,8 @@ defmodule Tau.Session do
          message_count: length(data.messages),
          skills: data.skills,
          metadata: data.metadata,
-         permissions_mode: Map.get(data.metadata, :permissions_mode, :default)
+         permissions_mode: Map.get(data.metadata, :permissions_mode, :default),
+         tools_whitelist: data.tools_whitelist
        }}
     end
   end
@@ -432,7 +434,15 @@ defmodule Tau.Session do
           # `active_skill.allowed_tools` before consulting the rule set.
           # Per-turn lifetime: cleared in `finalize_assistant/2` when the
           # assistant returns `stop_reason == :end_turn` and on `:cancel`.
-          active_skill: nil
+          active_skill: nil,
+          # #91: spawn-time tool whitelist (`:all` or `[String.t()]`).
+          # Filter applies in `dispatch_tools/2` before
+          # `Tau.Permissions.Evaluator`; calls outside the list synthesise
+          # an `is_error: true` ToolResult the same way deny rules do.
+          # Foundation for ADR-0014/15 subagent personas (the parent's
+          # `Agent` tool plumbs the child skill's `allowed_tools` through
+          # this opt). `:all` preserves today's behaviour.
+          tools_whitelist: opts[:tools_whitelist] || :all
         }
 
         {:ok, :awaiting_user, data}
@@ -887,6 +897,34 @@ defmodule Tau.Session do
 
     {data, activated_in_flight} = handle_skill_activations(activation_calls, data, parent)
 
+    # #91: spawn-time tools_whitelist filter. Runs *before* the permissions
+    # evaluator so the evaluator stays a pure permission-rule decision.
+    # Calls outside the list synthesise an `is_error: true` ToolResult the
+    # same way deny rules do; the filter is a no-op when `:all`.
+    {whitelisted_out, tool_calls} = split_tools_whitelist(tool_calls, data.tools_whitelist)
+
+    Enum.each(whitelisted_out, fn %{id: id, name: name} ->
+      result =
+        ToolResult.new(
+          tool_call_id: id,
+          tool_name: name,
+          content: "Tool '#{name}' not in this session's whitelist.",
+          is_error: true
+        )
+
+      Process.send(parent, {:tool_done, id, result}, [])
+
+      :telemetry.execute(
+        [:tau, :session, :tool_whitelisted],
+        %{system_time: System.system_time()},
+        %{
+          session_id: data.id,
+          tool_name: name,
+          whitelist_size: whitelist_size(data.tools_whitelist)
+        }
+      )
+    end)
+
     rule_set = Tau.Permissions.RuleSet.get()
     mode = Map.get(data.metadata, :permissions_mode, :default)
 
@@ -972,6 +1010,9 @@ defmodule Tau.Session do
     initial_in_flight =
       real_tasks
       |> Map.merge(Enum.into(gated, %{}, fn %{id: id} -> {id, :denied} end))
+      |> Map.merge(
+        Enum.into(whitelisted_out, %{}, fn %{id: id} -> {id, :whitelist_filtered} end)
+      )
       |> Map.merge(activated_in_flight)
 
     {:next_state, :tool_executing,
@@ -1052,6 +1093,20 @@ defmodule Tau.Session do
 
     pid
   end
+
+  # #91: split tool calls into {filtered_out, kept} based on the session's
+  # spawn-time `:tools_whitelist`. `:all` is the no-op identity (everything
+  # in `kept`); a list keeps only calls whose `name` is in the list. Stays
+  # ordering-preserving so downstream `Enum.into/2` and synthesis preserve
+  # the model's emit order.
+  defp split_tools_whitelist(tool_calls, :all), do: {[], tool_calls}
+
+  defp split_tools_whitelist(tool_calls, list) when is_list(list) do
+    Enum.split_with(tool_calls, fn %{name: name} -> name not in list end)
+  end
+
+  defp whitelist_size(:all), do: :all
+  defp whitelist_size(list) when is_list(list), do: length(list)
 
   # ADR-0013 / #16: format the synthetic ToolResult content for a
   # permissions :deny. When an active skill is in effect AND the tool is

@@ -36,6 +36,12 @@ defmodule Tau do
     * `:cwd` — working directory the session operates from
     * `:system_prompt` — overrides the default system prompt
     * `:tools` — `:all` or a list of tool modules / names to whitelist
+    * `:tools_whitelist` — `:all` (default) or a list of tool name
+      strings restricting which tools this session may call. Filter
+      runs in `Tau.Session.dispatch_tools/2` before
+      `Tau.Permissions.Evaluator`; calls outside the list synthesise an
+      `is_error: true` ToolResult the same way deny rules do. Useful
+      for sandboxed sessions and the subagent groundwork (ADR-0014/15).
     * `:permissions_mode` — `:default | :accept_edits | :plan | :auto | :dont_ask | :bypass`
     * `:persistence` — module implementing `Tau.Persistence`
     * `:resume_from` — event id to fork from (creates a new session branched off another)
