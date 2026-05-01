@@ -56,6 +56,19 @@ defmodule Tau.Session.Events do
     @type t :: %__MODULE__{}
   end
 
+  defmodule SkillActivated do
+    @moduledoc """
+    Broadcast when the model activates a discovered skill via the
+    synthetic `__activate_skill__` tool (issue #17, ADR-0013).
+
+    Activation lives on the FSM's `data.active_skill` field for the
+    remainder of the current turn (cleared on `:end_turn` or `:cancel`).
+    """
+    @enforce_keys [:session_id, :skill_name]
+    defstruct [:session_id, :skill_name, :tool_call_id]
+    @type t :: %__MODULE__{}
+  end
+
   defmodule SessionEnd do
     @enforce_keys [:session_id]
     defstruct [:session_id, :reason]

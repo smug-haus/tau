@@ -40,6 +40,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tool_call → tool_result` correspondence. (Closes #33.)
 
 ### Added
+- Model-invokable skills: the model can activate a discovered skill
+  by emitting a tool_call to the synthetic `__activate_skill__` tool.
+  Skills with `disable_model_invocation: true` are excluded from the
+  exposed list; their bodies are still injected as system messages
+  (background context). New PubSub event:
+  `%Tau.Session.Events.SkillActivated{}`. New telemetry:
+  `[:tau, :session, :skill_activated]`. New JSONL event kind:
+  `skill_activated`. Builds on #16 (PR #94) and ADR-0013. (Closes #17.)
 - Skill `allowed-tools` whitelist enforcement: when `data.active_skill` is
   set, the permissions evaluator denies any tool not listed in
   `active_skill.allowed_tools` before consulting the regular rule set.

@@ -29,6 +29,12 @@ defmodule Tau.Session do
   alias Tau.Session.Events
   alias Tau.Provider.Event, as: PEvent
 
+  # #17: name of the synthetic FSM-internal tool the model emits to
+  # activate a discovered skill. Not registered as a `Tau.Tool` module
+  # — interception happens in `dispatch_tools/2` before any executor
+  # would see it.
+  @activate_skill_tool_name "__activate_skill__"
+
   @type id :: String.t()
 
   defmodule Meta do
@@ -527,7 +533,11 @@ defmodule Tau.Session do
 
     ctx = Map.merge(data.provider_ctx, %{session_id: data.id})
 
-    case data.provider.stream(data.messages, %{model: data.model}, ctx) do
+    stream_opts =
+      %{model: data.model}
+      |> maybe_put_tools(skill_activation_tool_spec(data.skills))
+
+    case data.provider.stream(data.messages, stream_opts, ctx) do
       {:ok, stream} ->
         task =
           Task.async(fn ->
@@ -865,6 +875,18 @@ defmodule Tau.Session do
   defp dispatch_tools(tool_calls, data) do
     transition(data.id, data, :tool_executing)
     parent = self()
+
+    # #17: intercept synthetic `__activate_skill__` tool calls *before*
+    # permissions / hooks. Activation is FSM-internal — it never reaches
+    # the executor pool. The handler updates `data.active_skill` and
+    # synthesises a tool_result so the model's next turn sees an
+    # acknowledgement; subsequent tool calls in the same activation are
+    # then gated by the skill's `allowed_tools` list (ADR-0013).
+    {activation_calls, tool_calls} =
+      Enum.split_with(tool_calls, fn %{name: name} -> name == @activate_skill_tool_name end)
+
+    {data, activated_in_flight} = handle_skill_activations(activation_calls, data, parent)
+
     rule_set = Tau.Permissions.RuleSet.get()
     mode = Map.get(data.metadata, :permissions_mode, :default)
 
@@ -948,7 +970,9 @@ defmodule Tau.Session do
     real_tasks = Enum.into(parallel_calls, %{}, fn {id, _n, _a} -> {id, :running} end)
 
     initial_in_flight =
-      Map.merge(real_tasks, Enum.into(gated, %{}, fn %{id: id} -> {id, :denied} end))
+      real_tasks
+      |> Map.merge(Enum.into(gated, %{}, fn %{id: id} -> {id, :denied} end))
+      |> Map.merge(activated_in_flight)
 
     {:next_state, :tool_executing,
      %{
@@ -1251,6 +1275,163 @@ defmodule Tau.Session do
     # without an on-disk file return a pseudo-URI; the field on the
     # hook payload is always a non-nil binary.
     p.path_for(id, cwd)
+  end
+
+  # --- Skill activation (issue #17) -----------------------------------------
+  #
+  # Mechanism A (ADR-0013): the model activates a discovered skill by
+  # emitting a tool_call to the synthetic `__activate_skill__` tool. The
+  # tool is FSM-internal — it never reaches the executor pool, never
+  # passes through permissions or hooks. Skills with
+  # `disable_model_invocation: true` are excluded from the exposed enum;
+  # their bodies are still injected as system messages (background
+  # context) by `prepend_skill_messages/2`.
+
+  defp model_invokable_skills(skills) do
+    Enum.reject(skills, fn {_name, s} -> s.disable_model_invocation end)
+  end
+
+  defp skill_activation_tool_spec(skills) do
+    case model_invokable_skills(skills) do
+      [] ->
+        nil
+
+      list ->
+        names = Enum.map(list, fn {name, _s} -> name end)
+
+        descriptions =
+          list
+          |> Enum.map(fn {name, %Tau.Skill{description: d}} ->
+            case d do
+              "" -> "  - #{name}"
+              nil -> "  - #{name}"
+              desc -> "  - #{name}: #{desc}"
+            end
+          end)
+          |> Enum.join("\n")
+
+        description =
+          "Activate one of the available skills for the current turn. " <>
+            "Activation scopes subsequent tool calls to the skill's allowed_tools " <>
+            "whitelist (if set) and ends when you emit `end_turn`. " <>
+            "Available skills:\n" <> descriptions
+
+        %{
+          name: @activate_skill_tool_name,
+          description: description,
+          parameters: %{
+            "type" => "object",
+            "properties" => %{
+              "name" => %{
+                "type" => "string",
+                "enum" => names,
+                "description" => "Name of the skill to activate."
+              }
+            },
+            "required" => ["name"],
+            "additionalProperties" => false
+          }
+        }
+    end
+  end
+
+  defp maybe_put_tools(opts, nil), do: opts
+  defp maybe_put_tools(opts, tool_spec), do: Map.put(opts, :tools, [tool_spec])
+
+  # Process every `__activate_skill__` call inline. Returns the new
+  # `data` (with `active_skill` set on success) and the partial
+  # `tools_in_flight` map for these calls — they share the `:tool_done`
+  # mailbox path with regular tool results so the FSM bookkeeping is
+  # uniform.
+  defp handle_skill_activations([], data, _parent), do: {data, %{}}
+
+  defp handle_skill_activations(calls, data, parent) do
+    Enum.reduce(calls, {data, %{}}, fn %{id: id, name: tool_name, arguments: args},
+                                       {data_acc, in_flight_acc} ->
+      requested = skill_name_from_args(args)
+
+      {data_acc, result} = activate_skill(data_acc, requested, id)
+
+      :telemetry.execute(
+        [:tau, :session, :skill_activated],
+        %{system_time: System.system_time()},
+        %{
+          session_id: data_acc.id,
+          skill_name: requested,
+          tool_name: tool_name,
+          disabled?: result.is_error
+        }
+      )
+
+      Process.send(parent, {:tool_done, id, result}, [])
+      {data_acc, Map.put(in_flight_acc, id, :activated)}
+    end)
+  end
+
+  defp skill_name_from_args(args) when is_map(args) do
+    Map.get(args, "name") || Map.get(args, :name)
+  end
+
+  defp skill_name_from_args(_), do: nil
+
+  # Look up `name` on `data.skills`; honour `disable_model_invocation`.
+  # On success, set `data.active_skill`, persist a JSONL event, and
+  # broadcast `%Events.SkillActivated{}`. On failure, return an
+  # `is_error: true` ToolResult and leave `data` unchanged.
+  defp activate_skill(data, nil, call_id) do
+    {data,
+     ToolResult.new(
+       tool_call_id: call_id,
+       tool_name: @activate_skill_tool_name,
+       content: "Skill activation failed: missing 'name' parameter.",
+       is_error: true
+     )}
+  end
+
+  defp activate_skill(data, name, call_id) when is_binary(name) do
+    case List.keyfind(data.skills, name, 0) do
+      {^name, %Tau.Skill{disable_model_invocation: true}} ->
+        {data,
+         ToolResult.new(
+           tool_call_id: call_id,
+           tool_name: @activate_skill_tool_name,
+           content:
+             "Skill '#{name}' has disable-model-invocation set; it cannot be activated by the model.",
+           is_error: true
+         )}
+
+      {^name, %Tau.Skill{} = skill} ->
+        data =
+          %{data | active_skill: skill}
+          |> persist_event("skill_activated", %{
+            skill_name: name,
+            tool_call_id: call_id,
+            allowed_tools: skill.allowed_tools
+          })
+
+        broadcast(data.id, %Events.SkillActivated{
+          session_id: data.id,
+          skill_name: name,
+          tool_call_id: call_id
+        })
+
+        {data,
+         ToolResult.new(
+           tool_call_id: call_id,
+           tool_name: @activate_skill_tool_name,
+           content: "Skill activated: #{name}",
+           is_error: false
+         )}
+
+      nil ->
+        {data,
+         ToolResult.new(
+           tool_call_id: call_id,
+           tool_name: @activate_skill_tool_name,
+           content: "Unknown skill: #{name}",
+           is_error: true
+         )}
+    end
   end
 
   defp register_builtins do
