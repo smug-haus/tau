@@ -1752,7 +1752,10 @@ defmodule Tau.Session do
       Task.Supervisor.start_child(Tau.Tools.TaskSupervisor, fn ->
         result =
           try do
-            mod.execute(args, ctx)
+            case prepare_command_args(mod, args) do
+              {:ok, prepared} -> mod.execute(prepared, ctx)
+              {:error, _} = err -> err
+            end
           rescue
             e -> {:crashed, Exception.message(e)}
           catch
@@ -1793,10 +1796,32 @@ defmodule Tau.Session do
           | content: "(slash command timed out after #{ms}ms)\n\n" <> msg.content
         }
 
+      # #15: spec-parse failure surfaced from prepare_command_args/2.
+      {:error, reason} ->
+        %Tau.Message.User{
+          msg
+          | content:
+              "(slash command argument error: #{Tau.Command.Spec.format_error(reason)})\n\n" <>
+                msg.content
+        }
+
       _ ->
         msg
     end
   end
+
+  # #15: if the command module declares a `parameters/0` spec, tokenise
+  # the tail string and bind it before invoking `execute/2`. Otherwise
+  # pass the raw tail (backwards-compatible).
+  defp prepare_command_args(mod, args) when is_binary(args) do
+    if function_exported?(mod, :parameters, 0) do
+      Tau.Command.Spec.parse(mod.parameters(), args)
+    else
+      {:ok, args}
+    end
+  end
+
+  defp prepare_command_args(_mod, args), do: {:ok, args}
 
   defp invoke_file_command(path, args, msg) do
     case File.read(path) do

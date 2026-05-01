@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `Tau.Command.command_spec/1` macro for declarative argument parsing
+  on slash commands (positional `arg`, boolean `flag`, keyword `option`).
+  Pre-parser tokenises the tail string and binds it to the spec before
+  invoking `execute/2`. Missing/unknown args return tagged errors that
+  surface to the model. Commands without a spec continue to receive the
+  raw tail string (backwards-compatible). (Closes #15.)
+
 ### Tests
 - Property suite: thinking-block signature byte-exact preservation audit
   (`test/tau/persistence/thinking_roundtrip_property_test.exs`). Pins
