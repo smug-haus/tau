@@ -16,7 +16,13 @@ defmodule Tau.ProviderTest do
 
     @impl true
     def capabilities,
-      do: %{thinking: false, tools: false, vision: false, prompt_caching: false, parallel_tools: false}
+      do: %{
+        thinking: false,
+        tools: false,
+        vision: false,
+        prompt_caching: false,
+        parallel_tools: false
+      }
 
     @impl true
     def default_model, do: "sync-err"
@@ -32,14 +38,21 @@ defmodule Tau.ProviderTest do
 
     @impl true
     def capabilities,
-      do: %{thinking: false, tools: false, vision: false, prompt_caching: false, parallel_tools: false}
+      do: %{
+        thinking: false,
+        tools: false,
+        vision: false,
+        prompt_caching: false,
+        parallel_tools: false
+      }
 
     @impl true
     def default_model, do: "native"
 
     @impl true
     def chat(_msgs, _opts, _ctx) do
-      {:ok, Tau.Message.Assistant.new(content: [%{type: :text, text: "native"}], stop_reason: :stop)}
+      {:ok,
+       Tau.Message.Assistant.new(content: [%{type: :text, text: "native"}], stop_reason: :stop)}
     end
   end
 

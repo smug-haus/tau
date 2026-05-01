@@ -183,7 +183,8 @@ defmodule Tau.Providers.Shared.FinchStream do
     %{s | pending: s.pending ++ [%Event.Error{reason: reason, retryable?: true}], finished?: true}
   end
 
-  defp maybe_notify_rate_limiter(%{partial: %{provider: provider}}, status) when is_atom(provider) do
+  defp maybe_notify_rate_limiter(%{partial: %{provider: provider}}, status)
+       when is_atom(provider) do
     Tau.Providers.RateLimiter.record_response(provider, %{status: status})
   end
 

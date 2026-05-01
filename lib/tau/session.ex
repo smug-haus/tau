@@ -1161,9 +1161,7 @@ defmodule Tau.Session do
     initial_in_flight =
       real_tasks
       |> Map.merge(Enum.into(gated, %{}, fn %{id: id} -> {id, :denied} end))
-      |> Map.merge(
-        Enum.into(whitelisted_out, %{}, fn %{id: id} -> {id, :whitelist_filtered} end)
-      )
+      |> Map.merge(Enum.into(whitelisted_out, %{}, fn %{id: id} -> {id, :whitelist_filtered} end))
       |> Map.merge(activated_in_flight)
 
     {:next_state, :tool_executing,

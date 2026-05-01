@@ -31,32 +31,70 @@ defmodule Tau.CLI do
     Application.ensure_all_started(:tau)
 
     case Optimus.parse!(spec(), argv) do
-      {[:run], parsed} -> run_cmd(parsed) |> halt()
-      {[:resume], parsed} -> resume_cmd(parsed) |> halt()
-      {[:sessions, :list], _} -> sessions_list() |> halt()
-      {[:sessions, :show], parsed} -> sessions_show(parsed) |> halt()
-      {[:config], parsed} -> Tau.CLI.Config.show(opts_with_json(parsed)) |> halt()
-      {[:config, :get], parsed} -> config_get(parsed) |> halt()
-      {[:config, :set], parsed} -> config_set(parsed) |> halt()
-      {[:mcp], parsed} -> Tau.CLI.MCP.list(opts_with_json(parsed)) |> halt()
-      {[:mcp, :list], parsed} -> Tau.CLI.MCP.list(opts_with_json(parsed)) |> halt()
-      {[:mcp, :status], parsed} -> Tau.CLI.MCP.status(opts_with_json(parsed)) |> halt()
-      {[:mcp, :reload], parsed} -> Tau.CLI.MCP.reload(opts_with_json(parsed)) |> halt()
-      {[:extensions], parsed} -> Tau.CLI.Extensions.list(opts_with_json(parsed)) |> halt()
-      {[:extensions, :list], parsed} -> Tau.CLI.Extensions.list(opts_with_json(parsed)) |> halt()
+      {[:run], parsed} ->
+        run_cmd(parsed) |> halt()
+
+      {[:resume], parsed} ->
+        resume_cmd(parsed) |> halt()
+
+      {[:sessions, :list], _} ->
+        sessions_list() |> halt()
+
+      {[:sessions, :show], parsed} ->
+        sessions_show(parsed) |> halt()
+
+      {[:config], parsed} ->
+        Tau.CLI.Config.show(opts_with_json(parsed)) |> halt()
+
+      {[:config, :get], parsed} ->
+        config_get(parsed) |> halt()
+
+      {[:config, :set], parsed} ->
+        config_set(parsed) |> halt()
+
+      {[:mcp], parsed} ->
+        Tau.CLI.MCP.list(opts_with_json(parsed)) |> halt()
+
+      {[:mcp, :list], parsed} ->
+        Tau.CLI.MCP.list(opts_with_json(parsed)) |> halt()
+
+      {[:mcp, :status], parsed} ->
+        Tau.CLI.MCP.status(opts_with_json(parsed)) |> halt()
+
+      {[:mcp, :reload], parsed} ->
+        Tau.CLI.MCP.reload(opts_with_json(parsed)) |> halt()
+
+      {[:extensions], parsed} ->
+        Tau.CLI.Extensions.list(opts_with_json(parsed)) |> halt()
+
+      {[:extensions, :list], parsed} ->
+        Tau.CLI.Extensions.list(opts_with_json(parsed)) |> halt()
+
       {[:extensions, :reload], parsed} ->
         Tau.CLI.Extensions.reload(opts_with_json(parsed)) |> halt()
-      {[:version], _} -> version_cmd() |> halt()
-      {[:doctor], _} -> doctor_cmd() |> halt()
-      {[:init], parsed} -> init_cmd(parsed) |> halt()
-      {[:tui], _} -> tui_cmd() |> halt()
-      {[], _} -> tui_cmd() |> halt()
-      _ -> :ok
+
+      {[:version], _} ->
+        version_cmd() |> halt()
+
+      {[:doctor], _} ->
+        doctor_cmd() |> halt()
+
+      {[:init], parsed} ->
+        init_cmd(parsed) |> halt()
+
+      {[:tui], _} ->
+        tui_cmd() |> halt()
+
+      {[], _} ->
+        tui_cmd() |> halt()
+
+      _ ->
+        :ok
     end
   end
 
   defp opts_with_json(parsed) do
-    [json: !!(parsed.flags[:json] || (parsed.options[:json] in [true, "true"]))]
+    [json: !!(parsed.flags[:json] || parsed.options[:json] in [true, "true"])]
   end
 
   defp config_get(parsed) do

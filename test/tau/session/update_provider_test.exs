@@ -41,7 +41,13 @@ defmodule Tau.Session.UpdateProviderTest do
 
     @impl true
     def capabilities,
-      do: %{thinking: false, tools: false, vision: false, prompt_caching: false, parallel_tools: false}
+      do: %{
+        thinking: false,
+        tools: false,
+        vision: false,
+        prompt_caching: false,
+        parallel_tools: false
+      }
 
     @impl true
     def default_model, do: "alt"

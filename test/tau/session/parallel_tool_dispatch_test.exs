@@ -79,7 +79,13 @@ defmodule Tau.Session.ParallelToolDispatchTest do
 
     @impl true
     def capabilities,
-      do: %{thinking: false, tools: true, vision: false, prompt_caching: false, parallel_tools: true}
+      do: %{
+        thinking: false,
+        tools: true,
+        vision: false,
+        prompt_caching: false,
+        parallel_tools: true
+      }
 
     @impl true
     def default_model, do: "p33"
