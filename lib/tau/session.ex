@@ -412,6 +412,12 @@ defmodule Tau.Session do
           # settings reload between turns is picked up automatically.
           fallback_chain_remaining: [],
           tools_in_flight: %{},
+          # #33: pid of the per-turn parallel-tool dispatcher (a child of
+          # Tau.Tools.TaskSupervisor that drives Task.Supervisor.async_stream_nolink/4
+          # over the turn's tool calls). Stored so :cancel can brutal-kill
+          # the iterator; orphaned tool tasks remain under the supervisor
+          # and complete or are reaped naturally.
+          tool_dispatcher: nil,
           # ADR-0008: slash-command tasks (user code) run isolated under
           # Tau.Tools.TaskSupervisor, never inline in the FSM.
           command_task: nil
@@ -647,9 +653,13 @@ defmodule Tau.Session do
       Task.shutdown(data.provider_task, :brutal_kill)
     end
 
-    Enum.each(data.tools_in_flight, fn {_id, t} ->
-      if Process.alive?(t.pid), do: Task.shutdown(t, :brutal_kill)
-    end)
+    # #33: with async_stream_nolink the dispatcher owns the tool tasks.
+    # Brutal-killing it stops the iterator; in-flight tool processes under
+    # Tau.Tools.TaskSupervisor finish on their own (no link to dispatcher)
+    # and any late `:tool_done` messages drop into the catch-all clause.
+    if data.tool_dispatcher && Process.alive?(data.tool_dispatcher) do
+      Process.exit(data.tool_dispatcher, :brutal_kill)
+    end
 
     if data.command_task && Process.alive?(data.command_task) do
       Process.exit(data.command_task, :brutal_kill)
@@ -659,7 +669,14 @@ defmodule Tau.Session do
     persist_event(data, "cancellation", %{reason: "user"})
 
     {:next_state, :awaiting_user,
-     %{data | provider_task: nil, tools_in_flight: %{}, assembler: nil, command_task: nil}}
+     %{
+       data
+       | provider_task: nil,
+         tools_in_flight: %{},
+         tool_dispatcher: nil,
+         assembler: nil,
+         command_task: nil
+     }}
   end
 
   def handle_event(:cast, :stop, _state, data) do
@@ -710,7 +727,12 @@ defmodule Tau.Session do
     })
 
     if map_size(tools) == 0 do
-      handle_event(:internal, :start_provider, :provider_streaming, %{data | tools_in_flight: tools})
+      handle_event(
+        :internal,
+        :start_provider,
+        :provider_streaming,
+        %{data | tools_in_flight: tools, tool_dispatcher: nil}
+      )
     else
       {:keep_state, %{data | tools_in_flight: tools}}
     end
@@ -856,9 +878,11 @@ defmodule Tau.Session do
       })
     end)
 
-    tasks =
-      Enum.into(allowed, %{}, fn %{id: id, name: name, arguments: args} ->
-        # :pre_tool_use hook may rewrite args or veto.
+    # Run :pre_tool_use synchronously per call. Hook-vetoed calls synthesise
+    # a tool_result on the spot; survivors form the parallel batch handed to
+    # the dispatcher (#33).
+    {_hook_denied, parallel_calls} =
+      Enum.reduce(allowed, {[], []}, fn %{id: id, name: name, arguments: args}, {denied, kept} ->
         case Tau.Hooks.Dispatcher.run(
                :pre_tool_use,
                hook_payload(data, :pre_tool_use, %{
@@ -868,7 +892,7 @@ defmodule Tau.Session do
                })
              ) do
           {:halt, reason} ->
-            denied =
+            result =
               ToolResult.new(
                 tool_call_id: id,
                 tool_name: name,
@@ -876,11 +900,11 @@ defmodule Tau.Session do
                 is_error: true
               )
 
-            Process.send(parent, {:tool_done, id, denied}, [])
-            {id, :hook_blocked}
+            Process.send(parent, {:tool_done, id, result}, [])
+            {[id | denied], kept}
 
           {:deny, reason} ->
-            denied =
+            result =
               ToolResult.new(
                 tool_call_id: id,
                 tool_name: name,
@@ -888,77 +912,105 @@ defmodule Tau.Session do
                 is_error: true
               )
 
-            Process.send(parent, {:tool_done, id, denied}, [])
-            {id, :hook_denied}
+            Process.send(parent, {:tool_done, id, result}, [])
+            {[id | denied], kept}
 
           {:cont, payload} ->
-            args = Map.get(payload, :tool_input, args)
-            spawn_tool_task(name, id, args, data, parent)
+            rewritten_args = Map.get(payload, :tool_input, args)
+            {denied, [{id, name, rewritten_args} | kept]}
         end
       end)
 
-    # Filter out the synthesised :hook_blocked / :hook_denied entries — they
-    # already reported via :tool_done.
-    real_tasks =
-      tasks
-      |> Enum.reject(fn {_id, v} -> v in [:hook_blocked, :hook_denied] end)
-      |> Enum.into(%{})
+    parallel_calls = Enum.reverse(parallel_calls)
+
+    dispatcher_pid =
+      case parallel_calls do
+        [] -> nil
+        _ -> spawn_parallel_dispatcher(parallel_calls, data, parent)
+      end
+
+    real_tasks = Enum.into(parallel_calls, %{}, fn {id, _n, _a} -> {id, :running} end)
 
     initial_in_flight =
       Map.merge(real_tasks, Enum.into(gated, %{}, fn %{id: id} -> {id, :denied} end))
 
     {:next_state, :tool_executing,
-     %{data | tools_in_flight: initial_in_flight, provider_task: nil, assembler: nil}}
+     %{
+       data
+       | tools_in_flight: initial_in_flight,
+         tool_dispatcher: dispatcher_pid,
+         provider_task: nil,
+         assembler: nil
+     }}
   end
 
-  defp spawn_tool_task(name, id, args, data, parent) do
-    task =
-      Task.Supervisor.async_nolink(Tau.Tools.TaskSupervisor, fn ->
-        run_tool(name, id, args, data)
+  # #33: single iterator over the parallel batch via
+  # Task.Supervisor.async_stream_nolink/4. One process per turn drives the
+  # stream; per-tool tasks run concurrently under Tau.Tools.TaskSupervisor.
+  # Crash isolation: an exiting tool task surfaces as `{:exit, reason}` from
+  # the stream — we synthesise an `is_error: true` ToolResult so the FSM
+  # never loses a tool_call → tool_result correspondence. `ordered: true`
+  # so we can zip the input call back onto each result (needed to recover
+  # the call id on `{:exit, _}`); throughput is unchanged because tool
+  # tasks still run concurrently up to `max_concurrency`.
+  defp spawn_parallel_dispatcher(parallel_calls, data, parent) do
+    {:ok, pid} =
+      Task.Supervisor.start_child(Tau.Tools.TaskSupervisor, fn ->
+        Enum.each(parallel_calls, fn {id, name, args} ->
+          broadcast(data.id, %Events.ToolStart{
+            session_id: data.id,
+            tool_call_id: id,
+            name: name,
+            arguments: args
+          })
+        end)
+
+        parallel_calls
+        |> Task.Supervisor.async_stream_nolink(
+          Tau.Tools.TaskSupervisor,
+          fn {id, name, args} -> run_tool(name, id, args, data) end,
+          max_concurrency: System.schedulers_online(),
+          timeout: :infinity,
+          on_timeout: :kill_task,
+          ordered: true
+        )
+        |> Stream.zip(parallel_calls)
+        |> Enum.each(fn {stream_result, {id, name, _args}} ->
+          result =
+            case stream_result do
+              {:ok, %ToolResult{} = r} ->
+                r
+
+              {:exit, reason} ->
+                ToolResult.new(
+                  tool_call_id: id,
+                  tool_name: name,
+                  content: "Tool task crashed: #{inspect(reason)}",
+                  is_error: true
+                )
+            end
+
+          # :post_tool_use hook may rewrite the result.
+          post_event = if result.is_error, do: :post_tool_use_failure, else: :post_tool_use
+
+          result =
+            case Tau.Hooks.Dispatcher.run(
+                   post_event,
+                   hook_payload(data, post_event, %{
+                     tool_name: name,
+                     tool_call_id: id,
+                     result: result
+                   })
+                 ) do
+              {:cont, %{result: rewritten}} when is_struct(rewritten, ToolResult) -> rewritten
+              _ -> result
+            end
+
+          Process.send(parent, {:tool_done, id, result}, [])
+        end)
       end)
 
-    broadcast(data.id, %Events.ToolStart{
-      session_id: data.id,
-      tool_call_id: id,
-      name: name,
-      arguments: args
-    })
-
-    # Convert task completion into our :tool_done message.
-    spawn_link(fn ->
-      result =
-        try do
-          Task.await(task, :infinity)
-        catch
-          :exit, reason ->
-            ToolResult.new(
-              tool_call_id: id,
-              tool_name: name,
-              content: "Tool task crashed: #{inspect(reason)}",
-              is_error: true
-            )
-        end
-
-      # :post_tool_use hook may rewrite the result.
-      post_event = if result.is_error, do: :post_tool_use_failure, else: :post_tool_use
-
-      result =
-        case Tau.Hooks.Dispatcher.run(
-               post_event,
-               hook_payload(data, post_event, %{
-                 tool_name: name,
-                 tool_call_id: id,
-                 result: result
-               })
-             ) do
-          {:cont, %{result: rewritten}} when is_struct(rewritten, ToolResult) -> rewritten
-          _ -> result
-        end
-
-      Process.send(parent, {:tool_done, id, result}, [])
-    end)
-
-    {id, task}
+    pid
   end
 
   defp run_tool(name, call_id, args, data) do
