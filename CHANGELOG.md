@@ -40,6 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tool_call → tool_result` correspondence. (Closes #33.)
 
 ### Added
+- Skill `allowed-tools` whitelist enforcement: when `data.active_skill` is
+  set, the permissions evaluator denies any tool not listed in
+  `active_skill.allowed_tools` before consulting the regular rule set.
+  Skill activation lives on the session FSM and clears on `:end_turn` or
+  `:cancel`. See ADR-0013. (Closes #16.)
 - Provider fallback chains — sessions retry against the next provider
   in `settings.providers.fallback_chains[primary]` on a retryable
   `%Event.Error{}` mid-stream. Transcript is content-transformed for

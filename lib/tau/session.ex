@@ -420,7 +420,13 @@ defmodule Tau.Session do
           tool_dispatcher: nil,
           # ADR-0008: slash-command tasks (user code) run isolated under
           # Tau.Tools.TaskSupervisor, never inline in the FSM.
-          command_task: nil
+          command_task: nil,
+          # ADR-0013 (#16): currently-active skill, or nil. When set,
+          # `Tau.Permissions.Evaluator` denies any tool not on
+          # `active_skill.allowed_tools` before consulting the rule set.
+          # Per-turn lifetime: cleared in `finalize_assistant/2` when the
+          # assistant returns `stop_reason == :end_turn` and on `:cancel`.
+          active_skill: nil
         }
 
         {:ok, :awaiting_user, data}
@@ -675,7 +681,10 @@ defmodule Tau.Session do
          tools_in_flight: %{},
          tool_dispatcher: nil,
          assembler: nil,
-         command_task: nil
+         command_task: nil,
+         # ADR-0013 (#16): cancel ends the current turn — drop any
+         # active skill alongside it.
+         active_skill: nil
      }}
   end
 
@@ -803,6 +812,12 @@ defmodule Tau.Session do
     # that asked for the call.
     data = %{data | provider: data.original_provider, fallback_chain_remaining: []}
 
+    # ADR-0013 (#16): skill activation is per-turn. The skill's lifetime
+    # ends when the model decides the task is complete (`:end_turn`).
+    # Tool-call turns keep the active skill so subsequent dispatch is
+    # still gated; only `:end_turn` clears it.
+    data = if msg.stop_reason == :end_turn, do: %{data | active_skill: nil}, else: data
+
     tool_calls = Enum.filter(msg.content, &match?(%{type: :tool_call}, &1))
 
     cond do
@@ -853,10 +868,11 @@ defmodule Tau.Session do
     rule_set = Tau.Permissions.RuleSet.get()
     mode = Map.get(data.metadata, :permissions_mode, :default)
 
+    eval_ctx = %{cwd: data.cwd, active_skill: data.active_skill}
+
     {gated, allowed} =
       Enum.split_with(tool_calls, fn %{name: name, arguments: args} ->
-        Tau.Permissions.Evaluator.evaluate(rule_set, name, args, %{cwd: data.cwd}, mode) ==
-          :deny
+        Tau.Permissions.Evaluator.evaluate(rule_set, name, args, eval_ctx, mode) == :deny
       end)
 
     # Synthesise tool_results for denied calls — model sees them as is_error.
@@ -865,7 +881,7 @@ defmodule Tau.Session do
         ToolResult.new(
           tool_call_id: id,
           tool_name: name,
-          content: "Permission denied: #{name} blocked by deny rule",
+          content: deny_reason(name, data.active_skill),
           is_error: true
         )
 
@@ -1012,6 +1028,22 @@ defmodule Tau.Session do
 
     pid
   end
+
+  # ADR-0013 / #16: format the synthetic ToolResult content for a
+  # permissions :deny. When an active skill is in effect AND the tool is
+  # not on its allowed_tools list, the denial is attributed to the skill;
+  # otherwise the failure originated from a rule-set deny rule.
+  defp deny_reason(name, %Tau.Skill{name: skill_name, allowed_tools: list})
+       when is_list(list) and list != [] do
+    if name in list do
+      "Permission denied: #{name} blocked by deny rule"
+    else
+      "Tool '#{name}' not on active skill '#{skill_name}' allowed_tools whitelist"
+    end
+  end
+
+  defp deny_reason(name, _active_skill),
+    do: "Permission denied: #{name} blocked by deny rule"
 
   defp run_tool(name, call_id, args, data) do
     started = System.monotonic_time(:millisecond)
