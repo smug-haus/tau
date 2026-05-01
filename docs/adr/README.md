@@ -67,6 +67,8 @@ get rewritten away by the next refactor. ADRs survive.
 | [0011](0011-per-provider-rate-limiter-is-stateful-genserver.md) | Per-provider rate limiter is a stateful GenServer (not an ETS-owner) | Accepted |
 | [0012](0012-provider-fallback-is-fsm-internal-retry.md) | Provider fallback is an FSM-internal retry, not a wrapper provider | Accepted |
 | [0013](0013-skill-activation-is-fsm-scoped.md) | Skill activation lives on the session FSM, scoped to one turn | Accepted |
+| [0014](0014-subagents-are-sessions.md) | Subagents are sessions, spawned by the `Agent` tool | Proposed |
+| [0015](0015-subagent-persona-is-a-skill.md) | Subagent persona is a `Tau.Skill`; permissions inherit and may only tighten | Proposed |
 
 (New ADRs append here. Keep the table sorted by ADR number.)
 
