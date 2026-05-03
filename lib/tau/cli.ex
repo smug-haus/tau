@@ -291,17 +291,22 @@ defmodule Tau.CLI do
     IO.puts("OTP: #{System.otp_release()}")
     IO.puts("data_dir: #{Tau.Settings.data_dir()}")
 
-    [Tau.Providers.Anthropic]
-    |> Enum.each(fn mod ->
-      key_env =
-        case mod do
-          Tau.Providers.Anthropic -> "ANTHROPIC_API_KEY"
-          _ -> ""
-        end
+    # D-019: report which Anthropic auth path is configured.
+    case Tau.Providers.Anthropic.Auth.resolve(%{}) do
+      {:ok, {:api_key, _}} ->
+        IO.puts("provider Tau.Providers.Anthropic: api_key (env / settings)")
 
-      ok = if System.get_env(key_env), do: "ok", else: "missing key"
-      IO.puts("provider #{inspect(mod)}: #{ok}")
-    end)
+      {:ok, {:oauth, info}} ->
+        ttl_s = max(div(info.expires_at - :os.system_time(:millisecond), 1000), 0)
+
+        IO.puts(
+          "provider Tau.Providers.Anthropic: oauth (#{info.subscription_type}, " <>
+            "expires in #{ttl_s}s)"
+        )
+
+      {:error, _} = err ->
+        IO.puts("provider Tau.Providers.Anthropic: " <> Tau.Providers.Anthropic.Auth.describe_error(err))
+    end
 
     0
   end

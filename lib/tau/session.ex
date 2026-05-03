@@ -665,7 +665,13 @@ defmodule Tau.Session do
         # `msg.content` (e.g. `Tau.TUI.App.on_message_end/2`) surface the
         # error to the user. Without the text block the TUI silently drops
         # the error, presenting "TUI does nothing" to the user.
-        reason_str = inspect(reason)
+        #
+        # D-018 (SPEC-USER-TURN [C46]/[C48]): for Anthropic auth atoms
+        # (`:missing_api_key`, `:oauth_expired`, etc.) substitute the
+        # human-readable, actionable renewal instruction so the user
+        # learns to run `claude /login` instead of staring at an opaque
+        # `:oauth_expired`.
+        reason_str = describe_provider_error(reason)
 
         msg =
           Assistant.new(
@@ -1531,6 +1537,27 @@ defmodule Tau.Session do
   defp broadcast(id, event) do
     Phoenix.PubSub.broadcast(Tau.PubSub, "session:#{id}", event)
   end
+
+  # D-018: translate known provider auth atoms into user-actionable
+  # strings. Other reasons fall through to inspect/1 (the original
+  # D-009 behavior).
+  defp describe_provider_error(:missing_api_key) do
+    Tau.Providers.Anthropic.Auth.describe_error({:error, :no_auth})
+  end
+
+  defp describe_provider_error(:oauth_expired) do
+    Tau.Providers.Anthropic.Auth.describe_error({:error, :oauth_expired})
+  end
+
+  defp describe_provider_error(:oauth_missing_scope) do
+    Tau.Providers.Anthropic.Auth.describe_error({:error, :oauth_missing_scope})
+  end
+
+  defp describe_provider_error(:oauth_malformed) do
+    Tau.Providers.Anthropic.Auth.describe_error({:error, :oauth_malformed})
+  end
+
+  defp describe_provider_error(other), do: inspect(other)
 
   # ADR-0014 (#92): walk the child set and cast the chosen lifecycle
   # operation. Both `Tau.cancel/1` and `Tau.stop/1` are :ok-or-:ok casts

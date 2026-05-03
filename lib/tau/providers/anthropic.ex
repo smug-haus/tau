@@ -8,15 +8,20 @@ defmodule Tau.Providers.Anthropic do
 
   ## Configuration
 
-  Auth precedence (per call → settings → app env → vault):
+  Auth resolution lives in `Tau.Providers.Anthropic.Auth` (D-017).
+  Two paths are supported as first-class:
 
-      :api_key in opts
-      Application.get_env(:tau, Tau.Providers.Anthropic)[:api_key]
-      Tau.Settings.Vault.resolve({:vault, "ANTHROPIC_API_KEY"})
+  1. **API key** (`x-api-key` header). Resolved from explicit
+     `:api_key` opt → `Application.get_env(:tau, Tau.Providers.Anthropic)[:api_key]`
+     → `Tau.Settings.Vault.resolve({:vault, "ANTHROPIC_API_KEY"})`.
+  2. **Claude Code OAuth** (`Authorization: Bearer <token>` plus
+     `anthropic-beta: oauth-2025-04-20`). Sourced from
+     `~/.claude/.credentials.json` (key `claudeAiOauth`). Pro/Max
+     subscribers do NOT have API keys; this is the dominant path.
 
   The vault tail of the chain dispatches through the configured
   `Tau.Settings.Vault` backend (defaults to the `Env` passthrough,
-  which preserves today's `System.get_env("ANTHROPIC_API_KEY")`
+  which preserves the historical `System.get_env("ANTHROPIC_API_KEY")`
   behaviour). See ADR-0016.
 
   An `:api_key` value of the form `{:vault, name}` is resolved
@@ -36,6 +41,7 @@ defmodule Tau.Providers.Anthropic do
 
   alias Tau.Message.{Assistant, ToolResult, User}
   alias Tau.Provider.Event
+  alias Tau.Providers.Anthropic.Auth
   alias Tau.Providers.Shared.{FinchStream, ToolSpec}
 
   @api_url "https://api.anthropic.com"
@@ -60,11 +66,21 @@ defmodule Tau.Providers.Anthropic do
 
   @impl Tau.Provider
   def stream(messages, opts \\ %{}, ctx \\ %{}) do
-    case api_key(opts) do
-      nil ->
-        {:error, :missing_api_key}
+    case Auth.resolve(opts) do
+      {:error, _} = err ->
+        # D-017 / D-018: surface a structured auth error. The
+        # session FSM's :start_provider error branch translates this
+        # into an Assistant message whose content includes the
+        # actionable renewal instruction (D-009). Preserves the
+        # historical `:missing_api_key` shape ONLY for the legacy
+        # "no auth at all" case, so existing callers that switch on
+        # that atom keep working until migrated.
+        case err do
+          {:error, :no_auth} -> {:error, :missing_api_key}
+          other -> other
+        end
 
-      key ->
+      {:ok, auth} ->
         est = Tau.Providers.Shared.TokenEstimate.estimate(messages)
 
         case Tau.Providers.RateLimiter.acquire(__MODULE__, est) do
@@ -79,7 +95,7 @@ defmodule Tau.Providers.Anthropic do
               Finch.build(
                 :post,
                 "#{base_url()}/v1/messages",
-                headers(key),
+                headers(auth),
                 Jason.encode!(body)
               )
 
@@ -347,33 +363,30 @@ defmodule Tau.Providers.Anthropic do
 
   # --- Auth & transport plumbing -------------------------------------------
 
-  defp api_key(opts) do
-    # Resolution order (first non-nil wins):
-    #
-    #   1. `opts[:api_key]` — per-call override; literal string or
-    #      `{:vault, name}` reference.
-    #   2. `Application.get_env(:tau, __MODULE__)[:api_key]` — kept
-    #      for backwards compatibility with the pre-ADR-0016 path.
-    #   3. `Tau.Settings.Vault.resolve({:vault, "ANTHROPIC_API_KEY"})`
-    #      — dispatches through the configured vault backend (defaults
-    #      to `Env`, which is `System.get_env/1`, preserving today's
-    #      behaviour).
-    Tau.Settings.Vault.resolve(opts[:api_key]) ||
-      Application.get_env(:tau, __MODULE__, [])[:api_key] ||
-      Tau.Settings.Vault.resolve({:vault, "ANTHROPIC_API_KEY"})
-  end
-
   defp base_url do
     Application.get_env(:tau, __MODULE__, [])[:base_url] ||
       System.get_env("ANTHROPIC_BASE_URL") ||
       @api_url
   end
 
-  defp headers(key) do
+  # D-017: header dispatch. API-key auth uses `x-api-key`; OAuth uses
+  # `Authorization: Bearer ...` AND requires the `oauth-2025-04-20`
+  # beta header for the Messages API to honor the token.
+  defp headers({:api_key, key}) do
     [
       {"x-api-key", key},
       {"anthropic-version", @api_version},
       {"anthropic-beta", @beta_headers},
+      {"content-type", "application/json"},
+      {"accept", "text/event-stream"}
+    ]
+  end
+
+  defp headers({:oauth, %{access_token: token}}) do
+    [
+      {"authorization", "Bearer " <> token},
+      {"anthropic-version", @api_version},
+      {"anthropic-beta", "oauth-2025-04-20," <> @beta_headers},
       {"content-type", "application/json"},
       {"accept", "text/event-stream"}
     ]
