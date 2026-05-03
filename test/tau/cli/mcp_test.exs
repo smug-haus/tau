@@ -7,18 +7,18 @@ defmodule Tau.CLI.MCPTest do
 
   describe "Optimus parser wiring" do
     test "parses `tau mcp list`" do
-      assert {:ok, {[:mcp, :list], _}} = Optimus.parse(Tau.CLI.spec(), ["mcp", "list"])
+      assert {:ok, [:mcp, :list], _} = Optimus.parse(Tau.CLI.spec(), ["mcp", "list"])
     end
 
     test "parses `tau mcp status --json`" do
-      assert {:ok, {[:mcp, :status], parsed}} =
+      assert {:ok, [:mcp, :status], parsed} =
                Optimus.parse(Tau.CLI.spec(), ["mcp", "status", "--json"])
 
       assert parsed.flags[:json] == true
     end
 
     test "parses `tau mcp reload`" do
-      assert {:ok, {[:mcp, :reload], _}} = Optimus.parse(Tau.CLI.spec(), ["mcp", "reload"])
+      assert {:ok, [:mcp, :reload], _} = Optimus.parse(Tau.CLI.spec(), ["mcp", "reload"])
     end
   end
 

@@ -7,12 +7,12 @@ defmodule Tau.CLI.ExtensionsTest do
 
   describe "Optimus parser wiring" do
     test "parses `tau extensions list`" do
-      assert {:ok, {[:extensions, :list], _}} =
+      assert {:ok, [:extensions, :list], _} =
                Optimus.parse(Tau.CLI.spec(), ["extensions", "list"])
     end
 
     test "parses `tau extensions reload --json`" do
-      assert {:ok, {[:extensions, :reload], parsed}} =
+      assert {:ok, [:extensions, :reload], parsed} =
                Optimus.parse(Tau.CLI.spec(), ["extensions", "reload", "--json"])
 
       assert parsed.flags[:json] == true
