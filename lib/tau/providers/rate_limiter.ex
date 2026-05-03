@@ -195,7 +195,7 @@ defmodule Tau.Providers.RateLimiter do
   def handle_cast({:record_response, %{status: 429}}, state) do
     rpm = TokenBucket.halve(state.rpm_bucket)
     tpm = TokenBucket.halve(state.tpm_bucket)
-    half_until = monotonic_now() + @default_429_floor_ms
+    half_until = wall_now() + @default_429_floor_ms
 
     :telemetry.execute(
       [:tau, :provider, :rate_limit, :halved],
@@ -254,7 +254,7 @@ defmodule Tau.Providers.RateLimiter do
 
   def handle_info({:settings_reloaded, settings}, state) do
     {rpm_size, tpm_size} = sizes_from_settings(state.provider, settings)
-    now = monotonic_now()
+    now = wall_now()
 
     rpm_target = ceiling_during_half(rpm_size, state.rpm_bucket.size, state.half_until, now)
     tpm_target = ceiling_during_half(tpm_size, state.tpm_bucket.size, state.half_until, now)
@@ -342,4 +342,10 @@ defmodule Tau.Providers.RateLimiter do
   end
 
   defp monotonic_now, do: System.monotonic_time(:millisecond)
+
+  # `half_until` lives in wall-clock time (`System.system_time/1`) so the
+  # floor sentinel is always positive. The 60s comparison only cares about
+  # *relative* progression, and decoupling from monotonic time keeps the
+  # init value `0` meaning "no floor active" without sign-flip surprises.
+  defp wall_now, do: System.system_time(:millisecond)
 end
