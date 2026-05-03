@@ -122,12 +122,21 @@ defmodule Tau.MixProject do
         |> String.split(",")
         |> Enum.map(&String.to_atom/1)
 
-      release
-      |> Map.put(:steps, [&Burrito.wrap/1])
-      |> Map.put(:burrito,
+      # Burrito 1.5.0 reads its config from `release.options[:burrito]`
+      # (`Burrito.Builder.build/1`, line ~70). Earlier versions tolerated a
+      # top-level `release.burrito` field; current versions don't — putting
+      # it at the top level leaves `options[:burrito]` nil, which trips
+      # `Keyword.has_key?(nil, ...)` once `BURRITO_TARGET` is set.
+      burrito_options = [
         targets: target_atoms_to_keyword(target_atom),
         debug: false
-      )
+      ]
+
+      %{
+        release
+        | steps: [&Burrito.wrap/1],
+          options: Keyword.put(release.options, :burrito, burrito_options)
+      }
     else
       release
     end
