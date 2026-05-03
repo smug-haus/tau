@@ -1,0 +1,177 @@
+# PSDH Catalog Schema
+#
+# Machine-readable format for PSDH catalog entries. This schema defines the
+# structure that the emitter (Layer B) consumes to generate enforcement
+# artifacts: rules, property test stubs, review criteria, and hook heuristics.
+#
+# The markdown catalog (psdh-catalog-template.md) is the human authoring
+# format. This YAML schema is the machine format. Fields correspond exactly
+# to the catalog template. When authoring PSDHs, write in markdown first,
+# then express in YAML for automated consumption.
+#
+# One YAML file per project. Contains a header and a list of entries.
+
+# --- Schema Definition ---
+
+catalog:
+  project: ""                          # Project or component name
+  component: ""                        # Specific component or subsystem analyzed
+  triage_score: 0                      # Coordination complexity score (0-5)
+  last_updated: ""                     # ISO 8601 date (YYYY-MM-DD)
+
+  entries:
+    - id: "PSDH-NNN"                   # Permanent identifier, zero-padded, never reused
+      plain_language: ""               # 1-3 sentences. Specific enough to violate,
+                                       # general enough to reuse. No implementation
+                                       # references (no function names, no file paths).
+
+      contract:
+        pre: ""                        # Precondition: what must be true for this
+                                       # heuristic to apply. Omit if not applicable.
+        post: ""                       # Postcondition: what must be true after the
+                                       # constrained operation. Omit if not applicable.
+        inv: ""                        # Invariant: what must hold throughout.
+                                       # Omit if not applicable.
+
+      severity: ""                     # One of: critical, high, medium, low, retired
+                                       #   critical — data loss, corruption, safety failure
+                                       #   high     — silent incorrect behavior
+                                       #   medium   — reliability degradation, tech debt
+                                       #   low      — suboptimal but not incorrect
+                                       #   retired  — no longer applicable
+
+      source_questions:                # Which L0 questions surfaced this constraint
+        - ""                           # e.g., "L0-Q3 (partial failure)"
+                                       # If from flywheel: "flywheel cycle 2, L0-Q5"
+                                       # If from contract review: "contract review"
+
+      enforcement_targets:             # Which mechanisms enforce this PSDH.
+                                       # Each target type has per-target config.
+        - type: "rule"                 # One of: rule, property_test, review_criterion,
+                                       #         hook_heuristic
+          enabled: false               # Whether this enforcement is active
+          reference: ""                # Location or identifier:
+                                       #   rule: rule ID or file location
+                                       #   property_test: test function name
+                                       #   review_criterion: checklist item reference
+                                       #   hook_heuristic: heuristic ID (e.g., "D-001")
+          config: {}                   # Target-specific configuration (optional).
+                                       # Consumed by the emitter for that target type.
+                                       # Examples:
+                                       #   rule: { priority: 1 }
+                                       #   property_test: { iterations: 200,
+                                       #                    stateful: false }
+                                       #   hook_heuristic: { severity_score: 0.7,
+                                       #                     detection_method: "diff" }
+
+      history:                         # Changelog. Each entry records a version.
+        - version: "v1"
+          date: ""                     # ISO 8601 date
+          description: ""              # What was discovered or changed, and why
+
+
+# --- Example Entry ---
+# Matches the worked example in psdh-catalog-template.md.
+# From the distributed task queue prototype (Phase 3 research).
+
+example:
+  catalog:
+    project: "Distributed Task Queue"
+    component: "Task queue with retry and dead-letter handling"
+    triage_score: 4
+    last_updated: "2026-02-22"
+
+    entries:
+      - id: "PSDH-001"
+        plain_language: >
+          A job that exhausts its retries must reach exactly one terminal
+          state (dead-letter queue) before any further transitions. No job
+          may exist in both the retry pool and the terminal pool simultaneously.
+        contract:
+          pre: "job.attempt >= job.max_retries AND ack_failure called"
+          post: "job.state == DEAD_LETTER AND job_id in dlq"
+          inv: "no job in both ready_queue and dlq simultaneously"
+        severity: "critical"
+        source_questions:
+          - "L0-Q3 (partial failure)"
+          - "L0-Q6 (phase invariants)"
+        enforcement_targets:
+          - type: "rule"
+            enabled: true
+            reference: "CLAUDE.md rule #1"
+            config:
+              priority: 1
+          - type: "property_test"
+            enabled: true
+            reference: "test_psdh1_exhausted_retries_reach_dlq"
+            config:
+              iterations: 200
+              stateful: false
+          - type: "review_criterion"
+            enabled: true
+            reference: "DLQ review checklist item 1"
+            config: {}
+          - type: "hook_heuristic"
+            enabled: false
+            reference: ""
+            config: {}
+        history:
+          - version: "v1"
+            date: "2026-02-22"
+            description: >
+              Discovered via L0-Q3 (partial failure). Initial formulation
+              focused on the DLQ as the sole terminal state for exhausted jobs.
+          - version: "v2"
+            date: "2026-02-22"
+            description: >
+              Tightened after property test revealed ambiguity in "exactly
+              once" semantics — could a job enter DLQ, get retried, and
+              re-enter? Added invariant: no simultaneous membership in
+              ready_queue and dlq.
+
+      - id: "PSDH-003"
+        plain_language: >
+          Any operation that returns a terminated entity to the active pool
+          must reset the entity's exhaustion counter. Failure to reset
+          creates an immediate re-termination loop — the entity re-enters
+          the terminal state after one cycle, not after a full retry budget.
+        contract:
+          pre: "entity.state == TERMINATED AND entity in terminal_pool"
+          post: "entity.state = ACTIVE; entity.attempt_counter = 0; entity in active_pool; entity NOT in terminal_pool"
+          inv: "after re-entry, entity has full budget (max_retries) available"
+        severity: "high"
+        source_questions:
+          - "L0-Q6 (phase invariants)"
+          - "contract review"
+        enforcement_targets:
+          - type: "rule"
+            enabled: true
+            reference: "CLAUDE.md rule #3"
+            config:
+              priority: 3
+          - type: "property_test"
+            enabled: true
+            reference: "test_psdh3_dlq_retry_resets_counter"
+            config:
+              iterations: 200
+              stateful: false
+          - type: "review_criterion"
+            enabled: true
+            reference: "DLQ review checklist item 2"
+            config: {}
+          - type: "hook_heuristic"
+            enabled: false
+            reference: ""
+            config: {}
+        history:
+          - version: "v1"
+            date: "2026-02-22"
+            description: >
+              Discovered via L0-Q6. Initial formulation: "DLQ retry must
+              reset the attempt counter."
+          - version: "v2"
+            date: "2026-02-22"
+            description: >
+              Generalized from task-queue-specific to any terminated-entity
+              re-entry pattern. Violation test confirmed: without reset,
+              the job immediately re-enters DLQ after one failure.
