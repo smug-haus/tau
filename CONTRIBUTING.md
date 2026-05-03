@@ -8,6 +8,40 @@ Anything here is in addition.
 The backlog lives on GitHub issues. File one before writing code, reference
 it from your commits (`Closes #N`), and link it from the PR.
 
+## Build prerequisites
+
+Tau is BEAM-first, but two pieces of the build need an out-of-ecosystem
+toolchain:
+
+- **Erlang/OTP + Elixir** — see `.tool-versions`. Easiest path is
+  [`asdf`](https://asdf-vm.com) or [`mise`](https://mise.jdx.dev); the
+  `tau-toolchain` skill in `.claude/skills/` has a sandbox-aware fallback.
+- **Python 3.10** — required at compile time only, by `ex_termbox` (a
+  transitive dep of `ratatouille`, `only: [:dev]`). The vendored `waf`
+  inside `ex_termbox` uses Python-2-era idioms (`'rUb'` open mode) that
+  Python 3.11 removed; 3.10 still emits these as deprecation warnings
+  rather than errors. The pinned version lives in `.python-version`.
+
+The recommended Python setup is [`pyenv`](https://github.com/pyenv/pyenv)
+plus a per-developer venv:
+
+```sh
+# Install pyenv (https://github.com/pyenv/pyenv#installation), then:
+pyenv install                      # reads .python-version
+python -m venv .venv               # creates the per-dev venv
+source .venv/bin/activate          # puts `python` on PATH
+mix compile                        # ex_termbox's waf can now find python
+```
+
+`.venv/` is gitignored. `.python-version` is committed and is the source
+of truth — bump it there, not in CI.
+
+If you cannot install `pyenv` (locked-down environments, CI without it),
+any Python 3.10.x on PATH as `python` will satisfy the build. Python 3.11
+and later will fail with `ValueError: invalid mode: 'rUb'` until
+[issue #136](https://github.com/smug-haus/tau/issues/136) lands a
+waf-side fix.
+
 ## Dependencies
 
 **BEAM ecosystem first.** Prefer Erlang/Elixir libraries and the OTP stdlib

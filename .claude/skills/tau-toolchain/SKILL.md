@@ -138,6 +138,28 @@ annotated.
 | `mix escript.build && ./tau` | local TUI run | ✅ |
 | `iex -S mix` | REPL: `Tau.start_session/1` etc. | ✅ |
 
+## Python 3.10 (build-only, ex_termbox)
+
+`ex_termbox` (transitive via `ratatouille`, `only: [:dev]`) needs a `python`
+binary on PATH at compile time — not at runtime. Python 3.11+ removed the
+`'rUb'` file-open mode that the vendored `waf` script depends on (`ValueError:
+invalid mode: 'rUb'`). Python 3.10 still accepts it as a deprecated alias.
+
+Pinned in `.python-version`. Recommended setup:
+
+```sh
+pyenv install                      # reads .python-version
+python -m venv .venv               # per-dev venv (.venv/ is gitignored)
+source .venv/bin/activate
+mix compile                        # ex_termbox waf finds .venv/bin/python
+```
+
+`MIX_ENV=prod mix release` does not need Python — TUI is dev-only — so
+escript-shaped binary releases are unaffected when Python isn't available.
+
+See `CONTRIBUTING.md` § "Build prerequisites" for the full story; issue #136
+tracks the underlying waf incompatibility.
+
 ## When you DON'T need this skill
 
 - The user asked a code question that doesn't require running tests.
