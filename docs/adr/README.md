@@ -71,6 +71,7 @@ get rewritten away by the next refactor. ADRs survive.
 | [0015](0015-subagent-persona-is-a-skill.md) | Subagent persona is a `Tau.Skill`; permissions inherit and may only tighten | Proposed |
 | [0016](0016-credential-custody-is-the-os-not-tau.md) | Credential custody is the OS, not Tau | Accepted |
 | [0017](0017-cooperative-provider-cancellation.md) | Cooperative cancellation of in-flight provider streams | Accepted |
+| [0018](0018-tui-supervised-subtree.md) | TUI runs as a transient child of Tau.TUI.Supervisor | Accepted |
 
 (New ADRs append here. Keep the table sorted by ADR number.)
 

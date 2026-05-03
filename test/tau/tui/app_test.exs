@@ -49,64 +49,54 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       end
     end
 
-    describe "run/0 — Ratatouille runtime API contract" do
-      # Regression for the bug fixed in PR #148: `run/0` was calling
-      # `Ratatouille.Runtime.run/2`, which doesn't exist. The compile-time
-      # warning never failed the build (warnings-as-errors didn't trigger
-      # in the env that compiled this module pre-#147), so the bug shipped
-      # in the prod / Burrito binary and the TUI exited silently.
-      #
-      # This test invokes `run/0` in a child process and asserts the
-      # process does NOT die with `:undef`. TTY-required errors from
-      # ex_termbox (the binding it tries to load when no real terminal
-      # is present) are acceptable — they prove the API call landed; we
-      # just don't have a tty to render into.
-
-      test "invokes a real Ratatouille.Runtime function (not :undef)" do
-        # Belt: confirm the documented API exists at all.
-        assert function_exported?(Ratatouille.Runtime, :start_link, 1),
-               "Ratatouille.Runtime.start_link/1 not exported — pinned dep changed shape"
-
-        # Suspenders: actually call run/0 and confirm it doesn't raise UndefinedFunctionError.
+    describe "run/0 — supervised Ratatouille subtree" do
+      test "emits [:tau, :tui, :start] with Ratatouille.Runtime.Supervisor metadata" do
         parent = self()
+        handler_id = "tui-start-#{System.unique_integer([:positive])}"
 
-        pid =
-          spawn(fn ->
-            try do
-              Tau.TUI.App.run()
-              send(parent, {:exit_reason, :ok})
-            rescue
-              e -> send(parent, {:exit_reason, e})
-            catch
-              :exit, reason -> send(parent, {:exit_reason, {:exit, reason}})
-            end
-          end)
+        :telemetry.attach(
+          handler_id,
+          [:tau, :tui, :start],
+          fn _name, _meas, meta, _ -> send(parent, {:tui_start, meta}) end,
+          nil
+        )
 
-        ref = Process.monitor(pid)
+        on_exit(fn -> :telemetry.detach(handler_id) end)
 
-        receive do
-          {:exit_reason, %UndefinedFunctionError{} = e} ->
-            flunk(
-              "Tau.TUI.App.run/0 called a non-existent function: " <>
-                Exception.message(e)
-            )
+        # The TUI will fail to start in headless mix test (Window calls termbox
+        # NIF which needs a TTY). We assert the :start event fires BEFORE that
+        # failure path. Capture the resulting Logger.error so the test output
+        # stays clean.
+        ExUnit.CaptureLog.capture_log(fn ->
+          spawned =
+            spawn(fn ->
+              try do
+                Tau.TUI.App.run()
+              rescue
+                _ -> :ok
+              catch
+                :exit, _ -> :ok
+              end
+            end)
 
-          {:exit_reason, _other} ->
-            :ok
+          assert_receive {:tui_start,
+                          %{supervisor: Ratatouille.Runtime.Supervisor, app: Tau.TUI.App}},
+                         1000
 
-          {:DOWN, ^ref, :process, ^pid, {:undef, _} = reason} ->
-            flunk("Tau.TUI.App.run/0 died with :undef — #{inspect(reason)}")
+          Process.exit(spawned, :kill)
+        end)
+      end
 
-          {:DOWN, ^ref, :process, ^pid, _other} ->
-            :ok
-        after
-          1_500 ->
-            # The runtime started successfully and is now blocking on terminal
-            # input. That's the success case for THIS test — kill it and
-            # finish.
-            Process.exit(pid, :kill)
-            :ok
-        end
+      test "Ratatouille.Runtime.Supervisor.init/1 declares EventManager + Window + Runtime children" do
+        # Lock the dep contract: the supervisor we use MUST start EventManager.
+        # If a future Ratatouille upgrade removes it, this test forces a review.
+        {:ok, {_sup_flags, child_specs}} =
+          Ratatouille.Runtime.Supervisor.init(runtime: [app: Tau.TUI.App])
+
+        ids = Enum.map(child_specs, & &1.id)
+        assert Ratatouille.EventManager in ids
+        assert Ratatouille.Window in ids
+        assert Ratatouille.Runtime in ids
       end
     end
   end

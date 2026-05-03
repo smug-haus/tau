@@ -8,6 +8,8 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
     @behaviour Ratatouille.App
 
+    require Logger
+
     import Ratatouille.View
     alias Ratatouille.Runtime.Subscription
 
@@ -69,17 +71,57 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
     @doc "Run the TUI loop (blocking until the user quits)."
     def run do
-      {:ok, runtime} =
-        Ratatouille.Runtime.start_link(
-          app: __MODULE__,
-          interval: @tick_interval,
-          quit_events: [{:ch, ?q}, {:key, 3}]
-        )
+      meta = %{app: __MODULE__, supervisor: Ratatouille.Runtime.Supervisor}
 
-      ref = Process.monitor(runtime)
+      :telemetry.execute(
+        [:tau, :tui, :start],
+        %{system_time: System.system_time()},
+        meta
+      )
 
+      case start_runtime_supervisor() do
+        {:ok, sup_pid} ->
+          ref = Process.monitor(sup_pid)
+          reason = await_down(ref, sup_pid)
+
+          :telemetry.execute(
+            [:tau, :tui, :stop],
+            %{system_time: System.system_time()},
+            Map.put(meta, :reason, reason)
+          )
+
+          :ok
+
+        {:error, reason} ->
+          :telemetry.execute(
+            [:tau, :tui, :exception],
+            %{system_time: System.system_time()},
+            Map.put(meta, :reason, reason)
+          )
+
+          Logger.error("TUI failed to start: " <> inspect(reason))
+          {:error, reason}
+      end
+    end
+
+    defp start_runtime_supervisor do
+      opts = [
+        app: __MODULE__,
+        interval: @tick_interval,
+        quit_events: [{:ch, ?q}, {:key, 3}]
+      ]
+
+      case Tau.TUI.Supervisor.start_runtime(opts) do
+        {:ok, pid} -> {:ok, pid}
+        {:error, {:already_started, pid}} -> {:ok, pid}
+        other -> other
+      end
+    end
+
+    defp await_down(ref, pid) do
       receive do
-        {:DOWN, ^ref, :process, ^runtime, _reason} -> :ok
+        {:DOWN, ^ref, :process, ^pid, reason} -> reason
+        _other -> await_down(ref, pid)
       end
     end
 

@@ -31,11 +31,13 @@ defmodule Tau.TUI do
   case explicitly.
   """
 
+  alias Tau.TUI.App
+
   @doc "Start the TUI loop (blocking). Requires the optional :ratatouille dep."
   @spec start() :: :ok | {:error, :ratatouille_not_loaded}
   def start do
     if Code.ensure_loaded?(Ratatouille.Runtime) do
-      apply(Tau.TUI.App, :run, [])
+      App.run()
     else
       {:error, :ratatouille_not_loaded}
     end
