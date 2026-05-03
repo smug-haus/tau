@@ -127,6 +127,38 @@ defmodule Tau.Session.SkillActivationTest do
     def default_model, do: "act"
   end
 
+  defmodule SpecCapturingProvider do
+    @moduledoc false
+    @behaviour Tau.Provider
+
+    @impl true
+    def stream(_messages, opts, ctx) do
+      if pid = ctx[:report_to], do: send(pid, {:provider_opts, opts})
+
+      {:ok,
+       [
+         %Event.Start{request_id: "rs", model: "spec"},
+         %Event.TextStart{block_id: "t"},
+         %Event.TextDelta{block_id: "t", text: "ok"},
+         %Event.TextEnd{block_id: "t"},
+         %Event.Done{stop_reason: :end_turn, usage: %{}}
+       ]}
+    end
+
+    @impl true
+    def capabilities,
+      do: %{
+        thinking: false,
+        tools: true,
+        vision: false,
+        prompt_caching: false,
+        parallel_tools: false
+      }
+
+    @impl true
+    def default_model, do: "spec"
+  end
+
   setup do
     tmp = Path.join(System.tmp_dir!(), "tau-skill-act-#{System.unique_integer([:positive])}")
     File.mkdir_p!(tmp)
@@ -359,37 +391,5 @@ defmodule Tau.Session.SkillActivationTest do
     enum = get_in(tool, [:parameters, "properties", "name", "enum"])
     assert "deploy" in enum
     refute "secret" in enum
-  end
-
-  defmodule SpecCapturingProvider do
-    @moduledoc false
-    @behaviour Tau.Provider
-
-    @impl true
-    def stream(_messages, opts, ctx) do
-      if pid = ctx[:report_to], do: send(pid, {:provider_opts, opts})
-
-      {:ok,
-       [
-         %Event.Start{request_id: "rs", model: "spec"},
-         %Event.TextStart{block_id: "t"},
-         %Event.TextDelta{block_id: "t", text: "ok"},
-         %Event.TextEnd{block_id: "t"},
-         %Event.Done{stop_reason: :end_turn, usage: %{}}
-       ]}
-    end
-
-    @impl true
-    def capabilities,
-      do: %{
-        thinking: false,
-        tools: true,
-        vision: false,
-        prompt_caching: false,
-        parallel_tools: false
-      }
-
-    @impl true
-    def default_model, do: "spec"
   end
 end
