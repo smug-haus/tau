@@ -17,10 +17,11 @@ toolchain:
   [`asdf`](https://asdf-vm.com) or [`mise`](https://mise.jdx.dev); the
   `tau-toolchain` skill in `.claude/skills/` has a sandbox-aware fallback.
 - **Python 3.10** — required at compile time only, by `ex_termbox` (a
-  transitive dep of `ratatouille`, `only: [:dev]`). The vendored `waf`
-  inside `ex_termbox` uses Python-2-era idioms (`'rUb'` open mode) that
-  Python 3.11 removed; 3.10 still emits these as deprecation warnings
-  rather than errors. The pinned version lives in `.python-version`.
+  transitive dep of `ratatouille`, the TUI library). The vendored
+  `waf` inside `ex_termbox` uses Python-2-era idioms (`'rUb'` open
+  mode) that Python 3.11 removed; 3.10 still emits these as
+  deprecation warnings rather than errors. The pinned version lives
+  in `.python-version`.
 
 The recommended Python setup is [`pyenv`](https://github.com/pyenv/pyenv)
 plus a per-developer venv:

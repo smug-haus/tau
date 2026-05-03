@@ -61,10 +61,32 @@ defmodule Tau.Application do
           version: Application.spec(:tau, :vsn) |> to_string()
         })
 
+        maybe_dispatch_cli()
+
         {:ok, pid}
 
       other ->
         other
+    end
+  end
+
+  defp maybe_dispatch_cli do
+    case Burrito.Util.Args.get_bin_path() do
+      :not_in_burrito ->
+        :ok
+
+      _bin_path ->
+        args = Burrito.Util.Args.get_arguments() || []
+
+        Task.start(fn ->
+          exit_code =
+            case Tau.CLI.main(args) do
+              n when is_integer(n) -> n
+              _ -> 0
+            end
+
+          System.halt(exit_code)
+        end)
     end
   end
 end
