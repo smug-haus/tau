@@ -17,8 +17,14 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
     @impl true
     def init(_context) do
-      {:ok, session_id} = Tau.start_session([])
+      # D-004 (SPEC-USER-TURN [C6]): subscribe to PubSub BEFORE
+      # `Tau.start_session/1` returns. `Session.init/1` synchronously
+      # broadcasts `%Events.SessionStart{}` from inside FSM init; if we
+      # subscribe after start_session returns, that event is already
+      # gone. Pre-generate the id, subscribe, then start.
+      session_id = Tau.Session.generate_id()
       Phoenix.PubSub.subscribe(Tau.PubSub, "session:" <> session_id)
+      {:ok, ^session_id} = Tau.start_session(session_id: session_id)
 
       %{
         session_id: session_id,
