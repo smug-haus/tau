@@ -120,6 +120,24 @@ references above.
 | `mix test --only property` | StreamData property suite | yes |
 | `mix escript.build` | escript bundles | yes |
 
+## Common Mix commands
+
+Day-to-day workflow once `deps/` is populated. Sandbox reachability
+annotated.
+
+| Command | Purpose | Sandbox |
+|---------|---------|---------|
+| `mix deps.get` | Fetch deps from Hex | ❌ (use CI / prepopulated tree) |
+| `mix compile` | Build (treat warnings-as-errors) | ✅ |
+| `mix format --check-formatted` | CI gate: formatter | ✅ |
+| `mix credo --strict` | CI gate: static analysis | ✅ |
+| `mix dialyzer` | CI gate: typespecs | ✅ |
+| `mix test` | ExUnit suite | ✅ |
+| `mix test --only property` | StreamData property suite (longer budget) | ✅ |
+| `mix tau.hello` | one-shot smoke test against a provider | ✅ |
+| `mix escript.build && ./tau` | local TUI run | ✅ |
+| `iex -S mix` | REPL: `Tau.start_session/1` etc. | ✅ |
+
 ## When you DON'T need this skill
 
 - The user asked a code question that doesn't require running tests.
