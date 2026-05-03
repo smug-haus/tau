@@ -900,8 +900,19 @@ defmodule Tau.Session do
           nil -> brutal_kill_provider_task(task)
         end
 
+      # ADR-0017: telemetry event names are decoupled from the persisted
+      # mechanism atom — `:cooperative` surfaces as
+      # `[:tau, :provider, :request, :cancelled]` (the user-facing
+      # outcome), while `:brutal_kill` keeps its mechanism-named event
+      # so observability dashboards can flag the forced path explicitly.
+      telemetry_event_name =
+        case mechanism do
+          :cooperative -> :cancelled
+          :brutal_kill -> :brutal_kill
+        end
+
       :telemetry.execute(
-        [:tau, :provider, :request, mechanism],
+        [:tau, :provider, :request, telemetry_event_name],
         %{system_time: System.system_time()},
         %{provider: data.provider, model: data.model, session_id: data.id}
       )
@@ -1203,9 +1214,9 @@ defmodule Tau.Session do
           })
         end)
 
-        parallel_calls
+        Tau.Tools.TaskSupervisor
         |> Task.Supervisor.async_stream_nolink(
-          Tau.Tools.TaskSupervisor,
+          parallel_calls,
           fn {id, name, args} -> run_tool(name, id, args, data) end,
           max_concurrency: System.schedulers_online(),
           timeout: :infinity,

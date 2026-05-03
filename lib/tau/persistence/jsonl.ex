@@ -29,7 +29,13 @@ defmodule Tau.Persistence.Jsonl do
     path = path_for(session_id, cwd)
     File.mkdir_p!(Path.dirname(path))
 
-    case File.open(path, [:append, :binary, {:delayed_write, 64 * 1024, 100}]) do
+    # NOTE: opened in unbuffered append mode so concurrent readers (hooks,
+    # tests, dashboards) see events immediately. The previous
+    # `:delayed_write` configuration buffered up to 64KiB / 100ms of writes,
+    # which made events invisible to mid-session consumers — `update_provider`
+    # / parallel-tool-dispatch tests in particular flunk because the file
+    # appears empty for the test's read window.
+    case File.open(path, [:append, :binary]) do
       {:ok, io} ->
         write_header(io, session_id, cwd, opts)
         {:ok, %{io: io, path: path, session_id: session_id, cwd: cwd, count: 0}}
