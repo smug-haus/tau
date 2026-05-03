@@ -152,7 +152,7 @@ defmodule Tau.Session.ToolsWhitelistTest do
 
     assert_receive %SE.ToolEnd{
                      tool_call_id: "call-default",
-                     result: %Tau.Message.ToolResult{is_error: false, content: "ran"}
+                     result: %Tau.Message.ToolResult{is_error: false, content: "should-not-run"}
                    },
                    5_000
 
