@@ -47,3 +47,18 @@ coverage.json
 
 # Claude Code agent worktrees (created by Agent calls with isolation: "worktree")
 /.claude/worktrees/
+
+# Claude harness runtime state — observations, kill signals, solution tree.
+# .gitkeep keeps the directory present in version control.
+/.claude/logs/*
+!/.claude/logs/.gitkeep
+/.claude/settings.local.json
+
+# Defensive: kill-signal and observations belong under .claude/logs/, but
+# guard against any hook accidentally writing them at the repo root.
+/kill-signal.json
+/observations.jsonl
+
+# Python bytecode from the harness's hook scripts (heuristic-monitor, parsers).
+__pycache__/
+*.pyc
