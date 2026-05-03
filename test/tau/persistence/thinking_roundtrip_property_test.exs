@@ -90,9 +90,9 @@ defmodule Tau.Persistence.ThinkingRoundtripPropertyTest do
   property "JSONL persistence preserves thinking-signature byte-for-byte" do
     check all(
             signature <- signature_gen(),
-            text <- thinking_text_gen()
-          ),
-          max_runs: 25 do
+            text <- thinking_text_gen(),
+            max_runs: 25
+          ) do
       {sid, path} = drive_session_with_thinking(signature, text)
 
       lines = read_jsonl(path)
@@ -141,9 +141,9 @@ defmodule Tau.Persistence.ThinkingRoundtripPropertyTest do
   property "Tau.fork/2 reconstructs thinking-signature byte-for-byte", %{cwd: cwd} do
     check all(
             signature <- signature_gen(),
-            text <- thinking_text_gen()
-          ),
-          max_runs: 25 do
+            text <- thinking_text_gen(),
+            max_runs: 25
+          ) do
       parent_sid = "thinking-parent-#{System.unique_integer([:positive])}"
       asst_event_id = "evt_asst_#{System.unique_integer([:positive])}"
 
