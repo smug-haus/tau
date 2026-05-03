@@ -67,12 +67,20 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     @impl true
     def subscribe(_model), do: Subscription.interval(@tick_interval, :tick)
 
-    @doc "Run the TUI loop (blocking)."
+    @doc "Run the TUI loop (blocking until the user quits)."
     def run do
-      Ratatouille.Runtime.run(__MODULE__,
-        interval: @tick_interval,
-        quit_events: [{:ch, ?q}, {:key, 3}]
-      )
+      {:ok, runtime} =
+        Ratatouille.Runtime.start_link(
+          app: __MODULE__,
+          interval: @tick_interval,
+          quit_events: [{:ch, ?q}, {:key, 3}]
+        )
+
+      ref = Process.monitor(runtime)
+
+      receive do
+        {:DOWN, ^ref, :process, ^runtime, _reason} -> :ok
+      end
     end
 
     # --- Helpers --------------------------------------------------------
