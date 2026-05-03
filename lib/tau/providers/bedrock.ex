@@ -184,6 +184,8 @@ defmodule Tau.Providers.Bedrock do
         }
 
       Code.ensure_loaded?(:aws_credentials) ->
+        Application.ensure_all_started(:aws_credentials)
+
         case :aws_credentials.get_credentials() do
           :undefined -> nil
           c -> c

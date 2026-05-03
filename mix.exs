@@ -36,7 +36,8 @@ defmodule Tau.MixProject do
   def application do
     [
       mod: {Tau.Application, []},
-      extra_applications: [:logger, :crypto, :ssl, :inets]
+      extra_applications: [:logger, :crypto, :ssl, :inets],
+      included_applications: [:aws_credentials]
     ]
   end
 
