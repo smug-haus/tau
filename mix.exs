@@ -187,7 +187,12 @@ defmodule Tau.MixProject do
   defp aliases do
     [
       "test.property": ["test --only property"],
-      lint: ["format --check-formatted", "credo --strict", "dialyzer"],
+      lint: [
+        "compile --warnings-as-errors",
+        "format --check-formatted",
+        "credo --strict",
+        "dialyzer"
+      ],
       "tau.gen.schema": ["run priv/scripts/gen_settings_schema.exs"]
     ]
   end
