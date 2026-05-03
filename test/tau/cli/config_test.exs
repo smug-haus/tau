@@ -98,14 +98,14 @@ defmodule Tau.CLI.ConfigTest do
 
   describe "Optimus parser wiring" do
     test "parses `tau config get model` to the get subcommand" do
-      assert {:ok, {[:config, :get], parsed}} =
+      assert {:ok, [:config, :get], parsed} =
                Optimus.parse(Tau.CLI.spec(), ["config", "get", "model"])
 
       assert parsed.args.key == "model"
     end
 
     test "parses `tau config set theme dark`" do
-      assert {:ok, {[:config, :set], parsed}} =
+      assert {:ok, [:config, :set], parsed} =
                Optimus.parse(Tau.CLI.spec(), ["config", "set", "theme", "dark"])
 
       assert parsed.args.key == "theme"
@@ -113,7 +113,7 @@ defmodule Tau.CLI.ConfigTest do
     end
 
     test "parses `--json` flag on bare `config`" do
-      assert {:ok, {[:config], parsed}} =
+      assert {:ok, [:config], parsed} =
                Optimus.parse(Tau.CLI.spec(), ["config", "--json"])
 
       assert parsed.flags[:json] == true
