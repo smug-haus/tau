@@ -88,6 +88,9 @@ defmodule Tau.CLI do
       {[], _} ->
         tui_cmd() |> halt()
 
+      %Optimus.ParseResult{} ->
+        tui_cmd() |> halt()
+
       _ ->
         :ok
     end
