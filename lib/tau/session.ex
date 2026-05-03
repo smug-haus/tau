@@ -424,6 +424,15 @@ defmodule Tau.Session do
           persistence: persistence,
           persist_handle: persist_handle,
           provider_task: nil,
+          # ADR-0012: per-stream tag (a fresh `make_ref/0`) used to
+          # distinguish events emitted by the *current* provider task
+          # from stragglers left over from a predecessor that was killed
+          # mid-stream during a fallback transition. Re-issued in every
+          # `:start_provider`; matched on in every `{:provider_event, _,
+          # _}`, `{:provider_done, _}`, `{:provider_failed, _, _}`
+          # handler. Stale messages whose ref doesn't match are dropped
+          # by the catch-all clause.
+          stream_ref: nil,
           # ADR-0017: per-stream cooperative-cancel flag (a `:counters`
           # ref). Allocated freshly in `:start_provider`; consulted by the
           # `:cancel` handler before falling back to brutal-kill.
@@ -602,13 +611,27 @@ defmodule Tau.Session do
 
     case data.provider.stream(data.messages, stream_opts, ctx) do
       {:ok, stream} ->
+        # ADR-0012: tag each stream's mailbox traffic with a fresh ref so
+        # stragglers from a killed predecessor (e.g. a provider task whose
+        # `:provider_done` was already in the parent mailbox when fallback
+        # kicked in) get dropped instead of finalising a fresh assembler.
+        stream_ref = make_ref()
+
         task =
           Task.async(fn ->
             try do
-              Enum.each(stream, fn ev -> Process.send(parent, {:provider_event, ev}, []) end)
-              Process.send(parent, :provider_done, [])
+              Enum.each(stream, fn ev ->
+                Process.send(parent, {:provider_event, stream_ref, ev}, [])
+              end)
+
+              Process.send(parent, {:provider_done, stream_ref}, [])
             rescue
-              e -> Process.send(parent, {:provider_failed, Exception.message(e)}, [])
+              e ->
+                Process.send(
+                  parent,
+                  {:provider_failed, stream_ref, Exception.message(e)},
+                  []
+                )
             end
           end)
 
@@ -616,13 +639,19 @@ defmodule Tau.Session do
         broadcast(data.id, %Events.MessageStart{session_id: data.id, message: assembler.message})
 
         {:next_state, :provider_streaming,
-         %{data | provider_task: task, assembler: assembler, cancel_flag: cancel_flag}}
+         %{
+           data
+           | provider_task: task,
+             assembler: assembler,
+             cancel_flag: cancel_flag,
+             stream_ref: stream_ref
+         }}
 
       {:error, reason} ->
         # Synchronous provider error — emit and return to awaiting_user.
         msg = Assistant.new(stop_reason: :error, error_message: inspect(reason))
         broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: msg})
-        {:next_state, :awaiting_user, %{data | cancel_flag: nil}}
+        {:next_state, :awaiting_user, %{data | cancel_flag: nil, stream_ref: nil}}
     end
   end
 
@@ -633,9 +662,9 @@ defmodule Tau.Session do
   # generic clause, which records the error and finalises the message.
   def handle_event(
         :info,
-        {:provider_event, %PEvent.Error{retryable?: true} = ev},
+        {:provider_event, ref, %PEvent.Error{retryable?: true} = ev},
         :provider_streaming,
-        %{fallback_chain_remaining: [next | rest]} = data
+        %{fallback_chain_remaining: [next | rest], stream_ref: ref} = data
       ) do
     from_provider = data.provider
 
@@ -665,9 +694,10 @@ defmodule Tau.Session do
       })
 
     # Shut down the still-running provider task (it might still be
-    # emitting events or about to send :provider_done). Subsequent
-    # stragglers in the mailbox are absorbed by the catch-all
-    # handle_event clause at the bottom of the module.
+    # emitting events or about to send :provider_done). Stragglers
+    # already in the mailbox are tagged with the *previous* stream_ref
+    # and get dropped by the catch-all `handle_event` clause once
+    # `:start_provider` re-issues a fresh ref.
     if data.provider_task && Process.alive?(data.provider_task.pid) do
       Task.shutdown(data.provider_task, :brutal_kill)
     end
@@ -685,12 +715,18 @@ defmodule Tau.Session do
           messages: transformed,
           fallback_chain_remaining: rest,
           assembler: nil,
-          provider_task: nil
+          provider_task: nil,
+          stream_ref: nil
       }
     )
   end
 
-  def handle_event(:info, {:provider_event, ev}, :provider_streaming, data) do
+  def handle_event(
+        :info,
+        {:provider_event, ref, ev},
+        :provider_streaming,
+        %{stream_ref: ref} = data
+      ) do
     new_assembler = Assembler.step(data.assembler, ev)
 
     broadcast(data.id, %Events.MessageUpdate{
@@ -706,7 +742,12 @@ defmodule Tau.Session do
     end
   end
 
-  def handle_event(:info, :provider_done, :provider_streaming, data) do
+  def handle_event(
+        :info,
+        {:provider_done, ref},
+        :provider_streaming,
+        %{stream_ref: ref} = data
+      ) do
     if data.assembler && Assembler.done?(data.assembler) do
       {:keep_state, data}
     else
@@ -718,7 +759,12 @@ defmodule Tau.Session do
     end
   end
 
-  def handle_event(:info, {:provider_failed, msg}, :provider_streaming, data) do
+  def handle_event(
+        :info,
+        {:provider_failed, ref, msg},
+        :provider_streaming,
+        %{stream_ref: ref} = data
+      ) do
     assembler =
       Assembler.step(data.assembler || Assembler.new(), %PEvent.Error{
         reason: msg,
@@ -801,6 +847,7 @@ defmodule Tau.Session do
        data
        | provider_task: nil,
          cancel_flag: nil,
+         stream_ref: nil,
          tools_in_flight: %{},
          tool_dispatcher: nil,
          assembler: nil,
@@ -1010,9 +1057,9 @@ defmodule Tau.Session do
       tool_calls == [] ->
         # ADR-0017: drop the now-stale cancel flag — the stream that
         # owned it has finished. The next turn's :start_provider
-        # allocates a fresh one.
+        # allocates a fresh one. Same applies to ADR-0012's stream_ref.
         {:next_state, :awaiting_user,
-         %{data | provider_task: nil, assembler: nil, cancel_flag: nil}}
+         %{data | provider_task: nil, assembler: nil, cancel_flag: nil, stream_ref: nil}}
 
       true ->
         dispatch_tools(tool_calls, data)
@@ -1189,7 +1236,8 @@ defmodule Tau.Session do
        | tools_in_flight: initial_in_flight,
          tool_dispatcher: dispatcher_pid,
          provider_task: nil,
-         assembler: nil
+         assembler: nil,
+         stream_ref: nil
      }}
   end
 
