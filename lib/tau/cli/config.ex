@@ -91,19 +91,14 @@ defmodule Tau.CLI.Config do
   @spec set(String.t(), String.t(), opts()) :: 0 | 1 | 2
   def set(key, raw_value, opts \\ []) when is_binary(key) and is_binary(raw_value) do
     cwd = Keyword.get(opts, :cwd, File.cwd!())
-    atom_key = safe_to_atom(key)
 
     cond do
-      is_nil(atom_key) ->
-        IO.puts(:stderr, "config set: unknown key #{inspect(key)}")
-        1
-
       key not in Schema.known_top_level_keys() ->
         IO.puts(:stderr, "config set: #{key} is not a known top-level setting")
         1
 
       true ->
-        do_set(atom_key, key, decode_value(raw_value), cwd, opts)
+        do_set(safe_to_atom(key), key, decode_value(raw_value), cwd, opts)
     end
   end
 
