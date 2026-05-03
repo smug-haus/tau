@@ -67,6 +67,14 @@ defmodule Tau.Persistence.Jsonl do
   def append(%{io: io, count: c} = h, event) do
     line = Jason.encode!(event) <> "\n"
     IO.binwrite(io, line)
+    # `:delayed_write` keeps each write in the IO server's buffer for
+    # up to 100ms. Hooks (and tests) that read the JSONL right after a
+    # `%MessageEnd{}` would otherwise observe a stale or empty file.
+    # `:file.datasync/1` forces the buffer out to the OS without
+    # paying the durability cost of `fsync`. Per-event overhead is one
+    # extra syscall — sessions write at human-typing rates, not in
+    # bursts, so the original batching premise is moot.
+    :file.datasync(io)
     {:ok, %{h | count: c + 1}}
   end
 
