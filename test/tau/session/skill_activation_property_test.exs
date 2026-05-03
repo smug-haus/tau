@@ -89,8 +89,12 @@ defmodule Tau.Session.SkillActivationPropertyTest do
           :ok
         end
 
-        # Body MUST NOT be carried under a skill header for a disabled name.
-        refute String.contains?(system_blob, "# Skill: #{dname}")
+        # Body MUST NOT be carried under a skill header for a disabled
+        # name. The heading format from `render_skill/2` is
+        # `"# Skill: <name>\n\n"`; anchor with the trailing newline so a
+        # disabled name that is a prefix of an enabled name (e.g. "y" vs
+        # "y3hq6Ks") doesn't false-positive on the enabled skill's heading.
+        refute String.contains?(system_blob, "# Skill: #{dname}\n")
 
         # Property 2: disabled name absent from the activation enum.
         refute dname in enum_names

@@ -392,10 +392,18 @@ defmodule Tau.Session do
 
         skills = load_skills(cwd)
 
+        # ADR-0013 / ADR-0015: skills with `disable_model_invocation: true`
+        # are background-only — their bodies (and `# Skill: <name>` headings)
+        # MUST NOT enter the model-visible system_blob, lest internal
+        # personas leak. Filter at the assembly site; `prepend_skill_messages/2`
+        # also filters as defence-in-depth.
+        model_visible_skills =
+          Enum.reject(skills, fn {_name, s} -> s.disable_model_invocation end)
+
         messages =
           preload
           |> events_to_messages()
-          |> prepend_skill_messages(skills)
+          |> prepend_skill_messages(model_visible_skills)
           |> inject_memory(cwd)
 
         data = %{
