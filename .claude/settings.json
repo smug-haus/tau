@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "env": {
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "0",
+    "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY": "1",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  },
+  "permissions": {
+    "deny": [
+      "Read(docs/howto.md)",
+      "Read(docs/faq.md)",
+      "Read(.env)",
+      "Read(.env.*)",
+      "Read(secrets/**)",
+      "Read(.claude/settings.local.json)",
+      "Write(.env)",
+      "Write(.env.*)",
+      "Write(secrets/**)",
+      "Edit(.env)",
+      "Edit(.env.*)",
+      "Edit(secrets/**)",
+      "Read(/root/.claude/plans/**)",
+      "Read(priv/plts/**)",
+      "Read(deps/**)",
+      "Read(_build/**)",
+      "Read(erl_crash.dump)",
+      "Write(deps/**)",
+      "Write(_build/**)",
+      "Edit(deps/**)",
+      "Edit(_build/**)"
+    ],
+    "allow": [
+      "Bash(mix *)",
+      "Bash(iex *)",
+      "Bash(elixir *)",
+      "Bash(erl *)",
+      "Bash(escript *)",
+      "Bash(./tau)",
+      "Bash(./tau *)",
+      "Bash(gh *)",
+      "Bash(make *)",
+      "Bash(git status)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git branch *)",
+      "Bash(git checkout *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git worktree *)",
+      "Bash(cat *)",
+      "Bash(ls *)",
+      "Bash(find *)",
+      "Bash(grep *)",
+      "Bash(rg *)",
+      "Bash(jq *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Bash(wc *)",
+      "Bash(python *)",
+      "Bash(python3 *)",
+      "Bash(asdf *)",
+      "Bash(mise *)",
+      "Bash(scripts/install-toolchain.sh)",
+      "Bash(bash scripts/install-toolchain.sh)",
+      "Bash(sudo bash scripts/install-toolchain.sh)",
+      "Bash(. /etc/profile.d/elixir.sh && *)",
+      "Bash(/root/.mix/rebar3 --version)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo HARNESS_PROJECT_ROOT=$(pwd) >> $CLAUDE_ENV_FILE",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/kill-cascade.py",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/block-dangerous-commands.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/heuristic-monitor.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/inject-retry-context.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/check-tests-pass.sh",
+            "timeout": 30
+          },
+          {
+            "type": "prompt",
+            "prompt": "Context: $ARGUMENTS\n\nReview the subagent's completion claim. Check: (1) Were tests run (`mix test`) and do they pass? (2) Was `mix format --check-formatted` run? (3) Is the implementation complete or is the agent stopping early? (4) Are there hardcoded values, TODOs, or silent failures?\n\nYou MUST respond with ONLY a raw JSON object. No markdown, no code fences, no explanation. Output exactly one of:\n{\"ok\": true}\n{\"ok\": false, \"reason\": \"what remains\"}"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "Context: $ARGUMENTS\n\nReview the assistant's work against the original task request. Check: (1) Did it complete what was asked? (2) Were tests run (`mix test`) and do they pass? (3) Were findings documented?\n\nYou MUST respond with ONLY a raw JSON object. No markdown, no code fences, no explanation. Output exactly one of:\n{\"ok\": true}\n{\"ok\": false, \"reason\": \"what remains\"}"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"additionalContext\": \"Preserve: current task, solution tree state, attempt count, last kill reason, branch decision, active subagent, GitHub issue number(s) being closed, any ADR being drafted, gate verdicts on the active PR. Discard: verbose tool output, intermediate reads, prior attempt transcripts.\"}'",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,14 @@
+commit=2a8e2771bcce5c8a99dfaf9a73d2a612a491cf6e
+repo=/home/brentw/src/claude-harness
+vendored=2026-05-03
+
+# The harness is vendored, not submoduled. To pull updates:
+#   1. Run `git -C <harness-checkout> log <commit>..HEAD` to see what changed.
+#   2. Port relevant changes manually into .claude/.
+#   3. Update the `commit` and `vendored` lines above.
+#
+# Tau 1.0 goal: replace this pin with a Tau self-host once the harness
+# is good enough to build itself. At that point, this file is deleted.
+#
+# Repo path is local because the harness has no public URL yet.
+# Update the `repo=` line to a URL once it's published.
