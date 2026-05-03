@@ -60,6 +60,28 @@ EOF
 }
 
 # Detect and run
+
+# Elixir / Mix — checked first because Tau is an Elixir project and we want the
+# cheapest fast-path. If mix.exs exists, this branch owns the run regardless of
+# whether mix itself is on PATH (we pass through rather than fall through to
+# other detectors).
+if [ -f "$PROJECT_ROOT/mix.exs" ]; then
+    if ! command -v mix &>/dev/null; then
+        # Toolchain not installed; the tau-toolchain skill handles install separately.
+        echo "[check-tests-pass.sh] mix not on PATH; passing through" >&2
+        exit 0
+    fi
+    # Sandbox tolerance: `mix deps.get` cannot reach hex.pm in the Anthropic
+    # sandbox, so deps/ may be empty. Pass through rather than failing closed
+    # on a "Could not find Hex" error. See .claude/skills/tau-toolchain/SKILL.md.
+    if [ ! -d "$PROJECT_ROOT/deps" ] || [ -z "$(ls -A "$PROJECT_ROOT/deps" 2>/dev/null)" ]; then
+        echo "[check-tests-pass.sh] deps/ not populated; passing through" >&2
+        exit 0
+    fi
+    run_tests "mix_test_parser" "MIX_ENV=test mix test --color=never 2>&1"
+    exit 0
+fi
+
 if [ -f "$PROJECT_ROOT/pytest.ini" ] || [ -f "$PROJECT_ROOT/setup.cfg" ] || [ -f "$PROJECT_ROOT/pyproject.toml" ] || find "$PROJECT_ROOT" -maxdepth 2 -name "test_*.py" -o -name "*_test.py" 2>/dev/null | grep -q .; then
     if command -v pytest &>/dev/null; then
         run_tests "pytest_parser" "pytest --tb=short -q 2>&1"

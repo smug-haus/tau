@@ -6,9 +6,10 @@ this file serves as the reference and maintenance copy.
 
 ## Prompt
 
-> Review the subagent's completion claim. Check: (1) Were tests run, and
-> do they pass? (2) Is the implementation actually complete, or is the
-> agent stopping early? (3) Are there hardcoded values, TODOs, or silent
+> Review the subagent's completion claim. Check: (1) Were tests run
+> (`mix test`) and do they pass? (2) Was `mix format --check-formatted`
+> run? (3) Is the implementation actually complete, or is the agent
+> stopping early? (4) Are there hardcoded values, TODOs, or silent
 > failures? If the work is incomplete, state specifically what remains.
 
 ## Rationale

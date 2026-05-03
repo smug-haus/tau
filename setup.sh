@@ -69,6 +69,7 @@ DETECTED_STACKS=()
 [ -f package.json ]                                                   && DETECTED_STACKS+=("Node.js")
 [ -f go.mod ]                                                         && DETECTED_STACKS+=("Go")
 [ -f Cargo.toml ]                                                     && DETECTED_STACKS+=("Rust")
+[ -f mix.exs ]                                                        && DETECTED_STACKS+=("Elixir")
 
 SELECTED_STACK=""
 
@@ -120,6 +121,9 @@ case "$SELECTED_STACK" in
     ;;
   Rust)
     printf '  Test parser: cargo test output parser (configured in Phase 2)\n'
+    ;;
+  Elixir)
+    printf '  Test parser: mix_test_parser (handles ExUnit + doctests + properties)\n'
     ;;
   *)
     printf '  Test parser: manual configuration required (see docs/architecture.md)\n'

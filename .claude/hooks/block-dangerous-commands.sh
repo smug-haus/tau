@@ -33,6 +33,13 @@ BLOCKED_PATTERNS=(
   'git push .* master'
   'git push --force'
   'git reset --hard'
+  # Tau-specific (Mix/OTP)
+  'mix deps.get --no-archives-check'
+  'mix deps.clean --all'
+  'rm -rf deps'
+  'rm -rf _build'
+  'rm -rf priv/plts'
+  'rebar3 .* --unsafe'
 )
 
 for pattern in "${BLOCKED_PATTERNS[@]}"; do
