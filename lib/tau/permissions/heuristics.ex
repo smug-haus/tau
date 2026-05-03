@@ -27,7 +27,7 @@ defmodule Tau.Permissions.Heuristics do
     ~r/rm\s+-f/,
     ~r/sudo\s+/,
     ~r/dd\s+/,
-    ~r/mkfs\s/,
+    ~r/mkfs(\.\w+)?\s/,
     ~r/shred\s/,
     # Classic bash fork bomb. Match the literal sequence; whitespace
     # inside the brace block is part of the canonical form.
