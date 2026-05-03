@@ -62,3 +62,7 @@ coverage.json
 # Python bytecode from the harness's hook scripts (heuristic-monitor, parsers).
 __pycache__/
 *.pyc
+
+# Per-developer Python venv (see CONTRIBUTING.md "Build prerequisites").
+# `.python-version` IS committed (pyenv reads it); `.venv/` is not.
+/.venv/
