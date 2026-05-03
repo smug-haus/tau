@@ -1,8 +1,20 @@
 defmodule Tau.Permissions.Matchers.Always do
-  @moduledoc "Matches any tool call."
+  @moduledoc """
+  Matches any tool call for the rule's bare tool name.
+
+  The compiled rule is the bare pattern string (e.g. `"Read"`); the
+  match succeeds when `tool_name` equals that string, or when the
+  pattern is `"*"` (true blanket across all tools).
+
+  Bare-tool-name patterns deliberately do NOT match other tools — a
+  rule like `allow: ["Read"]` allows `Read` only, not `Bash`. Pre-#16
+  semantics. See issue #123.
+  """
   @behaviour Tau.Permissions.Matcher
   @impl true
-  def match?(_, _, _, _), do: true
+  def match?("*", _tool_name, _args, _ctx), do: true
+  def match?(rule, tool_name, _args, _ctx) when is_binary(rule), do: rule == tool_name
+  def match?(_, _, _, _), do: false
 end
 
 defmodule Tau.Permissions.Matchers.Glob do
