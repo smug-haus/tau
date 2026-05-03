@@ -64,7 +64,7 @@ defmodule Tau.MixProject do
 
       # TUI — optional, only fetched for dev. Prod builds the stub branch
       # of Tau.TUI; tests run without it. Add to your env to use the TUI.
-      {:ratatouille, "~> 0.5", only: [:dev], optional: true},
+      {:ratatouille, "~> 0.5"},
 
       # CLI argv parser
       {:optimus, "~> 0.5"},
@@ -80,8 +80,10 @@ defmodule Tau.MixProject do
       {:ex_json_schema, "~> 0.10"},
       {:nimble_options, "~> 1.1"},
 
-      # Self-contained binary distribution (release-only)
-      {:burrito, "~> 1.2", runtime: false},
+      # Self-contained binary distribution. Runtime modules
+      # (`Burrito.Util.Args`) are needed at runtime to read user
+      # argv and the `__BURRITO_BIN_PATH` context marker.
+      {:burrito, "~> 1.2"},
 
       # Dev / test
       {:mox, "~> 1.2", only: :test},
@@ -146,13 +148,40 @@ defmodule Tau.MixProject do
   defp target_atoms_to_keyword(targets) do
     targets
     |> Enum.map(fn
-      :linux_amd64 -> {:linux_amd64, [os: :linux, cpu: :x86_64]}
-      :linux_arm64 -> {:linux_arm64, [os: :linux, cpu: :aarch64]}
-      :macos_amd64 -> {:macos_amd64, [os: :darwin, cpu: :x86_64]}
-      :macos_arm64 -> {:macos_arm64, [os: :darwin, cpu: :aarch64]}
-      :windows_amd64 -> {:windows_amd64, [os: :windows, cpu: :x86_64]}
+      :linux_amd64 -> {:linux_amd64, [os: :linux, cpu: :x86_64, skip_nifs: same_target?(:linux_amd64)]}
+      :linux_arm64 -> {:linux_arm64, [os: :linux, cpu: :aarch64, skip_nifs: same_target?(:linux_arm64)]}
+      :macos_amd64 -> {:macos_amd64, [os: :darwin, cpu: :x86_64, skip_nifs: same_target?(:macos_amd64)]}
+      :macos_arm64 -> {:macos_arm64, [os: :darwin, cpu: :aarch64, skip_nifs: same_target?(:macos_arm64)]}
+      :windows_amd64 -> {:windows_amd64, [os: :windows, cpu: :x86_64, skip_nifs: same_target?(:windows_amd64)]}
       other -> {other, []}
     end)
+  end
+
+  defp same_target?(target) do
+    host =
+      case {:os.type(), :erlang.system_info(:system_architecture)} do
+        {{:unix, :linux}, arch} when is_list(arch) ->
+          cond do
+            arch |> to_string() |> String.contains?("aarch64") -> :linux_arm64
+            arch |> to_string() |> String.contains?("x86_64") -> :linux_amd64
+            true -> :unknown
+          end
+
+        {{:unix, :darwin}, arch} when is_list(arch) ->
+          cond do
+            arch |> to_string() |> String.contains?("aarch64") -> :macos_arm64
+            arch |> to_string() |> String.contains?("x86_64") -> :macos_amd64
+            true -> :unknown
+          end
+
+        {{:win32, _}, _} ->
+          :windows_amd64
+
+        _ ->
+          :unknown
+      end
+
+    host == target
   end
 
   defp aliases do
