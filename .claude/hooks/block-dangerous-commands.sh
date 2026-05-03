@@ -43,7 +43,7 @@ BLOCKED_PATTERNS=(
 )
 
 for pattern in "${BLOCKED_PATTERNS[@]}"; do
-  if echo "$COMMAND" | grep -qEi "$pattern"; then
+  if echo "$COMMAND" | grep -qPi "$pattern"; then
     echo "Blocked: command matches dangerous pattern '$pattern'"
     exit 2
   fi
