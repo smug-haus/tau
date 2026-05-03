@@ -170,6 +170,14 @@ jobs:
         env:
           MIX_TEST_PROPERTY_BUDGET_FACTOR: "5"
 
+      - name: Run binary smoke gate (AC-5 / SPEC-USER-TURN)
+        # Builds the host-architecture Burrito binary and runs
+        # `tau run "ping" --provider replay --model replay`. Fails CI
+        # if the prod binary cannot complete a one-shot turn against
+        # the Replay provider — the floor for "the binary actually
+        # works." Per docs/spec/SPEC-USER-TURN.md AC-5.
+        run: mix test --only smoke --include smoke --trace
+
       - name: Upload coverage
         if: matrix.elixir == '1.18.1'
         uses: actions/upload-artifact@v4
