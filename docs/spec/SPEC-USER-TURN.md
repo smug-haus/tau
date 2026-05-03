@@ -38,7 +38,7 @@ the prod binary.**
 
 ## 2. Component decomposition
 
-The user-turn loop spans seven boundaries. Naming each precisely so that
+The user-turn loop spans eight boundaries. Naming each precisely so that
 contracts in §4 attach to a specific operation.
 
 | # | Boundary | Operation |
@@ -50,6 +50,7 @@ contracts in §4 attach to a specific operation.
 | B5 | `Tau.Session` ↔ `Tau.Provider` (impl) | `provider.stream/3` call and event consumption |
 | B6 | `Tau.Session` ↔ `Tau.Tool` (impl, per-call) | tool dispatch, permissions, tool result fold-back |
 | B7 | `Tau.Settings.Cache` ↔ session/provider/permissions | settings cascade reads |
+| B8 | `Tau.Providers.Anthropic` ↔ Auth resolver | API-key OR Claude Code OAuth credential resolution and request-header construction |
 
 ## 3. L0 — eight questions
 
@@ -81,6 +82,10 @@ Each question lists raw constraints. Format: `[Cn-Bm]` = constraint number + bou
 - **★ [C16-B6]** Tool execution errors: `ToolEnd{result: %{is_error: true, content: c}}`. TUI renders `✗ <c[0..160]>`. If `c` is a structured error term, `inspect()` produces opaque output. Information loss.
 - **[C17-B1]** Telemetry handler crashes — Erlang detaches the handler from the bus. Subsequent emissions silently drop. No mechanism to detect a missing handler.
 - **★ [C18-B7]** `Settings.Cache.get/1` falls back to defaults if the key is absent. A typo in a settings.local.json key produces silent default behavior — debugging requires manually reading the merged cascade.
+- **★ [C46-B8]** `Tau.Providers.Anthropic.api_key/1` only resolves the API-key path (settings → env → vault) and `headers/1` only sends `x-api-key` (lib/tau/providers/anthropic.ex:350-380). **Claude Pro/Max users do not have API keys** — they authenticate via OAuth tokens that Claude Code stores at `~/.claude/.credentials.json` (top-level key `claudeAiOauth`, fields `accessToken`, `refreshToken`, `expiresAt`, `scopes`, `subscriptionType`). Without OAuth support, the entire Pro/Max user population gets `{:error, :missing_api_key}` on every turn — silent for them, since they never see the env var.
+- **★ [C47-B8]** Header dispatch: API-key requests use `x-api-key: <key>`; OAuth requests use `Authorization: Bearer <accessToken>` AND require `anthropic-beta: oauth-2025-04-20` for the Messages API to accept the token. The current single-shape `headers/1` cannot serve OAuth even if the token is provided. Confirmed empirically: `~/.claude/.credentials.json` accessToken format is `sk-ant-oat01-...` (vs API key `sk-ant-api03-...`).
+- **★ [C48-B8]** OAuth `accessToken` has `expiresAt` (ms epoch). When expired, Anthropic returns 401. Without a refresh path, the user sees a generic auth error and has to know to run `claude /login` to renew. Refresh requires writing back to `.credentials.json`, which races with Claude Code itself if it's running — single-writer constraint.
+- **[C49-B8]** OAuth `scopes` must include `user:inference` for the Messages API. Tau should validate this at config-load time and surface a clear error if missing.
 
 ### Q4: What information crosses a boundary, and what is lost?
 
@@ -339,25 +344,33 @@ Each entry: id, statement, severity, detection_method, source_constraint.
 | D-014 | Resume of a still-running session refused with `{:error, :session_running}` | medium | unit test | [C2] |
 | D-015 | Permissions `:ask` outcome in headless context resolves to `:deny` after timeout | high | unit test | [C30] |
 | D-016 | Compactor `{:error, reason}` MUST emit `[:tau, :compaction, :exception]` telemetry AND increment a per-session "consecutive failures" counter; on N>=3 consecutive failures, FSM aborts the turn with `stop_reason: :compaction_failed` rather than silently dropping. | medium | unit test: replay a compactor that always errors; assert telemetry + abort | [C26] (OQ-4) |
+| D-017 | `Tau.Providers.Anthropic` MUST support both API-key auth (`x-api-key` header) AND Claude Code OAuth auth (`Authorization: Bearer <token>` + `anthropic-beta: oauth-2025-04-20` header). OAuth credentials sourced from `~/.claude/.credentials.json` (top-level key `claudeAiOauth.accessToken`). Auth precedence (first non-nil wins): explicit `:api_key` opt → `Application.get_env` API key → `ANTHROPIC_API_KEY` env (vault) → Claude Code OAuth file. | high | unit test: stub each source; assert correct header shape; integration test with a Bypass server checking both code paths | [C46], [C47] |
+| D-018 | Expired OAuth token (`expiresAt < now`) MUST surface a clear, actionable error to the user — "Your Claude Code OAuth token expired; run `claude /login` to renew" — NOT a generic 401 or silent failure. Tau v1 does NOT refresh tokens itself (avoids the race with Claude Code's own refresh). | medium | unit test: stub credentials with past `expiresAt`; assert error message contains "expired" and the renewal command | [C48] |
+| D-019 | `tau doctor` MUST report which auth path is configured (api_key vs oauth vs none) and, for OAuth, the `subscriptionType` and time-to-expiry. | low | unit test on doctor output | [C46] (debuggability) |
 
-16 D-xxx entries. Each is enforceable. None require speculation.
+19 D-xxx entries. Each is enforceable. None require speculation.
 
 ## 7. Acceptance criteria — "working TUI"
 
 These are the bar for closing the umbrella issue (#153/#149) and unblocking the next milestone.
 
-### AC-1: First-run smoke
-- `MIX_ENV=prod mix release tau` then `BURRITO_TARGET=linux_arm64 mix release tau` produces `burrito_out/tau_linux_arm64`.
-- With `ANTHROPIC_API_KEY` in env and **no** `~/.tau/settings*.json` and **no** `.tau/settings*.json` in cwd, running the binary in a real terminal renders the TUI within 3 seconds.
+### AC-1: First-run smoke (BOTH auth paths)
 
-### AC-2: Single turn round-trip
+`MIX_ENV=prod mix release tau` then `BURRITO_TARGET=<host> mix release tau` produces the binary. With **no** `~/.tau/settings*.json` and **no** `.tau/settings*.json` in cwd, running the binary in a real terminal renders the TUI within 3 seconds in EACH of the following auth scenarios:
+
+- **AC-1a (API key user):** `ANTHROPIC_API_KEY=sk-ant-api03-...` in env, no Claude Code login.
+- **AC-1b (Claude Pro/Max user):** no `ANTHROPIC_API_KEY` in env, but `~/.claude/.credentials.json` exists with a valid (non-expired) `claudeAiOauth.accessToken`. This is the dominant case — Pro and Max subscribers do not have API keys.
+- **AC-1c (no auth):** neither — the TUI MUST render and the first turn MUST surface an actionable error ("set ANTHROPIC_API_KEY or run `claude /login`"), per D-018.
+
+### AC-2: Single turn round-trip (BOTH auth paths)
 - Type "say hello", press Enter.
 - Within 30 seconds, the transcript pane shows an assistant response containing at least one non-whitespace character.
 - Status bar transitions `idle → sending → streaming → idle`.
+- **Both AC-1a (API key) and AC-1b (Claude Code OAuth) paths must satisfy this.**
 
 ### AC-3: Provider error visibility
-- Unset `ANTHROPIC_API_KEY`. Launch TUI. Submit "hi".
-- Within 5 seconds, the transcript pane renders a line containing "Error" or "auth" (case-insensitive). The TUI does NOT freeze or silently swallow.
+- Unset `ANTHROPIC_API_KEY` AND ensure `~/.claude/.credentials.json` is absent or expired. Launch TUI. Submit "hi".
+- Within 5 seconds, the transcript pane renders a line containing "Error" or "auth" (case-insensitive) AND mentions BOTH renewal paths ("set `ANTHROPIC_API_KEY`" or "run `claude /login`"). The TUI does NOT freeze or silently swallow.
 
 ### AC-4: Quit ergonomics
 - Typing the literal letter `q` as part of a prompt does NOT quit.
