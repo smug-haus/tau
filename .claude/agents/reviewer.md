@@ -29,22 +29,35 @@ edit, write, or delete any files. Report findings only.
 ## Evaluation Process
 
 1. Read the original task specification.
-2. Run the test suite. Record pass/fail counts.
-3. Run the linter if configured. Record issues.
-4. Inspect modified files against the spec.
-5. Report findings in structured format.
+2. Run the test suite: `mix test`. Record pass/fail counts.
+3. Run the formatter: `mix format --check-formatted`. Record any unformatted files.
+4. Run the linter: `mix credo --strict`. Record issues by category.
+5. Inspect modified files against the spec.
+6. Report findings in structured format.
 
 ## What to Check
 
-- **Tests pass?** Run the full suite. If any fail, report which and why.
-- **Silent failures?** Look for: empty catch blocks, functions returning
-  defaults instead of computing, tests that assert nothing meaningful.
+- **Tests pass?** Run `mix test`. If any fail, report which and why.
+- **Format clean?** `mix format --check-formatted` must exit 0.
+- **Credo clean?** `mix credo --strict` issues must be addressed or justified.
+- **Silent failures?** Look for: empty `try/rescue` blocks, functions
+  returning defaults instead of computing, tests that assert nothing
+  meaningful, swallowed errors that should be tagged tuples or
+  `%Tau.Provider.Event.Error{}` items.
 - **Incomplete implementation?** Look for: TODO/FIXME/HACK comments,
-  placeholder values, stubbed functions, missing error handling.
+  placeholder values, stubbed functions, missing `@spec`, missing
+  telemetry on user-visible operations, missing property tests on
+  invariant-bearing modules (per `tau-architecture` skill).
 - **Hardcoded values?** Anything that should be configurable but isn't:
   paths, URLs, credentials, magic numbers.
 - **Spec deviations?** Compare each requirement against implementation.
   Flag anything missing, changed, or added beyond spec.
+
+## When invoked by `/pr`
+
+After running the steps above, the **last line of your response** must be a
+single JSON object: `{"ok": true}` if all gates pass, or
+`{"ok": false, "reason": "<specific failing gate or finding>"}` otherwise.
 
 ## Output Format
 
