@@ -63,6 +63,11 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       case msg do
         {:event, %{key: 13}} -> submit(model)
         {:event, %{key: 27}} -> cancel(model)
+        # Termbox / Ratatouille deliver Space as `key: 32` (the SPC special
+        # key), NOT as `ch: 32`. The `ch != 0` clause below therefore
+        # never fires for spaces, and they were silently dropped. Map
+        # the special key to a literal space here.
+        {:event, %{key: 32}} -> append_input(model, " ")
         {:event, %{ch: ch}} when ch != 0 -> append_input(model, <<ch::utf8>>)
         {:event, %{key: 127}} -> backspace(model)
         {:event, %{key: 8}} -> backspace(model)
