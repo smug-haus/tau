@@ -17,13 +17,21 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
     @impl true
     def init(_context) do
-      # D-004 (SPEC-USER-TURN [C6]): subscribe to PubSub BEFORE
-      # `Tau.start_session/1` returns. `Session.init/1` synchronously
-      # broadcasts `%Events.SessionStart{}` from inside FSM init; if we
-      # subscribe after start_session returns, that event is already
-      # gone. Pre-generate the id, subscribe, then start.
+      # D-004 (SPEC-USER-TURN [C6]): the bridge MUST subscribe to PubSub
+      # BEFORE `Tau.start_session/1` returns. `Session.init/1`
+      # synchronously broadcasts `%Events.SessionStart{}`; subscribing
+      # afterwards loses it. Pre-generate the id, start the bridge, then
+      # start the session.
+      #
+      # Bridge rationale: Ratatouille 0.5.1's runtime does NOT forward
+      # arbitrary mailbox messages to `update/2` — only its declared
+      # subscriptions (here, `:tick`). Without `Tau.TUI.EventBridge` the
+      # PubSub broadcasts would queue in the runtime's mailbox forever,
+      # the transcript pane stays empty, and the user never sees an
+      # assistant response. The bridge holds a queue per session;
+      # `update/2`'s `:tick` clause drains it.
       session_id = Tau.Session.generate_id()
-      Phoenix.PubSub.subscribe(Tau.PubSub, "session:" <> session_id)
+      {:ok, _bridge_pid} = Tau.TUI.EventBridge.start_link(session_id)
 
       # CLI-supplied per-invocation overrides flow via Tau.TUI.RuntimeOpts
       # (Ratatouille's `init/1` arity is fixed, so this is the seam).
@@ -58,7 +66,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         {:event, %{ch: ch}} when ch != 0 -> append_input(model, <<ch::utf8>>)
         {:event, %{key: 127}} -> backspace(model)
         {:event, %{key: 8}} -> backspace(model)
-        :tick -> model
+        :tick -> drain_bridge(model)
         %Tau.Session.Events.MessageStart{} = e -> on_message_start(model, e)
         %Tau.Session.Events.MessageUpdate{} = e -> on_message_update(model, e)
         %Tau.Session.Events.MessageEnd{} = e -> on_message_end(model, e)
@@ -68,6 +76,15 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         %Tau.Session.Events.SessionEnd{} = e -> on_session_end(model, e)
         _ -> model
       end
+    end
+
+    # Each tick, fold every event the bridge has buffered through the
+    # same handlers used by the unit tests (which call update/2 directly).
+    # This is the integration the unit tests don't exercise.
+    defp drain_bridge(model) do
+      model.session_id
+      |> Tau.TUI.EventBridge.drain()
+      |> Enum.reduce(model, fn event, acc -> update(acc, event) end)
     end
 
     @impl true
