@@ -92,6 +92,13 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       |> Enum.reduce(model, fn event, acc -> update(acc, event) end)
     end
 
+    # Hardcoded panel width for word-wrap. Ratatouille's `label` is
+    # single-line and clips at the panel edge; we pre-wrap long
+    # transcript entries into multiple sublines so nothing is lost.
+    # TODO: derive from `Ratatouille` window width via the resize
+    # event so wrapping adapts to terminal size.
+    @wrap_width 100
+
     @impl true
     def render(model) do
       view top_bar: status_bar(model),
@@ -99,12 +106,72 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         row do
           column(size: 12) do
             panel title: "transcript", height: :fill do
-              for line <- Enum.take(model.transcript, -200) do
-                label(content: line)
+              for line <- Enum.take(model.transcript, -200),
+                  sub <- wrap(line, @wrap_width) do
+                label(content: sub)
               end
             end
           end
         end
+      end
+    end
+
+    @doc false
+    @spec wrap(String.t(), pos_integer()) :: [String.t()]
+    def wrap("", _width), do: [""]
+
+    def wrap(line, width) when is_binary(line) and is_integer(width) and width > 0 do
+      line
+      |> String.split(~r/\s+/, trim: false)
+      |> Enum.reduce({[], ""}, fn word, {lines, current} ->
+        cond do
+          # Word longer than the wrap width on its own — hard-break
+          # mid-word (rare; long URLs, hashes).
+          String.length(word) > width ->
+            chunks = chunk_string(word, width)
+            new_current = List.last(chunks) || ""
+
+            new_lines =
+              cond do
+                current == "" and length(chunks) > 1 ->
+                  Enum.reverse(Enum.drop(chunks, -1)) ++ lines
+
+                current == "" ->
+                  lines
+
+                length(chunks) == 1 ->
+                  [current | lines]
+
+                true ->
+                  Enum.reverse(Enum.drop(chunks, -1)) ++ [current | lines]
+              end
+
+            {new_lines, new_current}
+
+          current == "" ->
+            {lines, word}
+
+          String.length(current) + 1 + String.length(word) <= width ->
+            {lines, current <> " " <> word}
+
+          true ->
+            {[current | lines], word}
+        end
+      end)
+      |> finalize_wrap()
+    end
+
+    defp finalize_wrap({lines, ""}), do: Enum.reverse(lines)
+    defp finalize_wrap({lines, last}), do: Enum.reverse([last | lines])
+
+    defp chunk_string(s, n) do
+      chunks = for <<chunk::binary-size(n) <- s>>, do: chunk
+      rest_len = byte_size(s) - length(chunks) * n
+
+      if rest_len > 0 do
+        chunks ++ [binary_part(s, byte_size(s) - rest_len, rest_len)]
+      else
+        chunks
       end
     end
 
