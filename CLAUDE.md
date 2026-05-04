@@ -2,6 +2,19 @@
 
 @TAU.md
 
+## Mission
+
+A working TUI is the priority. See `docs/MISSION.md` for verified state,
+open work, and the action ladder. Source of truth for "working" is
+`docs/spec/SPEC-USER-TURN.md` (currently on branch `spec/user-turn-loop`,
+not yet merged to main).
+
+The runtime-invariant namespace is **D-NNN**, defined in that SPEC §6.
+**D-001…D-019 are taken.** Before authoring a new D-NNN, verify the
+identifier is free across the whole repo (`git log --all --grep`, plus
+`grep -rn` over `lib test docs .claude`). Single-branch negative results
+are not evidence of absence.
+
 ## Project Context
 
 **Stack:** Elixir 1.18.1 / Erlang OTP 27.2 (`.tool-versions`).
