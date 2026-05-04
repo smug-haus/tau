@@ -93,6 +93,31 @@ defmodule Tau.Providers.OpenAI.Chat do
     # deltas for un-started blocks, so we MUST inject a synthetic
     # `TextStart` before the first non-empty delta. Tracked per-stream
     # via the `:text_started?` flag in `partial`.
+    #
+    # Thinking models (Qwen3, DeepSeek-R1, others) emit chain-of-thought
+    # via the non-standard `delta.reasoning` field on the same
+    # OpenAI-compatible endpoint. Decoded into Tau's existing Thinking*
+    # events; same start/delta/end synthesis as text since the upstream
+    # protocol has no explicit start/end markers.
+    {thinking_events, partial} =
+      case Map.get(delta, "reasoning") do
+        nil ->
+          {[], partial}
+
+        "" ->
+          {[], partial}
+
+        text ->
+          if Map.get(partial, :thinking_started?, false) do
+            {[%Event.ThinkingDelta{block_id: "thinking", text: text}], partial}
+          else
+            {[
+               %Event.ThinkingStart{block_id: "thinking"},
+               %Event.ThinkingDelta{block_id: "thinking", text: text}
+             ], Map.put(partial, :thinking_started?, true)}
+          end
+      end
+
     {text_events, partial} =
       case Map.get(delta, "content") do
         nil ->
@@ -102,13 +127,29 @@ defmodule Tau.Providers.OpenAI.Chat do
           {[], partial}
 
         text ->
+          # Close any open thinking block before the first content delta;
+          # thinking always precedes content in these models.
+          close_thinking =
+            if Map.get(partial, :thinking_started?, false) and
+                 not Map.get(partial, :thinking_closed?, false) do
+              [%Event.ThinkingEnd{block_id: "thinking", signature: nil}]
+            else
+              []
+            end
+
+          partial =
+            if close_thinking != [],
+              do: Map.put(partial, :thinking_closed?, true),
+              else: partial
+
           if Map.get(partial, :text_started?, false) do
-            {[%Event.TextDelta{block_id: "text", text: text}], partial}
+            {close_thinking ++ [%Event.TextDelta{block_id: "text", text: text}], partial}
           else
-            {[
-               %Event.TextStart{block_id: "text"},
-               %Event.TextDelta{block_id: "text", text: text}
-             ], Map.put(partial, :text_started?, true)}
+            {close_thinking ++
+               [
+                 %Event.TextStart{block_id: "text"},
+                 %Event.TextDelta{block_id: "text", text: text}
+               ], Map.put(partial, :text_started?, true)}
           end
       end
 
@@ -120,9 +161,15 @@ defmodule Tau.Providers.OpenAI.Chat do
           {[], partial}
 
         reason ->
-          # Close the text block before Done so the assembler's
-          # `build_content/1` sees a finalized block. (TextEnd is a
-          # signal to the assembler that no more deltas will arrive.)
+          # Close any still-open blocks before Done so the assembler's
+          # `build_content/1` sees finalized blocks. Both text and
+          # thinking blocks may be open at this point.
+          close_thinking =
+            if Map.get(partial, :thinking_started?, false) and
+                 not Map.get(partial, :thinking_closed?, false),
+               do: [%Event.ThinkingEnd{block_id: "thinking", signature: nil}],
+               else: []
+
           close_text =
             if Map.get(partial, :text_started?, false),
               do: [%Event.TextEnd{block_id: "text"}],
@@ -136,10 +183,10 @@ defmodule Tau.Providers.OpenAI.Chat do
               other -> %Event.Done{stop_reason: String.to_atom(other)}
             end
 
-          {close_text ++ [done], partial}
+          {close_thinking ++ close_text ++ [done], partial}
       end
 
-    {start_events ++ text_events ++ tool_events ++ finish_events, partial}
+    {start_events ++ thinking_events ++ text_events ++ tool_events ++ finish_events, partial}
   end
 
   defp decode_chunk(_, partial), do: {[], partial}

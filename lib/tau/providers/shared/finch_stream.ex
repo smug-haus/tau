@@ -71,8 +71,20 @@ defmodule Tau.Providers.Shared.FinchStream do
           {:done}, _ -> Process.send(parent, {ref, :done}, [])
         end)
         |> case do
-          {:ok, _} -> Process.send(parent, {ref, :end}, [])
-          {:error, e} -> Process.send(parent, {ref, {:error, e}}, [])
+          {:ok, _} ->
+            Process.send(parent, {ref, :end}, [])
+
+          {:error, e} ->
+            Process.send(parent, {ref, {:error, e}}, [])
+
+          # Finch.stream/4 also returns the 3-tuple form
+          # `{:error, exception, partial_result}` when an error
+          # interrupts a stream that had already produced partial
+          # output (e.g. Mint connection timeout during a slow
+          # first-load against a local Ollama). Without this clause
+          # the FSM crashes with CaseClauseError.
+          {:error, e, _partial} ->
+            Process.send(parent, {ref, {:error, e}}, [])
         end
       end)
 
