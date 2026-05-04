@@ -362,8 +362,19 @@ defmodule Tau.CLI do
 
   defp resolve_provider(nil), do: Tau.Provider.default()
   defp resolve_provider("anthropic"), do: Tau.Providers.Anthropic
+  defp resolve_provider("openai"), do: Tau.Providers.OpenAI.Chat
+  defp resolve_provider("ollama"), do: Tau.Providers.OpenAI.Chat
+  defp resolve_provider("local"), do: Tau.Providers.OpenAI.Chat
+  defp resolve_provider("bedrock"), do: Tau.Providers.Bedrock
+  defp resolve_provider("gemini"), do: Tau.Providers.Gemini
+  defp resolve_provider("replay"), do: Tau.Providers.Replay
 
-  defp resolve_provider(other) do
+  # Last-resort fallback for "Foo" → Tau.Providers.Foo style atoms.
+  # `String.capitalize/1` only touches the first byte, which is wrong
+  # for compound names like "openai" (-> "Openai" ≠ "OpenAI"). Known
+  # short names are handled above; this clause only fires for genuinely
+  # custom provider modules a caller registers themselves.
+  defp resolve_provider(other) when is_binary(other) do
     Module.concat(["Tau", "Providers", String.capitalize(other)])
   end
 

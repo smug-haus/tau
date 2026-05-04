@@ -88,22 +88,55 @@ defmodule Tau.Providers.OpenAI.Chat do
         {[], partial}
       end
 
-    text_events =
+    # OpenAI's streaming format has no analogue of `TextStart` — it just
+    # emits deltas. The assembler's `update_block/3` silently drops
+    # deltas for un-started blocks, so we MUST inject a synthetic
+    # `TextStart` before the first non-empty delta. Tracked per-stream
+    # via the `:text_started?` flag in `partial`.
+    {text_events, partial} =
       case Map.get(delta, "content") do
-        nil -> []
-        "" -> []
-        text -> [%Event.TextDelta{block_id: "text", text: text}]
+        nil ->
+          {[], partial}
+
+        "" ->
+          {[], partial}
+
+        text ->
+          if Map.get(partial, :text_started?, false) do
+            {[%Event.TextDelta{block_id: "text", text: text}], partial}
+          else
+            {[
+               %Event.TextStart{block_id: "text"},
+               %Event.TextDelta{block_id: "text", text: text}
+             ], Map.put(partial, :text_started?, true)}
+          end
       end
 
     {tool_events, partial} = decode_tool_calls(Map.get(delta, "tool_calls", []), partial)
 
-    finish_events =
+    {finish_events, partial} =
       case Map.get(choice, "finish_reason") do
-        nil -> []
-        "stop" -> [%Event.Done{stop_reason: :stop}]
-        "length" -> [%Event.Done{stop_reason: :length}]
-        "tool_calls" -> [%Event.Done{stop_reason: :tool_use}]
-        other -> [%Event.Done{stop_reason: String.to_atom(other)}]
+        nil ->
+          {[], partial}
+
+        reason ->
+          # Close the text block before Done so the assembler's
+          # `build_content/1` sees a finalized block. (TextEnd is a
+          # signal to the assembler that no more deltas will arrive.)
+          close_text =
+            if Map.get(partial, :text_started?, false),
+              do: [%Event.TextEnd{block_id: "text"}],
+              else: []
+
+          done =
+            case reason do
+              "stop" -> %Event.Done{stop_reason: :stop}
+              "length" -> %Event.Done{stop_reason: :length}
+              "tool_calls" -> %Event.Done{stop_reason: :tool_use}
+              other -> %Event.Done{stop_reason: String.to_atom(other)}
+            end
+
+          {close_text ++ [done], partial}
       end
 
     {start_events ++ text_events ++ tool_events ++ finish_events, partial}
