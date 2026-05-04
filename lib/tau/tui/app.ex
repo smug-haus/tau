@@ -24,7 +24,18 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       # gone. Pre-generate the id, subscribe, then start.
       session_id = Tau.Session.generate_id()
       Phoenix.PubSub.subscribe(Tau.PubSub, "session:" <> session_id)
-      {:ok, ^session_id} = Tau.start_session(session_id: session_id)
+
+      # CLI-supplied per-invocation overrides flow via Tau.TUI.RuntimeOpts
+      # (Ratatouille's `init/1` arity is fixed, so this is the seam).
+      runtime_opts = Tau.TUI.RuntimeOpts.get()
+
+      start_opts =
+        [session_id: session_id]
+        |> put_if(:provider, Map.get(runtime_opts, :provider))
+        |> put_if(:model, Map.get(runtime_opts, :model))
+        |> put_if(:provider_ctx, Map.get(runtime_opts, :provider_ctx))
+
+      {:ok, ^session_id} = Tau.start_session(start_opts)
 
       %{
         session_id: session_id,
@@ -35,6 +46,9 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         last_assistant: nil
       }
     end
+
+    defp put_if(opts, _key, nil), do: opts
+    defp put_if(opts, key, value), do: Keyword.put(opts, key, value)
 
     @impl true
     def update(model, msg) do

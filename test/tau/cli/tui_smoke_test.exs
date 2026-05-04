@@ -124,14 +124,34 @@ defmodule Tau.CLI.TuiSmokeTest do
   end
 
   describe "AC-H2: single turn round-trip (mirrors SPEC-USER-TURN AC-2)" do
-    @tag :pending
     test "replay provider produces assistant response in transcript", %{
       binary: binary,
       tmpdir: tmpdir
     } do
-      # Pending: TUI session-start hard-codes provider; needs a
-      # `--provider` plumb-through (deferred per SPEC-TUI-HEADLESS §8).
-      _ = {binary, tmpdir}
+      # The bar for "working TUI": user types, hits Enter, the assistant
+      # response appears in the transcript pane. Replay produces a
+      # deterministic "(replay) hello" so this test is hermetic.
+      {:ok, sess} =
+        TuiPtyHelper.start(binary,
+          env: [{"TAU_DATA_DIR", tmpdir}],
+          args: ["tui", "--provider", "replay", "--model", "replay"]
+        )
+
+      on_exit(fn -> TuiPtyHelper.quit(sess) end)
+
+      :ok = TuiPtyHelper.send(sess, "hello")
+      :ok = TuiPtyHelper.send(sess, :enter)
+
+      case TuiPtyHelper.await(sess, ~r/\(replay\)/, timeout_ms: 30_000) do
+        {:ok, _pane} ->
+          :ok
+
+        {:error, :timeout, last_pane} ->
+          flunk(
+            "AC-H2 violation: assistant response did not appear in the " <>
+              "transcript pane within 30s. Pane:\n#{last_pane}"
+          )
+      end
     end
   end
 

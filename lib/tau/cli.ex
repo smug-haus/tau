@@ -82,14 +82,14 @@ defmodule Tau.CLI do
       {[:init], parsed} ->
         init_cmd(parsed) |> halt()
 
-      {[:tui], _} ->
-        tui_cmd() |> halt()
+      {[:tui], parsed} ->
+        tui_cmd(parsed) |> halt()
 
       {[], _} ->
-        tui_cmd() |> halt()
+        tui_cmd(%Optimus.ParseResult{}) |> halt()
 
-      %Optimus.ParseResult{} ->
-        tui_cmd() |> halt()
+      %Optimus.ParseResult{} = parsed ->
+        tui_cmd(parsed) |> halt()
 
       _ ->
         :ok
@@ -216,7 +216,14 @@ defmodule Tau.CLI do
             ]
           ]
         ],
-        tui: [name: "tui", about: "Launch the interactive TUI"]
+        tui: [
+          name: "tui",
+          about: "Launch the interactive TUI",
+          options: [
+            provider: [short: "-p", long: "--provider", help: "Provider id"],
+            model: [short: "-m", long: "--model", help: "Model id"]
+          ]
+        ]
       ]
     )
   end
@@ -332,15 +339,26 @@ defmodule Tau.CLI do
     end
   end
 
-  defp tui_cmd do
-    if Code.ensure_loaded?(Tau.TUI) and function_exported?(Tau.TUI, :start, 0) do
-      Tau.TUI.start()
+  defp tui_cmd(parsed) do
+    if Code.ensure_loaded?(Tau.TUI) and function_exported?(Tau.TUI, :start, 1) do
+      Tau.TUI.start(tui_opts(parsed))
       0
     else
       IO.puts(:stderr, "TUI not available (Ratatouille not loaded?)")
       1
     end
   end
+
+  defp tui_opts(%Optimus.ParseResult{options: opts}) when is_map(opts) do
+    []
+    |> tui_put(:provider, opts[:provider], &resolve_provider/1)
+    |> tui_put(:model, opts[:model], & &1)
+  end
+
+  defp tui_opts(_), do: []
+
+  defp tui_put(opts, _key, nil, _xform), do: opts
+  defp tui_put(opts, key, value, xform), do: Keyword.put(opts, key, xform.(value))
 
   defp resolve_provider(nil), do: Tau.Provider.default()
   defp resolve_provider("anthropic"), do: Tau.Providers.Anthropic
