@@ -188,6 +188,15 @@ jobs:
         env:
           MIX_TEST_PROPERTY_BUDGET_FACTOR: "5"
 
+      # Burrito release-build (used by the smoke gate below) needs
+      # zig (cross-compiler driver) and xz (tarball compressor) on PATH.
+      # Mirrors the release.yml workflow.
+      - name: Setup zig (Burrito)
+        uses: mlugg/setup-zig@v1
+
+      - name: Setup xz (Burrito)
+        run: sudo apt-get update && sudo apt-get install -y xz-utils
+
       - name: Run binary smoke gate (AC-5 / SPEC-USER-TURN)
         # Builds the host-architecture Burrito binary and runs
         # `tau run "ping" --provider replay --model replay`. Fails CI
