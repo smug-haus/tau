@@ -135,6 +135,32 @@ defmodule Tau.Message.Assembler do
   defp format_reason({type, msg}) when is_binary(type), do: "#{type}: #{msg}"
   defp format_reason(other), do: inspect(other)
 
+  # SPEC-USER-TURN [C12]/[C19] / D-009: render paths that iterate
+  # `msg.content` (Tau.TUI.App.on_message_end/2) silently drop a
+  # message with empty content. When the provider stream errors before
+  # emitting any TextDelta — e.g. Anthropic auth failure, network
+  # error, OAuth expiry — `build_content/1` returns []. This guard
+  # synthesizes a single text block carrying the error so the TUI,
+  # CLI streamer, and any other consumer surface SOMETHING instead of
+  # going silent. Mirrors the shape used by the synchronous-error
+  # branch at lib/tau/session.ex:677-681.
+  defp ensure_visible_content(%{content: [_ | _]} = msg), do: msg
+
+  defp ensure_visible_content(%{content: [], stop_reason: :error, error_message: em} = msg)
+       when is_binary(em) and em != "" do
+    %{msg | content: [%{type: :text, text: "Error: " <> em}]}
+  end
+
+  defp ensure_visible_content(%{content: [], stop_reason: :error} = msg) do
+    %{msg | content: [%{type: :text, text: "Error: provider stream ended with no content"}]}
+  end
+
+  defp ensure_visible_content(%{content: []} = msg) do
+    %{msg | content: [%{type: :text, text: "(empty response)"}]}
+  end
+
+  defp ensure_visible_content(msg), do: msg
+
   @doc "Has the stream finished (cleanly or with an error)?"
   @spec done?(t()) :: boolean()
   def done?(%__MODULE__{done?: d}), do: d
@@ -143,9 +169,11 @@ defmodule Tau.Message.Assembler do
   @spec assistant(t()) :: Assistant.t()
   def assistant(%__MODULE__{message: msg, error: nil} = s) do
     %{msg | content: build_content(s)}
+    |> ensure_visible_content()
   end
 
   def assistant(%__MODULE__{message: msg} = s) do
     %{msg | content: build_content(s)}
+    |> ensure_visible_content()
   end
 end
