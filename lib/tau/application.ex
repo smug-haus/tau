@@ -25,7 +25,9 @@ defmodule Tau.Application do
     9. **Extensions.Loader** — registers tools/hooks/commands
        defined by extensions.
     10. **MCP.Supervisor** — MCP server connections.
-    11. **Sessions.Supervisor** — dynamic supervisor for session
+    11. **TUI.Supervisor** — empty DynamicSupervisor; hosts the
+        Ratatouille runtime subtree when the TUI is invoked (ADR-0018).
+    12. **Sessions.Supervisor** — dynamic supervisor for session
         FSMs (must be last; it's the only consumer of all the
         above).
 
@@ -50,6 +52,7 @@ defmodule Tau.Application do
       {Task.Supervisor, name: Tau.Tools.TaskSupervisor},
       Tau.Extensions.Loader,
       Tau.MCP.Supervisor,
+      Tau.TUI.Supervisor,
       Tau.Sessions.Supervisor
     ]
 

@@ -148,12 +148,23 @@ defmodule Tau.MixProject do
   defp target_atoms_to_keyword(targets) do
     targets
     |> Enum.map(fn
-      :linux_amd64 -> {:linux_amd64, [os: :linux, cpu: :x86_64, skip_nifs: same_target?(:linux_amd64)]}
-      :linux_arm64 -> {:linux_arm64, [os: :linux, cpu: :aarch64, skip_nifs: same_target?(:linux_arm64)]}
-      :macos_amd64 -> {:macos_amd64, [os: :darwin, cpu: :x86_64, skip_nifs: same_target?(:macos_amd64)]}
-      :macos_arm64 -> {:macos_arm64, [os: :darwin, cpu: :aarch64, skip_nifs: same_target?(:macos_arm64)]}
-      :windows_amd64 -> {:windows_amd64, [os: :windows, cpu: :x86_64, skip_nifs: same_target?(:windows_amd64)]}
-      other -> {other, []}
+      :linux_amd64 ->
+        {:linux_amd64, [os: :linux, cpu: :x86_64, skip_nifs: same_target?(:linux_amd64)]}
+
+      :linux_arm64 ->
+        {:linux_arm64, [os: :linux, cpu: :aarch64, skip_nifs: same_target?(:linux_arm64)]}
+
+      :macos_amd64 ->
+        {:macos_amd64, [os: :darwin, cpu: :x86_64, skip_nifs: same_target?(:macos_amd64)]}
+
+      :macos_arm64 ->
+        {:macos_arm64, [os: :darwin, cpu: :aarch64, skip_nifs: same_target?(:macos_arm64)]}
+
+      :windows_amd64 ->
+        {:windows_amd64, [os: :windows, cpu: :x86_64, skip_nifs: same_target?(:windows_amd64)]}
+
+      other ->
+        {other, []}
     end)
   end
 

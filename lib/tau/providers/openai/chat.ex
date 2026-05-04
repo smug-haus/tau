@@ -88,25 +88,105 @@ defmodule Tau.Providers.OpenAI.Chat do
         {[], partial}
       end
 
-    text_events =
+    # OpenAI's streaming format has no analogue of `TextStart` — it just
+    # emits deltas. The assembler's `update_block/3` silently drops
+    # deltas for un-started blocks, so we MUST inject a synthetic
+    # `TextStart` before the first non-empty delta. Tracked per-stream
+    # via the `:text_started?` flag in `partial`.
+    #
+    # Thinking models (Qwen3, DeepSeek-R1, others) emit chain-of-thought
+    # via the non-standard `delta.reasoning` field on the same
+    # OpenAI-compatible endpoint. Decoded into Tau's existing Thinking*
+    # events; same start/delta/end synthesis as text since the upstream
+    # protocol has no explicit start/end markers.
+    {thinking_events, partial} =
+      case Map.get(delta, "reasoning") do
+        nil ->
+          {[], partial}
+
+        "" ->
+          {[], partial}
+
+        text ->
+          if Map.get(partial, :thinking_started?, false) do
+            {[%Event.ThinkingDelta{block_id: "thinking", text: text}], partial}
+          else
+            {[
+               %Event.ThinkingStart{block_id: "thinking"},
+               %Event.ThinkingDelta{block_id: "thinking", text: text}
+             ], Map.put(partial, :thinking_started?, true)}
+          end
+      end
+
+    {text_events, partial} =
       case Map.get(delta, "content") do
-        nil -> []
-        "" -> []
-        text -> [%Event.TextDelta{block_id: "text", text: text}]
+        nil ->
+          {[], partial}
+
+        "" ->
+          {[], partial}
+
+        text ->
+          # Close any open thinking block before the first content delta;
+          # thinking always precedes content in these models.
+          close_thinking =
+            if Map.get(partial, :thinking_started?, false) and
+                 not Map.get(partial, :thinking_closed?, false) do
+              [%Event.ThinkingEnd{block_id: "thinking", signature: nil}]
+            else
+              []
+            end
+
+          partial =
+            if close_thinking != [],
+              do: Map.put(partial, :thinking_closed?, true),
+              else: partial
+
+          if Map.get(partial, :text_started?, false) do
+            {close_thinking ++ [%Event.TextDelta{block_id: "text", text: text}], partial}
+          else
+            {close_thinking ++
+               [
+                 %Event.TextStart{block_id: "text"},
+                 %Event.TextDelta{block_id: "text", text: text}
+               ], Map.put(partial, :text_started?, true)}
+          end
       end
 
     {tool_events, partial} = decode_tool_calls(Map.get(delta, "tool_calls", []), partial)
 
-    finish_events =
+    {finish_events, partial} =
       case Map.get(choice, "finish_reason") do
-        nil -> []
-        "stop" -> [%Event.Done{stop_reason: :stop}]
-        "length" -> [%Event.Done{stop_reason: :length}]
-        "tool_calls" -> [%Event.Done{stop_reason: :tool_use}]
-        other -> [%Event.Done{stop_reason: String.to_atom(other)}]
+        nil ->
+          {[], partial}
+
+        reason ->
+          # Close any still-open blocks before Done so the assembler's
+          # `build_content/1` sees finalized blocks. Both text and
+          # thinking blocks may be open at this point.
+          close_thinking =
+            if Map.get(partial, :thinking_started?, false) and
+                 not Map.get(partial, :thinking_closed?, false),
+               do: [%Event.ThinkingEnd{block_id: "thinking", signature: nil}],
+               else: []
+
+          close_text =
+            if Map.get(partial, :text_started?, false),
+              do: [%Event.TextEnd{block_id: "text"}],
+              else: []
+
+          done =
+            case reason do
+              "stop" -> %Event.Done{stop_reason: :stop}
+              "length" -> %Event.Done{stop_reason: :length}
+              "tool_calls" -> %Event.Done{stop_reason: :tool_use}
+              other -> %Event.Done{stop_reason: String.to_atom(other)}
+            end
+
+          {close_thinking ++ close_text ++ [done], partial}
       end
 
-    {start_events ++ text_events ++ tool_events ++ finish_events, partial}
+    {start_events ++ thinking_events ++ text_events ++ tool_events ++ finish_events, partial}
   end
 
   defp decode_chunk(_, partial), do: {[], partial}

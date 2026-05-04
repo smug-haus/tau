@@ -49,64 +49,159 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       end
     end
 
-    describe "run/0 — Ratatouille runtime API contract" do
-      # Regression for the bug fixed in PR #148: `run/0` was calling
-      # `Ratatouille.Runtime.run/2`, which doesn't exist. The compile-time
-      # warning never failed the build (warnings-as-errors didn't trigger
-      # in the env that compiled this module pre-#147), so the bug shipped
-      # in the prod / Burrito binary and the TUI exited silently.
-      #
-      # This test invokes `run/0` in a child process and asserts the
-      # process does NOT die with `:undef`. TTY-required errors from
-      # ex_termbox (the binding it tries to load when no real terminal
-      # is present) are acceptable — they prove the API call landed; we
-      # just don't have a tty to render into.
+    describe "update/2 — MessageEnd render path (D-009 / SPEC-USER-TURN AC-3)" do
+      # These tests close the loop on D-009: the FSM-side test
+      # (test/tau/session/sync_provider_error_test.exs) proves the
+      # broadcast carries non-empty content; THIS suite proves the TUI's
+      # update/2 produces a visible transcript line from that content.
+      # Without these, D-009 is a half-fix.
 
-      test "invokes a real Ratatouille.Runtime function (not :undef)" do
-        # Belt: confirm the documented API exists at all.
-        assert function_exported?(Ratatouille.Runtime, :start_link, 1),
-               "Ratatouille.Runtime.start_link/1 not exported — pinned dep changed shape"
+      test "synchronous-error MessageEnd produces a visible transcript line" do
+        # Mirrors the shape constructed at lib/tau/session.ex :start_provider
+        # error branch (D-009).
+        msg = %Tau.Message.Assistant{
+          content: [%{type: :text, text: "Error: :sync_fail"}],
+          timestamp: DateTime.utc_now(),
+          stop_reason: :error,
+          error_message: ":sync_fail"
+        }
 
-        # Suspenders: actually call run/0 and confirm it doesn't raise UndefinedFunctionError.
+        event = %Events.MessageEnd{session_id: "sess-test", message: msg}
+
+        next = App.update(model(), event)
+
+        assert next.status == :idle
+        assert next.last_assistant == nil
+
+        last_line = List.last(next.transcript)
+        assert is_binary(last_line) and last_line != "",
+               "transcript MUST gain a non-empty line; got #{inspect(last_line)}"
+
+        assert String.contains?(last_line, "Error"),
+               "transcript line MUST surface the error keyword for AC-3; got #{inspect(last_line)}"
+      end
+
+      test "Replay-style success MessageEnd produces an assistant transcript line" do
+        # Mirrors the canonical Replay default fixture
+        # (lib/tau/providers/replay.ex default_events/0).
+        msg = %Tau.Message.Assistant{
+          content: [%{type: :text, text: "(replay) hello"}],
+          timestamp: DateTime.utc_now(),
+          stop_reason: :stop
+        }
+
+        event = %Events.MessageEnd{session_id: "sess-test", message: msg}
+
+        next = App.update(model(), event)
+
+        assert next.status == :idle
+
+        assert "[assistant] (replay) hello" in next.transcript,
+               "transcript MUST contain the assistant line for AC-2 render path; " <>
+                 "got #{inspect(next.transcript)}"
+      end
+
+      test "empty-content MessageEnd produces no transcript line — regression guard" do
+        # Pre-D-009 shape: the synchronous-error branch produced an
+        # empty content list. Locks in: if anyone reverts D-009, the
+        # transcript silently drops the user's turn — and this test
+        # turns that silent failure into a loud one.
+        msg = %Tau.Message.Assistant{
+          content: [],
+          timestamp: DateTime.utc_now(),
+          stop_reason: :error,
+          error_message: "this would be invisible without D-009"
+        }
+
+        event = %Events.MessageEnd{session_id: "sess-test", message: msg}
+
+        next = App.update(model(), event)
+
+        # The render iterates content and reduces to []; transcript is
+        # unchanged. THIS is the silent failure D-009 prevents — kept
+        # here as a regression guard, not a desired behaviour.
+        assert next.transcript == [],
+               "(D-009 regression guard) empty content currently produces NO transcript line; " <>
+                 "if this assertion fails, the render path was changed — verify the new path " <>
+                 "still surfaces errors and update D-009's invariant accordingly"
+      end
+    end
+
+    describe "wrap/2" do
+      test "short line is one chunk" do
+        assert App.wrap("hello world", 100) == ["hello world"]
+      end
+
+      test "wraps at word boundary, width preserved" do
+        line = String.duplicate("ab ", 50) |> String.trim_trailing()
+        chunks = App.wrap(line, 20)
+        assert Enum.all?(chunks, fn c -> String.length(c) <= 20 end)
+        assert Enum.join(chunks, " ") == line
+      end
+
+      test "hard-breaks a word longer than the wrap width" do
+        chunks = App.wrap(String.duplicate("x", 30), 10)
+        assert chunks == ["xxxxxxxxxx", "xxxxxxxxxx", "xxxxxxxxxx"]
+      end
+
+      test "empty string yields a single empty chunk" do
+        assert App.wrap("", 10) == [""]
+      end
+
+      test "preserves all words across wrap boundaries" do
+        chunks = App.wrap("aaaa bbbb cccc dddd", 9)
+        assert Enum.join(chunks, " ") == "aaaa bbbb cccc dddd"
+      end
+    end
+
+    describe "run/0 — supervised Ratatouille subtree" do
+      test "emits [:tau, :tui, :start] with Ratatouille.Runtime.Supervisor metadata" do
         parent = self()
+        handler_id = "tui-start-#{System.unique_integer([:positive])}"
 
-        pid =
-          spawn(fn ->
-            try do
-              Tau.TUI.App.run()
-              send(parent, {:exit_reason, :ok})
-            rescue
-              e -> send(parent, {:exit_reason, e})
-            catch
-              :exit, reason -> send(parent, {:exit_reason, {:exit, reason}})
-            end
-          end)
+        :telemetry.attach(
+          handler_id,
+          [:tau, :tui, :start],
+          fn _name, _meas, meta, _ -> send(parent, {:tui_start, meta}) end,
+          nil
+        )
 
-        ref = Process.monitor(pid)
+        on_exit(fn -> :telemetry.detach(handler_id) end)
 
-        receive do
-          {:exit_reason, %UndefinedFunctionError{} = e} ->
-            flunk(
-              "Tau.TUI.App.run/0 called a non-existent function: " <>
-                Exception.message(e)
-            )
+        # The TUI will fail to start in headless mix test (Window calls termbox
+        # NIF which needs a TTY). We assert the :start event fires BEFORE that
+        # failure path. Capture the resulting Logger.error so the test output
+        # stays clean.
+        ExUnit.CaptureLog.capture_log(fn ->
+          spawned =
+            spawn(fn ->
+              try do
+                Tau.TUI.App.run()
+              rescue
+                _ -> :ok
+              catch
+                :exit, _ -> :ok
+              end
+            end)
 
-          {:exit_reason, _other} ->
-            :ok
+          assert_receive {:tui_start,
+                          %{supervisor: Ratatouille.Runtime.Supervisor, app: Tau.TUI.App}},
+                         1000
 
-          {:DOWN, ^ref, :process, ^pid, {:undef, _} = reason} ->
-            flunk("Tau.TUI.App.run/0 died with :undef — #{inspect(reason)}")
+          Process.exit(spawned, :kill)
+        end)
+      end
 
-          {:DOWN, ^ref, :process, ^pid, _other} ->
-            :ok
-        after
-          1_500 ->
-            # The runtime started successfully and is now blocking on terminal
-            # input. That's the success case for THIS test — kill it and
-            # finish.
-            Process.exit(pid, :kill)
-            :ok
-        end
+      test "Ratatouille.Runtime.Supervisor.init/1 declares EventManager + Window + Runtime children" do
+        # Lock the dep contract: the supervisor we use MUST start EventManager.
+        # If a future Ratatouille upgrade removes it, this test forces a review.
+        {:ok, {_sup_flags, child_specs}} =
+          Ratatouille.Runtime.Supervisor.init(runtime: [app: Tau.TUI.App])
+
+        ids = Enum.map(child_specs, & &1.id)
+        assert Ratatouille.EventManager in ids
+        assert Ratatouille.Window in ids
+        assert Ratatouille.Runtime in ids
       end
     end
   end

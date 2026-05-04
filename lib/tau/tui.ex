@@ -31,11 +31,21 @@ defmodule Tau.TUI do
   case explicitly.
   """
 
-  @doc "Start the TUI loop (blocking). Requires the optional :ratatouille dep."
-  @spec start() :: :ok | {:error, :ratatouille_not_loaded}
-  def start do
+  alias Tau.TUI.App
+
+  @doc """
+  Start the TUI loop (blocking). Requires the optional :ratatouille dep.
+
+  `opts` are stashed in `Tau.TUI.RuntimeOpts` for `Tau.TUI.App.init/1`
+  to read when it calls `Tau.start_session/1`. Recognised keys:
+  `:provider`, `:model`, `:provider_ctx`. Anything not set falls back
+  to the merged settings cascade via `Tau.Provider.default/0`.
+  """
+  @spec start(keyword() | map()) :: :ok | {:error, :ratatouille_not_loaded}
+  def start(opts \\ []) do
     if Code.ensure_loaded?(Ratatouille.Runtime) do
-      apply(Tau.TUI.App, :run, [])
+      Tau.TUI.RuntimeOpts.set(opts)
+      App.run()
     else
       {:error, :ratatouille_not_loaded}
     end

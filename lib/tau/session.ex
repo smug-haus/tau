@@ -314,7 +314,14 @@ defmodule Tau.Session do
     end
   end
 
-  defp generate_id do
+  @doc """
+  Generate a fresh session id (UUIDv7 if available, prefixed random
+  bytes otherwise). Public so callers that need to subscribe to
+  `"session:<id>"` PubSub events BEFORE `start_session/1` returns can
+  pre-allocate the id and pass it via `:session_id` (D-004).
+  """
+  @spec generate_id() :: id()
+  def generate_id do
     case Code.ensure_loaded?(Uniq.UUID) do
       true -> apply(Uniq.UUID, :uuid7, [])
       _ -> "sess_" <> (:crypto.strong_rand_bytes(10) |> Base.url_encode64(padding: false))
@@ -360,7 +367,11 @@ defmodule Tau.Session do
     id = Keyword.fetch!(opts, :session_id)
     cwd = opts[:cwd] || File.cwd!()
     provider = opts[:provider] || Tau.Provider.default()
-    model = opts[:model]
+    # D-002 (SPEC-USER-TURN [C29]): resolve nil model to the provider's
+    # default at session init, NOT at stream-call time. Without this,
+    # `data.model` stays nil through telemetry, persistence header, and
+    # the assembler — all of which expect a real model id.
+    model = opts[:model] || provider.default_model()
     metadata = opts[:metadata] || %{}
     provider_ctx = opts[:provider_ctx] || %{}
     persistence = opts[:persistence] || Tau.Persistence.impl()
@@ -649,7 +660,26 @@ defmodule Tau.Session do
 
       {:error, reason} ->
         # Synchronous provider error — emit and return to awaiting_user.
-        msg = Assistant.new(stop_reason: :error, error_message: inspect(reason))
+        # D-009 (SPEC-USER-TURN [C12]/[C19]): the assistant message MUST
+        # carry a non-empty content block so render paths that iterate
+        # `msg.content` (e.g. `Tau.TUI.App.on_message_end/2`) surface the
+        # error to the user. Without the text block the TUI silently drops
+        # the error, presenting "TUI does nothing" to the user.
+        #
+        # D-018 (SPEC-USER-TURN [C46]/[C48]): for Anthropic auth atoms
+        # (`:missing_api_key`, `:oauth_expired`, etc.) substitute the
+        # human-readable, actionable renewal instruction so the user
+        # learns to run `claude /login` instead of staring at an opaque
+        # `:oauth_expired`.
+        reason_str = describe_provider_error(reason)
+
+        msg =
+          Assistant.new(
+            stop_reason: :error,
+            error_message: reason_str,
+            content: [%{type: :text, text: "Error: " <> reason_str}]
+          )
+
         broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: msg})
         {:next_state, :awaiting_user, %{data | cancel_flag: nil, stream_ref: nil}}
     end
@@ -1507,6 +1537,27 @@ defmodule Tau.Session do
   defp broadcast(id, event) do
     Phoenix.PubSub.broadcast(Tau.PubSub, "session:#{id}", event)
   end
+
+  # D-018: translate known provider auth atoms into user-actionable
+  # strings. Other reasons fall through to inspect/1 (the original
+  # D-009 behavior).
+  defp describe_provider_error(:missing_api_key) do
+    Tau.Providers.Anthropic.Auth.describe_error({:error, :no_auth})
+  end
+
+  defp describe_provider_error(:oauth_expired) do
+    Tau.Providers.Anthropic.Auth.describe_error({:error, :oauth_expired})
+  end
+
+  defp describe_provider_error(:oauth_missing_scope) do
+    Tau.Providers.Anthropic.Auth.describe_error({:error, :oauth_missing_scope})
+  end
+
+  defp describe_provider_error(:oauth_malformed) do
+    Tau.Providers.Anthropic.Auth.describe_error({:error, :oauth_malformed})
+  end
+
+  defp describe_provider_error(other), do: inspect(other)
 
   # ADR-0014 (#92): walk the child set and cast the chosen lifecycle
   # operation. Both `Tau.cancel/1` and `Tau.stop/1` are :ok-or-:ok casts

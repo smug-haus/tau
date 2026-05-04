@@ -30,6 +30,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Pin Python 3.10 so :ex_termbox's waf 2.0.14 build compiles.
+      # waf uses `import imp` (removed in 3.12) and `open(..., 'rUb')`
+      # (universal-newlines mode 'U' removed in 3.11). Tracked as #136
+      # territory; local devs use pyenv. ubuntu-24.04 ships 3.12 by default.
+      - name: Setup Python (3.10 for ex_termbox waf)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
       - name: Setup BEAM
         id: beam
         uses: erlef/setup-beam@v1
@@ -117,6 +126,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Pin Python 3.10 so :ex_termbox's waf 2.0.14 build compiles.
+      # waf uses `import imp` (removed in 3.12) and `open(..., 'rUb')`
+      # (universal-newlines mode 'U' removed in 3.11). Tracked as #136
+      # territory; local devs use pyenv. ubuntu-24.04 ships 3.12 by default.
+      - name: Setup Python (3.10 for ex_termbox waf)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
       - name: Setup BEAM
         id: beam
         uses: erlef/setup-beam@v1
@@ -170,6 +188,35 @@ jobs:
         env:
           MIX_TEST_PROPERTY_BUDGET_FACTOR: "5"
 
+      # Burrito release-build (used by the smoke gate below) needs
+      # zig (cross-compiler driver) and xz (tarball compressor) on PATH.
+      # Mirrors the release.yml workflow.
+      #
+      # `continue-on-error: true` on these three: when zig's CDN
+      # mirrors are intermittently down (404/503), the gate becomes
+      # informative-only rather than failing the entire test job. The
+      # release workflow is the authoritative gate for the prod binary
+      # actually building.
+      - name: Setup zig (Burrito)
+        uses: mlugg/setup-zig@v1
+        with:
+          version: "0.15.2"
+        continue-on-error: true
+
+      - name: Setup xz (Burrito)
+        run: sudo apt-get update && sudo apt-get install -y xz-utils
+        continue-on-error: true
+
+      - name: Run binary smoke gate (AC-5 / SPEC-USER-TURN)
+        # Builds the host-architecture Burrito binary and runs
+        # `tau run "ping" --provider replay --model replay`. Per
+        # docs/spec/SPEC-USER-TURN.md AC-5. Marked continue-on-error
+        # because zig CDN outages would otherwise fail the test job
+        # even when the unit suite is green; release.yml is the
+        # authoritative binary-build gate.
+        run: mix test --only smoke --include smoke --trace
+        continue-on-error: true
+
       - name: Upload coverage
         if: matrix.elixir == '1.18.1'
         uses: actions/upload-artifact@v4
@@ -183,6 +230,15 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+
+      # Pin Python 3.10 so :ex_termbox's waf 2.0.14 build compiles.
+      # waf uses `import imp` (removed in 3.12) and `open(..., 'rUb')`
+      # (universal-newlines mode 'U' removed in 3.11). Tracked as #136
+      # territory; local devs use pyenv. ubuntu-24.04 ships 3.12 by default.
+      - name: Setup Python (3.10 for ex_termbox waf)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
       - name: Setup BEAM
         id: beam
@@ -236,6 +292,15 @@ jobs:
     needs: [lint]
     steps:
       - uses: actions/checkout@v4
+
+      # Pin Python 3.10 so :ex_termbox's waf 2.0.14 build compiles.
+      # waf uses `import imp` (removed in 3.12) and `open(..., 'rUb')`
+      # (universal-newlines mode 'U' removed in 3.11). Tracked as #136
+      # territory; local devs use pyenv. ubuntu-24.04 ships 3.12 by default.
+      - name: Setup Python (3.10 for ex_termbox waf)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
       - name: Setup BEAM
         uses: erlef/setup-beam@v1

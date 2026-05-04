@@ -8,6 +8,8 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
     @behaviour Ratatouille.App
 
+    require Logger
+
     import Ratatouille.View
     alias Ratatouille.Runtime.Subscription
 
@@ -15,8 +17,33 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
     @impl true
     def init(_context) do
-      {:ok, session_id} = Tau.start_session([])
-      Phoenix.PubSub.subscribe(Tau.PubSub, "session:" <> session_id)
+      # D-004 (SPEC-USER-TURN [C6]): the bridge MUST subscribe to PubSub
+      # BEFORE `Tau.start_session/1` returns. `Session.init/1`
+      # synchronously broadcasts `%Events.SessionStart{}`; subscribing
+      # afterwards loses it. Pre-generate the id, start the bridge, then
+      # start the session.
+      #
+      # Bridge rationale: Ratatouille 0.5.1's runtime does NOT forward
+      # arbitrary mailbox messages to `update/2` — only its declared
+      # subscriptions (here, `:tick`). Without `Tau.TUI.EventBridge` the
+      # PubSub broadcasts would queue in the runtime's mailbox forever,
+      # the transcript pane stays empty, and the user never sees an
+      # assistant response. The bridge holds a queue per session;
+      # `update/2`'s `:tick` clause drains it.
+      session_id = Tau.Session.generate_id()
+      {:ok, _bridge_pid} = Tau.TUI.EventBridge.start_link(session_id)
+
+      # CLI-supplied per-invocation overrides flow via Tau.TUI.RuntimeOpts
+      # (Ratatouille's `init/1` arity is fixed, so this is the seam).
+      runtime_opts = Tau.TUI.RuntimeOpts.get()
+
+      start_opts =
+        [session_id: session_id]
+        |> put_if(:provider, Map.get(runtime_opts, :provider))
+        |> put_if(:model, Map.get(runtime_opts, :model))
+        |> put_if(:provider_ctx, Map.get(runtime_opts, :provider_ctx))
+
+      {:ok, ^session_id} = Tau.start_session(start_opts)
 
       %{
         session_id: session_id,
@@ -28,15 +55,23 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       }
     end
 
+    defp put_if(opts, _key, nil), do: opts
+    defp put_if(opts, key, value), do: Keyword.put(opts, key, value)
+
     @impl true
     def update(model, msg) do
       case msg do
         {:event, %{key: 13}} -> submit(model)
         {:event, %{key: 27}} -> cancel(model)
+        # Termbox / Ratatouille deliver Space as `key: 32` (the SPC special
+        # key), NOT as `ch: 32`. The `ch != 0` clause below therefore
+        # never fires for spaces, and they were silently dropped. Map
+        # the special key to a literal space here.
+        {:event, %{key: 32}} -> append_input(model, " ")
         {:event, %{ch: ch}} when ch != 0 -> append_input(model, <<ch::utf8>>)
         {:event, %{key: 127}} -> backspace(model)
         {:event, %{key: 8}} -> backspace(model)
-        :tick -> model
+        :tick -> drain_bridge(model)
         %Tau.Session.Events.MessageStart{} = e -> on_message_start(model, e)
         %Tau.Session.Events.MessageUpdate{} = e -> on_message_update(model, e)
         %Tau.Session.Events.MessageEnd{} = e -> on_message_end(model, e)
@@ -48,6 +83,22 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       end
     end
 
+    # Each tick, fold every event the bridge has buffered through the
+    # same handlers used by the unit tests (which call update/2 directly).
+    # This is the integration the unit tests don't exercise.
+    defp drain_bridge(model) do
+      model.session_id
+      |> Tau.TUI.EventBridge.drain()
+      |> Enum.reduce(model, fn event, acc -> update(acc, event) end)
+    end
+
+    # Hardcoded panel width for word-wrap. Ratatouille's `label` is
+    # single-line and clips at the panel edge; we pre-wrap long
+    # transcript entries into multiple sublines so nothing is lost.
+    # TODO: derive from `Ratatouille` window width via the resize
+    # event so wrapping adapts to terminal size.
+    @wrap_width 100
+
     @impl true
     def render(model) do
       view top_bar: status_bar(model),
@@ -55,12 +106,72 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         row do
           column(size: 12) do
             panel title: "transcript", height: :fill do
-              for line <- Enum.take(model.transcript, -200) do
-                label(content: line)
+              for line <- Enum.take(model.transcript, -200),
+                  sub <- wrap(line, @wrap_width) do
+                label(content: sub)
               end
             end
           end
         end
+      end
+    end
+
+    @doc false
+    @spec wrap(String.t(), pos_integer()) :: [String.t()]
+    def wrap("", _width), do: [""]
+
+    def wrap(line, width) when is_binary(line) and is_integer(width) and width > 0 do
+      line
+      |> String.split(~r/\s+/, trim: false)
+      |> Enum.reduce({[], ""}, fn word, {lines, current} ->
+        cond do
+          # Word longer than the wrap width on its own — hard-break
+          # mid-word (rare; long URLs, hashes).
+          String.length(word) > width ->
+            chunks = chunk_string(word, width)
+            new_current = List.last(chunks) || ""
+
+            new_lines =
+              cond do
+                current == "" and length(chunks) > 1 ->
+                  Enum.reverse(Enum.drop(chunks, -1)) ++ lines
+
+                current == "" ->
+                  lines
+
+                length(chunks) == 1 ->
+                  [current | lines]
+
+                true ->
+                  Enum.reverse(Enum.drop(chunks, -1)) ++ [current | lines]
+              end
+
+            {new_lines, new_current}
+
+          current == "" ->
+            {lines, word}
+
+          String.length(current) + 1 + String.length(word) <= width ->
+            {lines, current <> " " <> word}
+
+          true ->
+            {[current | lines], word}
+        end
+      end)
+      |> finalize_wrap()
+    end
+
+    defp finalize_wrap({lines, ""}), do: Enum.reverse(lines)
+    defp finalize_wrap({lines, last}), do: Enum.reverse([last | lines])
+
+    defp chunk_string(s, n) do
+      chunks = for <<chunk::binary-size(n) <- s>>, do: chunk
+      rest_len = byte_size(s) - length(chunks) * n
+
+      if rest_len > 0 do
+        chunks ++ [binary_part(s, byte_size(s) - rest_len, rest_len)]
+      else
+        chunks
       end
     end
 
@@ -69,17 +180,57 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
     @doc "Run the TUI loop (blocking until the user quits)."
     def run do
-      {:ok, runtime} =
-        Ratatouille.Runtime.start_link(
-          app: __MODULE__,
-          interval: @tick_interval,
-          quit_events: [{:ch, ?q}, {:key, 3}]
-        )
+      meta = %{app: __MODULE__, supervisor: Ratatouille.Runtime.Supervisor}
 
-      ref = Process.monitor(runtime)
+      :telemetry.execute(
+        [:tau, :tui, :start],
+        %{system_time: System.system_time()},
+        meta
+      )
 
+      case start_runtime_supervisor() do
+        {:ok, sup_pid} ->
+          ref = Process.monitor(sup_pid)
+          reason = await_down(ref, sup_pid)
+
+          :telemetry.execute(
+            [:tau, :tui, :stop],
+            %{system_time: System.system_time()},
+            Map.put(meta, :reason, reason)
+          )
+
+          :ok
+
+        {:error, reason} ->
+          :telemetry.execute(
+            [:tau, :tui, :exception],
+            %{system_time: System.system_time()},
+            Map.put(meta, :reason, reason)
+          )
+
+          Logger.error("TUI failed to start: " <> inspect(reason))
+          {:error, reason}
+      end
+    end
+
+    defp start_runtime_supervisor do
+      opts = [
+        app: __MODULE__,
+        interval: @tick_interval,
+        quit_events: [{:ch, ?q}, {:key, 3}]
+      ]
+
+      case Tau.TUI.Supervisor.start_runtime(opts) do
+        {:ok, pid} -> {:ok, pid}
+        {:error, {:already_started, pid}} -> {:ok, pid}
+        other -> other
+      end
+    end
+
+    defp await_down(ref, pid) do
       receive do
-        {:DOWN, ^ref, :process, ^runtime, _reason} -> :ok
+        {:DOWN, ^ref, :process, ^pid, reason} -> reason
+        _other -> await_down(ref, pid)
       end
     end
 
@@ -143,6 +294,12 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         for block <- msg.content do
           case block do
             %{type: :text, text: t} -> "[assistant] " <> t
+            # Thinking models (Qwen3, DeepSeek-R1) emit chain-of-thought
+            # via Thinking* events. Surface them so a long think doesn't
+            # look like the TUI is hung.
+            %{type: :thinking, text: t} when is_binary(t) and t != "" ->
+              "[thinking] " <> t
+
             %{type: :tool_call, name: n} -> "[tool_call] " <> n <> "(...)"
             _ -> nil
           end

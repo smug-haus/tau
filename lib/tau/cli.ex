@@ -82,14 +82,14 @@ defmodule Tau.CLI do
       {[:init], parsed} ->
         init_cmd(parsed) |> halt()
 
-      {[:tui], _} ->
-        tui_cmd() |> halt()
+      {[:tui], parsed} ->
+        tui_cmd(parsed) |> halt()
 
       {[], _} ->
-        tui_cmd() |> halt()
+        tui_cmd(%Optimus.ParseResult{}) |> halt()
 
-      %Optimus.ParseResult{} ->
-        tui_cmd() |> halt()
+      %Optimus.ParseResult{} = parsed ->
+        tui_cmd(parsed) |> halt()
 
       _ ->
         :ok
@@ -216,7 +216,14 @@ defmodule Tau.CLI do
             ]
           ]
         ],
-        tui: [name: "tui", about: "Launch the interactive TUI"]
+        tui: [
+          name: "tui",
+          about: "Launch the interactive TUI",
+          options: [
+            provider: [short: "-p", long: "--provider", help: "Provider id"],
+            model: [short: "-m", long: "--model", help: "Model id"]
+          ]
+        ]
       ]
     )
   end
@@ -291,17 +298,22 @@ defmodule Tau.CLI do
     IO.puts("OTP: #{System.otp_release()}")
     IO.puts("data_dir: #{Tau.Settings.data_dir()}")
 
-    [Tau.Providers.Anthropic]
-    |> Enum.each(fn mod ->
-      key_env =
-        case mod do
-          Tau.Providers.Anthropic -> "ANTHROPIC_API_KEY"
-          _ -> ""
-        end
+    # D-019: report which Anthropic auth path is configured.
+    case Tau.Providers.Anthropic.Auth.resolve(%{}) do
+      {:ok, {:api_key, _}} ->
+        IO.puts("provider Tau.Providers.Anthropic: api_key (env / settings)")
 
-      ok = if System.get_env(key_env), do: "ok", else: "missing key"
-      IO.puts("provider #{inspect(mod)}: #{ok}")
-    end)
+      {:ok, {:oauth, info}} ->
+        ttl_s = max(div(info.expires_at - :os.system_time(:millisecond), 1000), 0)
+
+        IO.puts(
+          "provider Tau.Providers.Anthropic: oauth (#{info.subscription_type}, " <>
+            "expires in #{ttl_s}s)"
+        )
+
+      {:error, _} = err ->
+        IO.puts("provider Tau.Providers.Anthropic: " <> Tau.Providers.Anthropic.Auth.describe_error(err))
+    end
 
     0
   end
@@ -327,9 +339,9 @@ defmodule Tau.CLI do
     end
   end
 
-  defp tui_cmd do
-    if Code.ensure_loaded?(Tau.TUI) and function_exported?(Tau.TUI, :start, 0) do
-      Tau.TUI.start()
+  defp tui_cmd(parsed) do
+    if Code.ensure_loaded?(Tau.TUI) and function_exported?(Tau.TUI, :start, 1) do
+      Tau.TUI.start(tui_opts(parsed))
       0
     else
       IO.puts(:stderr, "TUI not available (Ratatouille not loaded?)")
@@ -337,10 +349,32 @@ defmodule Tau.CLI do
     end
   end
 
+  defp tui_opts(%Optimus.ParseResult{options: opts}) when is_map(opts) do
+    []
+    |> tui_put(:provider, opts[:provider], &resolve_provider/1)
+    |> tui_put(:model, opts[:model], & &1)
+  end
+
+  defp tui_opts(_), do: []
+
+  defp tui_put(opts, _key, nil, _xform), do: opts
+  defp tui_put(opts, key, value, xform), do: Keyword.put(opts, key, xform.(value))
+
   defp resolve_provider(nil), do: Tau.Provider.default()
   defp resolve_provider("anthropic"), do: Tau.Providers.Anthropic
+  defp resolve_provider("openai"), do: Tau.Providers.OpenAI.Chat
+  defp resolve_provider("ollama"), do: Tau.Providers.OpenAI.Chat
+  defp resolve_provider("local"), do: Tau.Providers.OpenAI.Chat
+  defp resolve_provider("bedrock"), do: Tau.Providers.Bedrock
+  defp resolve_provider("gemini"), do: Tau.Providers.Gemini
+  defp resolve_provider("replay"), do: Tau.Providers.Replay
 
-  defp resolve_provider(other) do
+  # Last-resort fallback for "Foo" → Tau.Providers.Foo style atoms.
+  # `String.capitalize/1` only touches the first byte, which is wrong
+  # for compound names like "openai" (-> "Openai" ≠ "OpenAI"). Known
+  # short names are handled above; this clause only fires for genuinely
+  # custom provider modules a caller registers themselves.
+  defp resolve_provider(other) when is_binary(other) do
     Module.concat(["Tau", "Providers", String.capitalize(other)])
   end
 
