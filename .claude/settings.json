@@ -6,29 +6,6 @@
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
   },
   "permissions": {
-    "deny": [
-      "Read(docs/howto.md)",
-      "Read(docs/faq.md)",
-      "Read(.env)",
-      "Read(.env.*)",
-      "Read(secrets/**)",
-      "Read(.claude/settings.local.json)",
-      "Write(.env)",
-      "Write(.env.*)",
-      "Write(secrets/**)",
-      "Edit(.env)",
-      "Edit(.env.*)",
-      "Edit(secrets/**)",
-      "Read(/root/.claude/plans/**)",
-      "Read(priv/plts/**)",
-      "Read(deps/**)",
-      "Read(_build/**)",
-      "Read(erl_crash.dump)",
-      "Write(deps/**)",
-      "Write(_build/**)",
-      "Edit(deps/**)",
-      "Edit(_build/**)"
-    ],
     "allow": [
       "Bash(mix *)",
       "Bash(iex *)",
@@ -65,6 +42,29 @@
       "Bash(sudo bash scripts/install-toolchain.sh)",
       "Bash(. /etc/profile.d/elixir.sh && *)",
       "Bash(/root/.mix/rebar3 --version)"
+    ],
+    "deny": [
+      "Read(docs/howto.md)",
+      "Read(docs/faq.md)",
+      "Read(.env)",
+      "Read(.env.*)",
+      "Read(secrets/**)",
+      "Read(.claude/settings.local.json)",
+      "Write(.env)",
+      "Write(.env.*)",
+      "Write(secrets/**)",
+      "Edit(.env)",
+      "Edit(.env.*)",
+      "Edit(secrets/**)",
+      "Read(/root/.claude/plans/**)",
+      "Read(priv/plts/**)",
+      "Read(deps/**)",
+      "Read(_build/**)",
+      "Read(erl_crash.dump)",
+      "Write(deps/**)",
+      "Write(_build/**)",
+      "Edit(deps/**)",
+      "Edit(_build/**)"
     ]
   },
   "hooks": {
@@ -133,16 +133,6 @@
           {
             "type": "prompt",
             "prompt": "Context: $ARGUMENTS\n\nReview the subagent's completion claim. Check: (1) Were tests run (`mix test`) and do they pass? (2) Was `mix format --check-formatted` run? (3) Is the implementation complete or is the agent stopping early? (4) Are there hardcoded values, TODOs, or silent failures?\n\nYou MUST respond with ONLY a raw JSON object. No markdown, no code fences, no explanation. Output exactly one of:\n{\"ok\": true}\n{\"ok\": false, \"reason\": \"what remains\"}"
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "prompt",
-            "prompt": "Context: $ARGUMENTS\n\nReview the assistant's work against the original task request. Check: (1) Did it complete what was asked? (2) Were tests run (`mix test`) and do they pass? (3) Were findings documented?\n\nYou MUST respond with ONLY a raw JSON object. No markdown, no code fences, no explanation. Output exactly one of:\n{\"ok\": true}\n{\"ok\": false, \"reason\": \"what remains\"}"
           }
         ]
       }

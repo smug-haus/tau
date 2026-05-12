@@ -48,6 +48,10 @@ coverage.json
 # Claude Code agent worktrees (created by Agent calls with isolation: "worktree")
 /.claude/worktrees/
 
+# hyperagents evolutionary archives — runtime output (each sibling is its own
+# git repo); the system's product, not the system itself.
+/.claude/hyperagents/
+
 # Claude harness runtime state — observations, kill signals, solution tree.
 # .gitkeep keeps the directory present in version control.
 /.claude/logs/*
