@@ -408,9 +408,18 @@ def run_implementer(args, eval_config, plugin_dir, out_dir, work_dir):
                         capture_output=True, text=True).stdout or ""
                     files = [ln.strip() for ln in names.splitlines() if ln.strip()]
 
-                passed = (rc == 0) and (bool(diff_txt.strip()) or bool(stdout_txt.strip()))
-                why = "ok" if passed else (
-                    f"rc={rc}; {stderr[:200]}" if rc != 0 else "no output and no diff")
+                # Diff is the artefact, not the stdout. A candidate that
+                # claims success without producing a diff (e.g. by working in
+                # a nested sub-worktree that doesn't reach the outer tree, or
+                # by editing nothing) must fail this probe so evolution
+                # selects against the behaviour.
+                passed = (rc == 0) and bool(diff_txt.strip())
+                if rc != 0:
+                    why = f"rc={rc}; {stderr[:200]}"
+                elif not diff_txt.strip():
+                    why = "empty diff: candidate produced no captured changes (work may have happened in a nested sub-worktree)"
+                else:
+                    why = "ok"
                 record["implementer"] = {
                     "gen_id": plugin_name or str(plugin_dir),
                     "base_sha": base_sha,
