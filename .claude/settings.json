@@ -129,10 +129,6 @@
             "type": "command",
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/check-tests-pass.sh",
             "timeout": 30
-          },
-          {
-            "type": "prompt",
-            "prompt": "Context: $ARGUMENTS\n\nReview the subagent's completion claim. Check: (1) Were tests run (`mix test`) and do they pass? (2) Was `mix format --check-formatted` run? (3) Is the implementation complete or is the agent stopping early? (4) Are there hardcoded values, TODOs, or silent failures?\n\nYou MUST respond with ONLY a raw JSON object. No markdown, no code fences, no explanation. Output exactly one of:\n{\"ok\": true}\n{\"ok\": false, \"reason\": \"what remains\"}"
           }
         ]
       }
