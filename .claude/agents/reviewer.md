@@ -59,6 +59,22 @@ After running the steps above, the **last line of your response** must be a
 single JSON object: `{"ok": true}` if all gates pass, or
 `{"ok": false, "reason": "<specific failing gate or finding>"}` otherwise.
 
+## Structured verdict (work-record emission)
+
+In addition to the narrative report and the final `{"ok": …}` line, emit a single fenced ```json``` block immediately before the final ok line, with the structured verdict shape consumed by `.claude/work-records/`:
+
+```json
+{
+  "verdict": "PASS|FAIL|PARTIAL",
+  "tests": {"tool":"mix test","passed":360,"failed":0,"errors":0},
+  "findings": [
+    {"id":"f-1","severity":"BLOCKING|WARNING","file":"lib/tau/...","line":42,"message":"..."}
+  ]
+}
+```
+
+`PASS` = all gates clean and no silent failures. `FAIL` = any blocking gate failed (test failures, format/credo not clean, silent-failure pattern found). `PARTIAL` = mixed (some gates clean, some not, no blocking finding). Populate `tests` from actual `mix test` output; omit the key (or set to `null`) if you didn't run it. See `.claude/work-records/SCHEMA.md` for the full record shape.
+
 ## Output Format
 
 ```

@@ -83,6 +83,21 @@ demonstrates this? What would failure look like?"
 
 Read the diff (`git diff main...HEAD`). Apply the PSDH triage checklist via the `design-reasoning` skill to any new component. Reference `.claude/rules/otp-non-negotiables.md` and the `tau-architecture` skill. Output a single JSON object as the final line of your response: `{"ok": true}` or `{"ok": false, "reason": "<specific blocking concern>"}`.
 
+## Structured findings (work-record emission)
+
+In addition to the narrative review and the final `{"ok": …}` line, emit a single fenced ```json``` block immediately before the final ok line, with the structured findings shape consumed by `.claude/work-records/`:
+
+```json
+{
+  "findings": [
+    {"id":"f-1","severity":"BLOCKING|SUGGESTION","category":"spec-deviation|otp-non-negotiable|over-engineering|scope-creep|other","file":"lib/tau/...","line":42,"message":"...","evidence":"quoted code or spec excerpt"}
+  ],
+  "single_most_important_id": "f-1"
+}
+```
+
+`file`, `line`, `category`, `evidence` are optional but preferred. Use `BLOCKING` for findings that must be addressed before merge, `SUGGESTION` otherwise. Empty findings list is valid when the diff is clean. The `single_most_important_id` identifies which finding leads the review (or `null` if no findings). See `.claude/work-records/SCHEMA.md` for the full record shape.
+
 ## Prompt Review (Additional)
 
 When reviewing prompts specifically:
