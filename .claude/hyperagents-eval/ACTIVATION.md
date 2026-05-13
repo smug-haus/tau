@@ -64,13 +64,16 @@ real-work eval (`role_eval.py`):
 
 ## What the adapter does not yet do
 
-- It does **not** read `human_action` from records for scoring. Once
-  records have human-action data, replace the structural-shape score
-  with a calibration score (e.g., critic: fraction of findings the
-  human addressed; reviewer: agreement between verdict and merge).
 - It does **not** invoke other-role operators inline. Each role runs
   separately. To chain (impl → critic → reviewer), run the loop for
-  each sibling in sequence, or write a chain orchestrator.
+  each sibling in sequence, or write a chain orchestrator. The chain
+  is order-dependent: critic and reviewer both need the implementer
+  block populated on the record.
+- Scoring today is *structural* (did the role produce well-shaped
+  output) plus, for the reviewer role, the toolchain's own verdict
+  through `reviewer.tests`. Cross-role calibration (e.g., critic.score
+  = agreement-with-reviewer-and-merge-outcome) is a follow-up; the
+  record schema captures the inputs already.
 
 ## Smoke test
 

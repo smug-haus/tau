@@ -123,17 +123,34 @@ def claude_p(*, plugin_dir, input_text, cwd=None, timeout_s=RUN_TIMEOUT_S):
 
 # ───────── worktree (only used for implementer) ─────────
 
+def repo_head_sha(repo: Path):
+    """Return the HEAD sha of *repo*, or ``None`` if not a git repo."""
+    if not repo or not (repo / ".git").exists():
+        return None
+    r = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                       capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
 class Workspace:
-    """Throwaway working copy of the host repo for the implementer run."""
+    """Throwaway working copy of the host repo for the implementer run.
+
+    Creates a `git worktree add --detach` of the repo at HEAD (or a
+    filtered copytree fallback). The diff captured at exit-time is the
+    raw text the implementer wrote, suitable for `git apply` against the
+    same base SHA.
+    """
     def __init__(self, repo: Path):
         self.repo = Path(repo) if repo else None
         self.base = None
         self.wt = None
         self._is_worktree = False
+        self.base_sha = None
 
     def __enter__(self):
         self.base = Path(tempfile.mkdtemp(prefix="tau-real-eval-"))
         self.wt = self.base / "wt"
+        self.base_sha = repo_head_sha(self.repo) if self.repo else None
         if self.repo and (self.repo / ".git").exists():
             subprocess.run(["git", "-C", str(self.repo), "worktree", "prune"],
                            capture_output=True, text=True)
@@ -164,6 +181,70 @@ class Workspace:
                                capture_output=True, text=True).stdout or ""
         files = [ln.strip() for ln in names.splitlines() if ln.strip()]
         return (d, files)
+
+    def __exit__(self, *exc):
+        if self._is_worktree and self.repo is not None:
+            subprocess.run(
+                ["git", "-C", str(self.repo), "worktree", "remove", "--force", str(self.wt)],
+                capture_output=True, text=True,
+            )
+        if self.base:
+            shutil.rmtree(self.base, ignore_errors=True)
+
+
+class PatchedWorkspace:
+    """Worktree at *base_sha* with *diff* applied via ``git apply``.
+
+    Used by critic and reviewer roles so the candidate reviews the
+    implementer's *applied* changes, not the live repo state. Reproducible:
+    the (base_sha, diff) pair pins the exact tree.
+
+    Raises ``RuntimeError`` from ``__enter__`` if worktree creation or
+    diff application fails; the caller persists the error in the role
+    block and scores 0 for that probe.
+    """
+    def __init__(self, repo: Path, base_sha, diff: str):
+        self.repo = Path(repo) if repo else None
+        self.base_sha = base_sha
+        self.diff_text = diff or ""
+        self.base = None
+        self.wt = None
+        self._is_worktree = False
+
+    def __enter__(self):
+        if not self.repo or not (self.repo / ".git").exists():
+            raise RuntimeError("PatchedWorkspace: host repo missing or not git")
+        if not self.base_sha:
+            self.base_sha = repo_head_sha(self.repo)
+        self.base = Path(tempfile.mkdtemp(prefix="tau-real-eval-patched-"))
+        self.wt = self.base / "wt"
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "prune"],
+                       capture_output=True, text=True)
+        r = subprocess.run(
+            ["git", "-C", str(self.repo), "worktree", "add", "--detach",
+             str(self.wt), self.base_sha or "HEAD"],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            shutil.rmtree(self.base, ignore_errors=True)
+            raise RuntimeError(
+                f"git worktree add failed at {self.base_sha or 'HEAD'}: {r.stderr[:300]}")
+        self._is_worktree = True
+        if self.diff_text.strip():
+            ap = subprocess.run(
+                ["git", "-C", str(self.wt), "apply", "--whitespace=nowarn", "-"],
+                input=self.diff_text, capture_output=True, text=True,
+            )
+            if ap.returncode != 0:
+                # Clean up the worktree before raising so we don't leak it.
+                subprocess.run(
+                    ["git", "-C", str(self.repo), "worktree", "remove", "--force", str(self.wt)],
+                    capture_output=True, text=True,
+                )
+                shutil.rmtree(self.base, ignore_errors=True)
+                raise RuntimeError(
+                    f"git apply failed against base {self.base_sha or 'HEAD'}: {ap.stderr[:300]}")
+        return self.wt
 
     def __exit__(self, *exc):
         if self._is_worktree and self.repo is not None:
@@ -262,6 +343,8 @@ failed. PARTIAL = mixed."""
 
 def run_implementer(args, eval_config, plugin_dir, out_dir, work_dir):
     tasks = eval_config.get("tasks") or []
+    if args.task_limit is not None:
+        tasks = tasks[:args.task_limit]
     repo = Path(eval_config["repo"]).resolve() if eval_config.get("repo") else None
     plugin_name = load_plugin_name(plugin_dir)
 
@@ -281,13 +364,13 @@ def run_implementer(args, eval_config, plugin_dir, out_dir, work_dir):
             "implementer": None,
             "critic": None,
             "reviewer": None,
-            "human_action": None,
         }
 
         if args.stub_mode:
             passed = bool(task_body.strip())
             record["implementer"] = {
                 "gen_id": plugin_name or str(plugin_dir),
+                "base_sha": None,
                 "diff": "", "files_changed": [],
                 "stdout_excerpt": "stub-mode",
                 "wall_clock_s": 0.0, "tokens": 0,
@@ -297,6 +380,7 @@ def run_implementer(args, eval_config, plugin_dir, out_dir, work_dir):
                              "why": "stub-mode" if passed else "empty-task"})
         else:
             with Workspace(repo) as wt:
+                base_sha = repo_head_sha(repo)
                 prompt = (f"@{plugin_name}:task-agent\n\n" if plugin_name else "") + task_body
                 ts = time.monotonic()
                 stdout_txt, tokens, rc, stderr = claude_p(
@@ -322,6 +406,7 @@ def run_implementer(args, eval_config, plugin_dir, out_dir, work_dir):
                     f"rc={rc}; {stderr[:200]}" if rc != 0 else "no output and no diff")
                 record["implementer"] = {
                     "gen_id": plugin_name or str(plugin_dir),
+                    "base_sha": base_sha,
                     "diff": diff_txt[:MAX_DIFF_CHARS],
                     "files_changed": files[:200],
                     "stdout_excerpt": stdout_txt[:MAX_OUTPUT_CHARS],
@@ -341,9 +426,16 @@ def run_implementer(args, eval_config, plugin_dir, out_dir, work_dir):
     return 0
 
 
-def _process_pending(args, plugin_dir, work_dir, role: str, build_prompt, parse_response, max_diff=60_000, max_out=6_000):
-    """Common loop for critic/reviewer: pick pending records, invoke candidate, append role block, score."""
+def _process_pending(args, eval_config, plugin_dir, work_dir, role: str,
+                     build_prompt, parse_response,
+                     max_diff=60_000, max_out=6_000):
+    """Common loop for critic/reviewer: pick pending records, build a patched
+    worktree (base_sha + diff from the record's implementer block), invoke
+    candidate with cwd=worktree so its `mix test`/`git diff` see the
+    implementer's actual changes, append role block, score.
+    """
     plugin_name = load_plugin_name(plugin_dir)
+    repo = Path(eval_config["repo"]).resolve() if eval_config.get("repo") else None
     pending = []
     for f in sorted(work_dir.glob("wr-*.json")):
         try:
@@ -364,15 +456,45 @@ def _process_pending(args, plugin_dir, work_dir, role: str, build_prompt, parse_
         impl = record["implementer"]
         diff = (impl.get("diff") or "")[:max_diff]
         stdout = (impl.get("stdout_excerpt") or "")[:max_out]
+        base_sha = impl.get("base_sha")
         task = record["task"]["body"]
 
         if args.stub_mode:
             block, passed, why = parse_response(None, args.stub_mode, plugin_name, plugin_dir)
-        else:
+            record[role] = block
+            f.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+            per_task.append({"task": task[:160], "passed": passed, "why": why})
+            continue
+
+        # Build the patched worktree the candidate will see.
+        worktree_path = None
+        worktree_error = None
+        try:
+            workspace_cm = PatchedWorkspace(repo, base_sha, impl.get("diff") or "")
+            worktree_path = workspace_cm.__enter__()
+        except RuntimeError as e:
+            worktree_error = str(e)
+            workspace_cm = None
+
+        if worktree_error:
+            block = {
+                "gen_id": plugin_name or str(plugin_dir),
+                "error": f"worktree-prep failed: {worktree_error}",
+                "wall_clock_s": 0.0, "tokens": 0,
+                "completed_at": now_iso(),
+            }
+            record[role] = block
+            f.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+            per_task.append({"task": task[:160], "passed": False,
+                             "why": f"worktree/apply failure: {worktree_error[:200]}"})
+            continue
+
+        try:
             prompt = build_prompt(task, diff, stdout, plugin_name)
             ts = time.monotonic()
             stdout_txt, tokens, rc, stderr = claude_p(
-                plugin_dir=plugin_dir, input_text=prompt, cwd=None,
+                plugin_dir=plugin_dir, input_text=prompt,
+                cwd=str(worktree_path),
                 timeout_s=args.run_timeout_s,
             )
             wall = time.monotonic() - ts
@@ -382,7 +504,14 @@ def _process_pending(args, plugin_dir, work_dir, role: str, build_prompt, parse_
                                                  rc=rc, stderr=stderr,
                                                  wall_s=wall, tokens=tokens,
                                                  raw=stdout_txt)
-        record[role] = block
+            # Annotate the role block with the worktree base it reviewed.
+            if isinstance(block, dict):
+                block["reviewed_base_sha"] = base_sha
+            record[role] = block
+        finally:
+            if workspace_cm is not None:
+                workspace_cm.__exit__(None, None, None)
+
         f.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
         per_task.append({"task": task[:160], "passed": passed, "why": why})
 
@@ -477,7 +606,7 @@ def _reviewer_parse(parsed, stub, plugin_name, plugin_dir, rc=0, stderr="", wall
 
 def run_critic(args, eval_config, plugin_dir, out_dir, work_dir):
     per_task, tokens, wall, empty_reason = _process_pending(
-        args, plugin_dir, work_dir, "critic",
+        args, eval_config, plugin_dir, work_dir, "critic",
         build_critic_prompt, _critic_parse,
     )
     if empty_reason:
@@ -492,7 +621,7 @@ def run_critic(args, eval_config, plugin_dir, out_dir, work_dir):
 
 def run_reviewer(args, eval_config, plugin_dir, out_dir, work_dir):
     per_task, tokens, wall, empty_reason = _process_pending(
-        args, plugin_dir, work_dir, "reviewer",
+        args, eval_config, plugin_dir, work_dir, "reviewer",
         build_reviewer_prompt, _reviewer_parse,
     )
     if empty_reason:
@@ -540,7 +669,10 @@ def main():
                    choices=["implementer", "critic", "reviewer"])
     p.add_argument("--project-root", default=None)
     p.add_argument("--stub-mode", action="store_true")
-    p.add_argument("--max-probes", type=int, default=3)
+    p.add_argument("--max-probes", type=int, default=3,
+                   help="critic/reviewer: cap records-per-run")
+    p.add_argument("--task-limit", type=int, default=None,
+                   help="implementer: cap tasks from eval_config.tasks")
     p.add_argument("--run-timeout-s", type=int, default=RUN_TIMEOUT_S)
     args = p.parse_args()
 
