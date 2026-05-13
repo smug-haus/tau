@@ -71,7 +71,7 @@ Worktree isolation isolates git refs but **not** absolute-path writes — brief 
 - `retry-strategy` — refine vs pivot.
 - `code-review-patterns` — review checklist.
 - `design-reasoning` — PSDH for coordination-heavy components.
-- `tau-toolchain` — Erlang+Elixir install; sandbox `mix` limits.
+- `tau-toolchain` — Erlang+Elixir install.
 - `tau-architecture` — behaviour order, style, worktree-leak detail.
 - `tau-github-workflow` — issues, milestones, project board, PR linkage.
 - `tau-adr` — when and how to write an ADR.

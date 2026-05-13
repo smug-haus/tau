@@ -15,7 +15,8 @@ toolchain:
 
 - **Erlang/OTP + Elixir** — see `.tool-versions`. Easiest path is
   [`asdf`](https://asdf-vm.com) or [`mise`](https://mise.jdx.dev); the
-  `tau-toolchain` skill in `.claude/skills/` has a sandbox-aware fallback.
+  `tau-toolchain` skill in `.claude/skills/` has a precompiled-binary
+  fallback when neither is available.
 - **Python 3.10** — required at compile time only, by `ex_termbox` (a
   transitive dep of `ratatouille`, the TUI library). The vendored
   `waf` inside `ex_termbox` uses Python-2-era idioms (`'rUb'` open

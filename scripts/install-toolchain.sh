@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# install-toolchain.sh — install Erlang/OTP, Elixir, Hex, and rebar3 in a fresh
-# Linux sandbox without using the OS package manager.
+# install-toolchain.sh — install Erlang/OTP, Elixir, Hex, and rebar3 from
+# precompiled binaries, without using the OS package manager.
 #
 # Idempotent: safe to re-run. Existing installs are skipped.
 #
@@ -14,23 +14,6 @@
 #   - Elixir precompiled zip:    https://github.com/elixir-lang/elixir/releases
 #   - Hex archive:               https://builds.hex.pm/installs/<elixir>/hex.ez
 #   - rebar3 binary:             https://github.com/erlang/rebar3/releases/latest
-#
-# Why this exists:
-#   The Anthropic sandbox MITMs all outbound TLS via an "egress-gateway-ca".
-#   Curl negotiates a fingerprint the proxy accepts, so direct downloads work.
-#   But Erlang's :httpc gets 502/503 from the proxy on EVERY https host —
-#   confirmed against hex.pm, jsdelivr, github.com, google.com — so Mix's
-#   built-in fetcher (mix local.hex / mix local.rebar / mix deps.get) cannot
-#   reach the network from inside the sandbox.
-#
-#   This script bootstraps everything via curl, which DOES work, then drops
-#   the Hex archive and rebar3 binary into the locations Mix expects. After
-#   it runs you have working `mix compile` / `mix format` / `mix test`
-#   IF deps are already on disk.
-#
-#   `mix deps.get` itself remains blocked. See scripts/install-toolchain.sh
-#   companion docs in .claude/skills/tau-toolchain/SKILL.md for the
-#   sandboxed-deps workaround (push to CI, or fetch via curl + git).
 #
 # Usage:
 #   sudo bash scripts/install-toolchain.sh        # installs to /opt/erlang & /opt/elixir
@@ -118,9 +101,7 @@ export PATH="\$ERLANG_HOME/bin:\$ELIXIR_HOME/bin:\$PATH"
 export ELIXIR_ERL_OPTIONS="+fnu"
 export LANG="\${LANG:-C.UTF-8}"
 export LC_ALL="\${LC_ALL:-C.UTF-8}"
-# Hex respects this for its own HTTPS verification when it can talk to Hex —
-# in this sandbox the egress proxy blocks Erlang TLS regardless, but the var
-# is still correct for non-sandboxed environments.
+# Point Hex at the system CA bundle for its HTTPS verification.
 export HEX_CACERTS_PATH="/etc/ssl/certs/ca-certificates.crt"
 EOF
 chmod +x "$PROFILE_FILE"
@@ -134,8 +115,8 @@ mix --version    | tail -1
 
 # --- Hex archive -------------------------------------------------------------
 #
-# `mix local.hex --force` would normally fetch this, but Erlang's :httpc is
-# blocked in the sandbox. Download via curl and install the archive offline.
+# Download the Hex archive via curl and install it offline so this script
+# works on hosts without Mix archives on disk yet.
 
 ELIXIR_MINOR="$(echo "$ELIXIR_VERSION" | awk -F. '{print $1"."$2".0"}')"
 HEX_EZ="$(mktemp --suffix=.ez)"
@@ -168,10 +149,4 @@ fi
 
 log "Done. Open a new shell or 'source $PROFILE_FILE' to pick up PATH."
 log ""
-log "What works in the sandbox:"
-log "  • mix compile / mix format / mix credo / mix test  (after deps are on disk)"
-log "  • iex -S mix"
-log ""
-log "What does NOT work in the sandbox:"
-log "  • mix deps.get  — Erlang :httpc is blocked by the egress proxy."
-log "    See .claude/skills/tau-toolchain/SKILL.md for the deps workaround."
+log "Next step (in a fresh checkout): mix deps.get && mix compile"

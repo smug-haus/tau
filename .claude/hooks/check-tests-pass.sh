@@ -71,9 +71,8 @@ if [ -f "$PROJECT_ROOT/mix.exs" ]; then
         echo "[check-tests-pass.sh] mix not on PATH; passing through" >&2
         exit 0
     fi
-    # Sandbox tolerance: `mix deps.get` cannot reach hex.pm in the Anthropic
-    # sandbox, so deps/ may be empty. Pass through rather than failing closed
-    # on a "Could not find Hex" error. See .claude/skills/tau-toolchain/SKILL.md.
+    # If deps/ is empty (e.g., fresh checkout before `mix deps.get`), pass through
+    # rather than failing closed on a "Could not find Hex" error.
     if [ ! -d "$PROJECT_ROOT/deps" ] || [ -z "$(ls -A "$PROJECT_ROOT/deps" 2>/dev/null)" ]; then
         echo "[check-tests-pass.sh] deps/ not populated; passing through" >&2
         exit 0

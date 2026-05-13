@@ -1,12 +1,12 @@
 ---
 name: tau-toolchain
-description: Install and verify the Erlang/OTP + Elixir + Hex + rebar3 toolchain Tau needs to build. Use whenever a session starts with `mix` or `elixir` not on PATH, when `mix compile` / `mix test` / `mix format` fail with "command not found", when the user asks you to set up the BEAM, or when CI failures suggest a toolchain mismatch with `.tool-versions`. Also covers what Mix operations DO NOT work inside the Anthropic sandbox (`mix deps.get`) and the verified workaround.
+description: Install and verify the Erlang/OTP + Elixir + Hex + rebar3 toolchain Tau needs to build. Use whenever a session starts with `mix` or `elixir` not on PATH, when `mix compile` / `mix test` / `mix format` fail with "command not found", when the user asks you to set up the BEAM, or when CI failures suggest a toolchain mismatch with `.tool-versions`.
 ---
 
 # tau-toolchain — install BEAM + Elixir for this repo
 
 This skill is the canonical answer to "how do I get `mix` working in this
-sandbox". **Read it before re-deriving anything.**
+repo". **Read it before re-deriving anything.**
 
 ## TL;DR
 
@@ -21,8 +21,8 @@ That installs Erlang/OTP 27.2, Elixir 1.18.1, Hex archive, and rebar3 —
 **without using apt** and without any `--unsafe` flags. Versions are pinned
 from `.tool-versions`.
 
-If `mix compile` then fails because `deps/` is empty, see
-**"Fetching deps"** below — it does NOT work inside the sandbox.
+If `mix compile` then fails because `deps/` is empty, run `mix deps.get`
+first.
 
 ## Why a script (and not asdf / mise / apt)
 
@@ -41,77 +41,13 @@ already publishes:
 | Hex archive | builds.hex.pm | `https://builds.hex.pm/installs/1.18.0/hex.ez` |
 | rebar3 | erlang/rebar3 GitHub release | `https://github.com/erlang/rebar3/releases/latest/download/rebar3` |
 
-All four are reachable via curl from inside the sandbox.
-
-## Sandbox limitation: Erlang TLS is blocked, curl is not
-
-The Anthropic sandbox MITMs all outbound HTTPS via an `egress-gateway-ca`
-(`O=Anthropic; CN=sandbox-egress-production TLS Inspection CA`). curl
-negotiates a TLS fingerprint the proxy accepts, so direct downloads work.
-
-**Erlang's `:httpc` consistently gets `502 Bad Gateway` /
-`503 Service Unavailable` from the proxy on every HTTPS host** — verified
-against `hex.pm`, `cdn.jsdelivr.net`, `github.com`, `google.com`. The
-proxy's response body is the Envoy-style
-`upstream connect error or disconnect/reset before headers`.
-
-This is **not** fixable from Mix config. `HEX_MIRROR`, `HEX_CACERTS_PATH`,
-`HEX_UNSAFE_HTTPS=1`, custom `HEX_HTTP_*` retry tuning, and TLS 1.2/1.3
-toggles all yield the same 5xx. The proxy distinguishes Erlang's TLS hello
-from curl's and refuses to relay it.
-
-References:
-- [openai/codex#10502](https://github.com/openai/codex/issues/10502) —
-  same symptom on a different sandbox vendor; confirms it is a proxy
-  policy, not a hex.pm outage.
-- [hexpm/hex docs — mirrors](https://hex.pm/docs/mirrors) — official
-  mirror list (Fastly, jsDelivr, UPYUN). All three fail from Erlang
-  inside this sandbox.
-
-### Implications
-
-- `mix local.hex --force` ❌ (Mix uses :httpc → blocked)
-- `mix local.rebar --force` ❌ (same)
-- `mix deps.get` ❌ (same)
-- `mix hex.search`, `mix hex.info <pkg>` ❌ (same)
-- `mix compile`, `mix test`, `mix format`, `mix credo`, `mix dialyzer` ✅
-  — provided `deps/` is populated. None of these need network.
-- `iex -S mix` ✅
-- `escript`, `mix escript.build` ✅
-
-The install script handles `local.hex` / `local.rebar` by downloading the
-Hex archive via curl and dropping rebar3 into `~/.mix/rebar3` directly,
-which is where Mix looks for them.
-
-## Fetching deps
-
-`mix deps.get` does not work in the sandbox. Two reliable alternatives:
-
-### Option A — push and let CI fetch
-
-Make the change locally, push the branch, let GitHub Actions run
-`mix deps.get` + `mix test` + `mix dialyzer`. The CI workflow at
-`.github/workflows/ci.yml` is configured exactly for this.
-
-This is the right path **for any work that needs `mix test` to pass**.
-Don't pretend you ran the test suite inside the sandbox if you didn't —
-say so and rely on CI.
-
-### Option B — fetch deps via curl on a host with working egress
-
-If a checkout of this repo with a populated `deps/` and `_build/` exists
-elsewhere (a dev machine, a previous CI artifact), tar it up and copy it
-in. The `deps/` tree is self-contained — once present, every `mix`
-command that doesn't reach the network just works.
-
-There is no third option that bypasses `:httpc` from inside this sandbox.
-Don't waste tokens trying to make `HEX_MIRROR=https://...` work — see the
-references above.
+All four are reachable via curl.
 
 ## What `mix` commands work and what they verify
 
 | Command | Verifies | Needs deps/ |
 |---------|----------|-------------|
+| `mix deps.get` | Fetch deps from Hex | — (populates `deps/`) |
 | `mix compile --warnings-as-errors` | code compiles, no warnings | yes |
 | `mix format --check-formatted` | code is `mix format`-clean | no (formatter is bundled) |
 | `mix credo --strict` | static analysis | yes (credo is a dep) |
@@ -120,23 +56,8 @@ references above.
 | `mix test --only property` | StreamData property suite | yes |
 | `mix escript.build` | escript bundles | yes |
 
-## Common Mix commands
-
-Day-to-day workflow once `deps/` is populated. Sandbox reachability
-annotated.
-
-| Command | Purpose | Sandbox |
-|---------|---------|---------|
-| `mix deps.get` | Fetch deps from Hex | ❌ (use CI / prepopulated tree) |
-| `mix compile` | Build (treat warnings-as-errors) | ✅ |
-| `mix format --check-formatted` | CI gate: formatter | ✅ |
-| `mix credo --strict` | CI gate: static analysis | ✅ |
-| `mix dialyzer` | CI gate: typespecs | ✅ |
-| `mix test` | ExUnit suite | ✅ |
-| `mix test --only property` | StreamData property suite (longer budget) | ✅ |
-| `mix tau.hello` | one-shot smoke test against a provider | ✅ |
-| `mix escript.build && ./tau` | local TUI run | ✅ |
-| `iex -S mix` | REPL: `Tau.start_session/1` etc. | ✅ |
+`mix format` is the only entry that's safe in a fresh checkout — the rest
+need `deps/` populated, which is what `mix deps.get` is for.
 
 ## Python 3.10 (build-only, ex_termbox)
 

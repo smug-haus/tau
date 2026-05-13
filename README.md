@@ -26,10 +26,8 @@ Done:
 - Ratatouille TUI app, escript CLI with run/resume/sessions/doctor (M6)
 - Burrito release wrapping for cross-platform binaries (M8)
 
-Pending verification: full `mix test` on a real CI runner — the dev
-sandbox blocks `mix deps.get` from reaching `repo.hex.pm` via Erlang's
-httpc (curl works, Erlang doesn't). Verify on GitHub Actions per
-`.github/workflows/ci.yml`.
+Pending verification: full `mix test` on a real CI runner. Verify on
+GitHub Actions per `.github/workflows/ci.yml`.
 
 Known limitations: cancelling a `Bash` tool call kills only the direct
 `bash` PID — descendants survive on every platform until `:erlexec`
