@@ -43,8 +43,40 @@ MAX_DIFF_CHARS = 200_000
 
 
 def archive_root(plugin_dir: Path) -> Path:
-    """``.../hyperagents/<sibling>/scratch/<id>/`` → ``.../hyperagents/<sibling>/``."""
+    """``.../hyperagents/<sibling>/{scratch|agents}/<id>/`` → ``.../hyperagents/<sibling>/``."""
     return plugin_dir.parent.parent
+
+
+def parent_primary(plugin_dir: Path):
+    """Look up the parent's primary score from the archive.
+
+    Reads ``<scratch>/lineage.json`` to find ``parent_id``, then opens
+    ``<archive>/runs/<parent_id>/scores.json``. Returns the float
+    ``primary`` if both exist, else ``None``.
+
+    Used by critic/reviewer cold-start handling: when the role has no
+    pending records to process, the candidate inherits its parent's
+    score so the admission step admits a no-op cycle rather than
+    rejecting on a fabricated zero.
+    """
+    lineage = plugin_dir / "lineage.json"
+    if not lineage.is_file():
+        return None
+    try:
+        lin = json.loads(lineage.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    parent_id = lin.get("parent")
+    if not parent_id:
+        return None
+    sc = archive_root(plugin_dir) / "runs" / parent_id / "scores.json"
+    if not sc.is_file():
+        return None
+    try:
+        d = json.loads(sc.read_text(encoding="utf-8"))
+        return float(d.get("primary", 0.0))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
 
 
 def project_root_from(plugin_dir: Path) -> Path:
@@ -620,14 +652,26 @@ def _reviewer_parse(parsed, stub, plugin_name, plugin_dir, rc=0, stderr="", wall
     return block, passed, why
 
 
+def _cold_start_score(role: str, plugin_dir: Path, out_dir, wall_s, tokens, reason):
+    """No pending records: inherit parent's primary so admission admits
+    a no-op cycle rather than rejecting on fabricated zero signal."""
+    pp = parent_primary(plugin_dir)
+    if pp is None:
+        # No parent (gen-0 or seed): default to 0.0; loop will reject as expected.
+        write_scores(out_dir, role, 0.0, [], wall_s=wall_s, tokens=tokens,
+                     notes=f"{role}: {reason}; no parent score available — inheriting 0.0")
+    else:
+        write_scores(out_dir, role, float(pp), [], wall_s=wall_s, tokens=tokens,
+                     notes=f"{role}: {reason}; inheriting parent primary={pp:.4f} (no-op cycle)")
+
+
 def run_critic(args, eval_config, plugin_dir, out_dir, work_dir):
     per_task, tokens, wall, empty_reason = _process_pending(
         args, eval_config, plugin_dir, work_dir, "critic",
         build_critic_prompt, _critic_parse,
     )
     if empty_reason:
-        write_scores(out_dir, "critic", 0.0, per_task, wall_s=wall, tokens=tokens,
-                     notes=f"critic: {empty_reason}")
+        _cold_start_score("critic", plugin_dir, out_dir, wall, tokens, empty_reason)
         return 0
     primary = (sum(1 for p in per_task if p["passed"]) / len(per_task)) if per_task else 0.0
     write_scores(out_dir, "critic", primary, per_task, wall_s=wall, tokens=tokens,
@@ -641,8 +685,7 @@ def run_reviewer(args, eval_config, plugin_dir, out_dir, work_dir):
         build_reviewer_prompt, _reviewer_parse,
     )
     if empty_reason:
-        write_scores(out_dir, "reviewer", 0.0, per_task, wall_s=wall, tokens=tokens,
-                     notes=f"reviewer: {empty_reason}")
+        _cold_start_score("reviewer", plugin_dir, out_dir, wall, tokens, empty_reason)
         return 0
     primary = (sum(1 for p in per_task if p["passed"]) / len(per_task)) if per_task else 0.0
     write_scores(out_dir, "reviewer", primary, per_task, wall_s=wall, tokens=tokens,
