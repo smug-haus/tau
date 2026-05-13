@@ -342,10 +342,17 @@ failed. PARTIAL = mixed."""
 # ───────── role bodies ─────────
 
 def run_implementer(args, eval_config, plugin_dir, out_dir, work_dir):
-    tasks = eval_config.get("tasks") or []
-    if args.task_limit is not None:
-        tasks = tasks[:args.task_limit]
+    if args.task is not None:
+        tasks = [args.task]
+    else:
+        tasks = eval_config.get("tasks") or []
+        if args.task_limit is not None:
+            tasks = tasks[:args.task_limit]
     repo = Path(eval_config["repo"]).resolve() if eval_config.get("repo") else None
+    # Fallback: if eval_config doesn't name a repo (e.g., bare --task usage),
+    # default to the host project root computed from the plugin-dir path.
+    if repo is None:
+        repo = project_root_from(plugin_dir)
     plugin_name = load_plugin_name(plugin_dir)
 
     per_task = []
@@ -673,6 +680,9 @@ def main():
                    help="critic/reviewer: cap records-per-run")
     p.add_argument("--task-limit", type=int, default=None,
                    help="implementer: cap tasks from eval_config.tasks")
+    p.add_argument("--task", default=None,
+                   help="implementer: run this task text instead of reading "
+                        "eval_config.tasks (one-shot; no eval_config mutation)")
     p.add_argument("--run-timeout-s", type=int, default=RUN_TIMEOUT_S)
     args = p.parse_args()
 
