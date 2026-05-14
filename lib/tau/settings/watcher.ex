@@ -22,14 +22,20 @@ defmodule Tau.Settings.Watcher do
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
   @impl true
-  def init(_opts) do
-    cwd = File.cwd!()
-    home = System.user_home!() || "."
-
+  def init(opts) do
     dirs =
-      [Path.join(home, ".tau"), Path.join(cwd, ".tau"), cwd]
-      |> Enum.uniq()
-      |> Enum.filter(&File.dir?/1)
+      case Keyword.get(opts, :dirs) do
+        nil ->
+          cwd = File.cwd!()
+          home = System.user_home!() || "."
+
+          [Path.join(home, ".tau"), Path.join(cwd, ".tau"), cwd]
+          |> Enum.uniq()
+          |> Enum.filter(&File.dir?/1)
+
+        explicit ->
+          explicit
+      end
 
     state =
       case maybe_start_watcher(dirs) do
@@ -38,6 +44,13 @@ defmodule Tau.Settings.Watcher do
 
         other ->
           Logger.debug("Tau.Settings.Watcher disabled: #{inspect(other)}")
+
+          :telemetry.execute(
+            [:tau, :settings, :watcher_degraded],
+            %{system_time_native: System.system_time(:native)},
+            %{reason: other}
+          )
+
           %{watcher: nil, dirs: dirs, debounce: nil}
       end
 

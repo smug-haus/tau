@@ -40,6 +40,8 @@ defmodule Tau.Application do
 
   @impl true
   def start(_type, _args) do
+    install_file_system_log_filter()
+
     children = [
       Tau.Telemetry.Supervisor,
       {Phoenix.PubSub, name: Tau.PubSub},
@@ -72,6 +74,40 @@ defmodule Tau.Application do
         other
     end
   end
+
+  # Suppress noisy [error]/[warning] messages from the :file_system library
+  # (FSInotify.bootstrap and FileSystem.Worker.init) that fire before the
+  # Tau.Settings.Watcher GenServer has a chance to degrade gracefully.  These
+  # messages are emitted at the OTP logger level by Erlang code inside the
+  # dependency and therefore cannot be suppressed via Elixir Logger config
+  # alone — they arrive before any runtime filter registered by the Watcher
+  # could be in place.  Installing a primary filter here, before the
+  # supervision tree starts, ensures they are never written to stderr.
+  #
+  # The filter is intentionally narrow: it only drops :error and :warning
+  # entries whose OTP logger :application metadata is :file_system.  All
+  # other log entries are passed through unaffected.
+  defp install_file_system_log_filter do
+    case :logger.add_primary_filter(
+           :tau_suppress_file_system_noise,
+           {&__MODULE__.filter_file_system_log/2, :drop}
+         ) do
+      :ok -> :ok
+      # Idempotent: filter already installed (hot-upgrade, test restart, etc.)
+      {:error, {:already_exist, _}} -> :ok
+    end
+  end
+
+  # Public because OTP :logger requires an MFA-capturable function for filter
+  # callbacks ({&Mod.fun/arity, extra}). Do not call directly.
+  @doc false
+  @spec filter_file_system_log(:logger.log_event(), term()) :: :stop | :logger.log_event()
+  def filter_file_system_log(%{level: level, meta: %{application: :file_system}} = _event, :drop)
+      when level in [:error, :warning] do
+    :stop
+  end
+
+  def filter_file_system_log(event, _), do: event
 
   defp maybe_dispatch_cli do
     case Burrito.Util.Args.get_bin_path() do
