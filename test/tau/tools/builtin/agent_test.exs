@@ -252,18 +252,90 @@ defmodule Tau.Tools.Builtin.AgentTest do
   # 4. Permissions clamp end-to-end
   # ---------------------------------------------------------------------------
   describe "permissions clamp" do
-    @tag :skip
-    test "child permissions_mode is clamped to :plan parent ceiling", %{tmp: _tmp} do
-      # BUG: AC-4 specifies permissions_mode: :plan as the parent ceiling, but
-      # Tau.Permissions.Evaluator.default_for_mode(:plan, _, _) returns :deny for
-      # every tool except Read/Grep/Glob (evaluator.ex:94). The Agent tool is
-      # therefore denied before clamp logic in agent.ex ever runs. End-to-end
-      # testing of the :plan ceiling requires either (a) an exemption list for
-      # synthetic internal tools, or (b) a dedicated permissions override path.
-      # Neither exists today. Skipped (not failed) so the gap is visible in the
-      # test output but does not fail CI. The :auto ceiling case is covered below
-      # and exercises the same clamp logic.
-      :ok
+    test "child permissions_mode is clamped to :plan parent ceiling", %{tmp: tmp} do
+      # Issue #166 / Option 1: Tau.Permissions.Evaluator now exempts "Agent"
+      # from :plan-mode denial (it's dispatch infrastructure, not a content
+      # tool). This allows the clamp logic in agent.ex to run and enforce the
+      # :plan ceiling on the child session.
+      parent_sid = Tau.Session.generate_id()
+      Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{parent_sid}")
+
+      test_pid = self()
+      telemetry_id = "agent-plan-clamp-test-#{parent_sid}"
+
+      :telemetry.attach_many(
+        telemetry_id,
+        [
+          [:tau, :permissions, :ceiling_clamped],
+          [:tau, :session, :child_registered]
+        ],
+        fn event, _measurements, meta, _ ->
+          send(test_pid, {:telemetry, event, meta})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(telemetry_id) end)
+
+      call_id = "agent-plan-clamp-call"
+
+      # Agent call requests "bypass" mode; parent is :plan — child must be
+      # clamped to :plan (the ceiling).
+      provider_ctx = %{
+        parent_session_id: parent_sid,
+        parent_first_fixture: [
+          %Event.Start{request_id: "plan-clamp-r1", model: "multi-fixture"},
+          %Event.ToolCallStart{tool_call_id: call_id, name: "Agent"},
+          %Event.ToolCallEnd{
+            tool_call_id: call_id,
+            params: %{"description" => "read the codebase", "permissions_mode" => "bypass"}
+          },
+          %Event.Done{stop_reason: :tool_use, usage: %{}}
+        ],
+        parent_second_fixture: parent_end_turn_fixture(),
+        child_fixture: child_text_fixture("plan-mode result")
+      }
+
+      {:ok, ^parent_sid} =
+        start_session_for_test(
+          provider: MultiFixtureProvider,
+          session_id: parent_sid,
+          cwd: tmp,
+          # Parent starts in :plan mode (read-only ceiling).
+          # Child requests :bypass (more permissive) — must be clamped to :plan.
+          metadata: %{permissions_mode: :plan},
+          provider_ctx: provider_ctx
+        )
+
+      Tau.send(parent_sid, "delegate with escalation attempt under plan ceiling")
+
+      # Wait for the child to be registered.
+      assert_receive {:telemetry, [:tau, :session, :child_registered], %{child_id: child_id}},
+                     10_000
+
+      # Ceiling-clamped telemetry must fire.
+      assert_receive {:telemetry, [:tau, :permissions, :ceiling_clamped], clamp_meta}, 5_000
+      assert clamp_meta.requested == :bypass
+      assert clamp_meta.parent == :plan
+      assert clamp_meta.effective == :plan
+
+      # Wait for the tool to complete and the parent to finish.
+      assert_receive %SE.MessageEnd{message: %{stop_reason: :end_turn}}, 10_000
+
+      # Child's metadata must show :plan (clamped, not :bypass).
+      case Tau.snapshot(child_id) do
+        {:ok, child_snap} ->
+          assert child_snap.permissions_mode == :plan
+
+        {:error, :not_found} ->
+          # Child may have already stopped; verify via JSONL instead.
+          [child_path] =
+            Path.wildcard(Path.join(Tau.Settings.data_dir(), "sessions/*/#{child_id}.jsonl"))
+
+          rows = jsonl_rows(child_path)
+          header = Enum.find(rows, &(&1["kind"] == "session_start"))
+          assert get_in(header, ["data", "metadata", "permissions_mode"]) == "plan"
+      end
     end
 
     test "child permissions_mode is clamped to :auto parent ceiling", %{tmp: tmp} do
