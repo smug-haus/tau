@@ -250,7 +250,12 @@ POST
   - On is_error: true, content is a printable error string (NOT a raw struct).
     (Closes [C16].)
 INV (iteration cap)
-  - A single user-turn MUST NOT exceed N tool-call iterations
+  - A single user-turn MUST complete at most N tool-call iterations
+    before either (a) the model emits stop_reason: :end_turn (clean
+    exit) or (b) the FSM aborts with stop_reason: :tool_loop_aborted
+    (cap reached). "At most N" means N dispatches may complete; the
+    (N+1)th attempt triggers the abort path. The check is
+    `data.tool_iterations >= cap` evaluated before each dispatch.
     (default N=20, configurable via Tau.Settings or per-session opt).
     Cap precedence: opts[:max_tool_iterations] > Settings.Cache
     [:session, :max_tool_iterations] > default 20. Cap snapshotted at
@@ -340,7 +345,7 @@ Each entry: id, statement, severity, detection_method, source_constraint.
 | D-002 | `Tau.start_session/1` MUST resolve a non-nil model before reaching `:start_provider` | high | property test: start_session([]) ; assert data.model != nil | [C29] |
 | D-003 | `Ratatouille.run` quit_events MUST NOT include bare `{:ch, ?q}` — quit must be context-aware | medium | source-level: refute regex match; manual-test gate | [C7] |
 | D-004 | TUI MUST `Phoenix.PubSub.subscribe/2` BEFORE `Tau.start_session/1` returns | high | property test: capture SessionStart event from TUI side | [C6] |
-| D-005 | Session FSM MUST cap tool-call iterations per turn (default 20) | high | property test: replay model that loops on tool; assert turn ends within N | [C24] |
+| D-005 | _Superseded by D-027 (same invariant, fully specified there). Retained as placeholder; references to D-005 in code comments and commit history point here._ | — | _see D-027_ | [C24] |
 | D-006 | When `Tau.send/2` returns non-:ok, TUI MUST surface to user | medium | review criterion + property test on submit/1 | [C15] |
 | D-007 | `Settings.Cache` values consumed in a turn are snapshotted at `:start_provider` | medium | property test: mutate settings during a Replay turn; assert in-flight uses old | [C5] |
 | D-008 | Watcher degraded mode emits `[:tau, :settings, :watcher_degraded]` telemetry | low | unit test: start watcher without inotify; assert telemetry | [C8] |

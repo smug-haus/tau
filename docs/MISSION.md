@@ -24,7 +24,7 @@ blocker is not the priority.
 `docs/spec/SPEC-USER-TURN.md` defines:
 
 - 43 boundary constraints (`[Cn-Bm]`, 24 marked non-obvious).
-- 19 runtime invariants (`D-001`–`D-019`) with detection methods.
+- 20 runtime invariants (`D-001`–`D-019` plus `D-027`; `D-005` superseded by `D-027`) with detection methods.
 - 7 acceptance criteria (`AC-1`–`AC-7`).
 - A source map (Appendix B) tying constraints to file:line.
 
