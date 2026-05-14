@@ -58,7 +58,11 @@ defmodule Tau.BurritoSteps.RelinkTermbox do
       |> List.first()
 
     unless so_output do
-      Log.error(:step, "[RelinkTermbox] Could not find termbox_bindings.so in release tree at #{context.work_dir}/lib/ex_termbox-*/priv/")
+      Log.error(
+        :step,
+        "[RelinkTermbox] Could not find termbox_bindings.so in release tree at #{context.work_dir}/lib/ex_termbox-*/priv/"
+      )
+
       exit(1)
     end
 
@@ -66,13 +70,15 @@ defmodule Tau.BurritoSteps.RelinkTermbox do
 
     args = [
       "cc",
-      "-target", zig_target,
+      "-target",
+      zig_target,
       "-O2",
       "-fPIC",
       "-shared",
       "-I#{erts_include}",
       "-I#{termbox_include}",
-      "-o", so_output,
+      "-o",
+      so_output,
       termbox_bindings_c,
       libtermbox_a
     ]
@@ -82,7 +88,11 @@ defmodule Tau.BurritoSteps.RelinkTermbox do
 
     case System.cmd(zig_bin, args, stderr_to_stdout: true, into: IO.stream()) do
       {_, 0} ->
-        Log.info(:step, "[RelinkTermbox] Successfully relinked termbox_bindings.so for #{zig_target}")
+        Log.info(
+          :step,
+          "[RelinkTermbox] Successfully relinked termbox_bindings.so for #{zig_target}"
+        )
+
         context
 
       {_, exit_code} ->
@@ -126,7 +136,16 @@ defmodule Tau.BurritoSteps.RelinkTermbox do
 
   defp resolve_erts_include(_) do
     # Best-effort fallback: use host erl headers
-    {root, 0} = System.cmd("erl", ["-eval", "io:format(\"~s\", [code:root_dir()])", "-s", "init", "stop", "-noshell"])
+    {root, 0} =
+      System.cmd("erl", [
+        "-eval",
+        "io:format(\"~s\", [code:root_dir()])",
+        "-s",
+        "init",
+        "stop",
+        "-noshell"
+      ])
+
     version = :erlang.system_info(:version) |> to_string()
     Path.join(String.trim(root), "erts-#{version}/include")
   end
