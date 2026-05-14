@@ -95,6 +95,7 @@ Each question lists raw constraints. Format: `[Cn-Bm]` = constraint number + bou
 - **★ [C21-B7]** `Settings.Cache.get/1` returns merged values without provenance. Debugging "why is `model` X" requires manually walking `~/.tau/settings.local.json` ↔ user-global ↔ defaults. No `Settings.explain/1`.
 - **[C22-B5]** `Provider → Session` event stream lacks "request id" trace correlation. If a provider call retries via the fallback chain, telemetry events from both attempts share the session_id but not a per-attempt id, complicating diagnosis.
 - **[C23-B5]** `provider.stream/3` ctx carries `session_id` and `cancel_flag` but not `is_fallback_attempt: bool`. Providers can't differentiate first-try from fallback for log/billing purposes.
+- **★ [C52-B5]** Assistant text content from `%Provider.Event.TextDelta{}` is concatenated and appended to the TUI transcript verbatim (`lib/tau/tui/app.ex` `on_message_end/2`). CommonMark / GFM table markup that round-trips fine through JSONL persistence becomes visually inert in the rendered pane. The text-content boundary loses its structure on display.
 
 ### Q5: What feedback loops exist, and can they diverge?
 
@@ -132,7 +133,7 @@ Each question lists raw constraints. Format: `[Cn-Bm]` = constraint number + bou
 
 ### L0 yield
 
-**44 raw constraints**, of which **24 are non-obvious (★)**. Threshold (5–12) exceeded — appropriate for a 5/5 triage component.
+**45 raw constraints**, of which **25 are non-obvious (★)**. Threshold (5–12) exceeded — appropriate for a 5/5 triage component.
 
 ## 4. Boundary contracts (from L0)
 
@@ -371,8 +372,9 @@ Each entry: id, statement, severity, detection_method, source_constraint.
 | D-019 | `tau doctor` MUST report which auth path is configured (api_key vs oauth vs none) and, for OAuth, the `subscriptionType` and time-to-expiry. | low | unit test on doctor output | [C46] (debuggability) |
 | D-026 | The TUI prompt bar MUST render a solid block cursor glyph ("█", U+2588) appended after `model.input` on every render frame. The glyph indicates the active insertion point and distinguishes an idle, waiting-for-input state from a frozen or blank render. No animation required in v1. | medium | tmux smoke test (`test/tau/cli/tui_smoke_test.exs` AC-H1): `tmux capture-pane` output after a 150 ms render-settle MUST contain "█"; absence indicates the render path is broken or the glyph is being stripped | [C51-B3] |
 | D-027 | Session FSM MUST cap tool-call iterations per turn at `max_tool_iterations` (default 20, readable from `opts[:max_tool_iterations]` or `Settings.Cache.get()[:session][:max_tool_iterations]`). When the cap is exceeded, the FSM MUST emit `[:tau, :session, :tool_iteration_cap]` telemetry with measurements `%{iterations: N, cap: K}` — where `N` is the count of completed dispatches in the aborted turn (equals `K` at the abort boundary; resets to 0 at the start of the next turn) — and metadata `%{session_id: id}`, then abort the turn with `stop_reason: :tool_loop_aborted`. The per-turn counter resets to 0 on every return to `:awaiting_user`. | high | property test `test/tau/session/tool_iteration_cap_property_test.exs`: drives a session backed by bespoke `AlwaysToolCallProvider` (a `Tau.Provider` behaviour implementation that always emits a `tool_call` event stream, independent of Replay); asserts turn terminates within `max_tool_iterations` with `stop_reason: :tool_loop_aborted` and that the telemetry event fires with `iterations == cap` | [C24], [C50] |
+| D-028 | Assistant text content rendered to the TUI transcript MUST be parsed as CommonMark with GFM tables (`Tau.Markdown.render/1`) before display. Raw markdown source MUST NOT appear in the rendered pane for valid CommonMark input. Tables render as aligned ASCII grids with `│`/`├`/`─`/`┼`/`┤` box-drawing. On parse error, a `[markdown-parse-error]` prefix surfaces the failure rather than silently dropping the content. | medium | unit test on `Tau.Markdown.render/1` over a markdown fixture containing a table + bold + inline code + fenced code; assert the output list contains aligned-table lines (`│ ... │`) and no raw `\|` pipe markers as table delimiters | [C52-B5] |
 
-21 D-xxx entries. Each is enforceable. None require speculation.
+22 D-xxx entries. Each is enforceable. None require speculation.
 
 ## 7. Acceptance criteria — "working TUI"
 
