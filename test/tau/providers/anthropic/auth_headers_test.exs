@@ -97,6 +97,7 @@ defmodule Tau.Providers.Anthropic.AuthHeadersTest do
 
         beta = headers["anthropic-beta"]
         assert is_binary(beta)
+
         assert beta =~ "oauth-2025-04-20",
                "Anthropic Messages API requires the oauth-2025-04-20 beta header for OAuth tokens; got #{inspect(beta)}"
 

@@ -100,6 +100,7 @@ Each question lists raw constraints. Format: `[Cn-Bm]` = constraint number + bou
 - **★ [C24-B6]** Tool-call iteration in a single turn is **unbounded**. `Tau.Session` (lib/tau/session.ex:1056-1066) loops while `tool_calls != []`. A model that always emits a tool call (e.g., a buggy persona that loops on `Bash`) consumes API calls and tokens without limit. No `max_tool_iterations` guard visible in the FSM.
 - **[C25-B5]** Rate limiter on 429: halves both buckets and arms a fixed 60-second floor (lib/tau/providers/rate_limiter.ex:50, 198). NOT exponential, no max-retry. Per-call bound is `acquire/3` timeout (default 30s) → FSM falls back to `:awaiting_user` with a rate_limit_timeout error. Persistent 429 produces continuous 60s holds; user sees repeated "rate_limit_timeout" errors with no escalation. Acceptable for v1, but [C25] flag remains for a future "max consecutive 429s" guard.
 - **★ [C26-B5]** Compactor failure: `compactor.compact(...)` returns `{:error, _}` and the FSM silently drops it (`{:error, _} -> data`, lib/tau/session.ex:1094). No telemetry, no log. `should_compact?` refires next turn → silent loop on a persistent failure. Confirmed via OQ-4 reading.
+- **★ [C50-B6]** Tool-call iteration cap value is read from `opts[:max_tool_iterations]` at session init, falling back to `get_in(Settings.Cache.get(), [:session, :max_tool_iterations])`, then defaulting to 20. The cap is snapshotted at session start, not re-read each turn (D-007 consistency). A new session inherits any settings change, but in-flight sessions use their init-time cap. This is the correct behaviour for D-007 compliance; naming it as a constraint so future callers know the precedence order.
 - **[C27-B5]** Fallback chain is bounded by chain length (ADR-0012). OK.
 - **[C28-B4]** Session resume replays JSONL. Fork chains (ADR-0007) reference parent events; cycle in fork chain would diverge replay. Verify acyclic invariant.
 
@@ -130,7 +131,7 @@ Each question lists raw constraints. Format: `[Cn-Bm]` = constraint number + bou
 
 ### L0 yield
 
-**42 raw constraints**, of which **23 are non-obvious (★)**. Threshold (5–12) exceeded — appropriate for a 5/5 triage component.
+**43 raw constraints**, of which **24 are non-obvious (★)**. Threshold (5–12) exceeded — appropriate for a 5/5 triage component.
 
 ## 4. Boundary contracts (from L0)
 
@@ -249,11 +250,23 @@ POST
   - On is_error: true, content is a printable error string (NOT a raw struct).
     (Closes [C16].)
 INV (iteration cap)
-  - A single user-turn MUST NOT exceed N tool-call iterations
-    (default N=20, configurable via Tau.Settings). On overflow: emit
-    [:tau, :session, :tool_iteration_cap] telemetry, finalize an Assistant
-    message with stop_reason: :tool_loop_aborted, return to :awaiting_user.
-    (Closes [C24].)
+  - A single user-turn MUST complete at most N tool-call iterations
+    before either (a) the model emits stop_reason: :end_turn (clean
+    exit) or (b) the FSM aborts with stop_reason: :tool_loop_aborted
+    (cap reached). "At most N" means N dispatches may complete; the
+    (N+1)th attempt triggers the abort path. The check is
+    `data.tool_iterations >= cap` evaluated before each dispatch.
+    (default N=20, configurable via Tau.Settings or per-session opt).
+    Cap precedence: opts[:max_tool_iterations] > Settings.Cache
+    [:session, :max_tool_iterations] > default 20. Cap snapshotted at
+    session init (D-007 compliance — mid-session settings reloads do
+    NOT change the cap for in-flight sessions). ([C50])
+    On overflow: emit [:tau, :session, :tool_iteration_cap] telemetry
+    with measurements %{iterations: N, cap: K} (N = completed dispatches
+    in the aborted turn, equals K at abort boundary) and metadata
+    %{session_id: id}, append and persist an Assistant message with
+    stop_reason: :tool_loop_aborted, broadcast MessageEnd, return to
+    :awaiting_user. (Closes [C24], implements D-027 / AC-6.)
 INV (permissions :ask in headless)
   - When permissions evaluator returns :ask and no UI subscriber answered
     within timeout: treat as :deny, emit telemetry. The current FSM behavior
@@ -332,7 +345,7 @@ Each entry: id, statement, severity, detection_method, source_constraint.
 | D-002 | `Tau.start_session/1` MUST resolve a non-nil model before reaching `:start_provider` | high | property test: start_session([]) ; assert data.model != nil | [C29] |
 | D-003 | `Ratatouille.run` quit_events MUST NOT include bare `{:ch, ?q}` — quit must be context-aware | medium | source-level: refute regex match; manual-test gate | [C7] |
 | D-004 | TUI MUST `Phoenix.PubSub.subscribe/2` BEFORE `Tau.start_session/1` returns | high | property test: capture SessionStart event from TUI side | [C6] |
-| D-005 | Session FSM MUST cap tool-call iterations per turn (default 20) | high | property test: replay model that loops on tool; assert turn ends within N | [C24] |
+| D-005 | _Superseded by D-027 (same invariant, fully specified there). Retained as placeholder; references to D-005 in code comments and commit history point here._ | — | _see D-027_ | [C24] |
 | D-006 | When `Tau.send/2` returns non-:ok, TUI MUST surface to user | medium | review criterion + property test on submit/1 | [C15] |
 | D-007 | `Settings.Cache` values consumed in a turn are snapshotted at `:start_provider` | medium | property test: mutate settings during a Replay turn; assert in-flight uses old | [C5] |
 | D-008 | Watcher degraded mode emits `[:tau, :settings, :watcher_degraded]` telemetry | low | unit test: start watcher without inotify; assert telemetry | [C8] |
@@ -347,8 +360,9 @@ Each entry: id, statement, severity, detection_method, source_constraint.
 | D-017 | `Tau.Providers.Anthropic` MUST support both API-key auth (`x-api-key` header) AND Claude Code OAuth auth (`Authorization: Bearer <token>` + `anthropic-beta: oauth-2025-04-20` header). OAuth credentials sourced from `~/.claude/.credentials.json` (top-level key `claudeAiOauth.accessToken`). Auth precedence (first non-nil wins): explicit `:api_key` opt → `Application.get_env` API key → `ANTHROPIC_API_KEY` env (vault) → Claude Code OAuth file. | high | unit test: stub each source; assert correct header shape; integration test with a Bypass server checking both code paths | [C46], [C47] |
 | D-018 | Expired OAuth token (`expiresAt < now`) MUST surface a clear, actionable error to the user — "Your Claude Code OAuth token expired; run `claude /login` to renew" — NOT a generic 401 or silent failure. Tau v1 does NOT refresh tokens itself (avoids the race with Claude Code's own refresh). | medium | unit test: stub credentials with past `expiresAt`; assert error message contains "expired" and the renewal command | [C48] |
 | D-019 | `tau doctor` MUST report which auth path is configured (api_key vs oauth vs none) and, for OAuth, the `subscriptionType` and time-to-expiry. | low | unit test on doctor output | [C46] (debuggability) |
+| D-027 | Session FSM MUST cap tool-call iterations per turn at `max_tool_iterations` (default 20, readable from `opts[:max_tool_iterations]` or `Settings.Cache.get()[:session][:max_tool_iterations]`). When the cap is exceeded, the FSM MUST emit `[:tau, :session, :tool_iteration_cap]` telemetry with measurements `%{iterations: N, cap: K}` — where `N` is the count of completed dispatches in the aborted turn (equals `K` at the abort boundary; resets to 0 at the start of the next turn) — and metadata `%{session_id: id}`, then abort the turn with `stop_reason: :tool_loop_aborted`. The per-turn counter resets to 0 on every return to `:awaiting_user`. | high | property test `test/tau/session/tool_iteration_cap_property_test.exs`: drives a session backed by bespoke `AlwaysToolCallProvider` (a `Tau.Provider` behaviour implementation that always emits a `tool_call` event stream, independent of Replay); asserts turn terminates within `max_tool_iterations` with `stop_reason: :tool_loop_aborted` and that the telemetry event fires with `iterations == cap` | [C24], [C50] |
 
-19 D-xxx entries. Each is enforceable. None require speculation.
+20 D-xxx entries. Each is enforceable. None require speculation.
 
 ## 7. Acceptance criteria — "working TUI"
 
@@ -386,7 +400,7 @@ These are the bar for closing the umbrella issue (#153/#149) and unblocking the 
 - This test runs in CI on every PR and is a blocking gate.
 
 ### AC-6: Tool-iteration safety
-- A property test runs a Replay session whose canned response always emits a tool_call. The session terminates within `max_tool_iterations` (default 20) with `stop_reason: :tool_loop_aborted`.
+- A property test runs a session backed by a bespoke `AlwaysToolCallProvider` (a `Tau.Provider` behaviour implementation that always emits a `tool_call` event stream). The session terminates within `max_tool_iterations` (default 20) with `stop_reason: :tool_loop_aborted`.
 
 ### AC-7: Resume sanity
 - After AC-2, `tau sessions list` shows the session. `tau sessions show <id>` prints the JSONL events. `tau resume <id>` opens a TUI for the resumed session whose transcript pane includes the prior turn.
@@ -456,5 +470,7 @@ For each constraint, the file:line where it lives in the current codebase:
 | C35 | `lib/tau/tui/app.ex:228-237` (on_session_end no unsubscribe) |
 | L1-C43 | `lib/tau/session.ex` :stopped transition |
 | L1-C45 | `lib/tau/tui/app.ex:18-21` (no monitor on FSM pid) |
+
+| C50 | `lib/tau/session.ex` init/1 — `max_tool_iterations` resolution (opts → Settings.Cache → 20) |
 
 Other constraints map to sites named in their text.

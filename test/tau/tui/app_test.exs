@@ -74,6 +74,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         assert next.last_assistant == nil
 
         last_line = List.last(next.transcript)
+
         assert is_binary(last_line) and last_line != "",
                "transcript MUST gain a non-empty line; got #{inspect(last_line)}"
 

@@ -23,8 +23,8 @@ blocker is not the priority.
 
 `docs/spec/SPEC-USER-TURN.md` defines:
 
-- 42 boundary constraints (`[Cn-Bm]`, 23 marked non-obvious).
-- 19 runtime invariants (`D-001`–`D-019`) with detection methods.
+- 43 boundary constraints (`[Cn-Bm]`, 24 marked non-obvious).
+- 20 runtime invariants (`D-001`–`D-019` plus `D-027`; `D-005` superseded by `D-027`) with detection methods.
 - 7 acceptance criteria (`AC-1`–`AC-7`).
 - A source map (Appendix B) tying constraints to file:line.
 
@@ -85,8 +85,11 @@ elsewhere.
 The runtime-invariant namespace is defined in `SPEC-USER-TURN.md` §6:
 
 ```
-D-001 … D-019  taken
-D-020 +        free
+D-001 … D-019  taken (SPEC-USER-TURN.md)
+D-020 … D-025  taken (SPEC-TUI-HEADLESS.md)
+D-026           free
+D-027           taken (SPEC-USER-TURN.md — tool-iteration cap, AC-6)
+D-028 +        free
 ```
 
 References to D-NNN appear across `lib/tau/`, `test/tau/`, commit messages,

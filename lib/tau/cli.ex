@@ -312,7 +312,9 @@ defmodule Tau.CLI do
         )
 
       {:error, _} = err ->
-        IO.puts("provider Tau.Providers.Anthropic: " <> Tau.Providers.Anthropic.Auth.describe_error(err))
+        IO.puts(
+          "provider Tau.Providers.Anthropic: " <> Tau.Providers.Anthropic.Auth.describe_error(err)
+        )
     end
 
     0

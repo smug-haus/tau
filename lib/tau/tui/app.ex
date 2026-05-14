@@ -293,15 +293,20 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       transcript_lines =
         for block <- msg.content do
           case block do
-            %{type: :text, text: t} -> "[assistant] " <> t
+            %{type: :text, text: t} ->
+              "[assistant] " <> t
+
             # Thinking models (Qwen3, DeepSeek-R1) emit chain-of-thought
             # via Thinking* events. Surface them so a long think doesn't
             # look like the TUI is hung.
             %{type: :thinking, text: t} when is_binary(t) and t != "" ->
               "[thinking] " <> t
 
-            %{type: :tool_call, name: n} -> "[tool_call] " <> n <> "(...)"
-            _ -> nil
+            %{type: :tool_call, name: n} ->
+              "[tool_call] " <> n <> "(...)"
+
+            _ ->
+              nil
           end
         end
         |> Enum.reject(&is_nil/1)

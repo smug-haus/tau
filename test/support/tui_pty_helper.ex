@@ -72,8 +72,12 @@ defmodule Tau.Test.TuiPtyHelper do
           sess = %{tmux_name: name, binary: binary, opts: opts}
 
           case wait_for_ready(sess, Keyword.get(opts, :ready_timeout_ms, @ready_default)) do
-            :ok -> {:ok, sess}
-            err -> _ = quit(sess); err
+            :ok ->
+              {:ok, sess}
+
+            err ->
+              _ = quit(sess)
+              err
           end
 
         {out, code} ->
