@@ -420,6 +420,13 @@ def run_implementer(args, eval_config, plugin_dir, out_dir, work_dir):
         else:
             with Workspace(repo) as wt:
                 base_sha = repo_head_sha(repo)
+                # Snapshot agent worktrees existing before this run so we
+                # can detect ones the implementer's nested Task spawns.
+                agent_wt_root = repo / ".claude" / "worktrees"
+                preexisting_agent_wts = set()
+                if agent_wt_root.is_dir():
+                    preexisting_agent_wts = {p.name for p in agent_wt_root.glob("agent-*")
+                                             if p.is_dir()}
                 prompt = (f"@{plugin_name}:task-agent\n\n" if plugin_name else "") + task_body
                 ts = time.monotonic()
                 stdout_txt, tokens, rc, stderr = claude_p(
@@ -430,6 +437,7 @@ def run_implementer(args, eval_config, plugin_dir, out_dir, work_dir):
                 total_tokens += tokens
                 diff_txt = ""
                 files = []
+                diff_source = "workspace"
                 if (wt / ".git").exists():
                     subprocess.run(["git", "-C", str(wt), "add", "-A"],
                                    capture_output=True, text=True)
@@ -440,11 +448,33 @@ def run_implementer(args, eval_config, plugin_dir, out_dir, work_dir):
                         capture_output=True, text=True).stdout or ""
                     files = [ln.strip() for ln in names.splitlines() if ln.strip()]
 
+                # Fallback: if the candidate produced no diff in our worktree
+                # but spawned a nested agent worktree (the Task tool with
+                # isolation: "worktree" creates one under
+                # `<repo>/.claude/worktrees/agent-*`), harvest the diff from
+                # there. This is the nested-worktree bug — the candidate
+                # nested-Tasked another subagent and its diff lives in a
+                # peer location rather than the workspace we created.
+                if not diff_txt.strip() and agent_wt_root.is_dir():
+                    new_agent_wts = [p for p in agent_wt_root.glob("agent-*")
+                                     if p.is_dir() and p.name not in preexisting_agent_wts]
+                    for awt in new_agent_wts:
+                        subprocess.run(["git", "-C", str(awt), "add", "-A"],
+                                       capture_output=True, text=True)
+                        d = subprocess.run(["git", "-C", str(awt), "diff", "--cached"],
+                                           capture_output=True, text=True).stdout or ""
+                        n = subprocess.run(["git", "-C", str(awt), "diff", "--cached", "--name-only"],
+                                           capture_output=True, text=True).stdout or ""
+                        if d.strip():
+                            diff_txt = d
+                            files = [ln.strip() for ln in n.splitlines() if ln.strip()]
+                            diff_source = f"nested-agent-worktree:{awt.name}"
+                            break
+
                 # Diff is the artefact, not the stdout. A candidate that
-                # claims success without producing a diff (e.g. by working in
-                # a nested sub-worktree that doesn't reach the outer tree, or
-                # by editing nothing) must fail this probe so evolution
-                # selects against the behaviour.
+                # claims success without producing a diff (in our worktree
+                # or any nested agent worktree it spawned) must fail this
+                # probe so evolution selects against the behaviour.
                 passed = (rc == 0) and bool(diff_txt.strip())
                 if rc != 0:
                     why = f"rc={rc}; {stderr[:200]}"
@@ -457,6 +487,7 @@ def run_implementer(args, eval_config, plugin_dir, out_dir, work_dir):
                     "base_sha": base_sha,
                     "diff": diff_txt[:MAX_DIFF_CHARS],
                     "files_changed": files[:200],
+                    "diff_source": diff_source,
                     "stdout_excerpt": stdout_txt[:MAX_OUTPUT_CHARS],
                     "wall_clock_s": round(wall, 2),
                     "tokens": tokens,
