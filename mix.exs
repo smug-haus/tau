@@ -132,7 +132,10 @@ defmodule Tau.MixProject do
       # `Keyword.has_key?(nil, ...)` once `BURRITO_TARGET` is set.
       burrito_options = [
         targets: target_atoms_to_keyword(target_atom),
-        debug: false
+        debug: false,
+        extra_steps: [
+          patch: [post: [Tau.BurritoSteps.RelinkTermbox]]
+        ]
       ]
 
       %{
