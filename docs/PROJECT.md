@@ -18,6 +18,20 @@ plan-of-record: each milestone's description holds the milestone plan;
 issues are filed against the milestone and surface on the `Tau`
 project board.
 
+## Milestones
+
+| ID | Title | Description |
+|----|-------|-------------|
+| M0 | Working TUI | AC-1..AC-7 pass; binary launches, completes a one-turn round-trip against a real provider, quits cleanly. |
+| M1 | Self-hosting | tau replaces vendored claude-harness; coordinator runs end-to-end through `Tau.Tools.Builtin.Agent`. |
+| M2 | Provider reliability | Multi-provider abstraction, fallback chain, per-resource circuit breakers, OpenTelemetry export. |
+| M3 | Persistence + replay | Durable JSONL persistence, session resume, hash-anchored editing, audit-trail integration. |
+| M4 | Sub-agents & coordination | Agent tool sub-session dispatch, inter-agent message passing, persona-pinned lifetime. |
+| M5 | Settings & memory | SQLite-backed semantic memory, settings hot-reload everywhere, vault parity across macOS/Linux/Windows. |
+| M6 | Skills & extensions | Skill activation paths (model + slash), MCP server orchestration, extension dynamic loading. |
+| M7 | LiveView dashboard | Read-only LiveView session viewer, telemetry dashboard, auth gate, interactive driver. |
+| M8 | Distribution & integration | Shareable session URLs, JSON-RPC transport, Gateway behaviour for Telegram/Discord/MCP-server-mode. |
+
 ## Layout
 
 ```
