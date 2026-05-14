@@ -131,6 +131,13 @@ defmodule Tau.Message.Assembler do
   defp strip_internals(%{type: :tool_call} = b), do: Map.drop(b, [:_args_buf])
   defp strip_internals(b), do: Map.drop(b, [:id])
 
+  defp format_reason({:http_status, n, %{type: type, message: msg}}) when is_binary(type),
+    do: "HTTP #{n} (#{type}): #{msg}"
+
+  defp format_reason({:http_status, n, %{body: body}}) when is_binary(body),
+    do: "HTTP #{n}: #{body}"
+
+  defp format_reason({:http_status, n, _other}), do: "HTTP #{n}"
   defp format_reason({:http_status, n}), do: "HTTP #{n}"
   defp format_reason({type, msg}) when is_binary(type), do: "#{type}: #{msg}"
   defp format_reason(other), do: inspect(other)
