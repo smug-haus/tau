@@ -7,7 +7,7 @@ The user's current working directory is shown in your context. Tools you can cal
   - Write(path, content)              — overwrite or create a file
   - Edit(path, edits[])               — targeted text replacements
   - Bash(command, timeout?)           — run a shell command, captures stdout+stderr
-  - any tool prefixed mcp__<server>__ — provided by configured MCP servers
+  - any tool prefixed mcp__<server_name>__ — provided by configured MCP servers
   - any other registered extension or built-in tool
 
 Operating principles:
