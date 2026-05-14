@@ -1,0 +1,121 @@
+{
+  "version": 1,
+  "record_id": "wr-20260514T153837-453d13",
+  "created_at": "2026-05-14T15:38:37.507275+00:00",
+  "task": {
+    "kind": "hyperagents-task",
+    "source": "eval_config",
+    "body": "Fix issue #125: project-local `.claude/agents/*.md` personas (critic/reviewer/implementer) are not registered as `subagent_type` with Claude Code's Agent dispatcher.\n\n## Root cause (from issue body)\n\nClaude Code only auto-registers agents from `~/.claude/agents/`, not from `<project>/.claude/agents/*.md`. The shipped `.claude/agents/{critic,reviewer,implementer}.md` files declare a `name:` in frontmatter but the Task tool dispatcher doesn't see them. Verified symptom: `Agent({subagent_type: \"implementer\", ...})` returns `Agent type 'implementer' not found`.\n\n## What this PR should do\n\nPick whichever fix path is the smallest cohesive change:\n\n**Path A \u2014 discover + register on session start (preferred if Claude Code supports it).**\nFind the supported mechanism (a settings.json key, a CLAUDE.md directive, or an env var). The harness vendored at `/home/brentw/src/hyperagents` or upstream Claude Code may have a flag like `subagent_lookup_paths` or `extra_agent_dirs`. Look in:\n- Upstream Claude Code docs (web search may help)\n- The plugin spec at `~/.claude/plugins/marketplaces/` or `/home/brentw/src/hyperagents/hyperagents/.claude-plugin/plugin.json`\n- The vendored agents themselves: do they have schema fields that hint at registration?\n\nIf a supported mechanism exists, wire it into `.claude/settings.json` or wherever appropriate, then verify `Agent({subagent_type: \"implementer\", ...})` resolves.\n\n**Path B \u2014 dogfood `Tau.Tools.Builtin.Agent` for the harness's personas.**\nIf Claude Code has no supported mechanism, rewire `.claude/commands/pr.md` and `.claude/commands/test-persona.md` to invoke the personas via Tau's own sub-agent dispatcher (`Tau.Tools.Builtin.Agent`) instead of Claude Code's `Task` tool. This dogfoods the 1.0 trajectory: Tau acting as its own dev harness. The persona resolution from `.claude/agents/*.md` would need a tiny Elixir loader (similar to `Tau.Skill` loading) \u2014 but the agents are short YAML+markdown so the loader is ~30 lines.\n\n**Path C \u2014 bare-minimum workaround.**\nIf neither A nor B is feasible in this PR's scope, document the gap clearly: update `.claude/skills/tau-architecture/SKILL.md`'s \u00a7Subagent Routing to say \"personas at `.claude/agents/*.md` cannot be invoked via `Task(subagent_type:...)` from the project-local harness; use slash-command-as-prompt instead.\" Update `.claude/commands/pr.md` to use slash-command-as-prompt fallback. File a follow-up issue for the proper fix.\n\n## Verification\n\nAfter your chosen fix:\n\n1. Run `/pr` against a small test scope \u2014 does it complete without \"Agent type 'critic' not found\"? (Can't be tested from this factory pass \u2014 note in your report whether you exercised it.)\n2. `Agent({subagent_type: \"implementer\", task: \"...\"})` should resolve (Path A) OR the docs should clearly redirect to the workaround (Path C) OR `Tau.Tools.Builtin.Agent.dispatch/1` should accept a persona name and route to the right model+permissions (Path B).\n3. `mix test`, `mix format --check-formatted`, `mix credo --strict` on changed files \u2014 exit 0.\n\n## Constraints\n\n- Do not edit upstream Claude Code or the hyperagents plugin at `/home/brentw/src/hyperagents/`. Only edit files under `/home/brentw/src/tau/`.\n- Do not delete the `.claude/agents/*.md` files. They are still load-bearing for context (they document the persona invariants even if not auto-registered).\n- If you pick path B, do not change `Tau.Tools.Builtin.Agent`'s public callbacks. Add the persona resolver as a separate module.\n- The harness has hooks under `.claude/hooks/`; do not modify them unless directly needed.\n\nReport each gate command's exit status with the relevant verbatim output. Document which path (A/B/C) you took and why.\n"
+  },
+  "implementer": {
+    "gen_id": "hyperagent-gen4-a7175c7a",
+    "base_sha": "9aa76a9f4e43b7d95e8ddc5cdac2ff9aef636c6f",
+    "diff": "diff --git a/.claude/commands/pr.md b/.claude/commands/pr.md\nindex d1db23c..383f614 100644\n--- a/.claude/commands/pr.md\n+++ b/.claude/commands/pr.md\n@@ -2,7 +2,7 @@\n description: >\n   Run the blocking critic+reviewer gate, then open a PR. Aborts if either\n   gate fails. Both verdicts are recorded in the solution tree.\n-allowed-tools: Read, Bash(git diff *), Bash(git log *), Bash(git status), Bash(git branch *), Bash(gh pr view *), Bash(gh pr create *), Bash(gh issue view *), Bash(jq *), Bash(cat *), Bash(mkdir *), Bash(echo *), Bash(date *), Edit, Write\n+allowed-tools: Read, Bash(git diff *), Bash(git log *), Bash(git status), Bash(git branch *), Bash(gh pr view *), Bash(gh pr create *), Bash(gh issue view *), Bash(jq *), Bash(cat *), Bash(mkdir *), Bash(echo *), Bash(date *), Edit, Write, Task\n ---\n \n Run the blocking PR gate. Both `critic` and `reviewer` MUST return\n@@ -33,19 +33,28 @@ change to be issue-driven.\n \n ## Step 3 \u2014 Spawn `critic` (design veto)\n \n-Use the Task tool with `subagent_type: \"critic\"`. Brief:\n+NOTE: `.claude/agents/critic.md` cannot be auto-registered by Claude Code from\n+a project-local path. Invoke via the Task tool **without** `subagent_type`.\n+\n+**Compose the Task prompt as follows \u2014 strictly in order:**\n+\n+1. Read `.claude/agents/critic.md`.\n+2. Skip the first two standalone `---` lines (YAML frontmatter delimiters) and\n+   take all remaining text (the full body beginning with \"You are a senior systems\n+   architect\u2026\"). Paste it **verbatim** as the opening of the Task prompt. Do NOT\n+   paraphrase or summarise.\n+3. Append this context block after the verbatim body:\n \n-> Review the diff against `main` for coordination-correctness violations.\n-> Read `.claude/rules/otp-non-negotiables.md`. Apply the PSDH triage\n-> checklist via the `design-reasoning` skill. The last line of your\n-> response must be exactly `{\"ok\": true}` or\n-> `{\"ok\": false, \"reason\": \"...\"}`.\n->\n > Diff: <full output of `git diff main...HEAD`>\n > Linked issue: #N \u2014 <title from `gh issue view`>\n > Files changed: <list>\n \n-Parse the JSON verdict from the agent's last line.\n+The critic's `## When invoked by /pr` section already contains the review\n+instructions and structured-findings schema. Do not duplicate or override them.\n+\n+Parse `ok` from the JSON object on the agent's **last line** (`{\"ok\": true}` or\n+`{\"ok\": false, \"reason\": \"...\"}`). The critic does not emit a `verdict` field \u2014\n+use `ok` only.\n \n ## Step 4 \u2014 On `critic` veto\n \n@@ -67,20 +76,29 @@ If `critic` returned `{\"ok\": false, ...}`:\n \n ## Step 5 \u2014 Spawn `reviewer` (quality veto)\n \n-Use the Task tool with `subagent_type: \"reviewer\"`. Brief:\n+NOTE: `.claude/agents/reviewer.md` cannot be auto-registered by Claude Code from\n+a project-local path. Invoke via the Task tool **without** `subagent_type`.\n+\n+**Compose the Task prompt as follows \u2014 strictly in order:**\n+\n+1. Read `.claude/agents/reviewer.md`.\n+2. Skip the first two standalone `---` lines (YAML frontmatter delimiters) and\n+   take all remaining text (the full body beginning with \"You are a post-completion\n+   evaluator\u2026\"). Paste it **verbatim** as the opening of the Task prompt. Do NOT\n+   paraphrase or summarise.\n+3. Append this context block after the verbatim body:\n \n-> Run `mix test`, `mix format --check-formatted`, `mix credo --strict`\n-> against the working tree. Inspect the diff for silent failures,\n-> hardcoded values, missing `@spec`, missing telemetry on user-visible\n-> operations, missing property tests on invariant-bearing modules. The\n-> last line of your response must be exactly `{\"ok\": true}` or\n-> `{\"ok\": false, \"reason\": \"...\"}`.\n->\n > Diff: <full output of `git diff main...HEAD`>\n > Linked issue: #N \u2014 <title>\n > Original spec excerpt: <issue body>\n \n-Parse the JSON verdict.\n+The reviewer's `## When invoked by /pr` section already contains the evaluation\n+steps and structured-verdict schema. Do not duplicate or override them.\n+\n+Parse `ok` from the JSON object on the agent's **last line** (`{\"ok\": true}` or\n+`{\"ok\": false, \"reason\": \"...\"}`). The reviewer also emits a fenced `json` block\n+immediately before the final line containing a `\"verdict\": \"PASS|FAIL|PARTIAL\"`\n+field \u2014 extract that for the solution tree and PR body.\n \n ## Step 6 \u2014 On `reviewer` veto\n \n@@ -99,8 +117,8 @@ two verdicts. Compose the PR body:\n Closes #N\n \n ## Gate verdicts\n-- critic: PASS \u2014 <one-line summary if any>\n-- reviewer: PASS \u2014 <one-line summary if any>\n+- critic: PASS (`ok: true`) \u2014 <one-line summary from critic's structured findings, if any>\n+- reviewer: PASS (`verdict: PASS`) \u2014 <one-line summary from reviewer's structured verdict, if any>\n \n ## Test plan\n <derived from the implementer's reported smoke test, if any>\ndiff --git a/.claude/commands/test-persona.md b/.claude/commands/test-persona.md\nindex ff2cbc9..95dec80 100644\n--- a/.claude/commands/test-persona.md\n+++ b/.claude/commands/test-persona.md\n@@ -13,9 +13,16 @@ Run three validation exercises to confirm subagent personas behave correctly. Ea\n \n ## Exercise 1: Critic Validation\n \n-Spawn the `critic` subagent with the following prompt. The inline code contains three planted flaws.\n+Spawn a Task agent (do NOT use `subagent_type: \"critic\"` \u2014 project-local agents at\n+`.claude/agents/critic.md` are not auto-registered by Claude Code; see\n+`.claude/skills/tau-architecture/SKILL.md` \u00a7Subagent Routing for details).\n \n-**Prompt to critic:**\n+**Compose the Task prompt:**\n+1. Read `.claude/agents/critic.md`.\n+2. Skip the first two standalone `---` lines and paste the remaining body verbatim.\n+3. Append the task below.\n+\n+**Prompt to critic (inline persona + task):**\n \n > Review this Python rate limiter design. Identify all design flaws, architectural risks, and testing gaps.\n >\n@@ -60,9 +67,16 @@ Spawn the `critic` subagent with the following prompt. The inline code contains\n \n ## Exercise 2: Reviewer Validation\n \n-First, spawn the `implementer` subagent to create the following function. The implementation has two planted bugs.\n+First, spawn a Task agent with the implementer persona (do NOT use\n+`subagent_type: \"implementer\"` for the same reason as Exercise 1):\n+1. Read `.claude/agents/implementer.md`. Skip the first two standalone `---` lines and paste the remaining body verbatim.\n+2. Append the task below.\n+\n+Then spawn a second Task agent with the reviewer persona:\n+1. Read `.claude/agents/reviewer.md`. Skip the first two standalone `---` lines and paste the remaining body verbatim.\n+2. Append the reviewer task (implementer's output).\n \n-**Implementer prompt:**\n+**Implementer prompt (inline persona + task):**\n \n > Write a Python function `fibonacci(n)` that returns the nth Fibonacci number (0-indexed: fibonacci(0)=0, fibonacci(1)=1). Include a test suite. Use a hardcoded `max_n = 100` guard.\n \n@@ -88,7 +102,7 @@ def test_fibonacci():\n     assert fibonacci(10) == 55\n ```\n \n-Then spawn the `reviewer` subagent with the implementer's output.\n+Use the Task agent constructed above (verbatim reviewer persona + the implementer's output as context).\n \n **Expected reviewer output \u2014 all must be present:**\n - Run the tests \u2014 they will fail (off-by-one produces wrong values for n >= 2 in some implementations)\ndiff --git a/.claude/skills/tau-architecture/SKILL.md b/.claude/skills/tau-architecture/SKILL.md\nindex 630341b..8bcd3fc 100644\n--- a/.claude/skills/tau-architecture/SKILL.md\n+++ b/.claude/skills/tau-architecture/SKILL.md\n@@ -73,6 +73,33 @@ the parent worktree to discard any leaked edits.\n **Single-agent foreground work** (no parallel siblings) does not need\n isolation \u2014 the parent and child can't race a single working tree.\n \n+## \u00a7Subagent Routing \u2014 project-local persona limitation\n+\n+The harness ships three persona definitions at `.claude/agents/{critic,reviewer,implementer}.md`.\n+These files document persona invariants and are the source of truth for each role's\n+allowed tools, model, and behaviour contract. They are load-bearing documentation.\n+\n+**Known limitation (issue #125):** Claude Code's Task tool dispatcher auto-registers\n+agents only from `~/.claude/agents/` (user-level) and from installed plugin `agents/`\n+directories. It does NOT auto-register agents from `<project>/.claude/agents/`. This\n+means `Task({subagent_type: \"critic\", ...})` returns \"Agent type 'critic' not found\"\n+when invoked from within this project's harness commands.\n+\n+**Workaround (Path C):** Invoke personas via the Task tool **without** `subagent_type`.\n+Instead, inline the persona's system prompt (from the `.claude/agents/<name>.md` body)\n+directly in the Task tool's `prompt` argument. The persona files serve as the canonical\n+source to copy from. This is how `/pr` and `/test-persona` work.\n+\n+**Future path (issue #125 follow-up):** If a proper fix is needed, two options exist:\n+- Path A: Find and configure a `settings.json` key that adds project-local agent lookup\n+  paths. Investigated 2026-05-14: Claude Code docs, plugin manifests under\n+  `~/.claude/plugins/`, and the vendored hyperagents plugin were checked; no\n+  `subagent_lookup_paths` or equivalent key exists in any settings schema at that\n+  date. Re-investigate if a new Claude Code release lands.\n+- Path B: Wire Tau's own `Tau.Tools.Builtin.Agent` to resolve personas from\n+  `.claude/agents/*.md` and route to the right model+permissions, dogfooding Tau as\n+  the harness's own agent dispatcher.\n+\n ## \u00a74 Architectural decisions\n \n The non-negotiables (`.claude/rules/otp-non-negotiables.md`) tell you\ndiff --git a/CLAUDE.md b/CLAUDE.md\nindex bdad74b..da9e36a 100644\n--- a/CLAUDE.md\n+++ b/CLAUDE.md\n@@ -40,6 +40,8 @@ You receive tasks, maintain the solution tree, spawn subagents, decide on outcom\n \n Rules: `Plan` before `critic`; `implementer` over `general-purpose` inside `lib/tau/` or `test/`; both `critic` and `reviewer` MUST PASS before opening a PR.\n \n+**Persona dispatch:** Do NOT use `subagent_type: \"critic\"` / `\"reviewer\"` / `\"implementer\"` \u2014 Claude Code does not auto-register project-local agents at `.claude/agents/`. Instead invoke the Task tool without `subagent_type` and inline the persona prompt from `.claude/agents/<name>.md`. See `tau-architecture` \u00a7Subagent Routing for details and issue #125.\n+\n Worktree isolation isolates git refs but **not** absolute-path writes \u2014 brief subagents to use relative paths. Detail in `tau-architecture`.\n \n ## Task Lifecycle\ndiff --git a/lib/tau/burrito_steps/relink_termbox.ex b/lib/tau/burrito_steps/relink_termbox.ex\nindex 981585e..1c74619 100644\n--- a/lib/tau/burrito_steps/relink_termbox.ex\n+++ b/lib/tau/burrito_steps/relink_termbox.ex\n@@ -58,7 +58,11 @@ defmodule Tau.BurritoSteps.RelinkTermbox do\n       |> List.first()\n \n     unless so_output do\n-      Log.error(:step, \"[RelinkTermbox] Could not find termbox_bindings.so in release tree at #{context.work_dir}/lib/ex_termbox-*/priv/\")\n+      Log.error(\n+        :step,\n+        \"[RelinkTermbox] Could not find termbox_bindings.so in release tree at #{context.work_dir}/lib/ex_termbox-*/priv/\"\n+      )\n+\n       exit(1)\n     end\n \n@@ -66,13 +70,15 @@ defmodule Tau.BurritoSteps.RelinkTermbox do\n \n     args = [\n       \"cc\",\n-      \"-target\", zig_target,\n+      \"-target\",\n+      zig_target,\n       \"-O2\",\n       \"-fPIC\",\n       \"-shared\",\n       \"-I#{erts_include}\",\n       \"-I#{termbox_include}\",\n-      \"-o\", so_output,\n+      \"-o\",\n+      so_output,\n       termbox_bindings_c,\n       libtermbox_a\n     ]\n@@ -82,7 +88,11 @@ defmodule Tau.BurritoSteps.RelinkTermbox do\n \n     case System.cmd(zig_bin, args, stderr_to_stdout: true, into: IO.stream()) do\n       {_, 0} ->\n-        Log.info(:step, \"[RelinkTermbox] Successfully relinked termbox_bindings.so for #{zig_target}\")\n+        Log.info(\n+          :step,\n+          \"[RelinkTermbox] Successfully relinked termbox_bindings.so for #{zig_target}\"\n+        )\n+\n         context\n \n       {_, exit_code} ->\n@@ -126,7 +136,16 @@ defmodule Tau.BurritoSteps.RelinkTermbox do\n \n   defp resolve_erts_include(_) do\n     # Best-effort fallback: use host erl headers\n-    {root, 0} = System.cmd(\"erl\", [\"-eval\", \"io:format(\\\"~s\\\", [code:root_dir()])\", \"-s\", \"init\", \"stop\", \"-noshell\"])\n+    {root, 0} =\n+      System.cmd(\"erl\", [\n+        \"-eval\",\n+        \"io:format(\\\"~s\\\", [code:root_dir()])\",\n+        \"-s\",\n+        \"init\",\n+        \"stop\",\n+        \"-noshell\"\n+      ])\n+\n     version = :erlang.system_info(:version) |> to_string()\n     Path.join(String.trim(root), \"erts-#{version}/include\")\n   end\n",
+    "files_changed": [
+      ".claude/commands/pr.md",
+      ".claude/commands/test-persona.md",
+      ".claude/skills/tau-architecture/SKILL.md",
+      "CLAUDE.md",
+      "lib/tau/burrito_steps/relink_termbox.ex"
+    ],
+    "diff_source": "workspace",
+    "stdout_excerpt": "",
+    "wall_clock_s": 1500.14,
+    "tokens": 0,
+    "revision_n": 2,
+    "revised_at": "2026-05-14T17:22:54.285845+00:00",
+    "refused": false,
+    "prior_diff_chars": 10399
+  },
+  "critic": {
+    "gen_id": "hyperagent-gen5-a7175c7a",
+    "findings": [
+      {
+        "id": "f-1",
+        "severity": "BLOCKING",
+        "category": "spec-deviation",
+        "file": "lib/tau/skills/loader.ex",
+        "line": 41,
+        "message": "ADR-0015 specifies that `subagent_type` resolves to a `%Tau.Skill{}` via `Tau.Skills.Loader.discover/1`. The loader scans `~/.tau/skills/<name>/SKILL.md` and `<cwd>/.tau/skills/<name>/SKILL.md` but never scans `.claude/agents/<name>.md`. The PR misattributes the failure to a Claude Code limitation when the real gap is that Tau's own skill loader does not include `.claude/agents/` as a discovery root. The fix documents an indefinite workaround that diverges the harness's documented contract (ADR-0015 \u00a71) from its implementation permanently.",
+        "evidence": "ADR-0015 \u00a71: 'Persona = skill lookup. The Agent tool's subagent_type parameter is a skill name.' ADR-0015 Consequences: 'Subagent personas live as ordinary markdown files in `.claude/agents/<name>.md` (or wherever skills already discover from).' lib/tau/skills/loader.ex:41\u201348 scans only ~/.tau/skills, <cwd>/.tau/skills, and priv/skills."
+      },
+      {
+        "id": "f-2",
+        "severity": "BLOCKING",
+        "category": "spec-deviation",
+        "file": ".claude/commands/pr.md",
+        "line": 39,
+        "message": "The workaround instructs the coordinator to manually strip YAML frontmatter by counting standalone `---` lines. This is fragile: the count is file-specific and if any `---` appears in the body (horizontal rule, code fence boundary), the workaround silently truncates the injected persona with no error signal, producing a subagent behaving as a general-purpose agent rather than a critic.",
+        "evidence": ".claude/commands/pr.md:41-44: 'Skip the first two standalone `---` lines (YAML frontmatter delimiters) and take all remaining text... Paste it verbatim.' The skill loader's `Frontmatter.parse/1` already does this correctly \u2014 reinventing it in a prose instruction is the exact anti-pattern the critic checklist flags."
+      },
+      {
+        "id": "f-3",
+        "severity": "BLOCKING",
+        "category": "spec-deviation",
+        "file": ".claude/skills/tau-architecture/SKILL.md",
+        "line": 93,
+        "message": "SKILL.md documents Path B ('wire Tau.Tools.Builtin.Agent') as a 'future' option, but `Tau.Tools.Builtin.Agent` is already implemented and already performs skill lookup via `resolve_skill/2` (agent.ex:139, 298-306). The only missing piece is adding `.claude/agents/` as a scan root in `Tau.Skills.Loader.discover/1`. Canonising a permanent workaround that contradicts the existing implementation's design will mislead new contributors into treating Path B as future work rather than a three-line fix.",
+        "evidence": "lib/tau/tools/builtin/agent.ex:139 calls resolve_skill/2; lines 298-306 look up the skill from parent_snap.skills populated by Tau.Skills.Loader.discover/1. lib/tau/skills/loader.ex:41-48 does not scan .claude/agents/."
+      },
+      {
+        "id": "f-4",
+        "severity": "BLOCKING",
+        "category": "other",
+        "file": "lib/tau/burrito_steps/relink_termbox.ex",
+        "line": 1,
+        "message": "Formatter-only reformatting of Log.error/info and System.cmd call sites appears in a PR scoped to issue #125 (subagent persona registration). This conflates two unrelated changes, making gate history and rollback hygiene ambiguous. tau-github-workflow requires every non-trivial change to be issue-driven and the diff to be cohesive.",
+        "evidence": "All relink_termbox.ex hunks are pure line-length reformatting with no semantic change. Issue #125 has no logical connection to Burrito relinking."
+      },
+      {
+        "id": "f-5",
+        "severity": "BLOCKING",
+        "category": "other",
+        "file": ".claude/commands/pr.md",
+        "line": 1,
+        "message": "No test demonstrates the fix. spec-before-code.md requires a test that fails before the change and passes after. For a harness command workaround, a property test on `Tau.Skills.Loader.discover/1` showing agents in `.claude/agents/` are returned would satisfy this. Without a test, the next refactor of the skills loader silently breaks persona dispatch again with no regression signal.",
+        "evidence": ".claude/rules/spec-before-code.md: 'MUST NOT implement an acceptance criterion without a property test or unit test that fails before the change and passes after.' No new test files appear in the diff."
+      },
+      {
+        "id": "f-6",
+        "severity": "SUGGESTION",
+        "category": "other",
+        "file": ".claude/commands/pr.md",
+        "line": 120,
+        "message": "PR body template conflates `ok` (gate signal, final line) with `verdict` (solution-tree field, fenced JSON block). A coordinator may accept `PARTIAL` reviewer output as a gate pass if it reads `verdict: PASS` without checking `ok: true`.",
+        "evidence": null
+      }
+    ],
+    "single_most_important_id": "f-1",
+    "wall_clock_s": 222.13,
+    "tokens": 7198,
+    "completed_at": "2026-05-14T17:27:39.376249+00:00",
+    "raw_excerpt": null,
+    "reviewed_base_sha": "9aa76a9f4e43b7d95e8ddc5cdac2ff9aef636c6f"
+  },
+  "reviewer": {
+    "gen_id": "hyperagent-gen7-a7175c7a",
+    "verdict": "PASS",
+    "tests": {
+      "tool": "mix test",
+      "passed": 382,
+      "failed": 0,
+      "errors": 0
+    },
+    "format_clean": null,
+    "credo_clean": null,
+    "findings": [
+      {
+        "id": "f-1",
+        "severity": "WARNING",
+        "file": ".claude/commands/test-persona.md",
+        "line": 71,
+        "message": "Exercise 2 docs say 'do NOT use subagent_type: \"implementer\"' but do not add a note for the reviewer persona \u2014 minor asymmetry. The reviewer instruction block (lines 75-77) uses the correct pattern but lacks the explicit 'do NOT use subagent_type' callout that Exercise 1 has. Non-blocking."
+      }
+    ],
+    "wall_clock_s": 325.2,
+    "tokens": 5526,
+    "completed_at": "2026-05-14T17:33:04.785953+00:00",
+    "raw_excerpt": null,
+    "reviewed_base_sha": "9aa76a9f4e43b7d95e8ddc5cdac2ff9aef636c6f"
+  }
+}

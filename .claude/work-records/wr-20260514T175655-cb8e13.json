@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "record_id": "wr-20260514T175655-cb8e13",
+  "created_at": "2026-05-14T17:56:55.653372+00:00",
+  "task": {
+    "kind": "hyperagents-task",
+    "source": "eval_config",
+    "body": "Add a property test in `test/tau/settings/loader_test.exs` verifying that `Tau.Settings.Loader` merge is commutative for non-conflicting keys and right-biased for conflicts, then make `mix test` pass."
+  },
+  "implementer": {
+    "gen_id": "hyperagent-scratch-20260514T175616-f8ef",
+    "base_sha": "4f72e7f17ee4af92fa7ba1d01d0286b4fc14f255",
+    "diff": "diff --git a/test/tau/settings/loader_test.exs b/test/tau/settings/loader_test.exs\nindex 545db4d..9a19965 100644\n--- a/test/tau/settings/loader_test.exs\n+++ b/test/tau/settings/loader_test.exs\n@@ -1,5 +1,6 @@\n defmodule Tau.Settings.LoaderTest do\n   use ExUnit.Case, async: true\n+  use ExUnitProperties\n \n   alias Tau.Settings.Loader\n \n@@ -31,4 +32,43 @@ defmodule Tau.Settings.LoaderTest do\n       assert merged[:permissions][:deny] == [\"Bash(rm *)\", \"Bash(sudo *)\"]\n     end\n   end\n+\n+  # Fixed key alphabet keeps generated maps realistic and avoids atom exhaustion.\n+  @key_pool [:alpha, :beta, :gamma, :delta, :epsilon, :zeta, :eta, :theta]\n+\n+  defp scalar_gen do\n+    one_of([integer(), string(:alphanumeric)])\n+  end\n+\n+  defp key_gen, do: member_of(@key_pool)\n+\n+  describe \"merge/2 properties\" do\n+    @tag :property\n+    property \"commutative for non-conflicting keys\" do\n+      # Split the key pool so the two halves never share a key \u2014 that guarantees\n+      # merge(a, b) and merge(b, a) see no conflicts and must yield the same map.\n+      {pool_a, pool_b} = Enum.split(@key_pool, div(length(@key_pool), 2))\n+\n+      check all a <- map_of(member_of(pool_a), scalar_gen(), max_length: 3),\n+                b <- map_of(member_of(pool_b), scalar_gen(), max_length: 3) do\n+        assert Loader.merge(a, b) == Loader.merge(b, a)\n+      end\n+    end\n+\n+    @tag :property\n+    property \"right-biased for conflicting scalar keys\" do\n+      check all keys <- list_of(key_gen(), min_length: 1, max_length: 4),\n+                keys = Enum.uniq(keys),\n+                vals_a <- list_of(scalar_gen(), length: length(keys)),\n+                vals_b <- list_of(scalar_gen(), length: length(keys)) do\n+        a = Map.new(Enum.zip(keys, vals_a))\n+        b = Map.new(Enum.zip(keys, vals_b))\n+        merged = Loader.merge(a, b)\n+\n+        Enum.each(keys, fn k ->\n+          assert Map.fetch!(merged, k) == Map.fetch!(b, k)\n+        end)\n+      end\n+    end\n+  end\n end\n",
+    "files_changed": [
+      "test/tau/settings/loader_test.exs"
+    ],
+    "diff_source": "workspace",
+    "stdout_excerpt": "All 6 tests pass (4 existing + 2 new properties). The final test file adds:\n\n- **`commutative for non-conflicting keys`** \u2014 splits the 8-key pool into two disjoint halves, generates maps from each half, asserts `merge(a, b) == merge(b, a)`.\n- **`right-biased for conflicting scalar keys`** \u2014 generates two maps with identical key sets, asserts every conflicting key resolves to the value from the right-hand map.",
+    "wall_clock_s": 199.53,
+    "tokens": 6268,
+    "completed_at": "2026-05-14T18:00:15.314767+00:00"
+  },
+  "critic": null,
+  "reviewer": null
+}
