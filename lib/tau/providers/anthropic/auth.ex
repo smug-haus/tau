@@ -45,17 +45,18 @@ defmodule Tau.Providers.Anthropic.Auth do
   @required_scope "user:inference"
 
   @type api_key :: {:api_key, String.t()}
-  @type oauth :: {:oauth, %{
-          access_token: String.t(),
-          expires_at: integer(),
-          scopes: [String.t()],
-          subscription_type: String.t()
-        }}
+  @type oauth ::
+          {:oauth,
+           %{
+             access_token: String.t(),
+             expires_at: integer(),
+             scopes: [String.t()],
+             subscription_type: String.t()
+           }}
 
   @type ok :: {:ok, api_key() | oauth()}
   @type error ::
-          {:error,
-           :no_auth | :oauth_expired | :oauth_missing_scope | :oauth_malformed}
+          {:error, :no_auth | :oauth_expired | :oauth_missing_scope | :oauth_malformed}
 
   @doc """
   Resolve auth from opts, app env, vault, then Claude Code OAuth file.
@@ -113,11 +114,13 @@ defmodule Tau.Providers.Anthropic.Auth do
   defp fetch_oauth_block(%{"claudeAiOauth" => block}) when is_map(block), do: {:ok, block}
   defp fetch_oauth_block(_), do: {:error, :oauth_malformed}
 
-  defp parse_oauth_block(%{
-         "accessToken" => access_token,
-         "expiresAt" => expires_at,
-         "scopes" => scopes
-       } = block)
+  defp parse_oauth_block(
+         %{
+           "accessToken" => access_token,
+           "expiresAt" => expires_at,
+           "scopes" => scopes
+         } = block
+       )
        when is_binary(access_token) and is_integer(expires_at) and is_list(scopes) do
     {:ok,
      %{

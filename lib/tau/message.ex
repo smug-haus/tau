@@ -43,7 +43,7 @@ defmodule Tau.Message.Assistant do
   ]
 
   @type stop_reason ::
-          :stop | :length | :tool_use | :error | :aborted | :stop_sequence
+          :stop | :length | :tool_use | :error | :aborted | :stop_sequence | :tool_loop_aborted
 
   @type t :: %__MODULE__{
           content: [map()],

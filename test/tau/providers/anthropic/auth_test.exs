@@ -23,17 +23,18 @@ defmodule Tau.Providers.Anthropic.AuthTest do
 
   defp write_oauth(path, overrides) do
     base = %{
-      "claudeAiOauth" => Map.merge(
-        %{
-          "accessToken" => "sk-ant-oat01-test-token",
-          "refreshToken" => "sk-ant-ort01-test-refresh",
-          "expiresAt" => :os.system_time(:millisecond) + @future_ms_offset,
-          "scopes" => ["user:inference", "user:profile"],
-          "subscriptionType" => "max",
-          "rateLimitTier" => "default"
-        },
-        overrides
-      )
+      "claudeAiOauth" =>
+        Map.merge(
+          %{
+            "accessToken" => "sk-ant-oat01-test-token",
+            "refreshToken" => "sk-ant-ort01-test-refresh",
+            "expiresAt" => :os.system_time(:millisecond) + @future_ms_offset,
+            "scopes" => ["user:inference", "user:profile"],
+            "subscriptionType" => "max",
+            "rateLimitTier" => "default"
+          },
+          overrides
+        )
     }
 
     File.write!(path, Jason.encode!(base))

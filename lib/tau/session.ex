@@ -28,6 +28,7 @@ defmodule Tau.Session do
   alias Tau.Message.{Assembler, Assistant, ToolResult, User}
   alias Tau.Session.Events
   alias Tau.Provider.Event, as: PEvent
+  alias Tau.Settings.Cache, as: SettingsCache
 
   # #17: name of the synthetic FSM-internal tool the model emits to
   # activate a discovered skill. Not registered as a `Tau.Tool` module
@@ -273,7 +274,9 @@ defmodule Tau.Session do
           metadata: map(),
           permissions_mode: atom(),
           tools_whitelist: [String.t()] | :all,
-          child_session_ids: MapSet.t(String.t())
+          child_session_ids: MapSet.t(String.t()),
+          tool_iterations: non_neg_integer(),
+          max_tool_iterations: pos_integer()
         }
 
   @doc """
@@ -302,7 +305,9 @@ defmodule Tau.Session do
          metadata: data.metadata,
          permissions_mode: Map.get(data.metadata, :permissions_mode, :default),
          tools_whitelist: data.tools_whitelist,
-         child_session_ids: data.child_session_ids
+         child_session_ids: data.child_session_ids,
+         tool_iterations: Map.get(data, :tool_iterations, 0),
+         max_tool_iterations: Map.get(data, :max_tool_iterations, 20)
        }}
     end
   end
@@ -497,7 +502,18 @@ defmodule Tau.Session do
           # above. Supervisor is `:one_for_one`; a parent crash does *not*
           # propagate to children — that's the whole point of explicit
           # cascade on the user-driven shutdown paths.
-          child_session_ids: MapSet.new()
+          child_session_ids: MapSet.new(),
+          # D-005 / AC-6 (SPEC-USER-TURN [C24]): tool-call iteration cap.
+          # Counts tool-dispatch rounds within a single user turn; reset to
+          # 0 when the FSM returns to :awaiting_user (clean end_turn OR
+          # tool_loop_aborted). Capped at max_tool_iterations; overflow
+          # emits [:tau, :session, :tool_iteration_cap] telemetry and aborts
+          # the turn with stop_reason: :tool_loop_aborted.
+          tool_iterations: 0,
+          max_tool_iterations:
+            opts[:max_tool_iterations] ||
+              get_in(SettingsCache.get(), [:session, :max_tool_iterations]) ||
+              20
         }
 
         {:ok, :awaiting_user, data}
@@ -884,7 +900,10 @@ defmodule Tau.Session do
          command_task: nil,
          # ADR-0013 (#16): cancel ends the current turn — drop any
          # active skill alongside it.
-         active_skill: nil
+         active_skill: nil,
+         # D-027: reset per-turn tool-iteration counter on every
+         # return to :awaiting_user, including cancellation.
+         tool_iterations: 0
      }}
   end
 
@@ -1088,11 +1107,65 @@ defmodule Tau.Session do
         # ADR-0017: drop the now-stale cancel flag — the stream that
         # owned it has finished. The next turn's :start_provider
         # allocates a fresh one. Same applies to ADR-0012's stream_ref.
+        # D-005: reset the per-turn tool-iteration counter on clean
+        # return to :awaiting_user.
         {:next_state, :awaiting_user,
-         %{data | provider_task: nil, assembler: nil, cancel_flag: nil, stream_ref: nil}}
+         %{
+           data
+           | provider_task: nil,
+             assembler: nil,
+             cancel_flag: nil,
+             stream_ref: nil,
+             tool_iterations: 0
+         }}
 
       true ->
-        dispatch_tools(tool_calls, data)
+        # D-005 / AC-6 (SPEC-USER-TURN [C24]): enforce the per-turn
+        # tool-call iteration cap before dispatching the next round.
+        # Check against the already-dispatched count so that cap=N allows
+        # exactly N dispatches (tool_iterations counts rounds dispatched).
+        cap = data.max_tool_iterations
+
+        if data.tool_iterations >= cap do
+          aborted_iter = data.tool_iterations
+
+          :telemetry.execute(
+            [:tau, :session, :tool_iteration_cap],
+            %{iterations: aborted_iter, cap: cap},
+            %{session_id: data.id}
+          )
+
+          abort_msg =
+            Assistant.new(
+              stop_reason: :tool_loop_aborted,
+              content: [
+                %{
+                  type: :text,
+                  text:
+                    "Tool-call iteration cap (#{cap}) exceeded. Turn aborted to prevent runaway loops."
+                }
+              ]
+            )
+
+          data =
+            data
+            |> append_message(abort_msg)
+            |> persist_event("assistant_message", message_to_data(abort_msg))
+
+          broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: abort_msg})
+
+          {:next_state, :awaiting_user,
+           %{
+             data
+             | provider_task: nil,
+               assembler: nil,
+               cancel_flag: nil,
+               stream_ref: nil,
+               tool_iterations: 0
+           }}
+        else
+          dispatch_tools(tool_calls, %{data | tool_iterations: data.tool_iterations + 1})
+        end
     end
   end
 
