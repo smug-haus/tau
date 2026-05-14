@@ -563,9 +563,13 @@ defmodule Tau.Session do
   def handle_event(:cast, {:user_message, msg}, :awaiting_user, %{command_task: nil} = data) do
     emit_user_message_telemetry(:delivered, data, :awaiting_user)
 
-    case classify_slash_command(msg) do
+    case classify_slash_command(msg, data.skills) do
       {:async, mod, args, msg} ->
         spawn_command_task(mod, args, msg, data)
+
+      {:skill_activation, skill, rewritten_msg} ->
+        data = activate_skill_via_slash(data, skill)
+        process_user_message(rewritten_msg, data)
 
       {:sync, msg} ->
         process_user_message(msg, data)
@@ -1785,6 +1789,37 @@ defmodule Tau.Session do
 
   defp skill_name_from_args(_), do: nil
 
+  # Issue #95: user-initiated slash-command skill activation.
+  #
+  # Called when `classify_slash_command/2` matches the slash-command name
+  # against `data.skills`. Sets `data.active_skill`, persists a JSONL
+  # `skill_activated` event, broadcasts `%Events.SkillActivated{}`, and
+  # emits telemetry — reusing the same side-effects as model-initiated
+  # activation, but without a tool_call_id (nil).
+  defp activate_skill_via_slash(data, %Tau.Skill{name: name} = skill) do
+    data =
+      %{data | active_skill: skill}
+      |> persist_event("skill_activated", %{
+        skill_name: name,
+        tool_call_id: nil,
+        allowed_tools: skill.allowed_tools
+      })
+
+    broadcast(data.id, %Events.SkillActivated{
+      session_id: data.id,
+      skill_name: name,
+      tool_call_id: nil
+    })
+
+    :telemetry.execute(
+      [:tau, :session, :skill_activated],
+      %{},
+      %{session_id: data.id, skill_name: name, disabled?: false}
+    )
+
+    data
+  end
+
   # Look up `name` on `data.skills`; honour `disable_model_invocation`.
   # On success, set `data.active_skill`, persist a JSONL event, and
   # broadcast `%Events.SkillActivated{}`. On failure, return an
@@ -2066,9 +2101,10 @@ defmodule Tau.Session do
   # `{:sync, msg}` (caller proceeds directly with the rewritten
   # message).
 
-  defp classify_slash_command(%Tau.Message.User{content: c} = msg) when is_binary(c) do
+  defp classify_slash_command(%Tau.Message.User{content: c} = msg, skills)
+       when is_binary(c) do
     case Tau.Commands.Parser.parse(c) do
-      {:command, name, args} ->
+      {:command, "/" <> bare_name = name, args} ->
         case Tau.Commands.Parser.lookup(name) do
           {:ok, mod} when is_atom(mod) ->
             if function_exported?(mod, :execute, 2) do
@@ -2081,10 +2117,18 @@ defmodule Tau.Session do
             {:sync, invoke_file_command(path, args, msg)}
 
           :error ->
-            # Unknown slash command; pass through verbatim — the model
-            # can handle it as a stylistic preface or report that it's
-            # unknown.
-            {:sync, msg}
+            # Not a built-in command — check the session's loaded skills.
+            case Tau.Commands.Parser.lookup_skill(bare_name, skills) do
+              {:ok, skill} ->
+                rewritten = %Tau.Message.User{msg | content: args}
+                {:skill_activation, skill, rewritten}
+
+              :error ->
+                # Unknown slash command; pass through verbatim — the model
+                # can handle it as a stylistic preface or report that it's
+                # unknown.
+                {:sync, msg}
+            end
         end
 
       _ ->
@@ -2092,7 +2136,7 @@ defmodule Tau.Session do
     end
   end
 
-  defp classify_slash_command(msg), do: {:sync, msg}
+  defp classify_slash_command(msg, _skills), do: {:sync, msg}
 
   defp spawn_command_task(mod, args, msg, data) do
     parent = self()

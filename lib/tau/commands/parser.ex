@@ -32,4 +32,23 @@ defmodule Tau.Commands.Parser do
       _ -> :error
     end
   end
+
+  @doc """
+  Look up a slash-stripped command name against a skills list.
+
+  `name` is the raw slash-command token with the leading slash removed
+  (e.g. `"deploy"` from `"/deploy"`). `skills` is the session's
+  `data.skills` keyword list of `{name, %Tau.Skill{}}` pairs.
+
+  Returns `{:ok, %Tau.Skill{}}` when a matching skill is found,
+  `:error` otherwise.
+  """
+  @spec lookup_skill(String.t(), [{String.t(), Tau.Skill.t()}]) ::
+          {:ok, Tau.Skill.t()} | :error
+  def lookup_skill(name, skills) when is_binary(name) and is_list(skills) do
+    case List.keyfind(skills, name, 0) do
+      {^name, %Tau.Skill{} = skill} -> {:ok, skill}
+      _ -> :error
+    end
+  end
 end
