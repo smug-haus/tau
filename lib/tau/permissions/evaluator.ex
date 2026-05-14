@@ -90,7 +90,15 @@ defmodule Tau.Permissions.Evaluator do
 
   defp default_for_mode(:default, _, _), do: :ask
   defp default_for_mode(:dont_ask, _, _), do: :deny
-  defp default_for_mode(:plan, tool, _) when tool in ["Read", "Grep", "Glob"], do: :allow
+  # "Agent" is dispatch infrastructure, not a content tool. Denying it under
+  # :plan kills sub-agent delegation entirely, which is too blunt — :plan
+  # mode's read-only intent targets content tools (Bash, Write, Edit), not
+  # synthetic dispatch primitives. The child session inherits :plan as its
+  # ceiling via Tau.Permissions.Mode.clamp/2, so the read-only constraint is
+  # still enforced inside the child. (Issue #166, Option 1.)
+  defp default_for_mode(:plan, tool, _) when tool in ["Read", "Grep", "Glob", "Agent"],
+    do: :allow
+
   defp default_for_mode(:plan, _, _), do: :deny
 
   defp default_for_mode(:accept_edits, tool, _) when tool in ["Read", "Write", "Edit", "Grep"],
