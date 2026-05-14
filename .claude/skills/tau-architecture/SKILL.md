@@ -73,6 +73,33 @@ the parent worktree to discard any leaked edits.
 **Single-agent foreground work** (no parallel siblings) does not need
 isolation — the parent and child can't race a single working tree.
 
+## §Subagent Routing — project-local persona limitation
+
+The harness ships three persona definitions at `.claude/agents/{critic,reviewer,implementer}.md`.
+These files document persona invariants and are the source of truth for each role's
+allowed tools, model, and behaviour contract. They are load-bearing documentation.
+
+**Known limitation (issue #125):** Claude Code's Task tool dispatcher auto-registers
+agents only from `~/.claude/agents/` (user-level) and from installed plugin `agents/`
+directories. It does NOT auto-register agents from `<project>/.claude/agents/`. This
+means `Task({subagent_type: "critic", ...})` returns "Agent type 'critic' not found"
+when invoked from within this project's harness commands.
+
+**Workaround (Path C):** Invoke personas via the Task tool **without** `subagent_type`.
+Instead, inline the persona's system prompt (from the `.claude/agents/<name>.md` body)
+directly in the Task tool's `prompt` argument. The persona files serve as the canonical
+source to copy from. This is how `/pr` and `/test-persona` work.
+
+**Future path (issue #125 follow-up):** If a proper fix is needed, two options exist:
+- Path A: Find and configure a `settings.json` key that adds project-local agent lookup
+  paths. Investigated 2026-05-14: Claude Code docs, plugin manifests under
+  `~/.claude/plugins/`, and the vendored hyperagents plugin were checked; no
+  `subagent_lookup_paths` or equivalent key exists in any settings schema at that
+  date. Re-investigate if a new Claude Code release lands.
+- Path B: Wire Tau's own `Tau.Tools.Builtin.Agent` to resolve personas from
+  `.claude/agents/*.md` and route to the right model+permissions, dogfooding Tau as
+  the harness's own agent dispatcher.
+
 ## §4 Architectural decisions
 
 The non-negotiables (`.claude/rules/otp-non-negotiables.md`) tell you

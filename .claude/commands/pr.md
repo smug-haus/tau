@@ -2,7 +2,7 @@
 description: >
   Run the blocking critic+reviewer gate, then open a PR. Aborts if either
   gate fails. Both verdicts are recorded in the solution tree.
-allowed-tools: Read, Bash(git diff *), Bash(git log *), Bash(git status), Bash(git branch *), Bash(gh pr view *), Bash(gh pr create *), Bash(gh issue view *), Bash(jq *), Bash(cat *), Bash(mkdir *), Bash(echo *), Bash(date *), Edit, Write
+allowed-tools: Read, Bash(git diff *), Bash(git log *), Bash(git status), Bash(git branch *), Bash(gh pr view *), Bash(gh pr create *), Bash(gh issue view *), Bash(jq *), Bash(cat *), Bash(mkdir *), Bash(echo *), Bash(date *), Edit, Write, Task
 ---
 
 Run the blocking PR gate. Both `critic` and `reviewer` MUST return
@@ -33,19 +33,28 @@ change to be issue-driven.
 
 ## Step 3 — Spawn `critic` (design veto)
 
-Use the Task tool with `subagent_type: "critic"`. Brief:
+NOTE: `.claude/agents/critic.md` cannot be auto-registered by Claude Code from
+a project-local path. Invoke via the Task tool **without** `subagent_type`.
 
-> Review the diff against `main` for coordination-correctness violations.
-> Read `.claude/rules/otp-non-negotiables.md`. Apply the PSDH triage
-> checklist via the `design-reasoning` skill. The last line of your
-> response must be exactly `{"ok": true}` or
-> `{"ok": false, "reason": "..."}`.
->
+**Compose the Task prompt as follows — strictly in order:**
+
+1. Read `.claude/agents/critic.md`.
+2. Skip the first two standalone `---` lines (YAML frontmatter delimiters) and
+   take all remaining text (the full body beginning with "You are a senior systems
+   architect…"). Paste it **verbatim** as the opening of the Task prompt. Do NOT
+   paraphrase or summarise.
+3. Append this context block after the verbatim body:
+
 > Diff: <full output of `git diff main...HEAD`>
 > Linked issue: #N — <title from `gh issue view`>
 > Files changed: <list>
 
-Parse the JSON verdict from the agent's last line.
+The critic's `## When invoked by /pr` section already contains the review
+instructions and structured-findings schema. Do not duplicate or override them.
+
+Parse `ok` from the JSON object on the agent's **last line** (`{"ok": true}` or
+`{"ok": false, "reason": "..."}`). The critic does not emit a `verdict` field —
+use `ok` only.
 
 ## Step 4 — On `critic` veto
 
@@ -67,20 +76,29 @@ If `critic` returned `{"ok": false, ...}`:
 
 ## Step 5 — Spawn `reviewer` (quality veto)
 
-Use the Task tool with `subagent_type: "reviewer"`. Brief:
+NOTE: `.claude/agents/reviewer.md` cannot be auto-registered by Claude Code from
+a project-local path. Invoke via the Task tool **without** `subagent_type`.
 
-> Run `mix test`, `mix format --check-formatted`, `mix credo --strict`
-> against the working tree. Inspect the diff for silent failures,
-> hardcoded values, missing `@spec`, missing telemetry on user-visible
-> operations, missing property tests on invariant-bearing modules. The
-> last line of your response must be exactly `{"ok": true}` or
-> `{"ok": false, "reason": "..."}`.
->
+**Compose the Task prompt as follows — strictly in order:**
+
+1. Read `.claude/agents/reviewer.md`.
+2. Skip the first two standalone `---` lines (YAML frontmatter delimiters) and
+   take all remaining text (the full body beginning with "You are a post-completion
+   evaluator…"). Paste it **verbatim** as the opening of the Task prompt. Do NOT
+   paraphrase or summarise.
+3. Append this context block after the verbatim body:
+
 > Diff: <full output of `git diff main...HEAD`>
 > Linked issue: #N — <title>
 > Original spec excerpt: <issue body>
 
-Parse the JSON verdict.
+The reviewer's `## When invoked by /pr` section already contains the evaluation
+steps and structured-verdict schema. Do not duplicate or override them.
+
+Parse `ok` from the JSON object on the agent's **last line** (`{"ok": true}` or
+`{"ok": false, "reason": "..."}`). The reviewer also emits a fenced `json` block
+immediately before the final line containing a `"verdict": "PASS|FAIL|PARTIAL"`
+field — extract that for the solution tree and PR body.
 
 ## Step 6 — On `reviewer` veto
 
@@ -99,8 +117,8 @@ two verdicts. Compose the PR body:
 Closes #N
 
 ## Gate verdicts
-- critic: PASS — <one-line summary if any>
-- reviewer: PASS — <one-line summary if any>
+- critic: PASS (`ok: true`) — <one-line summary from critic's structured findings, if any>
+- reviewer: PASS (`verdict: PASS`) — <one-line summary from reviewer's structured verdict, if any>
 
 ## Test plan
 <derived from the implementer's reported smoke test, if any>

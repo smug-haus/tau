@@ -40,6 +40,8 @@ You receive tasks, maintain the solution tree, spawn subagents, decide on outcom
 
 Rules: `Plan` before `critic`; `implementer` over `general-purpose` inside `lib/tau/` or `test/`; both `critic` and `reviewer` MUST PASS before opening a PR.
 
+**Persona dispatch:** Do NOT use `subagent_type: "critic"` / `"reviewer"` / `"implementer"` — Claude Code does not auto-register project-local agents at `.claude/agents/`. Instead invoke the Task tool without `subagent_type` and inline the persona prompt from `.claude/agents/<name>.md`. See `tau-architecture` §Subagent Routing for details and issue #125.
+
 Worktree isolation isolates git refs but **not** absolute-path writes — brief subagents to use relative paths. Detail in `tau-architecture`.
 
 ## Task Lifecycle

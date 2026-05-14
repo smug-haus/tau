@@ -13,9 +13,16 @@ Run three validation exercises to confirm subagent personas behave correctly. Ea
 
 ## Exercise 1: Critic Validation
 
-Spawn the `critic` subagent with the following prompt. The inline code contains three planted flaws.
+Spawn a Task agent (do NOT use `subagent_type: "critic"` — project-local agents at
+`.claude/agents/critic.md` are not auto-registered by Claude Code; see
+`.claude/skills/tau-architecture/SKILL.md` §Subagent Routing for details).
 
-**Prompt to critic:**
+**Compose the Task prompt:**
+1. Read `.claude/agents/critic.md`.
+2. Skip the first two standalone `---` lines and paste the remaining body verbatim.
+3. Append the task below.
+
+**Prompt to critic (inline persona + task):**
 
 > Review this Python rate limiter design. Identify all design flaws, architectural risks, and testing gaps.
 >
@@ -60,9 +67,16 @@ Spawn the `critic` subagent with the following prompt. The inline code contains 
 
 ## Exercise 2: Reviewer Validation
 
-First, spawn the `implementer` subagent to create the following function. The implementation has two planted bugs.
+First, spawn a Task agent with the implementer persona (do NOT use
+`subagent_type: "implementer"` for the same reason as Exercise 1):
+1. Read `.claude/agents/implementer.md`. Skip the first two standalone `---` lines and paste the remaining body verbatim.
+2. Append the task below.
 
-**Implementer prompt:**
+Then spawn a second Task agent with the reviewer persona:
+1. Read `.claude/agents/reviewer.md`. Skip the first two standalone `---` lines and paste the remaining body verbatim.
+2. Append the reviewer task (implementer's output).
+
+**Implementer prompt (inline persona + task):**
 
 > Write a Python function `fibonacci(n)` that returns the nth Fibonacci number (0-indexed: fibonacci(0)=0, fibonacci(1)=1). Include a test suite. Use a hardcoded `max_n = 100` guard.
 
@@ -88,7 +102,7 @@ def test_fibonacci():
     assert fibonacci(10) == 55
 ```
 
-Then spawn the `reviewer` subagent with the implementer's output.
+Use the Task agent constructed above (verbatim reviewer persona + the implementer's output as context).
 
 **Expected reviewer output — all must be present:**
 - Run the tests — they will fail (off-by-one produces wrong values for n >= 2 in some implementations)
