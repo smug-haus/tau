@@ -55,6 +55,13 @@ defmodule Tau.CLI.TuiSmokeTest do
       assert pane =~ ~r/session:/, "status bar missing session id; pane:\n#{pane}"
       assert pane =~ "transcript", "transcript panel header missing; pane:\n#{pane}"
       assert pane =~ "<Enter> submit", "prompt help missing; pane:\n#{pane}"
+
+      # D-026 ([C51-B3]): the prompt MUST render a visible cursor glyph
+      # so the user can see the insertion point. "█" (U+2588) is appended
+      # after model.input by the render/1 path.
+      Process.sleep(150)
+      {:ok, pane2} = TuiPtyHelper.capture(sess)
+      assert pane2 =~ "█", "cursor glyph missing from prompt; pane:\n#{pane2}"
     end
   end
 

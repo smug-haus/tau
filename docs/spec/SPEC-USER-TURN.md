@@ -86,6 +86,7 @@ Each question lists raw constraints. Format: `[Cn-Bm]` = constraint number + bou
 - **★ [C47-B8]** Header dispatch: API-key requests use `x-api-key: <key>`; OAuth requests use `Authorization: Bearer <accessToken>` AND require `anthropic-beta: oauth-2025-04-20` for the Messages API to accept the token. The current single-shape `headers/1` cannot serve OAuth even if the token is provided. Confirmed empirically: `~/.claude/.credentials.json` accessToken format is `sk-ant-oat01-...` (vs API key `sk-ant-api03-...`).
 - **★ [C48-B8]** OAuth `accessToken` has `expiresAt` (ms epoch). When expired, Anthropic returns 401. Without a refresh path, the user sees a generic auth error and has to know to run `claude /login` to renew. Refresh requires writing back to `.credentials.json`, which races with Claude Code itself if it's running — single-writer constraint.
 - **[C49-B8]** OAuth `scopes` must include `user:inference` for the Messages API. Tau should validate this at config-load time and surface a clear error if missing.
+- **★ [C51-B3]** The TUI prompt MUST render a visible cursor glyph at the end of `model.input`. Without it, an empty input field is indistinguishable from a frozen or blank render — the user cannot tell whether the TUI is waiting for input or has hung. Silent-failure category: the render path produces output, but the output is ambiguous to the human observer. Detection: tmux `capture-pane` must contain the cursor glyph character after a render-settle delay.
 
 ### Q4: What information crosses a boundary, and what is lost?
 
@@ -131,7 +132,7 @@ Each question lists raw constraints. Format: `[Cn-Bm]` = constraint number + bou
 
 ### L0 yield
 
-**43 raw constraints**, of which **24 are non-obvious (★)**. Threshold (5–12) exceeded — appropriate for a 5/5 triage component.
+**44 raw constraints**, of which **24 are non-obvious (★)**. Threshold (5–12) exceeded — appropriate for a 5/5 triage component.
 
 ## 4. Boundary contracts (from L0)
 
@@ -183,6 +184,14 @@ POST
 INV
   - Quit happens only on `{:key, 3}` (Ctrl-C) at any time, OR `{:ch, ?q}` AT THE
     EMPTY PROMPT only. Typing `q` as input character must NOT quit. (Closes [C7].)
+PROMPT INV
+  - The prompt bar MUST append a solid block cursor glyph ("█", U+2588) after
+    `model.input` on every render. No animation or timer required in v1; a static
+    glyph is sufficient. The glyph must survive terminal width truncation — if the
+    input line is close to the terminal width, prefer the glyph over trailing input
+    characters (current implementation: Ratatouille `label` clips at the right edge,
+    so the glyph is always present when input is short enough to display). (Closes
+    [C51-B3]; see D-026.)
 ```
 
 ### B4 — `Tau.TUI.App` ↔ `Tau.Session` (session lifecycle)
@@ -360,9 +369,10 @@ Each entry: id, statement, severity, detection_method, source_constraint.
 | D-017 | `Tau.Providers.Anthropic` MUST support both API-key auth (`x-api-key` header) AND Claude Code OAuth auth (`Authorization: Bearer <token>` + `anthropic-beta: oauth-2025-04-20` header). OAuth credentials sourced from `~/.claude/.credentials.json` (top-level key `claudeAiOauth.accessToken`). Auth precedence (first non-nil wins): explicit `:api_key` opt → `Application.get_env` API key → `ANTHROPIC_API_KEY` env (vault) → Claude Code OAuth file. | high | unit test: stub each source; assert correct header shape; integration test with a Bypass server checking both code paths | [C46], [C47] |
 | D-018 | Expired OAuth token (`expiresAt < now`) MUST surface a clear, actionable error to the user — "Your Claude Code OAuth token expired; run `claude /login` to renew" — NOT a generic 401 or silent failure. Tau v1 does NOT refresh tokens itself (avoids the race with Claude Code's own refresh). | medium | unit test: stub credentials with past `expiresAt`; assert error message contains "expired" and the renewal command | [C48] |
 | D-019 | `tau doctor` MUST report which auth path is configured (api_key vs oauth vs none) and, for OAuth, the `subscriptionType` and time-to-expiry. | low | unit test on doctor output | [C46] (debuggability) |
+| D-026 | The TUI prompt bar MUST render a solid block cursor glyph ("█", U+2588) appended after `model.input` on every render frame. The glyph indicates the active insertion point and distinguishes an idle, waiting-for-input state from a frozen or blank render. No animation required in v1. | medium | tmux smoke test (`test/tau/cli/tui_smoke_test.exs` AC-H1): `tmux capture-pane` output after a 150 ms render-settle MUST contain "█"; absence indicates the render path is broken or the glyph is being stripped | [C51-B3] |
 | D-027 | Session FSM MUST cap tool-call iterations per turn at `max_tool_iterations` (default 20, readable from `opts[:max_tool_iterations]` or `Settings.Cache.get()[:session][:max_tool_iterations]`). When the cap is exceeded, the FSM MUST emit `[:tau, :session, :tool_iteration_cap]` telemetry with measurements `%{iterations: N, cap: K}` — where `N` is the count of completed dispatches in the aborted turn (equals `K` at the abort boundary; resets to 0 at the start of the next turn) — and metadata `%{session_id: id}`, then abort the turn with `stop_reason: :tool_loop_aborted`. The per-turn counter resets to 0 on every return to `:awaiting_user`. | high | property test `test/tau/session/tool_iteration_cap_property_test.exs`: drives a session backed by bespoke `AlwaysToolCallProvider` (a `Tau.Provider` behaviour implementation that always emits a `tool_call` event stream, independent of Replay); asserts turn terminates within `max_tool_iterations` with `stop_reason: :tool_loop_aborted` and that the telemetry event fires with `iterations == cap` | [C24], [C50] |
 
-20 D-xxx entries. Each is enforceable. None require speculation.
+21 D-xxx entries. Each is enforceable. None require speculation.
 
 ## 7. Acceptance criteria — "working TUI"
 

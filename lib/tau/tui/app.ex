@@ -249,9 +249,16 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       end
     end
 
+    # D-026 ([C51-B3]): a solid block cursor (U+2588 "█") MUST be appended
+    # after the current input so the user can see the insertion point.
+    # Unicode block renders in all common terminal emulators; it is
+    # visually distinct from typed characters and requires no timer or
+    # animation (v1 constraint: no blinking).
+    @cursor_glyph "█"
+
     defp prompt(model) do
       bar do
-        label(content: "> " <> model.input)
+        label(content: "> " <> model.input <> @cursor_glyph)
       end
     end
 
