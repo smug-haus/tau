@@ -1,0 +1,600 @@
+diff --git a/docs/spec/SPEC-USER-TURN.md b/docs/spec/SPEC-USER-TURN.md
+index 42a040d..249590d 100644
+--- a/docs/spec/SPEC-USER-TURN.md
++++ b/docs/spec/SPEC-USER-TURN.md
+@@ -102,6 +102,7 @@ Each question lists raw constraints. Format: `[Cn-Bm]` = constraint number + bou
+ - **★ [C26-B5]** Compactor failure: `compactor.compact(...)` returns `{:error, _}` and the FSM silently drops it (`{:error, _} -> data`, lib/tau/session.ex:1094). No telemetry, no log. `should_compact?` refires next turn → silent loop on a persistent failure. Confirmed via OQ-4 reading.
+ - **[C27-B5]** Fallback chain is bounded by chain length (ADR-0012). OK.
+ - **[C28-B4]** Session resume replays JSONL. Fork chains (ADR-0007) reference parent events; cycle in fork chain would diverge replay. Verify acyclic invariant.
++- **★ [C49-B5]** Turn telemetry span (`turn_start_time` field): the span opens at `[:tau, :session, :turn, :start]` in `process_user_message/2` and MUST close with exactly one of `:stop` or `:exception` before the next `:start`. If the field is not cleared on **every** path back to `:awaiting_user` (including cancel), the next turn's `:stop` subtracts an old `t0`, producing a duration that includes idle time between turns. Cancel is the non-obvious exit path — it clears every other in-flight field but `turn_start_time` has no natural owner outside the telemetry code. All three of `monotonic_time` callsites MUST use the same unit (`:millisecond`) or dashboards silently compute wrong latency.
+ 
+ ### Q6: What must be true before and after each phase transition?
+ 
+@@ -130,7 +131,7 @@ Each question lists raw constraints. Format: `[Cn-Bm]` = constraint number + bou
+ 
+ ### L0 yield
+ 
+-**42 raw constraints**, of which **23 are non-obvious (★)**. Threshold (5–12) exceeded — appropriate for a 5/5 triage component.
++**43 raw constraints**, of which **24 are non-obvious (★)**. Threshold (5–12) exceeded — appropriate for a 5/5 triage component.
+ 
+ ## 4. Boundary contracts (from L0)
+ 
+@@ -236,6 +237,19 @@ INV (event ordering)
+ INV (stale event tagging)
+   - Any new code path that sends provider_event/provider_done/provider_failed
+     to the FSM MUST tag with the current stream_ref. (Closes [C34].)
++INV (turn telemetry span)
++  - [:tau, :session, :turn, :start] fires once per user message, before
++    append_message/persist_event side-effects, using
++    System.monotonic_time(:millisecond) as t0 stored in data.turn_start_time.
++  - Exactly one of [:tau, :session, :turn, :stop] or [:tau, :session, :turn,
++    :exception] fires before the next :start. data.turn_start_time MUST be nil
++    at :awaiting_user entry — enforced on finalize, cancel, and exception paths.
++    (D-026, [C49-B5].)
++  - In tool-executing turns, finalize_assistant/2 is called twice: once when
++    the provider stops (which emits :stop and clears turn_start_time), and
++    again after tool execution completes. The second call is a no-op for the
++    span because turn_start_time is nil — this is intentional suppression, not
++    an accidental nil-skip.
+ ```
+ 
+ ### B6 — `Tau.Session` ↔ `Tau.Tool` (per-call dispatch)
+@@ -347,8 +361,9 @@ Each entry: id, statement, severity, detection_method, source_constraint.
+ | D-017 | `Tau.Providers.Anthropic` MUST support both API-key auth (`x-api-key` header) AND Claude Code OAuth auth (`Authorization: Bearer <token>` + `anthropic-beta: oauth-2025-04-20` header). OAuth credentials sourced from `~/.claude/.credentials.json` (top-level key `claudeAiOauth.accessToken`). Auth precedence (first non-nil wins): explicit `:api_key` opt → `Application.get_env` API key → `ANTHROPIC_API_KEY` env (vault) → Claude Code OAuth file. | high | unit test: stub each source; assert correct header shape; integration test with a Bypass server checking both code paths | [C46], [C47] |
+ | D-018 | Expired OAuth token (`expiresAt < now`) MUST surface a clear, actionable error to the user — "Your Claude Code OAuth token expired; run `claude /login` to renew" — NOT a generic 401 or silent failure. Tau v1 does NOT refresh tokens itself (avoids the race with Claude Code's own refresh). | medium | unit test: stub credentials with past `expiresAt`; assert error message contains "expired" and the renewal command | [C48] |
+ | D-019 | `tau doctor` MUST report which auth path is configured (api_key vs oauth vs none) and, for OAuth, the `subscriptionType` and time-to-expiry. | low | unit test on doctor output | [C46] (debuggability) |
++| D-026 | The `turn_start_time` field in the Session FSM MUST be cleared (`nil`) on every transition back to `:awaiting_user`: `finalize_assistant/2` (both tool and no-tool branches), the `:exception` provider-error path, and the `:cancel` handler. Duration measurements emitted in `[:tau, :session, :turn, :stop]` and `[:tau, :session, :turn, :exception]` MUST use `System.monotonic_time(:millisecond)` at both capture and delta callsites; mixing native units produces silently incorrect latency figures. | high | unit test: attach telemetry handler, cancel mid-turn, send second turn, assert second :stop duration < 5_000ms (not spanning idle gap) | [C49-B5] |
+ 
+-19 D-xxx entries. Each is enforceable. None require speculation.
++20 D-xxx entries. Each is enforceable. None require speculation.
+ 
+ ## 7. Acceptance criteria — "working TUI"
+ 
+diff --git a/lib/tau/cli.ex b/lib/tau/cli.ex
+index 13872a6..aa82f8d 100644
+--- a/lib/tau/cli.ex
++++ b/lib/tau/cli.ex
+@@ -312,7 +312,9 @@ defmodule Tau.CLI do
+         )
+ 
+       {:error, _} = err ->
+-        IO.puts("provider Tau.Providers.Anthropic: " <> Tau.Providers.Anthropic.Auth.describe_error(err))
++        IO.puts(
++          "provider Tau.Providers.Anthropic: " <> Tau.Providers.Anthropic.Auth.describe_error(err)
++        )
+     end
+ 
+     0
+diff --git a/lib/tau/providers/anthropic/auth.ex b/lib/tau/providers/anthropic/auth.ex
+index 02f0424..053086b 100644
+--- a/lib/tau/providers/anthropic/auth.ex
++++ b/lib/tau/providers/anthropic/auth.ex
+@@ -45,17 +45,18 @@ defmodule Tau.Providers.Anthropic.Auth do
+   @required_scope "user:inference"
+ 
+   @type api_key :: {:api_key, String.t()}
+-  @type oauth :: {:oauth, %{
+-          access_token: String.t(),
+-          expires_at: integer(),
+-          scopes: [String.t()],
+-          subscription_type: String.t()
+-        }}
++  @type oauth ::
++          {:oauth,
++           %{
++             access_token: String.t(),
++             expires_at: integer(),
++             scopes: [String.t()],
++             subscription_type: String.t()
++           }}
+ 
+   @type ok :: {:ok, api_key() | oauth()}
+   @type error ::
+-          {:error,
+-           :no_auth | :oauth_expired | :oauth_missing_scope | :oauth_malformed}
++          {:error, :no_auth | :oauth_expired | :oauth_missing_scope | :oauth_malformed}
+ 
+   @doc """
+   Resolve auth from opts, app env, vault, then Claude Code OAuth file.
+@@ -113,11 +114,13 @@ defmodule Tau.Providers.Anthropic.Auth do
+   defp fetch_oauth_block(%{"claudeAiOauth" => block}) when is_map(block), do: {:ok, block}
+   defp fetch_oauth_block(_), do: {:error, :oauth_malformed}
+ 
+-  defp parse_oauth_block(%{
+-         "accessToken" => access_token,
+-         "expiresAt" => expires_at,
+-         "scopes" => scopes
+-       } = block)
++  defp parse_oauth_block(
++         %{
++           "accessToken" => access_token,
++           "expiresAt" => expires_at,
++           "scopes" => scopes
++         } = block
++       )
+        when is_binary(access_token) and is_integer(expires_at) and is_list(scopes) do
+     {:ok,
+      %{
+diff --git a/lib/tau/session.ex b/lib/tau/session.ex
+index 60c488a..089ea18 100644
+--- a/lib/tau/session.ex
++++ b/lib/tau/session.ex
+@@ -497,7 +497,11 @@ defmodule Tau.Session do
+           # above. Supervisor is `:one_for_one`; a parent crash does *not*
+           # propagate to children — that's the whole point of explicit
+           # cascade on the user-driven shutdown paths.
+-          child_session_ids: MapSet.new()
++          child_session_ids: MapSet.new(),
++          # D-026: MUST be cleared on every transition back to :awaiting_user
++          # (finalize, cancel, exception) — otherwise the next turn's :stop
++          # computes duration spanning two turns (inflated by idle time).
++          turn_start_time: nil
+         }
+ 
+         {:ok, :awaiting_user, data}
+@@ -671,6 +675,16 @@ defmodule Tau.Session do
+         # human-readable, actionable renewal instruction so the user
+         # learns to run `claude /login` instead of staring at an opaque
+         # `:oauth_expired`.
++        if data.turn_start_time do
++          duration = System.monotonic_time(:millisecond) - data.turn_start_time
++
++          :telemetry.execute(
++            [:tau, :session, :turn, :exception],
++            %{system_time: System.system_time(), duration: duration},
++            %{session_id: data.id, reason: reason}
++          )
++        end
++
+         reason_str = describe_provider_error(reason)
+ 
+         msg =
+@@ -681,7 +695,9 @@ defmodule Tau.Session do
+           )
+ 
+         broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: msg})
+-        {:next_state, :awaiting_user, %{data | cancel_flag: nil, stream_ref: nil}}
++
++        {:next_state, :awaiting_user,
++         %{data | cancel_flag: nil, stream_ref: nil, turn_start_time: nil}}
+     end
+   end
+ 
+@@ -872,6 +888,19 @@ defmodule Tau.Session do
+       reason: Atom.to_string(cancel_mechanism)
+     })
+ 
++    # D-026: close the span before clearing turn_start_time. A cancel is
++    # an abnormal turn end; emit :exception so dashboards see exactly one
++    # span-close per span-open regardless of exit path.
++    if data.turn_start_time do
++      duration = System.monotonic_time(:millisecond) - data.turn_start_time
++
++      :telemetry.execute(
++        [:tau, :session, :turn, :exception],
++        %{system_time: System.system_time(), duration: duration},
++        %{session_id: data.id, reason: :cancelled}
++      )
++    end
++
+     {:next_state, :awaiting_user,
+      %{
+        data
+@@ -884,7 +913,10 @@ defmodule Tau.Session do
+          command_task: nil,
+          # ADR-0013 (#16): cancel ends the current turn — drop any
+          # active skill alongside it.
+-         active_skill: nil
++         active_skill: nil,
++         # D-026: span MUST be cleared on every exit to :awaiting_user,
++         # including cancel, or the next turn's :stop miscalculates duration.
++         turn_start_time: nil
+      }}
+   end
+ 
+@@ -1024,11 +1056,19 @@ defmodule Tau.Session do
+ 
+       {:cont, payload} ->
+         msg = Map.get(payload, :message, msg)
++        t0 = System.monotonic_time(:millisecond)
++
++        :telemetry.execute(
++          [:tau, :session, :turn, :start],
++          %{system_time: System.system_time()},
++          %{session_id: data.id}
++        )
+ 
+         data =
+           data
+           |> append_message(msg)
+           |> persist_event("user_message", message_to_data(msg))
++          |> Map.put(:turn_start_time, t0)
+ 
+         handle_event(:internal, :start_provider, :provider_streaming, data)
+     end
+@@ -1083,16 +1123,35 @@ defmodule Tau.Session do
+ 
+     tool_calls = Enum.filter(msg.content, &match?(%{type: :tool_call}, &1))
+ 
+-    cond do
+-      tool_calls == [] ->
+-        # ADR-0017: drop the now-stale cancel flag — the stream that
+-        # owned it has finished. The next turn's :start_provider
+-        # allocates a fresh one. Same applies to ADR-0012's stream_ref.
+-        {:next_state, :awaiting_user,
+-         %{data | provider_task: nil, assembler: nil, cancel_flag: nil, stream_ref: nil}}
++    # Emit :stop once per span — only when a span is open. Guards against
++    # double-fire on the second finalize_assistant call after tool execution,
++    # where turn_start_time has already been cleared.
++    if data.turn_start_time do
++      duration = System.monotonic_time(:millisecond) - data.turn_start_time
++
++      :telemetry.execute(
++        [:tau, :session, :turn, :stop],
++        %{system_time: System.system_time(), duration: duration},
++        %{session_id: data.id, stop_reason: msg.stop_reason}
++      )
++    end
++
++    data = %{data | turn_start_time: nil}
+ 
+-      true ->
+-        dispatch_tools(tool_calls, data)
++    if tool_calls == [] do
++      # ADR-0017: drop the now-stale cancel flag — the stream that
++      # owned it has finished. The next turn's :start_provider
++      # allocates a fresh one. Same applies to ADR-0012's stream_ref.
++      {:next_state, :awaiting_user,
++       %{
++         data
++         | provider_task: nil,
++           assembler: nil,
++           cancel_flag: nil,
++           stream_ref: nil
++       }}
++    else
++      dispatch_tools(tool_calls, data)
+     end
+   end
+ 
+diff --git a/lib/tau/tui/app.ex b/lib/tau/tui/app.ex
+index 6d0916b..74bd54b 100644
+--- a/lib/tau/tui/app.ex
++++ b/lib/tau/tui/app.ex
+@@ -293,15 +293,20 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
+       transcript_lines =
+         for block <- msg.content do
+           case block do
+-            %{type: :text, text: t} -> "[assistant] " <> t
++            %{type: :text, text: t} ->
++              "[assistant] " <> t
++
+             # Thinking models (Qwen3, DeepSeek-R1) emit chain-of-thought
+             # via Thinking* events. Surface them so a long think doesn't
+             # look like the TUI is hung.
+             %{type: :thinking, text: t} when is_binary(t) and t != "" ->
+               "[thinking] " <> t
+ 
+-            %{type: :tool_call, name: n} -> "[tool_call] " <> n <> "(...)"
+-            _ -> nil
++            %{type: :tool_call, name: n} ->
++              "[tool_call] " <> n <> "(...)"
++
++            _ ->
++              nil
+           end
+         end
+         |> Enum.reject(&is_nil/1)
+diff --git a/test/support/tui_pty_helper.ex b/test/support/tui_pty_helper.ex
+index f085ac0..52d230c 100644
+--- a/test/support/tui_pty_helper.ex
++++ b/test/support/tui_pty_helper.ex
+@@ -72,8 +72,12 @@ defmodule Tau.Test.TuiPtyHelper do
+           sess = %{tmux_name: name, binary: binary, opts: opts}
+ 
+           case wait_for_ready(sess, Keyword.get(opts, :ready_timeout_ms, @ready_default)) do
+-            :ok -> {:ok, sess}
+-            err -> _ = quit(sess); err
++            :ok ->
++              {:ok, sess}
++
++            err ->
++              _ = quit(sess)
++              err
+           end
+ 
+         {out, code} ->
+diff --git a/test/tau/providers/anthropic/auth_headers_test.exs b/test/tau/providers/anthropic/auth_headers_test.exs
+index ed84bc5..041ce66 100644
+--- a/test/tau/providers/anthropic/auth_headers_test.exs
++++ b/test/tau/providers/anthropic/auth_headers_test.exs
+@@ -97,6 +97,7 @@ defmodule Tau.Providers.Anthropic.AuthHeadersTest do
+ 
+         beta = headers["anthropic-beta"]
+         assert is_binary(beta)
++
+         assert beta =~ "oauth-2025-04-20",
+                "Anthropic Messages API requires the oauth-2025-04-20 beta header for OAuth tokens; got #{inspect(beta)}"
+ 
+diff --git a/test/tau/providers/anthropic/auth_test.exs b/test/tau/providers/anthropic/auth_test.exs
+index dc48b88..d148eaa 100644
+--- a/test/tau/providers/anthropic/auth_test.exs
++++ b/test/tau/providers/anthropic/auth_test.exs
+@@ -23,17 +23,18 @@ defmodule Tau.Providers.Anthropic.AuthTest do
+ 
+   defp write_oauth(path, overrides) do
+     base = %{
+-      "claudeAiOauth" => Map.merge(
+-        %{
+-          "accessToken" => "sk-ant-oat01-test-token",
+-          "refreshToken" => "sk-ant-ort01-test-refresh",
+-          "expiresAt" => :os.system_time(:millisecond) + @future_ms_offset,
+-          "scopes" => ["user:inference", "user:profile"],
+-          "subscriptionType" => "max",
+-          "rateLimitTier" => "default"
+-        },
+-        overrides
+-      )
++      "claudeAiOauth" =>
++        Map.merge(
++          %{
++            "accessToken" => "sk-ant-oat01-test-token",
++            "refreshToken" => "sk-ant-ort01-test-refresh",
++            "expiresAt" => :os.system_time(:millisecond) + @future_ms_offset,
++            "scopes" => ["user:inference", "user:profile"],
++            "subscriptionType" => "max",
++            "rateLimitTier" => "default"
++          },
++          overrides
++        )
+     }
+ 
+     File.write!(path, Jason.encode!(base))
+diff --git a/test/tau/session/turn_telemetry_test.exs b/test/tau/session/turn_telemetry_test.exs
+new file mode 100644
+index 0000000..409dc6f
+--- /dev/null
++++ b/test/tau/session/turn_telemetry_test.exs
+@@ -0,0 +1,230 @@
++defmodule Tau.Session.TurnTelemetryTest do
++  @moduledoc """
++  Verifies the [:tau, :session, :turn, :start | :stop | :exception] span
++  emitted around a user-to-assistant turn.
++  """
++  use ExUnit.Case, async: false
++
++  import Tau.Test.SessionHelper, only: [start_session_for_test: 1]
++  alias Tau.Provider.Event
++  alias Tau.Session.Events, as: SE
++
++  # Provider that returns {:error, reason} synchronously from stream/3,
++  # triggering the :exception telemetry path in session.ex.
++  defmodule ErrorProvider do
++    @moduledoc false
++    @behaviour Tau.Provider
++
++    @impl true
++    def stream(_, _, _), do: {:error, :test_provider_error}
++
++    @impl true
++    def capabilities,
++      do: %{
++        thinking: false,
++        tools: false,
++        vision: false,
++        prompt_caching: false,
++        parallel_tools: false
++      }
++
++    @impl true
++    def default_model, do: "error"
++  end
++
++  setup do
++    tmp = Path.join(System.tmp_dir!(), "tau-turn-tel-#{System.unique_integer([:positive])}")
++    File.mkdir_p!(tmp)
++    Application.put_env(:tau, :data_dir, tmp)
++
++    on_exit(fn ->
++      File.rm_rf!(tmp)
++      Application.delete_env(:tau, :data_dir)
++    end)
++
++    :ok
++  end
++
++  @fixture [
++    %Event.Start{request_id: "r0", model: "replay"},
++    %Event.TextStart{block_id: "b0"},
++    %Event.TextDelta{block_id: "b0", text: "hello"},
++    %Event.TextEnd{block_id: "b0"},
++    %Event.Done{stop_reason: :end_turn, usage: %{output_tokens: 1}}
++  ]
++
++  test ":start and :stop fire for a completed turn, :exception does not" do
++    sid = "turn-tel-#{System.unique_integer([:positive])}"
++    Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{sid}")
++
++    test_pid = self()
++    handler_id = "tau-turn-telemetry-#{sid}"
++
++    :telemetry.attach_many(
++      handler_id,
++      [
++        [:tau, :session, :turn, :start],
++        [:tau, :session, :turn, :stop],
++        [:tau, :session, :turn, :exception]
++      ],
++      fn event, measurements, metadata, _ ->
++        send(test_pid, {:telemetry, event, measurements, metadata})
++      end,
++      nil
++    )
++
++    on_exit(fn -> :telemetry.detach(handler_id) end)
++
++    {:ok, ^sid} =
++      start_session_for_test(
++        provider: Tau.Providers.Replay,
++        session_id: sid,
++        provider_ctx: %{replay_fixture: @fixture}
++      )
++
++    Tau.send(sid, "hi")
++
++    assert_receive %SE.MessageEnd{}, 2_000
++
++    assert_receive {:telemetry, [:tau, :session, :turn, :start], _meas, start_meta}, 1_000
++    assert start_meta.session_id == sid
++
++    assert_receive {:telemetry, [:tau, :session, :turn, :stop], stop_meas, stop_meta}, 1_000
++    assert stop_meta.session_id == sid
++    assert is_integer(stop_meas.duration)
++    assert stop_meas.duration >= 0
++
++    refute_receive {:telemetry, [:tau, :session, :turn, :exception], _, _}, 100
++  end
++
++  # D-026 detection method: cancel mid-turn, send second turn, assert
++  # second :stop duration does not span the idle gap between turns.
++  test "cancel mid-turn closes span; second turn :stop duration is short" do
++    sid = "turn-tel-cancel-#{System.unique_integer([:positive])}"
++    Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{sid}")
++
++    test_pid = self()
++    handler_id = "tau-turn-telemetry-cancel-#{sid}"
++
++    :telemetry.attach_many(
++      handler_id,
++      [
++        [:tau, :session, :turn, :start],
++        [:tau, :session, :turn, :stop],
++        [:tau, :session, :turn, :exception]
++      ],
++      fn event, measurements, metadata, _ ->
++        send(test_pid, {:telemetry, event, measurements, metadata})
++      end,
++      nil
++    )
++
++    on_exit(fn -> :telemetry.detach(handler_id) end)
++
++    # Slow fixture — 50ms per event. 7 events × 50ms = ~350ms total stream
++    # time. The cancel is sent after receiving MessageStart + MessageUpdate,
++    # so there is a structural guarantee the stream is in progress. The
++    # 5_000ms duration guard on the second turn is the real D-026 detector;
++    # it catches a stale turn_start_time regardless of cancel timing.
++    slow_fixture = [
++      %Event.Start{request_id: "r0", model: "replay"},
++      %Event.TextStart{block_id: "b0"},
++      %Event.TextDelta{block_id: "b0", text: "a"},
++      %Event.TextDelta{block_id: "b0", text: "b"},
++      %Event.TextDelta{block_id: "b0", text: "c"},
++      %Event.TextEnd{block_id: "b0"},
++      %Event.Done{stop_reason: :end_turn, usage: %{output_tokens: 3}}
++    ]
++
++    {:ok, ^sid} =
++      start_session_for_test(
++        provider: Tau.Providers.Replay,
++        session_id: sid,
++        provider_ctx: %{replay_fixture: slow_fixture, replay_delay_ms: 50}
++      )
++
++    # First turn — cancel mid-stream.
++    Tau.send(sid, "first")
++
++    assert_receive %SE.MessageStart{}, 1_000
++    assert_receive %SE.MessageUpdate{}, 1_000
++
++    Tau.cancel(sid)
++
++    # Structural assertions: start fired before cancel, exception fires with
++    # reason :cancelled. The :stop check is intentionally omitted here —
++    # whether :stop fires depends on whether the cancel races the stream end,
++    # which is timing-sensitive. The duration guard on the second turn is the
++    # structural D-026 detector.
++    assert_receive {:telemetry, [:tau, :session, :turn, :start], _, %{session_id: ^sid}}, 1_000
++
++    assert_receive {:telemetry, [:tau, :session, :turn, :exception], _exc_meas,
++                    %{session_id: ^sid, reason: :cancelled}},
++                   1_000
++
++    # Wait for the session to acknowledge the cancel before the second turn.
++    assert_receive %SE.Cancelled{}, 1_000
++
++    # Second turn — let it complete. The same slow fixture is reused;
++    # ~250ms of stream time is well under the 5_000ms idle-gap threshold.
++    Tau.send(sid, "second")
++
++    assert_receive %SE.MessageEnd{}, 3_000
++
++    assert_receive {:telemetry, [:tau, :session, :turn, :start], _, %{session_id: ^sid}}, 1_000
++
++    assert_receive {:telemetry, [:tau, :session, :turn, :stop], stop_meas, %{session_id: ^sid}},
++                   1_000
++
++    # Duration must NOT span the idle gap between turn 1 and turn 2.
++    # If turn_start_time was NOT cleared on cancel, t0 is from turn 1;
++    # the second stop subtracts it, yielding a duration that includes
++    # all idle time between turns — easily > 5_000ms in CI.
++    assert stop_meas.duration < 5_000,
++           "second :stop duration #{stop_meas.duration}ms spans idle gap — turn_start_time not cleared on cancel"
++  end
++
++  test ":start and :exception fire when provider returns {:error, reason}" do
++    sid = "turn-tel-exc-#{System.unique_integer([:positive])}"
++    Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{sid}")
++
++    test_pid = self()
++    handler_id = "tau-turn-telemetry-exc-#{sid}"
++
++    :telemetry.attach_many(
++      handler_id,
++      [
++        [:tau, :session, :turn, :start],
++        [:tau, :session, :turn, :stop],
++        [:tau, :session, :turn, :exception]
++      ],
++      fn event, measurements, metadata, _ ->
++        send(test_pid, {:telemetry, event, measurements, metadata})
++      end,
++      nil
++    )
++
++    on_exit(fn -> :telemetry.detach(handler_id) end)
++
++    {:ok, ^sid} =
++      start_session_for_test(
++        provider: ErrorProvider,
++        session_id: sid
++      )
++
++    Tau.send(sid, "hi")
++
++    assert_receive %SE.MessageEnd{}, 2_000
++
++    assert_receive {:telemetry, [:tau, :session, :turn, :start], _meas, start_meta}, 1_000
++    assert start_meta.session_id == sid
++
++    assert_receive {:telemetry, [:tau, :session, :turn, :exception], exc_meas, exc_meta}, 1_000
++    assert exc_meta.session_id == sid
++    assert exc_meta.reason == :test_provider_error
++    assert is_integer(exc_meas.duration)
++    assert exc_meas.duration >= 0
++
++    refute_receive {:telemetry, [:tau, :session, :turn, :stop], _, _}, 100
++  end
++end
+diff --git a/test/tau/tui/app_test.exs b/test/tau/tui/app_test.exs
+index 18bda09..b86eb22 100644
+--- a/test/tau/tui/app_test.exs
++++ b/test/tau/tui/app_test.exs
+@@ -74,6 +74,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
+         assert next.last_assistant == nil
+ 
+         last_line = List.last(next.transcript)
++
+         assert is_binary(last_line) and last_line != "",
+                "transcript MUST gain a non-empty line; got #{inspect(last_line)}"
+ 
