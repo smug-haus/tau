@@ -97,8 +97,15 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
         assert next.status == :idle
 
-        assert "[assistant] (replay) hello" in next.transcript,
-               "transcript MUST contain the assistant line for AC-2 render path; " <>
+        # D-028: markdown render splits a paragraph into header + body lines.
+        # The transcript MUST contain both the "[assistant]" header marker
+        # and the rendered text body somewhere in the list.
+        assert "[assistant]" in next.transcript,
+               "transcript MUST contain the [assistant] header for AC-2 render path; " <>
+                 "got #{inspect(next.transcript)}"
+
+        assert Enum.any?(next.transcript, &String.contains?(&1, "(replay) hello")),
+               "transcript MUST contain the rendered assistant body for AC-2; " <>
                  "got #{inspect(next.transcript)}"
       end
 

@@ -52,6 +52,11 @@ defmodule Tau.MixProject do
       {:mint, "~> 1.6"},
       {:castore, "~> 1.0"},
 
+      # Markdown (D-028 / [C52-B5]): parse assistant text content as
+      # CommonMark with GFM tables before TUI render so structured
+      # markup doesn't appear raw in the transcript pane.
+      {:earmark, "~> 1.4"},
+
       # Observability
       {:telemetry, "~> 1.3"},
       {:telemetry_metrics, "~> 1.0"},
