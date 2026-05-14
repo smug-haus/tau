@@ -103,6 +103,7 @@ defmodule Tau.Providers.Shared.FinchStream do
       pending: [],
       finished?: false,
       status: nil,
+      error_body: nil,
       cancel_flag: cancel_flag
     }
   end
@@ -161,9 +162,11 @@ defmodule Tau.Providers.Shared.FinchStream do
   defp handle({:status, n}, s, _decoder) when n in 200..299, do: %{s | status: n}
 
   defp handle({:status, n}, s, _decoder) do
-    err = %Event.Error{reason: {:http_status, n}, retryable?: n in [408, 429, 500, 502, 503, 504]}
+    # Don't emit the Error event yet — buffer the body chunks so the
+    # rendered error includes Anthropic's structured `error.type` and
+    # `error.message`. The Error is finalised on :done / :end below.
     maybe_notify_rate_limiter(s, n)
-    %{s | status: n, pending: s.pending ++ [err], finished?: true}
+    %{s | status: n, error_body: ""}
   end
 
   defp handle({:headers, _}, s, _), do: s
@@ -185,14 +188,45 @@ defmodule Tau.Providers.Shared.FinchStream do
     %{s | partial: partial, pending: s.pending ++ events}
   end
 
+  defp handle({:data, chunk}, %{status: n} = s, _decoder) when is_integer(n) and n not in 200..299 do
+    %{s | error_body: (s.error_body || "") <> chunk}
+  end
+
   defp handle({:data, _chunk}, s, _decoder), do: s
 
-  defp handle(:done, s, _), do: s
+  defp handle(:done, s, _), do: finalise_error_if_pending(s)
 
-  defp handle(:end, s, _), do: %{s | finished?: true}
+  defp handle(:end, s, _), do: %{finalise_error_if_pending(s) | finished?: true}
 
   defp handle({:error, reason}, s, _) do
     %{s | pending: s.pending ++ [%Event.Error{reason: reason, retryable?: true}], finished?: true}
+  end
+
+  defp finalise_error_if_pending(%{status: n, error_body: body} = s)
+       when is_integer(n) and n not in 200..299 and is_binary(body) do
+    err = %Event.Error{
+      reason: build_error_reason(n, body),
+      retryable?: n in [408, 429, 500, 502, 503, 504]
+    }
+
+    %{s | pending: s.pending ++ [err], error_body: nil}
+  end
+
+  defp finalise_error_if_pending(s), do: s
+
+  defp build_error_reason(status, body) do
+    case Jason.decode(body) do
+      {:ok, %{"error" => %{"type" => type, "message" => msg}}} ->
+        {:http_status, status, %{type: type, message: msg}}
+
+      {:ok, %{"type" => type, "message" => msg}} ->
+        {:http_status, status, %{type: type, message: msg}}
+
+      _ ->
+        # Non-JSON body — surface the first 500 chars verbatim so the
+        # user sees rate-limit detail even from a non-Anthropic source.
+        {:http_status, status, %{body: String.slice(body, 0, 500)}}
+    end
   end
 
   defp maybe_notify_rate_limiter(%{partial: %{provider: provider}}, status)

@@ -28,7 +28,7 @@ defmodule Tau.Providers.Anthropic.HttpErrorStreamTest do
     %{bypass: bypass}
   end
 
-  test "HTTP 429 response yields %Event.Error{reason: {:http_status, 429}} in stream",
+  test "HTTP 429 response yields %Event.Error{reason: {:http_status, 429, _}} in stream",
        %{bypass: bypass} do
     Bypass.expect_once(bypass, "POST", "/v1/messages", fn conn ->
       conn
@@ -54,10 +54,10 @@ defmodule Tau.Providers.Anthropic.HttpErrorStreamTest do
     events = Enum.to_list(stream)
 
     assert Enum.any?(events, fn
-             %Event.Error{reason: {:http_status, 429}} -> true
+             %Event.Error{reason: {:http_status, 429, _}} -> true
              _ -> false
            end),
-           "Expected at least one %Event.Error{reason: {:http_status, 429}} in stream; got: #{inspect(events)}"
+           "Expected at least one %Event.Error{reason: {:http_status, 429, _}} in stream; got: #{inspect(events)}"
   end
 
   test "HTTP 429 Event.Error has retryable?: true", %{bypass: bypass} do
@@ -83,15 +83,15 @@ defmodule Tau.Providers.Anthropic.HttpErrorStreamTest do
 
     error_event =
       Enum.find(events, fn
-        %Event.Error{reason: {:http_status, 429}} -> true
+        %Event.Error{reason: {:http_status, 429, _}} -> true
         _ -> false
       end)
 
-    assert %Event.Error{reason: {:http_status, 429}, retryable?: true} = error_event,
+    assert %Event.Error{reason: {:http_status, 429, _}, retryable?: true} = error_event,
            "Expected retryable?: true for 429; got: #{inspect(error_event)}"
   end
 
-  test "HTTP 500 response yields retryable %Event.Error{reason: {:http_status, 500}}",
+  test "HTTP 500 response yields retryable %Event.Error{reason: {:http_status, 500, _}}",
        %{bypass: bypass} do
     Bypass.expect_once(bypass, "POST", "/v1/messages", fn conn ->
       conn
@@ -114,13 +114,13 @@ defmodule Tau.Providers.Anthropic.HttpErrorStreamTest do
     events = Enum.to_list(stream)
 
     assert Enum.any?(events, fn
-             %Event.Error{reason: {:http_status, 500}, retryable?: true} -> true
+             %Event.Error{reason: {:http_status, 500, _}, retryable?: true} -> true
              _ -> false
            end),
            "Expected retryable %Event.Error for 500; got: #{inspect(events)}"
   end
 
-  test "HTTP 401 response yields non-retryable %Event.Error{reason: {:http_status, 401}}",
+  test "HTTP 401 response yields non-retryable %Event.Error{reason: {:http_status, 401, _}}",
        %{bypass: bypass} do
     Bypass.expect_once(bypass, "POST", "/v1/messages", fn conn ->
       conn
@@ -143,7 +143,7 @@ defmodule Tau.Providers.Anthropic.HttpErrorStreamTest do
     events = Enum.to_list(stream)
 
     assert Enum.any?(events, fn
-             %Event.Error{reason: {:http_status, 401}, retryable?: false} -> true
+             %Event.Error{reason: {:http_status, 401, _}, retryable?: false} -> true
              _ -> false
            end),
            "Expected non-retryable %Event.Error for 401; got: #{inspect(events)}"
