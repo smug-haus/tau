@@ -1,0 +1,7 @@
+{"type":"start","agent":"replay","version":"0.0.0"}
+{"type":"assistant_text","text":"I'll look at the file.","turn":0}
+{"type":"tool_use","id":"t1","name":"Read","input":{"path":"README.md"}}
+{"type":"tool_result","tool_use_id":"t1","content":"file contents","is_error":false}
+{"type":"file_edit","path":"README.md","kind":"modify"}
+{"type":"cost","tokens":{"input":100,"output":50},"usd":0.0015,"duration_ms":1200}
+{"type":"done","exit_status":0,"final_message":"Done."}

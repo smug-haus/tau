@@ -20,6 +20,13 @@ The current spec catalog:
   `lib/tau/providers/*` (in their `stream/3` callback), or
   `lib/tau/settings/cache.ex`.
 
+- `docs/spec/SPEC-CODING-AGENT.md` — the coding-agent adapter substrate
+  (subprocess sub-agents driven by `Tau.CodingAgent` + dispatcher).
+  Mandatory for any PR touching `lib/tau/coding_agent.ex`,
+  `lib/tau/coding_agent/`, `lib/tau/coding_agents/`, `lib/tau/cli.ex`
+  (the `--coding-agent` flag), or `lib/tau/tools/builtin/delegate.ex`
+  (Phase 2). Triage score 4/5; D-031..D-036 live here.
+
 Future SPECs land here as new components reach triage threshold.
 
 ## What this rule requires

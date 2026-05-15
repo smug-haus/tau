@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | DRAFT — design review pending. Open questions in §7. |
+| **Status** | Approved (Phase 1A landed; Phase 1B/Phase 2 implementation pending). |
 | **Date** | 2026-05-15 |
 | **Scope** | A behaviour-shaped adapter that lets tau drive external coding assistants (Claude Code, Aider, Codex CLI, Gemini CLI, …) as sub-agents over a subprocess + structured-event transport. |
 | **Method** | PSDH (`.claude/skills/design-reasoning`); L0 + boundary contracts. L2 deferred until first impl lands. |
@@ -149,20 +149,21 @@ Done{exit_status: integer(), final_message: String.t() | nil}
 
 ### B3 — workspace
 
-- Default: dispatcher's cwd (the same cwd tau itself runs in).
-- Optional: per-task worktree (requires git repo).
+- **Default: per-task git worktree** (safer; protects the user's working tree from concurrent agent edits).
+- Opt-in: dispatcher's cwd via an explicit `--cwd` flag on the Delegate tool / session mode. The user-facing wording is "run in my current directory" so the trade-off is visible.
 - Adapter MUST validate the workspace exists and is a directory before spawn.
+- D-033 stands regardless: the path is **always** explicit in `task.workspace`; the dispatcher MUST NOT silently inherit tau's cwd. Worktree creation is the caller's responsibility (Phase 1B Team B); this contract just enforces the boundary.
 
-### B4 — optional `tau-context` MCP server
+### B4 — `tau-context` MCP server
 
 - A small MCP server tau spawns alongside the coding-agent subprocess.
-- Exposes (subset, opt-in per task):
+- Exposes (subset):
   - `tau_memory_query(query)` — read session memory
   - `tau_memory_write(kind, key, body)` — write to memory (subject to permissions)
   - `tau_session_status()` — current session metadata
   - `tau_delegate(prompt, agent)` — recursive delegation (with depth limit)
 - The coding-agent's own Read/Edit/Bash are **not** replaced. Tau-context is supplementary, not substitutionary.
-- Disabled by default. Enable via `coding_agent.expose_tau_context = true` in settings.
+- **Enabled by default.** Disable via `coding_agent.expose_tau_context = false` in settings. Rationale: the tau-context surface is the only way audit/permissions/memory cross the BEAM⇄subprocess boundary; making it opt-in turned out to mean "almost never on", which defeats the point.
 
 ### B5 — telemetry
 
@@ -197,31 +198,31 @@ Done{exit_status: integer(), final_message: String.t() | nil}
 | **D-035** | Adapter failures surface in-stream as `%CodingAgent.Event.Error{}` events. Adapters MUST NOT raise for transport, auth, or parse errors. Hard configuration errors (no executable on PATH, malformed argv) may return synchronous `{:error, reason}` from `start/2`. |
 | **D-036** | Auth boundary — tau MUST NOT inject or copy credentials. The subprocess inherits the host user's config dir. Tau MAY check existence and emit a user-actionable "not configured" error. |
 
-## 7. Open design questions (resolve before Status: Approved)
+## 7. Resolved design questions
 
 ### Q1 — Should the coding agent use tau's tools via MCP, or its native tools?
 
-**Options**
+**Options considered**
 
 | Option | Description | Pro | Con |
 |---|---|---|---|
-| **A** (lean) | Agent uses its native tools. Tau audits post-hoc via stream-json events + optional fs-events. | Preserves agent capability. Lower latency. Simpler. | Tau is not in the loop on every edit. Hooks/permissions don't apply to the agent's actions. |
+| **A** | Agent uses its native tools. Tau audits post-hoc via stream-json events + optional fs-events. | Preserves agent capability. Lower latency. Simpler. | Tau is not in the loop on every edit. Hooks/permissions don't apply to the agent's actions. |
 | **B** | Tau exposes Read/Edit/Bash via an MCP server; agent is started with `--disallowed-tools` for its native ones and `--mcp-config` for tau's. | Unified audit, hooks, permissions. | Cripples Claude Code (loses multi-edit, plan mode, web-fetch). Higher latency. Likely brittle across agent versions. |
 | **C** (hybrid) | Agent uses its native tools. Tau ALSO exposes a `tau-context` MCP server with session-memory + permission-query + recursive-delegate tools. Coding agent calls these in addition to its native set. | Best of both — agent keeps capability, tau gains a small audit/context window. | Tau-context becomes a permanent API surface that adapters must respect. |
 
-**Leaning: A as default, C as opt-in (`expose_tau_context = true`).** Reject B for now.
+**Resolved: Option C, with the tau-context MCP server enabled by default.** Setting becomes `coding_agent.expose_tau_context = false` to disable. Option B is explicitly rejected.
 
-**Reasoning:** The goal stated by the user is "use coding agents without API calls." Forcing tau's tools through MCP works against that goal — it degrades the very agent we want to leverage. Audit is real, but it's a separate problem with cheaper solutions (post-hoc fs diff + the event stream is already an auditable transcript).
+**Reasoning:** The user's stated goal is "use coding agents without API calls." Forcing tau's tools through MCP (B) works against that goal — it degrades the very agent we want to leverage. The earlier draft positioned C as opt-in; on reflection that meant "almost never on", and the audit/memory surface is the entire point of integrating at all. C as default makes the cross-boundary contract visible to every adapter.
 
 ### Q2 — Primary integration surface: tool or session mode?
 
-**Options**
+**Options considered**
 
 - **Tool** (`Tau.Tools.Builtin.Delegate`): provider-driven conversation can hand off subtasks. Composes with everything else (permissions, hooks, sub-agents).
 - **Session mode** (`--coding-agent claude_code`): the TUI's "Send" goes directly to the coding agent. Tau becomes a thin shell over Claude Code.
 - **Both** (independent).
 
-**Leaning: both, but Tool first.** The Tool surface is structurally identical to existing in-BEAM sub-agents (#32) and reuses more code. The session-mode is mostly an argv flag and a different default route — simpler once the dispatcher exists.
+**Resolved: both, but session mode first.** Session mode is the cleaner first user-facing slice and the simpler dispatcher consumer once Phase 1A's substrate exists; the Delegate tool follows in Phase 2. The earlier draft favoured Tool-first because of code-reuse with #32, but session-mode-first gives the user a working `tau --coding-agent` path the day Phase 1B Team B lands, without waiting on the provider conversation plumbing.
 
 ### Q3 — Workspace isolation
 
@@ -229,19 +230,19 @@ Done{exit_status: integer(), final_message: String.t() | nil}
 - Run in a worktree (safer, but harder to view edits live).
 - Configurable per task.
 
-**Leaning: per-task with cwd as default**, and a `--worktree` flag on the Delegate tool / session mode.
+**Resolved: per-task with worktree as default.** `--cwd` is opt-in on the Delegate tool / session mode for the user who explicitly wants the agent to edit their working tree. Rationale: a concurrent editor session + an agent rewriting the same files is the most common destructive interaction surface flagged in §3 ([C1-B3] / [C2-B3]); making worktree the default takes that out of play unless the user asks for it.
 
 ### Q4 — Cost aggregation
 
-Adapters that surface cost (Claude Code does; Aider doesn't reliably) emit `Event.Cost`. Tau's session-cost aggregator records these as a separate line item (`coding_agent.claude_code` vs `provider.anthropic`) so the user sees the split.
+Adapters that surface cost (Claude Code does; Aider doesn't reliably) emit `Event.Cost`. Tau's session-cost aggregator records these as a separate line item with adapter-tagged provenance (`coding_agent.claude_code` vs `provider.anthropic`) so the user sees the split.
 
-**Leaning: best-effort with explicit "unknown" sentinel when the adapter can't measure.**
+**Resolved: yes; adapter-tagged line items, with an explicit "unknown" sentinel (`usd: nil`) when the adapter can't measure.** Aggregation lives in Phase 1B Team D.
 
 ### Q5 — Session resume
 
 Claude Code supports `--resume <session-id>`. Should tau persist coding-agent session ids and offer resume across tau sessions?
 
-**Leaning: yes for the session-mode surface; no for the tool surface (each tool call is its own discrete delegation).**
+**Resolved: yes for the session-mode surface; no for the Delegate tool surface.** Each tool call is its own discrete delegation; sharing resume state across tool calls re-introduces the temporal coupling §3 [C3-B2] / [C4-B2] worked hard to remove. Session-mode resume is the natural fit because the human is already in a conversational frame; persistence shape lands with Phase 1B Team D.
 
 ## 8. Out of scope (explicit)
 
@@ -250,18 +251,35 @@ Claude Code supports `--resume <session-id>`. Should tau persist coding-agent se
 - Mid-turn agent migration.
 - Coding agent and provider concurrent in the same turn.
 
-## Appendix A — proposed source map (when implementation lands)
+## Appendix A — source map
+
+Phase 1A (this PR — landed):
 
 ```
-lib/tau/coding_agent.ex                          # behaviour
+lib/tau/coding_agent.ex                          # behaviour + run/4
 lib/tau/coding_agent/event.ex                    # event structs
 lib/tau/coding_agent/supervisor.ex               # DynamicSupervisor for dispatchers
-lib/tau/coding_agent/dispatcher.ex               # Port owner GenServer
-lib/tau/coding_agents/claude_code.ex             # first adapter
+lib/tau/coding_agent/dispatcher.ex               # lifecycle/cancel/telemetry GenServer
 lib/tau/coding_agents/replay.ex                  # test fixture adapter
-lib/tau/tools/builtin/delegate.ex                # tool surface
-lib/tau/cli.ex                                   # --coding-agent flag wiring
+test/fixtures/coding_agent_replay_default.jsonl  # default Replay fixture
+test/tau/coding_agent_test.exs                   # behaviour contract
+test/tau/coding_agent/dispatcher_test.exs        # dispatcher contract
+test/tau/coding_agent/telemetry_test.exs         # D-034 shape
+test/tau/coding_agent/lifecycle_property_test.exs # AC-5 skeleton
 ```
+
+Phase 1B / Phase 2 (planned):
+
+```
+lib/tau/coding_agents/claude_code.ex             # first real adapter (Team A)
+lib/tau/cli.ex                                   # --coding-agent flag (Team B)
+lib/tau/coding_agent/workspace.ex                # worktree creation (Team B)
+lib/tau/mcp/servers/tau_context.ex               # tau-context MCP server (Team C)
+lib/tau/cost.ex                                  # adapter-tagged line items (Team D)
+lib/tau/tools/builtin/delegate.ex                # tool surface (Phase 2)
+```
+
+Total runtime invariants claimed by this spec: **D-031 through D-036** (6).
 
 ## Appendix B — non-goals discussion
 
