@@ -396,8 +396,9 @@ defmodule Tau.CodingAgent.TauContext.Tools do
     end
   end
 
+  # `snap.provider` is `module() | nil` per `Tau.Session.snapshot/1`.
+  # Narrow clauses match dialyzer's inference; broader fallthroughs
+  # (binaries, arbitrary terms) were unreachable per the spec.
   defp safe_inspect(nil), do: nil
-  defp safe_inspect(v) when is_binary(v), do: v
   defp safe_inspect(v) when is_atom(v), do: Atom.to_string(v)
-  defp safe_inspect(v), do: inspect(v)
 end

@@ -277,9 +277,6 @@ defmodule Tau.CodingAgent.TauContext.Router do
 
           {:error, %{code: code, message: msg}} ->
             rpc_error(id, code, msg)
-
-          other ->
-            rpc_error(id, -32_603, "unexpected tool return: " <> inspect(other))
         end
     end
   end
