@@ -30,10 +30,13 @@ defmodule Tau.CodingAgent.TelemetryAuditTest do
     [:tau, :coding_agent, :start],
     [:tau, :coding_agent, :event],
     [:tau, :coding_agent, :stop],
+    [:tau, :coding_agent, :exception],
     [:tau, :session, :coding_agent_streaming, :start],
     [:tau, :session, :coding_agent_streaming, :stop],
     [:tau, :session, :coding_agent_streaming, :adapter_start],
+    [:tau, :session, :coding_agent_streaming, :exception],
     [:tau, :coding_agent, :cost],
+    [:tau, :coding_agent, :cost, :failed],
     [:tau, :coding_agent, :resume]
   ]
 

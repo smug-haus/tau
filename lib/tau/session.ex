@@ -167,14 +167,24 @@ defmodule Tau.Session do
           [] ->
             {:error, :not_found}
 
-          [%{"kind" => "session_header", "data" => d} | _rest] ->
+          [%{"kind" => "session_header", "data" => d} | rest] ->
+            # SPEC-CODING-AGENT §7 Q4/Q5 (D-037/D-038): thread the
+            # post-header event log into `:preload_events` so init/1's
+            # `coding_agent_state_from_preload/1` and
+            # `coding_agent_costs_from_preload/1` can rehydrate the
+            # adapter-side session_id (for the next dispatcher's
+            # `task.resume_id`) and the per-session cost ledger.
+            # Mirrors `fork/2`'s shape — provider-only sessions pass
+            # an event list with no coding_agent_* kinds, and the
+            # helpers fall back to safe defaults (nil / []).
             opts = [
               session_id: id,
               cwd: d["cwd"],
               provider: resolve_provider(d["provider"]),
               model: d["model"],
               metadata: d["metadata"] || %{},
-              resume?: true
+              resume?: true,
+              preload_events: rest
             ]
 
             start(opts)
