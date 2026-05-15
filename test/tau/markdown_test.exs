@@ -9,7 +9,7 @@ defmodule Tau.MarkdownTest do
   alias Tau.Markdown
 
   describe "tables" do
-    test "renders a GFM table with aligned columns and box-drawing" do
+    test "renders a GFM table with aligned ASCII pipe-and-plus grid" do
       md = """
       | Name | Age |
       |------|-----|
@@ -19,23 +19,32 @@ defmodule Tau.MarkdownTest do
 
       lines = Markdown.render(md)
 
-      # Header row + separator + 2 body rows = 4 table lines (the separator
-      # uses ├/─/┼/┤ box-drawing chars; row borders use │)
-      table_lines =
-        Enum.filter(lines, fn line ->
-          String.contains?(line, "│") or String.contains?(line, "├")
-        end)
+      # Header row + separator + 2 body rows = 4 table lines
+      assert length(lines) >= 4, "expected ≥4 table lines, got: #{inspect(lines)}"
 
-      assert length(table_lines) >= 4, "expected ≥4 table lines, got: #{inspect(lines)}"
-
-      # No raw GFM pipe-delimiter source in output
+      # ASCII-only: no Unicode box-drawing chars in output (Ratatouille
+      # 0.5.1's Cells.to_char/1 can't handle multi-byte UTF-8).
       refute Enum.any?(lines, fn line ->
-               String.contains?(line, "|------|") or String.contains?(line, "|--|--|")
+               String.contains?(line, "│") or String.contains?(line, "├") or
+                 String.contains?(line, "─")
              end),
-             "raw GFM separator leaked: #{inspect(lines)}"
+             "Unicode box-drawing leaked: #{inspect(lines)}"
 
-      # Separator uses box-drawing chars
-      assert Enum.any?(lines, &String.contains?(&1, "├")), "no box-drawing separator: #{inspect(lines)}"
+      # Row borders use ASCII pipes
+      assert Enum.any?(lines, fn line ->
+               String.starts_with?(line, "| ") and String.ends_with?(line, " |")
+             end),
+             "no ASCII pipe-bordered row: #{inspect(lines)}"
+
+      # Separator row uses ASCII plus-and-dash
+      assert Enum.any?(lines, fn line ->
+               String.starts_with?(line, "+-") and String.contains?(line, "-+-")
+             end),
+             "no ASCII plus-dash separator: #{inspect(lines)}"
+
+      # Content present and column-aligned (Alice has 5 chars, Bob has 3 — both rows pad to width 5)
+      assert Enum.any?(lines, &String.contains?(&1, "Alice"))
+      assert Enum.any?(lines, &String.contains?(&1, "Bob"))
     end
   end
 
@@ -52,7 +61,7 @@ defmodule Tau.MarkdownTest do
   end
 
   describe "lists" do
-    test "renders bullet lists with • marker" do
+    test "renders bullet lists with * marker (ASCII, Ratatouille-safe)" do
       md = """
       - first
       - second
@@ -60,9 +69,12 @@ defmodule Tau.MarkdownTest do
       """
 
       lines = Markdown.render(md)
-      assert "• first" in lines
-      assert "• second" in lines
-      assert "• third" in lines
+      assert "* first" in lines
+      assert "* second" in lines
+      assert "* third" in lines
+
+      # No Unicode bullet leaks
+      refute Enum.any?(lines, &String.contains?(&1, "•"))
     end
 
     test "renders ordered lists with numeric prefix" do
@@ -78,7 +90,7 @@ defmodule Tau.MarkdownTest do
   end
 
   describe "code blocks" do
-    test "renders fenced code blocks with visual delimiter" do
+    test "renders fenced code blocks with ASCII pipe delimiter" do
       md = """
       ```
       def hello, do: :world
@@ -86,18 +98,30 @@ defmodule Tau.MarkdownTest do
       """
 
       lines = Markdown.render(md)
-      assert Enum.any?(lines, &String.contains?(&1, "│ def hello")),
+      assert Enum.any?(lines, &String.contains?(&1, "| def hello")),
              "code block not delimited: #{inspect(lines)}"
+
+      # No Unicode pipe leaks (Ratatouille can't render it)
+      refute Enum.any?(lines, &String.contains?(&1, "│"))
     end
   end
 
   describe "inline markup" do
-    test "preserves bold / italic / inline-code markers in prose output" do
-      lines = Markdown.render("This has **bold** and *italic* and `code` inline.")
+    test "strips bold/italic markers (Ratatouille labels render flat text)" do
+      lines = Markdown.render("This has **bold** and *italic* text.")
       [line | _] = lines
-      assert line =~ "**bold**"
-      assert line =~ "*italic*"
-      assert line =~ "`code`"
+
+      # Bold/italic markers stripped — body text preserved.
+      assert line =~ "bold"
+      assert line =~ "italic"
+      refute line =~ "**bold**"
+      refute line =~ "*italic*"
+    end
+
+    test "preserves inline-code backticks (ASCII, useful as visual cue)" do
+      lines = Markdown.render("Run `mix test` to verify.")
+      [line | _] = lines
+      assert line =~ "`mix test`"
     end
   end
 

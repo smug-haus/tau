@@ -1,23 +1,41 @@
 defmodule Tau.Markdown do
   @moduledoc """
-  Renders CommonMark (with GFM tables) assistant text into terminal-formatted
-  lines suitable for the Ratatouille transcript pane.
+  Renders CommonMark (with GFM tables) assistant text into ASCII-only
+  terminal lines suitable for the Ratatouille transcript pane.
 
   Scope (D-028 / [C52-B5]): replaces the prior raw-text concatenation in
-  `Tau.TUI.App.on_message_end/2`. Tables align as ASCII grids; headers,
-  emphasis, code, and lists get visible treatment without bracket-leaking
-  raw markdown into the rendered pane.
+  `Tau.TUI.App.on_message_end/2`. Tables align as ASCII pipe-and-plus
+  grids; headers and lists get visible treatment without leaking raw
+  markdown into the rendered pane.
 
-  Out of scope:
+  ## ASCII-only constraint
+
+  Ratatouille 0.5.1's `Renderer.Cells.to_char/1` iterates label content
+  byte-by-byte rather than codepoint-by-codepoint, so any multi-byte
+  UTF-8 in a label crashes the renderer (lead byte 0xE2 has no clause,
+  full panel render fails). Until the TUI substrate handles UTF-8
+  natively (separate issue), this renderer emits ASCII-only output:
+
+  - Tables use `|` / `-` / `+` (not box-drawing chars)
+  - Lists use `*` (not Unicode bullet `•`)
+  - Code-block delimiter is `|` (not `│`)
+  - Bold (`**x**`) and italic (`*x*`) markers are STRIPPED — Ratatouille
+    labels render flat text with no inline attributes, so leaving the
+    markers would leak markdown source. Inline code keeps backticks
+    (ASCII, useful visual cue).
+
+  ## Out of scope
+
   - Syntax-highlighting code blocks.
-  - Inline images / hyperlinks rendered as anything other than their text
-    + URL (terminal hypertext is a separate concern).
+  - Inline images / hyperlinks beyond text + URL.
+  - Bold / italic visible styling (blocked on TUI substrate; see
+    Ratatouille tracking issue).
 
-  Render contract: input is a binary; output is a list of binaries, each
-  one visual line. On Earmark parse error the renderer falls back to the
-  input text prefixed with `[markdown-parse-error]` so the failure stays
-  visible to the user (D-028 fallback requirement).
+  ## Contract
 
+  Input is a binary; output is a list of binaries, each one visual line.
+  On Earmark parse error the renderer falls back to the input text
+  prefixed with `[markdown-parse-error]` so the failure stays visible.
   Earmark emits string tags ("h1", "p", "table", etc.) — not atoms.
   """
 
@@ -60,7 +78,7 @@ defmodule Tau.Markdown do
 
   defp render_block({"ul", _attrs, items, _meta}) do
     Enum.flat_map(items, fn
-      {"li", _attrs, children, _meta} -> ["• " <> render_inline(children)]
+      {"li", _attrs, children, _meta} -> ["* " <> render_inline(children)]
       _ -> []
     end)
   end
@@ -79,7 +97,7 @@ defmodule Tau.Markdown do
 
     body
     |> String.split("\n")
-    |> Enum.map(&("│ " <> &1))
+    |> Enum.map(&("| " <> &1))
   end
 
   defp render_block({"pre", _attrs, children, _meta}) do
@@ -87,13 +105,13 @@ defmodule Tau.Markdown do
 
     body
     |> String.split("\n")
-    |> Enum.map(&("│ " <> &1))
+    |> Enum.map(&("| " <> &1))
   end
 
   defp render_block({"blockquote", _attrs, children, _meta}) do
     children
     |> Enum.flat_map(&render_block/1)
-    |> Enum.map(&("│ " <> &1))
+    |> Enum.map(&("| " <> &1))
   end
 
   defp render_block({"table", _attrs, rows, _meta}) do
@@ -101,11 +119,11 @@ defmodule Tau.Markdown do
   end
 
   defp render_block({"hr", _attrs, _children, _meta}) do
-    [String.duplicate("─", 60)]
+    [String.duplicate("-", 60)]
   end
 
   defp render_block({"code", _attrs, children, _meta}) do
-    ["│ " <> render_inline(children)]
+    ["| " <> render_inline(children)]
   end
 
   defp render_block(text) when is_binary(text), do: [text]
@@ -193,17 +211,17 @@ defmodule Tau.Markdown do
         pad = Enum.at(widths, idx, String.length(cell))
         String.pad_trailing(cell, pad)
       end)
-      |> Enum.join(" │ ")
+      |> Enum.join(" | ")
 
-    "│ " <> body <> " │"
+    "| " <> body <> " |"
   end
 
   defp format_separator(widths) do
-    "├─" <>
+    "+-" <>
       (widths
-       |> Enum.map(&String.duplicate("─", &1))
-       |> Enum.join("─┼─")) <>
-      "─┤"
+       |> Enum.map(&String.duplicate("-", &1))
+       |> Enum.join("-+-")) <>
+      "-+"
   end
 
   # ---------------------------------------------------------------------------
@@ -220,10 +238,16 @@ defmodule Tau.Markdown do
 
   defp render_inline_node(text) when is_binary(text), do: text
 
-  defp render_inline_node({"em", _attrs, children, _meta}), do: "*" <> render_inline(children) <> "*"
+  # Ratatouille 0.5.1's `label` widget renders flat text — no inline
+  # attribute interpretation, no ANSI escape support. Embedding `**bold**`
+  # markers as visible literals leaks markdown source to the user. Until
+  # the TUI moves off Ratatouille (or Ratatouille gains rich text), strip
+  # emphasis markers and surface the body text only. Inline code keeps
+  # the backticks because they're a useful visual cue and an ASCII
+  # character.
+  defp render_inline_node({"em", _attrs, children, _meta}), do: render_inline(children)
 
-  defp render_inline_node({"strong", _attrs, children, _meta}),
-    do: "**" <> render_inline(children) <> "**"
+  defp render_inline_node({"strong", _attrs, children, _meta}), do: render_inline(children)
 
   defp render_inline_node({"code", _attrs, children, _meta}),
     do: "`" <> render_inline(children) <> "`"
