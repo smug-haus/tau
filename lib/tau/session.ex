@@ -29,6 +29,15 @@ defmodule Tau.Session do
   alias Tau.Session.Events
   alias Tau.Provider.Event, as: PEvent
   alias Tau.Settings.Cache, as: SettingsCache
+  # SPEC-CODING-AGENT (#191): coding-agent session mode. The FSM hosts
+  # a parallel `:coding_agent_streaming` state. When `data.coding_agent`
+  # is non-nil, user messages route through `Tau.CodingAgent.Dispatcher`
+  # instead of `data.provider.stream/3`; the dispatcher's normalized
+  # events fold into `data.messages` as `%Assistant{}` / `%ToolResult{}`
+  # so the existing TUI render path, persistence, and `/resume` apply
+  # unchanged (D-037).
+  alias Tau.CodingAgent.Event, as: CAEvent
+  alias Tau.CodingAgent.Workspace, as: CAWorkspace
 
   # #17: name of the synthetic FSM-internal tool the model emits to
   # activate a discovered skill. Not registered as a `Tau.Tool` module
@@ -381,6 +390,24 @@ defmodule Tau.Session do
     provider_ctx = opts[:provider_ctx] || %{}
     persistence = opts[:persistence] || Tau.Persistence.impl()
     preload = opts[:preload_events] || []
+    # SPEC-CODING-AGENT §4 B1 / D-037: coding-agent session mode. When
+    # `:coding_agent` is set the FSM routes user messages through the
+    # `:coding_agent_streaming` state. CLI flag overrides settings;
+    # settings provides the deployment-wide default.
+    coding_agent =
+      opts[:coding_agent] ||
+        coding_agent_from_settings()
+
+    coding_agent_workspace_backend =
+      opts[:coding_agent_workspace_backend] ||
+        if(coding_agent, do: CAWorkspace.resolve_default_backend(cwd), else: nil)
+
+    coding_agent_workspace_opts = opts[:coding_agent_workspace_opts] || []
+    # SPEC-CODING-AGENT §4 B1: per-run knobs for the coding-agent
+    # adapter. Mirrors `:provider_ctx` (ADR-0002) — not persisted, not
+    # propagated to forks/resumes. Tests use this to thread a Replay
+    # fixture into the adapter without touching settings or env.
+    coding_agent_ctx = opts[:coding_agent_ctx] || %{}
 
     case persistence.open(id,
            cwd: cwd,
@@ -513,7 +540,48 @@ defmodule Tau.Session do
           max_tool_iterations:
             opts[:max_tool_iterations] ||
               get_in(SettingsCache.get(), [:session, :max_tool_iterations]) ||
-              20
+              20,
+          # SPEC-CODING-AGENT (#191):
+          #
+          # `coding_agent` — adapter module or nil. When set, user
+          # messages route to `:coding_agent_streaming`.
+          #
+          # `coding_agent_workspace_backend` — pluggable backend module
+          # (`Workspace.Git` for repo-detected, `Workspace.Cwd`
+          # otherwise). Resolved at init time from `cwd`; lazily
+          # `prepare/2`'d on the first `:coding_agent_streaming`
+          # transition so a session that never runs an agent pays no
+          # worktree cost.
+          #
+          # `coding_agent_workspace_opts` — extra opts threaded through
+          # to `Workspace.prepare/1` (e.g. `:state_dir` overrides in
+          # tests).
+          #
+          # `coding_agent_workspace` — the prepared `%Workspace{}` once
+          # established; persists across turns within the same session
+          # so the agent keeps editing the same isolated branch.
+          # Cleaned up in `terminate/3`.
+          #
+          # `coding_agent_dispatcher` — pid of the currently-running
+          # dispatcher, or nil. Holds the cancel target for
+          # `:cancel` in `:coding_agent_streaming`.
+          #
+          # `coding_agent_pending` — the in-progress `%Assistant{}`
+          # being assembled from dispatcher events. Finalized on `Done`.
+          #
+          # `coding_agent_blocks` — ordered content-block accumulator
+          # for the in-progress assistant message. AssistantText events
+          # append to a single text block (per turn); ToolUse events
+          # append `%{type: :tool_call, ...}` blocks. Mirrors the
+          # provider-side `Assembler`'s `:order` semantics.
+          coding_agent: coding_agent,
+          coding_agent_ctx: coding_agent_ctx,
+          coding_agent_workspace_backend: coding_agent_workspace_backend,
+          coding_agent_workspace_opts: coding_agent_workspace_opts,
+          coding_agent_workspace: nil,
+          coding_agent_dispatcher: nil,
+          coding_agent_pending: nil,
+          coding_agent_blocks: []
         }
 
         {:ok, :awaiting_user, data}
@@ -524,8 +592,19 @@ defmodule Tau.Session do
   end
 
   @impl :gen_statem
-  def terminate(reason, _state, %{persistence: p, persist_handle: h, id: id}) do
+  def terminate(reason, _state, %{persistence: p, persist_handle: h, id: id} = data) do
     p.close(h)
+
+    # SPEC-CODING-AGENT D-032 + Workspace cleanup. Runs on every
+    # terminate path — normal exit, crash, supervisor shutdown — so
+    # the worktree never leaks across BEAM restarts. Best-effort and
+    # idempotent (no-op when workspace is nil or already cleaned).
+    if Map.get(data, :coding_agent_dispatcher) do
+      pid = data.coding_agent_dispatcher
+      if Process.alive?(pid), do: Tau.CodingAgent.Dispatcher.cancel(pid)
+    end
+
+    CAWorkspace.cleanup(Map.get(data, :coding_agent_workspace))
 
     broadcast(id, %Events.SessionEnd{session_id: id, reason: reason})
 
@@ -705,6 +784,52 @@ defmodule Tau.Session do
     end
   end
 
+  # ── coding-agent streaming (SPEC-CODING-AGENT §4 B1 / D-037) ─────
+  #
+  # Parallel to `:start_provider`. Spins up a dispatcher under
+  # `Tau.CodingAgent.Supervisor`, hands it the prepared workspace
+  # path, and consumes the normalized event stream. Each event lands
+  # in the FSM mailbox tagged `{:coding_agent_event, pid, struct}` and
+  # is dispatched in `handle_event(:info, {:coding_agent_event, ...},
+  # :coding_agent_streaming, _)`.
+  def handle_event(:internal, :start_coding_agent, :coding_agent_streaming, data) do
+    transition(data.id, data, :coding_agent_streaming)
+
+    :telemetry.execute(
+      [:tau, :session, :coding_agent_streaming, :start],
+      %{system_time: System.system_time()},
+      %{session_id: data.id, agent: data.coding_agent}
+    )
+
+    case ensure_coding_agent_workspace(data) do
+      {:ok, data, workspace_path} ->
+        start_coding_agent_dispatcher(data, workspace_path)
+
+      {:error, reason} ->
+        emit_coding_agent_sync_error(data, reason)
+    end
+  end
+
+  # Forward dispatcher events into the FSM. Stale events (from a
+  # previous run that was cancelled and superseded) are dropped by
+  # the pid mismatch — analogous to `stream_ref` for the provider
+  # path (ADR-0012).
+  def handle_event(
+        :info,
+        {:coding_agent_event, pid, event},
+        :coding_agent_streaming,
+        %{coding_agent_dispatcher: pid} = data
+      ) do
+    handle_coding_agent_event(event, data)
+  end
+
+  # Stale or out-of-order event — dispatcher mismatch. Drop silently;
+  # the dispatcher's `restart: :temporary` guarantees no zombie pid
+  # is resurrected.
+  def handle_event(:info, {:coding_agent_event, _other_pid, _event}, _state, data) do
+    {:keep_state, data}
+  end
+
   # ADR-0012: retryable mid-stream errors fall back to the next provider
   # in `data.fallback_chain_remaining`. Inserted *before* the generic
   # :provider_event clause so a non-empty chain takes over before the
@@ -882,6 +1007,14 @@ defmodule Tau.Session do
       Process.exit(data.command_task, :brutal_kill)
     end
 
+    # SPEC-CODING-AGENT D-032: subprocess lifecycle bound to session.
+    # Cancel the dispatcher cooperatively; it will emit a synthetic
+    # `%Done{exit_status: -2}` event that we ignore here (the cancel
+    # cascade has already broadcast `%Cancelled{}` for the user).
+    if data.coding_agent_dispatcher && Process.alive?(data.coding_agent_dispatcher) do
+      Tau.CodingAgent.Dispatcher.cancel(data.coding_agent_dispatcher)
+    end
+
     broadcast(data.id, %Events.Cancelled{session_id: data.id, reason: :user})
 
     persist_event(data, "cancellation", %{
@@ -907,7 +1040,12 @@ defmodule Tau.Session do
          active_skill: nil,
          # D-027: reset per-turn tool-iteration counter on every
          # return to :awaiting_user, including cancellation.
-         tool_iterations: 0
+         tool_iterations: 0,
+         # SPEC-CODING-AGENT: dispatcher state is per-turn; reset on
+         # cancel. Workspace is per-session — preserved.
+         coding_agent_dispatcher: nil,
+         coding_agent_pending: nil,
+         coding_agent_blocks: []
      }}
   end
 
@@ -1053,7 +1191,15 @@ defmodule Tau.Session do
           |> append_message(msg)
           |> persist_event("user_message", message_to_data(msg))
 
-        handle_event(:internal, :start_provider, :provider_streaming, data)
+        # SPEC-CODING-AGENT (#191) / D-037: route to the coding-agent
+        # dispatcher when one is configured; preserve the legacy
+        # provider path otherwise. The byte-identity guarantee for
+        # the no-coding-agent case lives here.
+        if data.coding_agent do
+          handle_event(:internal, :start_coding_agent, :coding_agent_streaming, data)
+        else
+          handle_event(:internal, :start_provider, :provider_streaming, data)
+        end
     end
   end
 
@@ -1593,6 +1739,24 @@ defmodule Tau.Session do
   # Both atom and string keys are accepted (Settings.Loader uses
   # `keys: :atoms`; Jason leaves *values* as strings, so the resolver
   # is the canonical str → module step).
+  # SPEC-CODING-AGENT §5 / D-037: deployment-wide default for the
+  # coding-agent surface. Read from the merged settings cascade at
+  # session init only — the CLI flag overrides; in-flight sessions
+  # are not affected by mid-session settings reloads (D-007).
+  defp coding_agent_from_settings do
+    settings = SettingsCache.get()
+
+    raw =
+      get_in(settings, [:coding_agent, :default_agent]) ||
+        get_in(settings, ["coding_agent", "default_agent"])
+
+    case raw do
+      nil -> nil
+      mod when is_atom(mod) -> mod
+      str when is_binary(str) -> Tau.CLI.resolve_coding_agent(str)
+    end
+  end
+
   defp lookup_fallback_chain(original_provider) when is_atom(original_provider) do
     settings = Tau.Settings.Cache.get()
 
@@ -1663,6 +1827,457 @@ defmodule Tau.Session do
       %{session_id: data.id, from_state: state}
     )
   end
+
+  # --- Coding-agent streaming (SPEC-CODING-AGENT §4 B1 / D-037) ------------
+  #
+  # Helpers for the `:coding_agent_streaming` FSM state. The split mirrors
+  # the provider path's helpers (Assembler + finalize_assistant +
+  # cancel_provider_task) but operates on `Tau.CodingAgent.Event` instead
+  # of `Tau.Provider.Event`. Folding into a unified message type happens
+  # here so the TUI render, persistence, and `/resume` reuse the provider
+  # path unchanged.
+
+  # Ensure a per-session workspace exists. Re-uses an already-prepared
+  # workspace for subsequent turns within the same session (the worktree
+  # / cwd survives across user turns; only torn down at session end).
+  # Returns `{:ok, data, path}` on success, `{:error, reason}` on failure.
+  defp ensure_coding_agent_workspace(%{coding_agent_workspace: %CAWorkspace{} = ws} = data) do
+    {:ok, data, ws.path}
+  end
+
+  defp ensure_coding_agent_workspace(%{coding_agent_workspace: nil} = data) do
+    backend = data.coding_agent_workspace_backend || CAWorkspace.resolve_default_backend(data.cwd)
+
+    opts =
+      Keyword.merge(
+        [
+          backend: backend,
+          session_id: data.id,
+          cwd: data.cwd
+        ],
+        data.coding_agent_workspace_opts || []
+      )
+
+    case CAWorkspace.prepare(opts) do
+      {:ok, ws} -> {:ok, %{data | coding_agent_workspace: ws}, ws.path}
+      {:error, reason} -> {:error, {:workspace_prepare_failed, reason}}
+    end
+  end
+
+  # Synchronous pre-dispatch error (workspace prepare failed, supervisor
+  # refused to start a dispatcher, …). Surfaces as an `%Assistant{}` with
+  # `stop_reason: :error` and a non-empty content block — mirrors D-009
+  # for the provider path so the existing TUI render path Just Works.
+  defp emit_coding_agent_sync_error(data, reason) do
+    reason_str = describe_coding_agent_error(reason)
+
+    msg =
+      Assistant.new(
+        stop_reason: :error,
+        error_message: reason_str,
+        content: [%{type: :text, text: "Error: " <> reason_str}]
+      )
+
+    data =
+      data
+      |> append_message(msg)
+      |> persist_event("assistant_message", message_to_data(msg))
+
+    broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: msg})
+
+    :telemetry.execute(
+      [:tau, :session, :coding_agent_streaming, :exception],
+      %{system_time: System.system_time()},
+      %{session_id: data.id, agent: data.coding_agent, reason: reason}
+    )
+
+    {:next_state, :awaiting_user,
+     %{data | coding_agent_dispatcher: nil, coding_agent_pending: nil, coding_agent_blocks: []}}
+  end
+
+  # Start a fresh dispatcher under `Tau.CodingAgent.Supervisor` and
+  # broadcast `MessageStart` so the TUI's `:streaming` indicator lights
+  # up immediately (no waiting for the first AssistantText event).
+  defp start_coding_agent_dispatcher(data, workspace_path) do
+    user_text = latest_user_text(data.messages)
+
+    task = %{
+      prompt: user_text,
+      workspace: workspace_path,
+      session_id: data.id,
+      allowed_tools: :all,
+      mcp_servers: [],
+      timeout: :infinity
+    }
+
+    ctx =
+      Map.merge(
+        %{
+          session_id: data.id,
+          request_id: generate_event_id()
+        },
+        data.coding_agent_ctx || %{}
+      )
+
+    args = [
+      adapter: data.coding_agent,
+      task: task,
+      ctx: ctx,
+      subscriber: self()
+    ]
+
+    case Tau.CodingAgent.Supervisor.start_dispatcher(args) do
+      {:ok, pid} ->
+        pending =
+          Assistant.new(
+            provider: data.coding_agent,
+            model: nil,
+            api: :coding_agent,
+            content: []
+          )
+
+        broadcast(data.id, %Events.MessageStart{session_id: data.id, message: pending})
+
+        {:next_state, :coding_agent_streaming,
+         %{
+           data
+           | coding_agent_dispatcher: pid,
+             coding_agent_pending: pending,
+             coding_agent_blocks: []
+         }}
+
+      {:error, reason} ->
+        emit_coding_agent_sync_error(data, {:dispatcher_start_failed, reason})
+    end
+  end
+
+  defp latest_user_text(messages) do
+    # Walk from the end to find the most recent user-supplied text.
+    # The skill/memory injection prepends synthetic User messages with
+    # `metadata.role in [:system, :compaction_summary]`; skip those.
+    messages
+    |> Enum.reverse()
+    |> Enum.find_value("", fn
+      %User{metadata: %{role: r}} when r in [:system, :compaction_summary] ->
+        nil
+
+      %User{content: c} when is_binary(c) ->
+        c
+
+      %User{content: blocks} when is_list(blocks) ->
+        Enum.map_join(blocks, "\n", fn
+          %{type: :text, text: t} -> t
+          %{"type" => "text", "text" => t} -> t
+          _ -> ""
+        end)
+
+      _ ->
+        nil
+    end)
+  end
+
+  # ── Event-by-event handlers (D-031: pattern match on struct module).
+  #
+  # AssistantText accumulates into a single text block per turn (or
+  # restarts when a `turn` jump is observed). ToolUse and ToolResult
+  # emit their own messages so the assembled assistant message reflects
+  # the agent's actual content shape, matching the provider path. Cost
+  # and FileEdit emit telemetry; Cost is also NOT yet aggregated into
+  # session cost totals (Team D's scope). Error / Done finalize.
+
+  defp handle_coding_agent_event(%CAEvent.Start{} = ev, data) do
+    :telemetry.execute(
+      [:tau, :session, :coding_agent_streaming, :adapter_start],
+      %{system_time: System.system_time()},
+      %{session_id: data.id, agent: data.coding_agent, version: ev.version}
+    )
+
+    {:keep_state, data}
+  end
+
+  defp handle_coding_agent_event(%CAEvent.AssistantText{text: t}, data) do
+    blocks = append_assistant_text(data.coding_agent_blocks, t)
+    pending = %{data.coding_agent_pending | content: blocks}
+
+    broadcast(data.id, %Events.MessageUpdate{
+      session_id: data.id,
+      event: %CAEvent.AssistantText{text: t},
+      message: pending
+    })
+
+    {:keep_state, %{data | coding_agent_blocks: blocks, coding_agent_pending: pending}}
+  end
+
+  defp handle_coding_agent_event(%CAEvent.ToolUse{id: id, name: name, input: input}, data) do
+    # Anthropic-compatible content-block shape — same as the provider
+    # path's `%{type: :tool_call, ...}` blocks the Assembler emits.
+    block = %{type: :tool_call, id: id, name: name, arguments: input || %{}}
+    blocks = data.coding_agent_blocks ++ [block]
+    pending = %{data.coding_agent_pending | content: blocks}
+
+    broadcast(data.id, %Events.MessageUpdate{
+      session_id: data.id,
+      event: %CAEvent.ToolUse{id: id, name: name, input: input},
+      message: pending
+    })
+
+    # ToolStart broadcast mirrors the provider path so existing TUI /
+    # audit subscribers see the same tool-call surface regardless of
+    # which event source produced it (D-031).
+    broadcast(data.id, %Events.ToolStart{
+      session_id: data.id,
+      tool_call_id: id,
+      name: name,
+      arguments: input || %{}
+    })
+
+    {:keep_state, %{data | coding_agent_blocks: blocks, coding_agent_pending: pending}}
+  end
+
+  defp handle_coding_agent_event(
+         %CAEvent.ToolResult{tool_use_id: tool_id, content: content, is_error: is_err},
+         data
+       ) do
+    # ToolResult is a separate message in Anthropic's wire format. We
+    # finalise the current assistant message (so the user can see what
+    # the agent said BEFORE the tool result), append a ToolResult
+    # message, broadcast ToolEnd, then start a new pending assistant
+    # message for any subsequent AssistantText.
+    {data, _} = flush_pending_assistant(data, :tool_use)
+
+    tool_result =
+      ToolResult.new(
+        tool_call_id: tool_id,
+        # ToolUse may not have been observed (some adapters emit
+        # ToolResult standalone); we don't have the tool name here, so
+        # fall back to "tool" — matches Anthropic's permissive shape.
+        tool_name: tool_name_for(data, tool_id),
+        content: content,
+        is_error: is_err
+      )
+
+    data =
+      data
+      |> append_message(tool_result)
+      |> persist_event("tool_result", tool_result_to_data(tool_result))
+
+    broadcast(data.id, %Events.ToolEnd{
+      session_id: data.id,
+      tool_call_id: tool_id,
+      result: tool_result
+    })
+
+    # Start a fresh assistant message for any further AssistantText
+    # the agent emits before `Done`.
+    pending =
+      Assistant.new(
+        provider: data.coding_agent,
+        model: nil,
+        api: :coding_agent,
+        content: []
+      )
+
+    broadcast(data.id, %Events.MessageStart{session_id: data.id, message: pending})
+
+    {:keep_state, %{data | coding_agent_pending: pending, coding_agent_blocks: []}}
+  end
+
+  defp handle_coding_agent_event(%CAEvent.FileEdit{path: path, kind: kind}, data) do
+    :telemetry.execute(
+      [:tau, :session, :coding_agent_streaming, :file_edit],
+      %{system_time: System.system_time()},
+      %{session_id: data.id, agent: data.coding_agent, path: path, kind: kind}
+    )
+
+    {:keep_state, data}
+  end
+
+  defp handle_coding_agent_event(%CAEvent.Cost{} = cost, data) do
+    # Team D will fold this into session cost totals; for now we just
+    # surface telemetry so observers (tau doctor, future TUI panel)
+    # can see it. The hook below is the deliberate extension point.
+    :telemetry.execute(
+      [:tau, :session, :coding_agent_streaming, :cost],
+      %{
+        system_time: System.system_time(),
+        duration_ms: cost.duration_ms,
+        usd: cost.usd || 0.0
+      },
+      %{session_id: data.id, agent: data.coding_agent, tokens: cost.tokens}
+    )
+
+    {:keep_state, maybe_apply_cost_hook(data, cost)}
+  end
+
+  defp handle_coding_agent_event(%CAEvent.Error{reason: reason, recoverable: rec?}, data) do
+    reason_str = describe_coding_agent_error(reason)
+
+    if rec? do
+      # Recoverable: stash an error-content block so the user sees
+      # *something* and let the dispatcher continue.
+      blocks =
+        data.coding_agent_blocks ++ [%{type: :text, text: "[adapter error] " <> reason_str}]
+
+      pending = %{data.coding_agent_pending | content: blocks, error_message: reason_str}
+
+      broadcast(data.id, %Events.MessageUpdate{
+        session_id: data.id,
+        event: %CAEvent.Error{reason: reason, recoverable: rec?},
+        message: pending
+      })
+
+      {:keep_state, %{data | coding_agent_blocks: blocks, coding_agent_pending: pending}}
+    else
+      # Non-recoverable: the dispatcher will follow with a synthetic
+      # Done. Mark the pending message and let the Done finaliser
+      # render. We don't transition here — Done does the FSM move.
+      pending = %{
+        data.coding_agent_pending
+        | error_message: reason_str,
+          stop_reason: :error
+      }
+
+      {:keep_state, %{data | coding_agent_pending: pending}}
+    end
+  end
+
+  defp handle_coding_agent_event(%CAEvent.Done{} = done, data) do
+    finalize_coding_agent_turn(done, data)
+  end
+
+  defp handle_coding_agent_event(_other, data), do: {:keep_state, data}
+
+  # Build / extend the in-progress text block. AssistantText events
+  # within one turn concatenate into a single text content block — this
+  # mirrors how Anthropic's stream-json folds text deltas.
+  defp append_assistant_text(blocks, t) when is_binary(t) do
+    case List.last(blocks) do
+      %{type: :text, text: existing} ->
+        Enum.drop(blocks, -1) ++ [%{type: :text, text: existing <> t}]
+
+      _ ->
+        blocks ++ [%{type: :text, text: t}]
+    end
+  end
+
+  # Push the current pending assistant message into `data.messages`,
+  # persist, broadcast `MessageEnd`. Leaves the FSM state untouched
+  # (caller decides). Returns `{data, msg}`.
+  defp flush_pending_assistant(%{coding_agent_pending: nil} = data, _stop_reason),
+    do: {data, nil}
+
+  defp flush_pending_assistant(data, stop_reason) do
+    msg = %{
+      data.coding_agent_pending
+      | content:
+          ensure_visible_assistant_content(data.coding_agent_blocks, data.coding_agent_pending),
+        stop_reason: data.coding_agent_pending.stop_reason || stop_reason
+    }
+
+    data =
+      data
+      |> append_message(msg)
+      |> persist_event("assistant_message", message_to_data(msg))
+
+    broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: msg})
+
+    {data, msg}
+  end
+
+  # Mirrors the Assembler's `ensure_visible_content/1` so an
+  # error-with-empty-content message still surfaces a text block to the
+  # TUI (D-009 invariant preserved on the coding-agent path).
+  defp ensure_visible_assistant_content([], %{stop_reason: :error, error_message: em})
+       when is_binary(em) and em != "" do
+    [%{type: :text, text: "Error: " <> em}]
+  end
+
+  defp ensure_visible_assistant_content([], %{stop_reason: :error}) do
+    [%{type: :text, text: "Error: coding-agent ended with no content"}]
+  end
+
+  defp ensure_visible_assistant_content([], _pending) do
+    [%{type: :text, text: "(empty response)"}]
+  end
+
+  defp ensure_visible_assistant_content(blocks, _pending), do: blocks
+
+  defp finalize_coding_agent_turn(%CAEvent.Done{exit_status: status} = done, data) do
+    stop_reason =
+      cond do
+        data.coding_agent_pending && data.coding_agent_pending.stop_reason == :error -> :error
+        # Synthetic cancel sentinel (D-032).
+        status == -2 -> :aborted
+        # Synthetic dispatcher / adapter death.
+        status == -1 -> :error
+        status == 0 -> :end_turn
+        true -> :error
+      end
+
+    # Inject the final_message as a trailing text block if the agent
+    # supplied one and we don't already have content covering it.
+    blocks =
+      case done.final_message do
+        nil -> data.coding_agent_blocks
+        "" -> data.coding_agent_blocks
+        text -> append_assistant_text(data.coding_agent_blocks, "\n" <> text)
+      end
+
+    data = %{data | coding_agent_blocks: blocks}
+
+    {data, _msg} = flush_pending_assistant(data, stop_reason)
+
+    :telemetry.execute(
+      [:tau, :session, :coding_agent_streaming, :stop],
+      %{system_time: System.system_time()},
+      %{
+        session_id: data.id,
+        agent: data.coding_agent,
+        exit_status: status,
+        stop_reason: stop_reason
+      }
+    )
+
+    {:next_state, :awaiting_user,
+     %{
+       data
+       | coding_agent_dispatcher: nil,
+         coding_agent_pending: nil,
+         coding_agent_blocks: []
+     }}
+  end
+
+  # Recover a tool name from the in-progress message's ToolUse blocks
+  # for a given `tool_use_id`. Falls back to "tool" if the ToolUse
+  # event wasn't observed (some adapters elide it for cheap tools).
+  defp tool_name_for(data, tool_use_id) do
+    blocks = (data.coding_agent_pending && data.coding_agent_pending.content) || []
+
+    Enum.find_value(blocks, "tool", fn
+      %{type: :tool_call, id: ^tool_use_id, name: n} -> n
+      _ -> nil
+    end)
+  end
+
+  # Extension point for Team D's cost-piping work. Today a no-op; the
+  # `Cost` event already produces telemetry above. When Team D's
+  # aggregator lands they can replace this body with a call into the
+  # session-cost tracker.
+  defp maybe_apply_cost_hook(data, _cost), do: data
+
+  # Translate a coding-agent error reason into a user-visible string.
+  # Mirrors `describe_provider_error/1` for the provider path.
+  defp describe_coding_agent_error({:workspace_prepare_failed, reason}),
+    do: "Workspace preparation failed: " <> inspect(reason)
+
+  defp describe_coding_agent_error({:dispatcher_start_failed, reason}),
+    do: "Coding-agent dispatcher failed to start: " <> inspect(reason)
+
+  defp describe_coding_agent_error(:cancelled), do: "cancelled"
+  defp describe_coding_agent_error(:inactivity_timeout), do: "Coding-agent inactivity timeout"
+
+  defp describe_coding_agent_error(other) when is_binary(other), do: other
+  defp describe_coding_agent_error(other), do: inspect(other)
 
   # --- Hook payload --------------------------------------------------------
   #

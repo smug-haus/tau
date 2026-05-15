@@ -221,7 +221,19 @@ defmodule Tau.CLI do
           about: "Launch the interactive TUI",
           options: [
             provider: [short: "-p", long: "--provider", help: "Provider id"],
-            model: [short: "-m", long: "--model", help: "Model id"]
+            model: [short: "-m", long: "--model", help: "Model id"],
+            # SPEC-CODING-AGENT (#191) — session-mode coding-agent surface.
+            # When set, the TUI's "Send" routes user messages to the
+            # named coding-agent (e.g. `claude_code`, `replay`) via the
+            # `Tau.CodingAgent.Dispatcher` and the FSM's
+            # `:coding_agent_streaming` state, in place of the provider
+            # path. Default `nil` preserves the legacy `Tau.Provider`
+            # path byte-identically.
+            coding_agent: [
+              long: "--coding-agent",
+              help:
+                "Run the TUI in coding-agent session mode (claude_code|replay|<Module>); skips the provider path"
+            ]
           ]
         ]
       ]
@@ -355,12 +367,31 @@ defmodule Tau.CLI do
     []
     |> tui_put(:provider, opts[:provider], &resolve_provider/1)
     |> tui_put(:model, opts[:model], & &1)
+    |> tui_put(:coding_agent, opts[:coding_agent], &resolve_coding_agent/1)
   end
 
   defp tui_opts(_), do: []
 
   defp tui_put(opts, _key, nil, _xform), do: opts
   defp tui_put(opts, key, value, xform), do: Keyword.put(opts, key, xform.(value))
+
+  # SPEC-CODING-AGENT §4 B1 / D-031: adapters are addressed by atom in
+  # tau's runtime (the FSM's `data.coding_agent` is an atom module).
+  # Mirrors `resolve_provider/1`'s pattern: known short names map to
+  # concrete modules; anything else is treated as a `Tau.CodingAgents.<X>`
+  # module reference. Used by Optimus value -> module conversion when
+  # building `Tau.TUI.RuntimeOpts`.
+  @doc false
+  def resolve_coding_agent(nil), do: nil
+  def resolve_coding_agent("claude_code"), do: Tau.CodingAgents.ClaudeCode
+  def resolve_coding_agent("claudecode"), do: Tau.CodingAgents.ClaudeCode
+  def resolve_coding_agent("replay"), do: Tau.CodingAgents.Replay
+
+  def resolve_coding_agent(other) when is_binary(other) do
+    Module.concat(["Tau", "CodingAgents", String.capitalize(other)])
+  end
+
+  def resolve_coding_agent(mod) when is_atom(mod), do: mod
 
   defp resolve_provider(nil), do: Tau.Provider.default()
   defp resolve_provider("anthropic"), do: Tau.Providers.Anthropic

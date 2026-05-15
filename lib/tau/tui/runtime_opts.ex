@@ -19,6 +19,10 @@ defmodule Tau.TUI.RuntimeOpts do
     * `:provider` — provider module atom (e.g. `Tau.Providers.Replay`)
     * `:model` — model id string
     * `:provider_ctx` — provider-scoped runtime context map (ADR-0002)
+    * `:coding_agent` — coding-agent adapter module atom (e.g.
+      `Tau.CodingAgents.ClaudeCode`). When set, the TUI's user-message
+      path routes through `Tau.CodingAgent.Dispatcher` instead of the
+      provider stream (SPEC-CODING-AGENT §4 B1).
   """
 
   @key {Tau.TUI, :runtime_opts}

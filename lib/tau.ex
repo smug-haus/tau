@@ -62,6 +62,22 @@ defmodule Tau do
       `:session` pins it for the session's life so a sub-agent cannot
       dismiss its own persona. Has no effect when `:active_skill` is
       `nil`.
+    * `:coding_agent` — module implementing `Tau.CodingAgent`
+      (SPEC-CODING-AGENT). When set, user messages route through the
+      coding-agent dispatcher (FSM state `:coding_agent_streaming`)
+      instead of `provider.stream/3`. Default `nil` preserves the
+      legacy provider path byte-identically. See `--coding-agent` on
+      the CLI for the user-facing surface.
+    * `:coding_agent_ctx` — per-run map threaded into the
+      `Tau.CodingAgent` adapter's `ctx` argument. Same shape as
+      `:provider_ctx` (ADR-0002): not persisted, not propagated to
+      forks/resumes. Tests use this to thread Replay fixtures.
+    * `:coding_agent_workspace_backend` — override the workspace
+      backend (`Tau.CodingAgent.Workspace.Git` /
+      `Tau.CodingAgent.Workspace.Cwd`). Default: Git when invoked
+      inside a repo, Cwd otherwise.
+    * `:coding_agent_workspace_opts` — extra opts (e.g. `:state_dir`)
+      passed through to `Tau.CodingAgent.Workspace.prepare/1`.
   """
   @spec start_session(keyword()) :: {:ok, session_id()} | {:error, term()}
   def start_session(opts \\ []) do
