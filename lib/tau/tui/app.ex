@@ -42,6 +42,13 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         |> put_if(:provider, Map.get(runtime_opts, :provider))
         |> put_if(:model, Map.get(runtime_opts, :model))
         |> put_if(:provider_ctx, Map.get(runtime_opts, :provider_ctx))
+        # SPEC-CODING-AGENT §4 B1 / D-037: when the user invoked tau
+        # with `--coding-agent <name>`, the session FSM routes user
+        # messages through the coding-agent dispatcher instead of
+        # `data.provider.stream/3`. The TUI's submit path is unchanged
+        # (`Tau.send/2` → cast → FSM); the routing decision lives in
+        # `Tau.Session.process_user_message/2`.
+        |> put_if(:coding_agent, Map.get(runtime_opts, :coding_agent))
 
       {:ok, ^session_id} = Tau.start_session(start_opts)
 
@@ -51,7 +58,8 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         transcript: [],
         tool_output: [],
         status: :idle,
-        last_assistant: nil
+        last_assistant: nil,
+        coding_agent: Map.get(runtime_opts, :coding_agent)
       }
     end
 
@@ -242,12 +250,21 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
           content:
             "session: " <>
               model.session_id <>
+              status_bar_coding_agent(model) <>
               " | status: " <>
               to_string(model.status) <>
               " | <Enter> submit · <Esc> cancel · <Ctrl-C> quit"
         )
       end
     end
+
+    # SPEC-CODING-AGENT §4 B1: when the TUI was launched with
+    # `--coding-agent`, surface the adapter in the status bar so the
+    # user can tell at a glance that "Send" is routed through a
+    # subprocess agent rather than the configured `Tau.Provider`.
+    defp status_bar_coding_agent(%{coding_agent: nil}), do: ""
+    defp status_bar_coding_agent(%{coding_agent: mod}), do: " | agent: " <> inspect(mod)
+    defp status_bar_coding_agent(_), do: ""
 
     # D-026 ([C51-B3]): a solid block cursor (U+2588 "█") MUST be appended
     # after the current input so the user can see the insertion point.

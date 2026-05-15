@@ -155,6 +155,19 @@ defmodule Tau.Settings.Schema do
             "enum" => ~w(env keychain_mac keychain_linux keychain_windows auto)
           }
         }
+      },
+      # SPEC-CODING-AGENT (#191) / D-037: deployment-wide default for
+      # the coding-agent session-mode surface. `default_agent` is a
+      # short name resolved via `Tau.CLI.resolve_coding_agent/1`
+      # (e.g. `"claude_code"`, `"replay"`). The CLI flag
+      # `--coding-agent` overrides; in-flight sessions snapshot at init.
+      "coding_agent" => %{
+        "type" => "object",
+        "additionalProperties" => true,
+        "properties" => %{
+          "default_agent" => %{"type" => ["string", "null"]},
+          "expose_tau_context" => %{"type" => "boolean"}
+        }
       }
     }
   }

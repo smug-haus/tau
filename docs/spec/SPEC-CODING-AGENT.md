@@ -128,6 +128,29 @@ expressing the change.
       }
 ```
 
+**Session-mode integration shape (Phase 1B Team B, resolved 2026-05-15
+toward "FSM-extended").** The session FSM (`lib/tau/session.ex`,
+`:gen_statem`) hosts a new `:coding_agent_streaming` state **parallel
+to** the existing `:provider_streaming` state. The transition rules:
+
+* `:awaiting_user` + user submits + `data.coding_agent != nil` →
+  `:coding_agent_streaming` (skipping `:start_provider`).
+* `:coding_agent_streaming` consumes the dispatcher's normalized
+  events: `Event.AssistantText` folds into a `%Tau.Message.Assistant{}`
+  text content block; `Event.ToolUse` appends an Anthropic-shaped
+  `%{type: :tool_call, ...}` content block; `Event.ToolResult` flushes
+  the in-progress assistant message, appends a `%Tau.Message.ToolResult{}`,
+  broadcasts a `%Events.ToolEnd{}`, and starts a fresh pending
+  assistant message; `Event.FileEdit` and `Event.Cost` emit telemetry
+  only (cost aggregation lands in Phase 1B Team D); `Event.Done`
+  finalizes and returns to `:awaiting_user`.
+
+The normalization step is deliberate: **coding-agent events become
+`Tau.Message` structs**, which means the existing TUI render path,
+JSONL persistence, and `/resume` apply unchanged (D-037). Adapters are
+addressed by atom on `data.coding_agent`; the FSM never switches on
+agent type (D-031).
+
 The returned Enumerable emits `Tau.CodingAgent.Event` structs:
 
 ```
@@ -166,6 +189,25 @@ The dispatcher **guarantees** every run terminates with exactly one
 - Opt-in: dispatcher's cwd via an explicit `--cwd` flag on the Delegate tool / session mode. The user-facing wording is "run in my current directory" so the trade-off is visible.
 - Adapter MUST validate the workspace exists and is a directory before spawn.
 - D-033 stands regardless: the path is **always** explicit in `task.workspace`; the dispatcher MUST NOT silently inherit tau's cwd. Worktree creation is the caller's responsibility (Phase 1B Team B); this contract just enforces the boundary.
+
+**Phase 1B Team B implementation (landed).** Worktree creation lives in
+`Tau.CodingAgent.Workspace`, a pluggable behaviour with two backends:
+
+- `Tau.CodingAgent.Workspace.Git` — default when tau is invoked inside
+  a git repository. Creates a per-session worktree at
+  `~/.tau/worktrees/<session_id>/` on branch
+  `tau/coding-agent/<session_id>`. Cleaned up on session terminate
+  (normal exit, crash, or supervisor shutdown) via
+  `git worktree remove --force`.
+- `Tau.CodingAgent.Workspace.Cwd` — passthrough fallback when tau was
+  invoked outside a git repo, and the surface tests rely on. No state
+  is allocated; cleanup is a no-op. A
+  `[:tau, :coding_agent, :workspace, :git_repo_absent]` telemetry
+  event marks the fallback so `tau doctor` can surface it.
+
+Backend resolution is automatic — the user does not have to think about
+worktree vs cwd. `:coding_agent_workspace_backend` can be passed to
+`Tau.start_session/1` to override (tests use this).
 
 ### B4 — `tau-context` MCP server
 
@@ -210,6 +252,7 @@ The dispatcher **guarantees** every run terminates with exactly one
 | **D-034** | Telemetry parity with `Tau.Provider`. Start/event/stop/exception in the documented shape. |
 | **D-035** | Adapter failures surface in-stream as `%CodingAgent.Event.Error{}` events. Adapters MUST NOT raise for transport, auth, or parse errors. Hard configuration errors (no executable on PATH, malformed argv) may return synchronous `{:error, reason}` from `start/2`. |
 | **D-036** | Auth boundary — tau MUST NOT inject or copy credentials. The subprocess inherits the host user's config dir. Tau MAY check existence and emit a user-actionable "not configured" error. |
+| **D-037** | Coding-agent runs are **first-class sessions**: dispatcher events normalize into `Tau.Message.Assistant{}` / `Tau.Message.ToolResult{}` on ingestion so the session FSM's existing `data.messages` list, JSONL persistence, `%Events.MessageEnd{}` broadcast, TUI render path, and `/resume` apply unchanged. The `:coding_agent_streaming` state lives parallel to `:provider_streaming` and is selected at `process_user_message/2` time when `data.coding_agent != nil`. The no-coding-agent path remains byte-identical to today's provider flow. |
 
 ## 7. Resolved design questions
 
@@ -281,18 +324,32 @@ test/tau/coding_agent/telemetry_test.exs         # D-034 shape
 test/tau/coding_agent/lifecycle_property_test.exs # AC-5 skeleton
 ```
 
+Phase 1B Team B (this PR — landed):
+
+```
+lib/tau/coding_agent/workspace.ex                # behaviour + dispatch
+lib/tau/coding_agent/workspace/git.ex            # per-session worktree backend
+lib/tau/coding_agent/workspace/cwd.ex            # passthrough backend
+lib/tau/cli.ex                                   # --coding-agent flag + resolver
+lib/tau/tui/app.ex                               # plumbs flag through RuntimeOpts
+lib/tau/tui/runtime_opts.ex                      # documented :coding_agent key
+lib/tau/session.ex                               # :coding_agent_streaming state + helpers
+lib/tau/settings/schema.ex                       # coding_agent.default_agent
+test/tau/cli_coding_agent_flag_test.exs          # CLI flag parse + resolver
+test/tau/coding_agent/workspace_test.exs         # worktree create/cleanup
+test/tau/session/coding_agent_streaming_test.exs # FSM drives Replay end-to-end
+```
+
 Phase 1B / Phase 2 (planned):
 
 ```
 lib/tau/coding_agents/claude_code.ex             # first real adapter (Team A)
-lib/tau/cli.ex                                   # --coding-agent flag (Team B)
-lib/tau/coding_agent/workspace.ex                # worktree creation (Team B)
 lib/tau/mcp/servers/tau_context.ex               # tau-context MCP server (Team C)
 lib/tau/cost.ex                                  # adapter-tagged line items (Team D)
 lib/tau/tools/builtin/delegate.ex                # tool surface (Phase 2)
 ```
 
-Total runtime invariants claimed by this spec: **D-031 through D-036** (6).
+Total runtime invariants claimed by this spec: **D-031 through D-037** (7).
 
 ## Appendix B — non-goals discussion
 

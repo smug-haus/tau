@@ -10,7 +10,7 @@ defmodule Tau.CodingAgent do
   tool calls, edits, and (often) cost reporting.
 
   See `docs/spec/SPEC-CODING-AGENT.md` for the design rationale and
-  the D-031..D-036 runtime invariants.
+  the D-031..D-037 runtime invariants.
 
   ## Contract
 
