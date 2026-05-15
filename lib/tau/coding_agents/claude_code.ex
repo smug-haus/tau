@@ -18,8 +18,17 @@ defmodule Tau.CodingAgents.ClaudeCode do
       `task.mcp_servers` is non-empty; tear it down on `cancel/1`
       or stream completion.
     * Open a Port (`:spawn_executable`, `:exit_status`, `:line` of
-      16384 bytes, `:stderr_to_stdout`) and stream its stdout lines
-      through `Tau.CodingAgents.ClaudeCode.StreamJson.decode_line/2`.
+      16384 bytes) and stream its stdout lines through
+      `Tau.CodingAgents.ClaudeCode.StreamJson.decode_line/2`. stderr
+      is intentionally NOT redirected to stdout — banner / warning
+      lines that don't start with `{` would otherwise be parsed as
+      malformed JSON and pollute every transcript with recoverable
+      `:parse_error` events.
+    * Open the Port inside `Stream.resource`'s start_fun so its
+      owner is the drainer process — Port messages MUST route to
+      the `receive` loop that consumes them. (Opening in `start/2`
+      would make the caller — usually the dispatcher GenServer —
+      the owner, and the drainer would never see any data.)
     * Honour `ctx.cancel_flag` between lines — `Port.close/1` + 250ms
       grace + SIGKILL (the dispatcher handles the cancel ladder; here
       we just close the Port cooperatively when the flag flips).
@@ -89,20 +98,22 @@ defmodule Tau.CodingAgents.ClaudeCode do
   end
 
   @impl Tau.CodingAgent
-  def cancel(handle) do
-    # The dispatcher owns the cancel ladder (Port.close → SIGTERM
-    # → 250ms → SIGKILL); this callback is a notification hook.
-    # We accept any handle shape because the dispatcher passes the
-    # drainer pid, not the port.
-    case handle do
-      %{port: port, tempfile: tempfile} ->
-        close_port(port)
-        cleanup_tempfile(tempfile)
-        :ok
-
-      _ ->
-        :ok
-    end
+  def cancel(_handle) do
+    # The dispatcher passes the drainer pid here. Real cleanup
+    # happens in two places, both unaware of the dispatcher:
+    #
+    #   1. Port: opened inside `Stream.resource`'s start_fun (in the
+    #      drainer process). When the dispatcher kills the drainer
+    #      via `Process.exit(:shutdown)`, BEAM closes the Port and
+    #      the OS subprocess receives EOF on stdin.
+    #   2. MCP tempfile: a janitor process spawned at start time
+    #      `Process.monitor`s the drainer and unlinks the tempfile
+    #      on `:DOWN`. This survives `Process.exit(:shutdown)`
+    #      which would otherwise bypass `Stream.resource`'s
+    #      after_fun.
+    #
+    # So `cancel/1` is informational only; do nothing.
+    :ok
   end
 
   # ── workspace validation (D-033) ──────────────────────────────────
@@ -134,6 +145,13 @@ defmodule Tau.CodingAgents.ClaudeCode do
   # ── spawn path ───────────────────────────────────────────────────
 
   defp start_spawn(task, ctx) do
+    # Resolve executable + MCP tempfile synchronously so configuration
+    # errors surface via `{:error, _}` per D-035. The Port itself is
+    # opened lazily inside `Stream.resource`'s start_fun so its owner
+    # is the drainer process (the one that runs the `receive` loop),
+    # not whatever process happened to call `start/2`. Without this
+    # split, real-`claude` runs time out because Port messages route
+    # to the dispatcher mailbox and the drainer never sees them.
     case find_executable() do
       nil ->
         {:error, :claude_not_found}
@@ -145,20 +163,7 @@ defmodule Tau.CodingAgents.ClaudeCode do
 
           {:ok, mcp_path} ->
             argv = Argv.build(task, mcp_config_path: mcp_path)
-
-            port =
-              Port.open({:spawn_executable, exe}, [
-                :binary,
-                :exit_status,
-                :stderr_to_stdout,
-                :hide,
-                :use_stdio,
-                {:line, @line_size},
-                {:args, argv},
-                {:cd, Map.fetch!(task, :workspace)}
-              ])
-
-            stream = stream_from_port(port, mcp_path, ctx)
+            stream = stream_from_port(exe, argv, task, mcp_path, ctx)
             {:ok, stream}
         end
     end
@@ -207,12 +212,34 @@ defmodule Tau.CodingAgents.ClaudeCode do
 
   # ── stream construction (port) ───────────────────────────────────
 
-  defp stream_from_port(port, tempfile, ctx) do
+  defp stream_from_port(exe, argv, task, tempfile, ctx) do
+    workspace = Map.fetch!(task, :workspace)
+
     Stream.resource(
       fn ->
+        # Open the Port HERE — in the drainer process — so Port
+        # messages route to the receive loop in `pull_port_line/1`.
+        # See start_spawn/2 for the rationale.
+        port =
+          Port.open({:spawn_executable, exe}, [
+            :binary,
+            :exit_status,
+            :hide,
+            :use_stdio,
+            {:line, @line_size},
+            {:args, argv},
+            {:cd, workspace}
+          ])
+
+        # Janitor: monitors the drainer (this process) and unlinks
+        # the MCP tempfile on :DOWN. Survives `Process.exit(_, :shutdown)`
+        # which would otherwise bypass `Stream.resource`'s after_fun.
+        janitor = spawn_tempfile_janitor(tempfile, self())
+
         %{
           port: port,
           tempfile: tempfile,
+          janitor: janitor,
           partial: "",
           parser: StreamJson.new(),
           cancel_flag: Map.get(ctx, :cancel_flag),
@@ -224,6 +251,28 @@ defmodule Tau.CodingAgents.ClaudeCode do
       &port_next/1,
       &port_done/1
     )
+  end
+
+  # The janitor is intentionally unsupervised — it's a single-purpose
+  # `Process.monitor` + `File.rm` helper bound to one stream. It exits
+  # `:normal` after cleanup. If the BEAM dies before cleanup, OS-level
+  # /tmp cleanup is moot.
+  defp spawn_tempfile_janitor(nil, _drain_pid), do: nil
+
+  defp spawn_tempfile_janitor(tempfile, drain_pid) when is_binary(tempfile) do
+    spawn(fn ->
+      ref = Process.monitor(drain_pid)
+
+      receive do
+        {:DOWN, ^ref, :process, ^drain_pid, _reason} ->
+          _ = File.rm(tempfile)
+          :ok
+
+        {:cleanup_done, ^drain_pid} ->
+          Process.demonitor(ref, [:flush])
+          :ok
+      end
+    end)
   end
 
   defp port_next(%{done_emitted?: true}), do: {:halt, %{}}
@@ -251,7 +300,13 @@ defmodule Tau.CodingAgents.ClaudeCode do
         {events, parser} = StreamJson.decode_line(full_line, acc.parser)
 
         {events,
-         %{acc | partial: "", parser: parser, tail_text: tail_text(acc.tail_text, full_line)}}
+         %{
+           acc
+           | partial: "",
+             parser: parser,
+             tail_text: tail_text(acc.tail_text, full_line),
+             done_emitted?: acc.done_emitted? or terminal?(events)
+         }}
 
       {^port, {:data, {:noeol, chunk}}} ->
         # A line that exceeded `:line` size. Accumulate and continue.
@@ -267,6 +322,38 @@ defmodule Tau.CodingAgents.ClaudeCode do
     end
   end
 
+  # D-031: %Done{} is terminal — the first one ends the stream. Also
+  # treat a non-recoverable %Error{} as terminal because the dispatcher
+  # synthesises a %Done{} on its tail and we MUST NOT emit anything
+  # after that.
+  defp terminal?(events) when is_list(events) do
+    Enum.any?(events, fn
+      %Event.Done{} -> true
+      %Event.Error{recoverable: false} -> true
+      _ -> false
+    end)
+  end
+
+  defp handle_port_exit(%{done_emitted?: true} = acc, status) do
+    # The parser already produced a terminal event from a `result/*`
+    # line; the post-exit path MUST NOT append another %Error{}
+    # (D-031: Done is terminal — consumers may treat the first %Done{}
+    # as end-of-stream). Drain any partial buffer in case it carries
+    # non-terminal trailing JSON, but suppress synthetic closures.
+    {leftover_events, parser} =
+      if acc.partial != "" do
+        StreamJson.decode_line(acc.partial, acc.parser)
+      else
+        {[], acc.parser}
+      end
+
+    # Filter out anything terminal so we never emit a Done/Error after
+    # the real one.
+    leftover_events = Enum.reject(leftover_events, &terminal_event?/1)
+
+    {leftover_events, %{acc | partial: "", parser: parser, exit_status: status}}
+  end
+
   defp handle_port_exit(acc, status) do
     {leftover_events, parser} =
       if acc.partial != "" do
@@ -277,17 +364,13 @@ defmodule Tau.CodingAgents.ClaudeCode do
 
     acc = %{acc | partial: "", parser: parser}
 
-    # If the parser already saw a `result/*` line it produced a
-    # %Done{} (success) or %Error{recoverable: false} (failure). In
-    # either case the dispatcher takes it from here. But if the
-    # subprocess died without emitting one (e.g. crashed, killed by
-    # signal, exit 127 from spawn races), surface a synthetic
-    # terminal pair via %Error{recoverable: false} so the dispatcher
-    # can synthesise a Done with status -1 (and we keep the original
-    # exit_code in the reason for diagnostics).
+    # No result line ever arrived. Surface a synthetic terminal
+    # %Error{recoverable: false} so the dispatcher can synthesise a
+    # %Done{exit_status: -1} for the consumer.
     closing =
       if status == 0 do
-        # Success exit but no result line. Treat as anomalous.
+        # Success exit but no result line. Anomalous (process exited 0
+        # before flushing stream-json). Surface for diagnostics.
         [
           %Event.Error{
             reason: {:no_result_event, "claude exited 0 without emitting result"},
@@ -303,13 +386,28 @@ defmodule Tau.CodingAgents.ClaudeCode do
     {events, %{acc | done_emitted?: true, exit_status: status}}
   end
 
-  defp port_done(%{port: port, tempfile: tempfile}) do
+  defp terminal_event?(%Event.Done{}), do: true
+  defp terminal_event?(%Event.Error{recoverable: false}), do: true
+  defp terminal_event?(_), do: false
+
+  defp port_done(%{port: port, tempfile: tempfile, janitor: janitor}) do
     close_port(port)
     cleanup_tempfile(tempfile)
+    notify_janitor(janitor)
     :ok
   end
 
   defp port_done(_), do: :ok
+
+  defp notify_janitor(nil), do: :ok
+
+  defp notify_janitor(pid) when is_pid(pid) do
+    if Process.alive?(pid) do
+      Kernel.send(pid, {:cleanup_done, self()})
+    end
+
+    :ok
+  end
 
   defp close_port(nil), do: :ok
 

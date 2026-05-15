@@ -264,19 +264,36 @@ defmodule Tau.CodingAgents.ClaudeCodeTest do
   end
 
   describe "external integration (opt-in via INTEGRATION=1)" do
+    # Skipped by default via `test_helper.exs` exclude list. Run with:
+    #   INTEGRATION=1 mix test --only external
+    # Requires `claude` on PATH and a logged-in account
+    # (`claude /login`).
     @tag :external
     test "spawns real `claude` and round-trips a one-turn prompt" do
-      if System.find_executable("claude") == nil or System.get_env("INTEGRATION") != "1" do
-        # Skipping: requires `claude` on PATH and INTEGRATION=1
-        :ok
-      else
-        task = %{prompt: "say hi", workspace: System.tmp_dir!()}
-        {:ok, stream} = ClaudeCode.start(task, %{inactivity_timeout_ms: 60_000})
-        events = Enum.to_list(stream)
+      assert System.find_executable("claude"),
+             "the :external test requires `claude` on PATH"
 
-        assert Enum.any?(events, &match?(%Event.Start{}, &1))
-        assert match?(%Event.Done{}, List.last(events))
-      end
+      task = %{prompt: "say hi", workspace: System.tmp_dir!()}
+      {:ok, stream} = ClaudeCode.start(task, %{inactivity_timeout_ms: 60_000})
+      events = Enum.to_list(stream)
+
+      assert Enum.any?(events, &match?(%Event.Start{}, &1)),
+             "expected at least one %Start{} event, got: #{inspect(events)}"
+
+      assert match?(%Event.Done{}, List.last(events)),
+             "expected last event to be %Done{}, got: #{inspect(List.last(events))}"
+
+      # D-031: nothing follows the first %Done{}.
+      done_index = Enum.find_index(events, &match?(%Event.Done{}, &1))
+      assert done_index == length(events) - 1, "events after %Done{}: #{inspect(events)}"
+
+      # BLOCKER-3 regression guard: stderr is no longer merged into the
+      # JSON stream, so no banner-line parse errors should appear.
+      refute Enum.any?(events, fn
+               %Event.Error{recoverable: true, reason: {:parse_error, _}} -> true
+               _ -> false
+             end),
+             "stderr leaked into the event stream as parse errors: #{inspect(events)}"
     end
   end
 
