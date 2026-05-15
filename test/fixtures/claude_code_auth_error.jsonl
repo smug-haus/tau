@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"sess-003","tools":[],"model":"claude-sonnet-4-6","cwd":"/tmp","claude_code_version":"2.1.142"}
+{"type":"result","subtype":"error_during_execution","is_error":true,"duration_ms":80,"num_turns":0,"result":"Authentication required. Please run `/login`.","session_id":"sess-003","total_cost_usd":0.0}
