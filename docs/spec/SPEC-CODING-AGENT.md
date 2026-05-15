@@ -94,10 +94,11 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
 - A single turn that simultaneously uses a provider AND a coding agent.
 - Forcing the coding agent to use tau's Read/Edit/Bash tools (see §7 Q1 — currently rejected, may revisit).
 
-## 4. Proposed boundary contracts
+## 4. Boundary contracts
 
-These contracts are **proposed**; treat as targets for the design-review
-pass that converts this draft into Status: Approved.
+These contracts are **locked** as of Phase 1A landing. Amendments require
+a new PR that updates this section AND a follow-on test or invariant
+expressing the change.
 
 ### B1 — dispatcher API
 
@@ -139,6 +140,18 @@ Cost{tokens: map(), usd: float() | nil, duration_ms: integer()}
 Error{reason: term(), recoverable: bool}
 Done{exit_status: integer(), final_message: String.t() | nil}
 ```
+
+**Reserved synthetic `Done.exit_status` sentinels** (emitted by the
+dispatcher when the adapter cannot supply a real exit code; adapters
+MUST NOT emit these values for real subprocess exits):
+
+| Value | Meaning |
+|-------|---------|
+| `-1`  | Unexpected death / inactivity timeout / synchronous `start/2` error / unrecoverable `%Event.Error{}` from adapter |
+| `-2`  | Cooperative cancel via `cancel/1` |
+
+The dispatcher **guarantees** every run terminates with exactly one
+`%Done{}` event so consumers never need to switch on Error-as-terminator.
 
 ### B2 — subprocess transport
 
