@@ -61,6 +61,7 @@ Worktree isolation isolates git refs but **not** absolute-path writes — brief 
 - Document branch decisions before acting.
 - File a GitHub issue before any non-trivial code change; reference as `Closes #N`. See `tau-github-workflow`.
 - Both `critic` and `reviewer` MUST PASS before any PR. See `/pr`.
+- Every agent that reads or writes files MUST be spawned with `isolation: worktree`, and parent's HEAD MUST be on `main` at `origin/main` before every spawn. See `.claude/rules/worktree-discipline.md` for the full pre-spawn checklist, post-completion cleanup discipline, and recovery procedure.
 
 ## Compact Instructions
 
