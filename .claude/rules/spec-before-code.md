@@ -26,8 +26,8 @@ The current spec catalog:
   `lib/tau/coding_agent/`, `lib/tau/coding_agents/`, `lib/tau/cli.ex`
   (the `--coding-agent` flag), `lib/tau/cost.ex` /
   `lib/tau/cost/tracker.ex` (D-038 adapter-tagged line items), or
-  `lib/tau/tools/builtin/delegate.ex` (Phase 2). Triage score 4/5;
-  D-031..D-038 live here.
+  `lib/tau/tools/builtin/delegate.ex` (Phase 2; D-039). Triage score
+  4/5; D-031..D-039 live here.
 
 Future SPECs land here as new components reach triage threshold.
 

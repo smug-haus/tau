@@ -254,6 +254,7 @@ worktree vs cwd. `:coding_agent_workspace_backend` can be passed to
 | **D-036** | Auth boundary — tau MUST NOT inject or copy credentials. The subprocess inherits the host user's config dir. Tau MAY check existence and emit a user-actionable "not configured" error. |
 | **D-037** | Coding-agent runs are **first-class sessions**: dispatcher events normalize into `Tau.Message.Assistant{}` / `Tau.Message.ToolResult{}` on ingestion so the session FSM's existing `data.messages` list, JSONL persistence, `%Events.MessageEnd{}` broadcast, TUI render path, and `/resume` apply unchanged. The `:coding_agent_streaming` state lives parallel to `:provider_streaming` and is selected at `process_user_message/2` time when `data.coding_agent != nil`. The no-coding-agent path remains byte-identical to today's provider flow. |
 | **D-038** | Cost line items MUST be tagged by source so the user sees the split. Each `%Tau.CodingAgent.Event.Cost{}` folds into the session-cost aggregator as a `%Tau.CodingAgent.Cost{}` record carrying the adapter atom (`source/1` yields `"coding_agent.<agent>"`); provider-direct cost continues to land tagged `"provider.<provider>"` via the existing `[:tau, :provider, :request, :stop]` event. The session FSM emits `[:tau, :coding_agent, :cost]` per fold (D-034 parity) and persists a `coding_agent_cost` JSONL event so `/resume` recomputes totals from disk. Cost-folding failures MUST degrade gracefully (D-035): `[:tau, :coding_agent, :cost, :failed]` surfaces the reason but does not crash the session. |
+| **D-039** | Delegate-tool recursion MUST bottom out. `Tau.Tools.Builtin.Delegate` carries a `depth` parameter (default 0) and refuses calls at `depth >= 2`, returning a `ToolResult{is_error: true, details.kind: :depth_exceeded}` synchronously before any dispatcher starts. The same ceiling propagates through the per-run tau-context MCP server's `tau_delegate` tool (`tau_context_max_depth` in `Tau.CodingAgent.Dispatcher.ctx`), so coding-agent-driven re-entry hits the same limit. Each Delegate invocation is **stateless** (no resume id is persisted across calls — SPEC §7 Q5). |
 
 ## 7. Resolved design questions
 
@@ -280,6 +281,8 @@ worktree vs cwd. `:coding_agent_workspace_backend` can be passed to
 - **Both** (independent).
 
 **Resolved: both, but session mode first.** Session mode is the cleaner first user-facing slice and the simpler dispatcher consumer once Phase 1A's substrate exists; the Delegate tool follows in Phase 2. The earlier draft favoured Tool-first because of code-reuse with #32, but session-mode-first gives the user a working `tau --coding-agent` path the day Phase 1B Team B lands, without waiting on the provider conversation plumbing.
+
+**Surface A (session mode)** landed in Phase 1B Team B (#195 — `--coding-agent` flag + `:coding_agent_streaming` FSM state). **Surface B (Delegate tool)** lands in Phase 2 of this issue. The Delegate surface is stateless by design (Q5): each tool call spawns a fresh dispatcher under a per-task git worktree (Q3), invokes the requested adapter, drains the event stream synchronously, and returns the assembled final text + audit-trail (tool uses / tool results / file edits / cost) as a `Tau.Tool.Result`. Recursion is bounded at depth 2 — see D-039.
 
 ### Q3 — Workspace isolation
 
@@ -369,13 +372,16 @@ test/tau/session/coding_agent_resume_test.exs    # %Start.session_id → task.re
 test/tau/coding_agent/telemetry_audit_test.exs   # D-034 audit + :external ClaudeCode parity
 ```
 
-Phase 2 (planned):
+Phase 2 (this PR — landed):
 
 ```
-lib/tau/tools/builtin/delegate.ex                # tool surface (Phase 2)
+lib/tau/tools/builtin/delegate.ex                # Delegate tool — Surface B
+test/tau/tools/builtin/delegate_test.exs         # tool contract + cancel/timeout
+lib/tau/permissions/matchers.ex                  # Glob/Regex arg_for: Delegate(agent)
+config/config.exs                                # builtin_tools registration
 ```
 
-Total runtime invariants claimed by this spec: **D-031 through D-038** (8).
+Total runtime invariants claimed by this spec: **D-031 through D-039** (9).
 
 ## Appendix B — non-goals discussion
 

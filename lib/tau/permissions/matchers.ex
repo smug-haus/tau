@@ -50,6 +50,11 @@ defmodule Tau.Permissions.Matchers.Glob do
   defp arg_for("Read", %{"path" => p}), do: p
   defp arg_for("Write", %{"path" => p}), do: p
   defp arg_for("Edit", %{"path" => p}), do: p
+  # Delegate uses its `agent` field as the permission-scoping handle —
+  # rule writers can express `Delegate(claude_code)` (one adapter) or
+  # `Delegate(*)` (any adapter). The matched value is the bare agent
+  # name; not a path / not a command / not a domain.
+  defp arg_for("Delegate", %{"agent" => a}) when is_binary(a), do: a
   defp arg_for(_, _), do: ""
 
   defp compile(pattern) do
@@ -121,6 +126,7 @@ defmodule Tau.Permissions.Matchers.Regex do
   end
 
   defp arg_for("Bash", %{"command" => c}), do: c
+  defp arg_for("Delegate", %{"agent" => a}) when is_binary(a), do: a
   defp arg_for(_, %{"path" => p}), do: p
   defp arg_for(_, %{"url" => u}), do: u
   defp arg_for(_, _), do: ""

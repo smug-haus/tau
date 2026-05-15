@@ -33,6 +33,28 @@ defmodule Tau.Permissions.EvaluatorTest do
       rs = rule_set(%{ask: ["Write"]})
       assert Evaluator.evaluate(rs, "Write", %{}, %{}) == :ask
     end
+
+    # SPEC-CODING-AGENT §7 Q2: the Delegate tool scopes by the
+    # `agent` arg (e.g. `Delegate(claude_code)`), reusing the Glob
+    # matcher's `arg_for/2` extension landed alongside this PR.
+    test "Delegate(agent) routes through the Glob matcher's agent arg" do
+      rs = rule_set(%{allow: ["Delegate(claude_code)"]})
+
+      assert Evaluator.evaluate(rs, "Delegate", %{"agent" => "claude_code"}, %{}) == :allow
+      assert Evaluator.evaluate(rs, "Delegate", %{"agent" => "replay"}, %{}) == :ask
+    end
+
+    test "Delegate(*) blanket-allows any agent" do
+      rs = rule_set(%{allow: ["Delegate(*)"]})
+      assert Evaluator.evaluate(rs, "Delegate", %{"agent" => "claude_code"}, %{}) == :allow
+      assert Evaluator.evaluate(rs, "Delegate", %{"agent" => "replay"}, %{}) == :allow
+    end
+
+    test "deny: Delegate(agent) wins over allow: Delegate(*)" do
+      rs = rule_set(%{allow: ["Delegate(*)"], deny: ["Delegate(replay)"]})
+      assert Evaluator.evaluate(rs, "Delegate", %{"agent" => "claude_code"}, %{}) == :allow
+      assert Evaluator.evaluate(rs, "Delegate", %{"agent" => "replay"}, %{}) == :deny
+    end
   end
 
   describe "modes" do
