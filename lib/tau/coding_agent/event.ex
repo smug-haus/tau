@@ -21,14 +21,24 @@ defmodule Tau.CodingAgent.Event do
   """
 
   defmodule Start do
-    @moduledoc "Coding-agent process has started. Identifies the adapter and the OS pid."
+    @moduledoc """
+    Coding-agent process has started. Identifies the adapter and the
+    OS pid.
+
+    `session_id` is the adapter-side session identifier (e.g. Claude
+    Code's `system/init.session_id`). Captured by the session FSM
+    into `data.coding_agent_state` so subsequent runs of the same tau
+    session can pass it back as `task.resume_id` (SPEC §7 Q5).
+    Nil for adapters that don't expose a session concept.
+    """
     @enforce_keys [:agent]
-    defstruct [:agent, :version, :pid]
+    defstruct [:agent, :version, :pid, :session_id]
 
     @type t :: %__MODULE__{
             agent: atom(),
             version: String.t() | nil,
-            pid: pid() | non_neg_integer() | nil
+            pid: pid() | non_neg_integer() | nil,
+            session_id: String.t() | nil
           }
   end
 

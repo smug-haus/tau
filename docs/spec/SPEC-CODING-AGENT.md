@@ -253,6 +253,7 @@ worktree vs cwd. `:coding_agent_workspace_backend` can be passed to
 | **D-035** | Adapter failures surface in-stream as `%CodingAgent.Event.Error{}` events. Adapters MUST NOT raise for transport, auth, or parse errors. Hard configuration errors (no executable on PATH, malformed argv) may return synchronous `{:error, reason}` from `start/2`. |
 | **D-036** | Auth boundary — tau MUST NOT inject or copy credentials. The subprocess inherits the host user's config dir. Tau MAY check existence and emit a user-actionable "not configured" error. |
 | **D-037** | Coding-agent runs are **first-class sessions**: dispatcher events normalize into `Tau.Message.Assistant{}` / `Tau.Message.ToolResult{}` on ingestion so the session FSM's existing `data.messages` list, JSONL persistence, `%Events.MessageEnd{}` broadcast, TUI render path, and `/resume` apply unchanged. The `:coding_agent_streaming` state lives parallel to `:provider_streaming` and is selected at `process_user_message/2` time when `data.coding_agent != nil`. The no-coding-agent path remains byte-identical to today's provider flow. |
+| **D-038** | Cost line items MUST be tagged by source so the user sees the split. Each `%Tau.CodingAgent.Event.Cost{}` folds into the session-cost aggregator as a `%Tau.CodingAgent.Cost{}` record carrying the adapter atom (`source/1` yields `"coding_agent.<agent>"`); provider-direct cost continues to land tagged `"provider.<provider>"` via the existing `[:tau, :provider, :request, :stop]` event. The session FSM emits `[:tau, :coding_agent, :cost]` per fold (D-034 parity) and persists a `coding_agent_cost` JSONL event so `/resume` recomputes totals from disk. Cost-folding failures MUST degrade gracefully (D-035): `[:tau, :coding_agent, :cost, :failed]` surfaces the reason but does not crash the session. |
 
 ## 7. Resolved design questions
 
@@ -354,15 +355,27 @@ test/tau/coding_agent/tau_context/router_test.exs # JSON-RPC dispatch
 test/tau/coding_agent/tau_context/tools_test.exs  # tool implementations
 ```
 
-Phase 1B / Phase 2 (planned):
+Phase 1B Team D (this PR — landed):
 
 ```
-lib/tau/coding_agents/claude_code.ex             # first real adapter (Team A)
-lib/tau/cost.ex                                  # adapter-tagged line items (Team D)
+lib/tau/coding_agent/cost.ex                     # adapter-tagged cost record + JSONL round-trip
+lib/tau/coding_agent/event.ex                    # %Start{} gains :session_id (resume plumbing)
+lib/tau/coding_agents/claude_code/stream_json.ex # populates %Start.session_id from system/init
+lib/tau/coding_agents/replay.ex                  # JSONL fixtures round-trip :session_id
+lib/tau/cost/tracker.ex                          # second handler folds coding-agent rows into ETS
+lib/tau/session.ex                               # capture session_id; cost fold-in; resume_id; coding_agent_state
+test/tau/session/coding_agent_cost_test.exs      # D-038 fold + telemetry + JSONL
+test/tau/session/coding_agent_resume_test.exs    # %Start.session_id → task.resume_id
+test/tau/coding_agent/telemetry_audit_test.exs   # D-034 audit + :external ClaudeCode parity
+```
+
+Phase 2 (planned):
+
+```
 lib/tau/tools/builtin/delegate.ex                # tool surface (Phase 2)
 ```
 
-Total runtime invariants claimed by this spec: **D-031 through D-037** (7).
+Total runtime invariants claimed by this spec: **D-031 through D-038** (8).
 
 ## Appendix B — non-goals discussion
 

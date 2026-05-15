@@ -101,10 +101,14 @@ defmodule Tau.CodingAgents.ClaudeCode.StreamJson do
   defp translate(%{"type" => "system", "subtype" => "init"} = obj, state) do
     state = %{state | last_session_id: obj["session_id"]}
 
+    # SPEC-CODING-AGENT §7 Q5: surface the Claude-Code-side session id
+    # in `%Event.Start{}` so the session FSM can persist it for the
+    # next launch's `task.resume_id` (Team D).
     event = %Event.Start{
       agent: :claude_code,
       version: obj["claude_code_version"],
-      pid: nil
+      pid: nil,
+      session_id: obj["session_id"]
     }
 
     {[event], state}
