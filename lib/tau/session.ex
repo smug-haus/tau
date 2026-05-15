@@ -581,7 +581,23 @@ defmodule Tau.Session do
           coding_agent_workspace: nil,
           coding_agent_dispatcher: nil,
           coding_agent_pending: nil,
-          coding_agent_blocks: []
+          coding_agent_blocks: [],
+          # SPEC-CODING-AGENT §7 Q5 / D-037: adapter-side session
+          # state. Today carries the Claude-Code-side `session_id`
+          # captured from `%Event.Start{}` so the next dispatcher
+          # launch can thread it as `task.resume_id`. Persisted to
+          # JSONL via the `coding_agent_session` event so `/resume`
+          # recovers it across BEAM restarts.
+          coding_agent_state:
+            coding_agent_state_from_preload(preload) ||
+              %{session_id: nil, agent: nil},
+          # SPEC-CODING-AGENT §7 Q4 / D-038: per-session list of
+          # adapter-tagged cost records, folded from `%Event.Cost{}`
+          # events. Sums the dollar/token/duration split for the
+          # active session. Persisted line-by-line via the
+          # `coding_agent_cost` JSONL event so `/resume` can fold
+          # the totals back.
+          coding_agent_costs: coding_agent_costs_from_preload(preload)
         }
 
         {:ok, :awaiting_user, data}
@@ -1070,6 +1086,11 @@ defmodule Tau.Session do
       |> maybe_replace(:original_provider, opts[:provider])
       |> maybe_replace(:model, opts[:model])
       |> merge_provider_ctx(opts[:provider_ctx])
+      # SPEC-CODING-AGENT (#191): reconfigure may also adjust the
+      # coding-agent per-run ctx. Used by tests to thread a different
+      # Replay fixture across turns; the production surface lets the
+      # TUI swap inactivity-timeout / cancel-flag without restarting.
+      |> maybe_replace(:coding_agent_ctx, opts[:coding_agent_ctx])
 
     :telemetry.execute(
       [:tau, :session, :reconfigure],
@@ -1901,14 +1922,35 @@ defmodule Tau.Session do
   defp start_coding_agent_dispatcher(data, workspace_path) do
     user_text = latest_user_text(data.messages)
 
+    # SPEC-CODING-AGENT §7 Q5: thread the captured adapter-side
+    # session_id (from a previous %Event.Start{}) as
+    # `task.resume_id`. Claude Code picks up where the prior tau
+    # turn left off; other adapters that don't honour `resume_id`
+    # ignore the field. Emits a telemetry event so the audit test
+    # can assert the resume path was taken.
+    resume_id = get_in(data, [:coding_agent_state, :session_id])
+
     task = %{
       prompt: user_text,
       workspace: workspace_path,
       session_id: data.id,
+      resume_id: resume_id,
       allowed_tools: :all,
       mcp_servers: [],
       timeout: :infinity
     }
+
+    if is_binary(resume_id) do
+      :telemetry.execute(
+        [:tau, :coding_agent, :resume],
+        %{system_time: System.system_time()},
+        %{
+          session_id: data.id,
+          agent: data.coding_agent,
+          adapter_session_id: resume_id
+        }
+      )
+    end
 
     ctx =
       Map.merge(
@@ -1991,6 +2033,14 @@ defmodule Tau.Session do
       %{system_time: System.system_time()},
       %{session_id: data.id, agent: data.coding_agent, version: ev.version}
     )
+
+    # SPEC-CODING-AGENT §7 Q5: capture the adapter-side session_id.
+    # Persist a `coding_agent_session` JSONL event so a later
+    # `Tau.resume/1` can recover it and pass it as `task.resume_id`
+    # on the next dispatcher launch. Implementation deliberately
+    # lives below the other handle_coding_agent_event/2 clauses to
+    # keep them grouped (compiler warning otherwise).
+    data = maybe_capture_coding_agent_session(data, ev)
 
     {:keep_state, data}
   end
@@ -2259,11 +2309,100 @@ defmodule Tau.Session do
     end)
   end
 
-  # Extension point for Team D's cost-piping work. Today a no-op; the
-  # `Cost` event already produces telemetry above. When Team D's
-  # aggregator lands they can replace this body with a call into the
-  # session-cost tracker.
-  defp maybe_apply_cost_hook(data, _cost), do: data
+  # SPEC-CODING-AGENT §7 Q4 / D-038: fold `%Event.Cost{}` into
+  # session totals as an adapter-tagged line item. Three side
+  # effects, all wrapped so a failure in one MUST NOT crash the
+  # session (D-035):
+  #
+  # 1. Build a `%Tau.CodingAgent.Cost{}` and append to
+  #    `data.coding_agent_costs` so the in-process aggregator
+  #    has the line item.
+  # 2. Persist a `coding_agent_cost` JSONL event so `/resume` can
+  #    recompute totals from disk.
+  # 3. Emit `[:tau, :coding_agent, :cost]` telemetry so
+  #    `Tau.Cost.Tracker` folds the tokens into its ETS table
+  #    alongside provider-direct costs.
+  defp maybe_apply_cost_hook(data, %CAEvent.Cost{} = cost) do
+    try do
+      tagged =
+        Tau.CodingAgent.Cost.from_event(cost,
+          agent: data.coding_agent,
+          session_id: data.id,
+          adapter_session_id: get_in(data, [:coding_agent_state, :session_id])
+        )
+
+      data = persist_event(data, "coding_agent_cost", Tau.CodingAgent.Cost.to_jsonl(tagged))
+
+      :telemetry.execute(
+        [:tau, :coding_agent, :cost],
+        %{
+          system_time: System.system_time(),
+          usd: tagged.usd || 0.0,
+          duration_ms: tagged.duration_ms,
+          input_tokens: tagged.input_tokens,
+          output_tokens: tagged.output_tokens,
+          cache_read: tagged.cache_read,
+          cache_write: tagged.cache_write
+        },
+        %{
+          session_id: data.id,
+          agent: data.coding_agent,
+          model: data.model,
+          source: Tau.CodingAgent.Cost.source(tagged),
+          adapter_session_id: tagged.adapter_session_id
+        }
+      )
+
+      %{data | coding_agent_costs: (data.coding_agent_costs || []) ++ [tagged]}
+    rescue
+      e ->
+        # D-035: cost-folding errors don't crash the session. Surface
+        # diagnostically and continue with the original data.
+        :telemetry.execute(
+          [:tau, :coding_agent, :cost, :failed],
+          %{system_time: System.system_time()},
+          %{
+            session_id: data.id,
+            agent: data.coding_agent,
+            reason: Exception.message(e)
+          }
+        )
+
+        data
+    end
+  end
+
+  # SPEC-CODING-AGENT §7 Q5: only persist when (a) the adapter
+  # actually surfaced a session_id and (b) it's new. This avoids
+  # appending a JSONL line per turn for adapters (e.g. Replay) that
+  # don't expose a session concept, and avoids duplicate writes
+  # when the same id arrives twice.
+  defp maybe_capture_coding_agent_session(data, %CAEvent.Start{session_id: nil}), do: data
+
+  defp maybe_capture_coding_agent_session(data, %CAEvent.Start{session_id: sid} = ev)
+       when is_binary(sid) do
+    state = data.coding_agent_state || %{session_id: nil, agent: nil}
+
+    if state.session_id == sid do
+      data
+    else
+      new_state = %{state | session_id: sid, agent: data.coding_agent}
+
+      data
+      |> Map.put(:coding_agent_state, new_state)
+      |> persist_event("coding_agent_session", %{
+        "session_id" => sid,
+        "agent" => agent_to_string(data.coding_agent),
+        "version" => ev.version
+      })
+    end
+  end
+
+  defp maybe_capture_coding_agent_session(data, _ev), do: data
+
+  defp agent_to_string(nil), do: nil
+  defp agent_to_string(agent) when is_atom(agent), do: Atom.to_string(agent)
+  defp agent_to_string(bin) when is_binary(bin), do: bin
 
   # Translate a coding-agent error reason into a user-visible string.
   # Mirrors `describe_provider_error/1` for the provider path.
@@ -2670,6 +2809,50 @@ defmodule Tau.Session do
   end
 
   defp event_to_message(_), do: nil
+
+  # SPEC-CODING-AGENT §7 Q5: recover the most recent
+  # adapter-side session_id from a preload event log so a resumed
+  # session can pass it back as `task.resume_id`. Walks events in
+  # order so the LAST `coding_agent_session` wins (Claude Code
+  # rotates session_id across restarts in some failure modes).
+  defp coding_agent_state_from_preload(preload) when is_list(preload) do
+    Enum.reduce(preload, nil, fn
+      %{"kind" => "coding_agent_session", "data" => %{} = d}, _acc ->
+        %{
+          session_id: d["session_id"],
+          agent: agent_to_atom(d["agent"])
+        }
+
+      _, acc ->
+        acc
+    end)
+  end
+
+  defp coding_agent_state_from_preload(_), do: nil
+
+  # SPEC-CODING-AGENT §7 Q4 / D-038: fold persisted `coding_agent_cost`
+  # events back into in-memory records so the resumed session's
+  # cost panel doesn't lose history. Skips malformed lines silently
+  # (forward-compat — newer schema fields land here as additions).
+  defp coding_agent_costs_from_preload(preload) when is_list(preload) do
+    preload
+    |> Enum.filter(&match?(%{"kind" => "coding_agent_cost"}, &1))
+    |> Enum.map(fn %{"data" => d} -> Tau.CodingAgent.Cost.from_jsonl(d) end)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp coding_agent_costs_from_preload(_), do: []
+
+  defp agent_to_atom(nil), do: nil
+
+  defp agent_to_atom(bin) when is_binary(bin) do
+    String.to_existing_atom(bin)
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp agent_to_atom(a) when is_atom(a), do: a
+  defp agent_to_atom(_), do: nil
 
   # --- Compaction helpers --------------------------------------------------
   #

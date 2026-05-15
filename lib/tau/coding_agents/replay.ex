@@ -169,7 +169,8 @@ defmodule Tau.CodingAgents.Replay do
         %Event.Start{
           agent: atomize(m["agent"], :replay),
           version: m["version"],
-          pid: m["pid"]
+          pid: m["pid"],
+          session_id: m["session_id"]
         }
 
       "assistant_text" ->
