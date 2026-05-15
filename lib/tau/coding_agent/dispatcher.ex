@@ -65,6 +65,8 @@ defmodule Tau.CodingAgent.Dispatcher do
   use GenServer, restart: :temporary
 
   alias Tau.CodingAgent.Event
+  alias Tau.CodingAgent.TauContext
+  alias Tau.Settings.Cache, as: SettingsCache
 
   @default_inactivity_timeout_ms 120_000
   @cancel_exit_status -2
@@ -92,6 +94,7 @@ defmodule Tau.CodingAgent.Dispatcher do
       :drain_pid,
       :drain_ref,
       :inactivity_timer,
+      :tau_context_pid,
       cancelled?: false,
       done_emitted?: false,
       events_count: 0
@@ -175,6 +178,12 @@ defmodule Tau.CodingAgent.Dispatcher do
 
   @impl true
   def handle_continue(:start_adapter, state) do
+    # SPEC-CODING-AGENT [C5-B4]: the per-run tau-context MCP server
+    # MUST be reachable BEFORE the adapter invokes its first MCP
+    # tool. Start it (when enabled) and merge the resulting entry
+    # into `task.mcp_servers` BEFORE calling adapter.start/2.
+    state = maybe_start_tau_context(state)
+
     case safe_start(state.adapter, state.task, state.ctx) do
       {:ok, stream} ->
         {drain_pid, drain_ref} = spawn_drainer(stream, self())
@@ -318,9 +327,77 @@ defmodule Tau.CodingAgent.Dispatcher do
   def handle_info(_other, state), do: {:noreply, state}
 
   @impl true
-  def terminate(_reason, _state), do: :ok
+  def terminate(_reason, state) do
+    stop_tau_context(state)
+    :ok
+  end
 
   # ── internals ─────────────────────────────────────────────────
+
+  # SPEC-CODING-AGENT §4 B4: read the
+  # `coding_agent.expose_tau_context` setting (default true).
+  # Start a per-run MCP server and thread its mcp_servers entry
+  # into `task.mcp_servers` for the adapter to forward to the
+  # child subprocess. Failure to start the server is NOT fatal:
+  # we log via telemetry and continue with the original task —
+  # the agent simply won't see tau context tools.
+  defp maybe_start_tau_context(state) do
+    if expose_tau_context?() do
+      args = [
+        owner: self(),
+        session_id: Map.get(state.ctx, :session_id),
+        cwd: Map.get(state.task, :workspace),
+        max_depth: Map.get(state.ctx, :tau_context_max_depth, 2)
+      ]
+
+      case TauContext.start_link(args) do
+        {:ok, pid} ->
+          entry = TauContext.mcp_servers_entry(pid)
+          existing = state.task |> Map.get(:mcp_servers, []) |> List.wrap()
+          task = Map.put(state.task, :mcp_servers, [entry | existing])
+          %{state | task: task, tau_context_pid: pid}
+
+        {:error, reason} ->
+          :telemetry.execute(
+            [:tau, :coding_agent, :tau_context, :start_failed],
+            %{system_time: System.system_time()},
+            %{reason: reason, adapter: state.adapter}
+          )
+
+          state
+      end
+    else
+      state
+    end
+  end
+
+  defp stop_tau_context(%State{tau_context_pid: nil}), do: :ok
+
+  defp stop_tau_context(%State{tau_context_pid: pid}) when is_pid(pid) do
+    if Process.alive?(pid) do
+      TauContext.stop(pid)
+    end
+
+    :ok
+  end
+
+  defp expose_tau_context? do
+    settings =
+      try do
+        SettingsCache.get()
+      rescue
+        _ -> %{}
+      catch
+        _, _ -> %{}
+      end
+
+    settings
+    |> Map.get(:coding_agent, %{})
+    |> case do
+      %{} = ca -> Map.get(ca, :expose_tau_context, Map.get(ca, "expose_tau_context", true))
+      _ -> true
+    end
+  end
 
   defp safe_start(adapter, task, ctx) do
     adapter.start(task, ctx)

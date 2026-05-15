@@ -340,11 +340,24 @@ test/tau/coding_agent/workspace_test.exs         # worktree create/cleanup
 test/tau/session/coding_agent_streaming_test.exs # FSM drives Replay end-to-end
 ```
 
+Phase 1B Team C (this PR — landed):
+
+```
+lib/tau/coding_agent/tau_context.ex              # Bandit child-spec + start_link
+lib/tau/coding_agent/tau_context/auth.ex         # bearer-token mint + Plug auth
+lib/tau/coding_agent/tau_context/router.ex       # JSON-RPC 2.0 router (Plug)
+lib/tau/coding_agent/tau_context/tools.ex        # tools/list + tools/call
+test/tau/coding_agent/tau_context_test.exs       # supervisor + lifecycle
+test/tau/coding_agent/tau_context/auth_test.exs  # auth Plug contract
+test/tau/coding_agent/tau_context/auth_routing_test.exs # mount-point routing
+test/tau/coding_agent/tau_context/router_test.exs # JSON-RPC dispatch
+test/tau/coding_agent/tau_context/tools_test.exs  # tool implementations
+```
+
 Phase 1B / Phase 2 (planned):
 
 ```
 lib/tau/coding_agents/claude_code.ex             # first real adapter (Team A)
-lib/tau/mcp/servers/tau_context.ex               # tau-context MCP server (Team C)
 lib/tau/cost.ex                                  # adapter-tagged line items (Team D)
 lib/tau/tools/builtin/delegate.ex                # tool surface (Phase 2)
 ```

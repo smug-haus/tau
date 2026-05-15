@@ -64,6 +64,13 @@ defmodule Tau.MixProject do
       # PubSub for session event fanout
       {:phoenix_pubsub, "~> 2.1"},
 
+      # HTTP listener for the per-run `tau-context` MCP server that
+      # tau spawns alongside each coding-agent subprocess
+      # (SPEC-CODING-AGENT §4 B4). Bound to 127.0.0.1 only, with a
+      # per-run secret token for auth.
+      {:plug, "~> 1.14"},
+      {:plug_cowboy, "~> 2.6"},
+
       # Filesystem watcher
       {:file_system, "~> 1.0"},
 
