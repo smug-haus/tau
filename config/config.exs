@@ -17,7 +17,10 @@ config :tau,
     Tau.Tools.Builtin.Edit,
     Tau.Tools.Builtin.Bash,
     # ADR-0014/0015 — sub-agent spawn primitive (#32).
-    Tau.Tools.Builtin.Agent
+    Tau.Tools.Builtin.Agent,
+    # SPEC-CODING-AGENT §7 Q2 Surface B — delegate to an external
+    # coding agent (Claude Code, …) via the Phase 1 substrate (#191).
+    Tau.Tools.Builtin.Delegate
   ]
 
 config :logger, :console,
