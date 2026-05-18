@@ -15,24 +15,28 @@ defmodule Tau.Application do
        skills, sessions, MCP servers.
     4. **Settings.Cache + Watcher** — persistent_term-backed
        config.
-    5. **Permissions.RuleSet** — subscribes to settings PubSub,
+    5. **Memory.Supervisor** — `Tau.Memory.Store.SQLite` owner process;
+       runs schema migrations in `init/1` before reporting `:ok`.
+       Must follow Watcher (needs `data_dir/0`) and precede Finch
+       (embedding pipeline in PR3 uses Finch). D-045/D-046/D-047.
+    6. **Permissions.RuleSet** — subscribes to settings PubSub,
        compiles rules from Settings.Cache.
-    6. **Finch** — HTTP client, used by providers.
-    7. **Providers.RateLimiter.Supervisor** — per-provider token-bucket
+    7. **Finch** — HTTP client, used by providers.
+    8. **Providers.RateLimiter.Supervisor** — per-provider token-bucket
        limiters (ADR-0011). Boots after Finch (limiters wrap Finch
        sends) and before the task supervisors.
-    8. **Task supervisors** — for tool dispatch.
-    9. **Extensions.Loader** — registers tools/hooks/commands
-       defined by extensions.
-    10. **MCP.Supervisor** — MCP server connections.
-    11. **CodingAgent.Supervisor** — DynamicSupervisor for
+    9. **Task supervisors** — for tool dispatch.
+    10. **Extensions.Loader** — registers tools/hooks/commands
+        defined by extensions.
+    11. **MCP.Supervisor** — MCP server connections.
+    12. **CodingAgent.Supervisor** — DynamicSupervisor for
         `Tau.CodingAgent.Dispatcher` runs (SPEC-CODING-AGENT).
         Sits between MCP (which the future `tau-context` server
         depends on) and Sessions (which may reference dispatchers
         by id).
-    12. **TUI.Supervisor** — empty DynamicSupervisor; hosts the
+    13. **TUI.Supervisor** — empty DynamicSupervisor; hosts the
         Ratatouille runtime subtree when the TUI is invoked (ADR-0018).
-    13. **Sessions.Supervisor** — dynamic supervisor for session
+    14. **Sessions.Supervisor** — dynamic supervisor for session
         FSMs (must be last; it's the only consumer of all the
         above).
 
@@ -53,6 +57,12 @@ defmodule Tau.Application do
       Tau.Registries,
       Tau.Settings.Cache,
       Tau.Settings.Watcher,
+      # Memory store (SPEC-MEMORY-STORE, ADR-0020, D-045/D-046/D-047).
+      # Must follow Settings.Watcher (data_dir/0 depends on it) and precede
+      # Finch (embedding pipeline uses Finch in PR3). Under :rest_for_one a
+      # crash cascades forward — intentional; a broken memory store should
+      # not allow new sessions to start.
+      Tau.Memory.Supervisor,
       Tau.Permissions.RuleSet,
       {Finch, name: Tau.Providers.Finch},
       Tau.Providers.RateLimiter.Supervisor,

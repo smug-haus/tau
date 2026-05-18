@@ -38,6 +38,13 @@ The current spec catalog:
   in `lib/tau/application.ex`. Triage score 5/5; D-029, D-030, D-043,
   D-044 live here.
 
+- `docs/spec/SPEC-MEMORY-STORE.md` — the persistent memory store (SQLite via
+  Exqlite; write/delete in PR1, FTS5 search in PR2, sqlite-vec semantic search
+  in PR3). Mandatory for any PR touching `lib/tau/memory/store.ex`,
+  `lib/tau/memory/store/sqlite.ex`, `lib/tau/memory/migrations.ex`,
+  `lib/tau/memory/supervisor.ex`, or the `Tau.Memory.Supervisor` entry in
+  `lib/tau/application.ex`. Triage score 3/5; D-045, D-046, D-047 live here.
+
 Future SPECs land here as new components reach triage threshold.
 
 ## What this rule requires
