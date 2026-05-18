@@ -76,6 +76,13 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         # never fires for spaces, and they were silently dropped. Map
         # the special key to a literal space here.
         {:event, %{key: 32}} -> append_input(model, " ")
+        # D-003 ([C7] / AC-4): `q` is context-aware. On an empty prompt it
+        # quits (matching the old quit_events behaviour); on a non-empty
+        # prompt it appends `q` like any other character. The bare
+        # `{:ch, ?q}` entry has been removed from `quit_events` so that
+        # Ratatouille forwards the event here instead of consuming it
+        # unconditionally at the runtime layer.
+        {:event, %{ch: ?q}} -> quit_or_append(model)
         {:event, %{ch: ch}} when ch != 0 -> append_input(model, <<ch::utf8>>)
         {:event, %{key: 127}} -> backspace(model)
         {:event, %{key: 8}} -> backspace(model)
@@ -225,7 +232,11 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       opts = [
         app: __MODULE__,
         interval: @tick_interval,
-        quit_events: [{:ch, ?q}, {:key, 3}]
+        # D-003 ([C7] / AC-4): bare `{:ch, ?q}` is intentionally absent.
+        # The `q` key is forwarded to `update/2` where it is handled
+        # context-sensitively: quit on empty prompt, append on non-empty.
+        # Ctrl-C (`{:key, 3}`) remains unconditional.
+        quit_events: [{:key, 3}]
       ]
 
       case Tau.TUI.Supervisor.start_runtime(opts) do
@@ -278,6 +289,24 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         label(content: "> " <> model.input <> @cursor_glyph)
       end
     end
+
+    # D-003 ([C7] / AC-4): context-aware quit. On an empty prompt, stop the
+    # Ratatouille runtime supervisor so the TUI exits cleanly. The supervisor
+    # is located via the registered `Tau.TUI.Supervisor` DynamicSupervisor
+    # rather than storing its pid in the model (which would require a
+    # Ratatouille API extension). On a non-empty prompt, append "q" as
+    # ordinary input.
+    defp quit_or_append(%{input: ""} = model) do
+      spawn(fn ->
+        Tau.TUI.Supervisor
+        |> DynamicSupervisor.which_children()
+        |> Enum.each(fn {_, pid, _, _} -> Supervisor.stop(pid) end)
+      end)
+
+      model
+    end
+
+    defp quit_or_append(model), do: append_input(model, "q")
 
     defp append_input(model, ch), do: %{model | input: model.input <> ch}
 

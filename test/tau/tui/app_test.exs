@@ -25,6 +25,37 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       }
     end
 
+    describe "update/2 — quit ergonomics (D-003 / AC-4)" do
+      # AC-4 / D-003: `q` on an empty prompt triggers quit (returns the model
+      # unchanged — the actual supervisor stop is async); `q` on a non-empty
+      # prompt appends the character. The headless tui_smoke AC-H4 test
+      # ("literal q does not quit") cannot run until the plain-release
+      # entrypoint fix (#211 / PR #217) is merged; these unit tests verify
+      # the `update/2` contract that AC-H4 depends on.
+
+      test "q on empty prompt returns model unchanged (quit is async side-effect)" do
+        m = %{model() | input: ""}
+        next = App.update(m, {:event, %{ch: ?q}})
+        # Model is returned as-is; the async spawn stops the supervisor.
+        assert next.input == ""
+        assert next.status == m.status
+        assert next.transcript == m.transcript
+      end
+
+      test "q on non-empty prompt appends q to input" do
+        m = %{model() | input: "hel"}
+        next = App.update(m, {:event, %{ch: ?q}})
+        assert next.input == "helq"
+      end
+
+      test "q on non-empty prompt does not change status or transcript" do
+        m = %{model() | input: "hello"}
+        next = App.update(m, {:event, %{ch: ?q}})
+        assert next.status == m.status
+        assert next.transcript == m.transcript
+      end
+    end
+
     describe "update/2 — Cancelled" do
       test "moves status into a cancelled string and appends a transcript line" do
         event = %Events.Cancelled{session_id: "sess-test", reason: :user_request}
