@@ -69,6 +69,18 @@ defmodule Tau.Session.Events do
     @type t :: %__MODULE__{}
   end
 
+  defmodule SystemNotice do
+    @moduledoc """
+    Broadcast when a built-in FSM slash command (e.g. `/model`) needs
+    to surface a message to the user without starting a provider turn.
+    The `text` field contains a human-readable notice line appended to
+    the TUI transcript.
+    """
+    @enforce_keys [:session_id, :text]
+    defstruct [:session_id, :text]
+    @type t :: %__MODULE__{}
+  end
+
   defmodule SessionEnd do
     @enforce_keys [:session_id]
     defstruct [:session_id, :reason]
