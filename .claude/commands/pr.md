@@ -13,7 +13,23 @@ task lifecycle.
 
 Steps in order — **do not skip**.
 
-## Step 1 — Compute the diff
+## Step 1 — Verify the branch is rebased onto `origin/main`
+
+Before the gate runs, the PR branch MUST sit on top of current
+`origin/main` so that `git diff main...HEAD` reflects only this PR's own
+changes — not unrelated work merged to `main` since the branch forked.
+
+```sh
+git fetch origin
+git merge-base --is-ancestor origin/main HEAD
+```
+
+If `git merge-base --is-ancestor` exits non-zero, the branch is behind
+or diverged. Rebase it (`git rebase origin/main`) and re-run the check;
+if the rebase cannot complete cleanly, **abort** with a clear message
+naming the conflict — do not proceed to the gate on a stale branch.
+
+## Step 2 — Compute the diff
 
 Determine the base branch (default `main`):
 
@@ -24,14 +40,14 @@ git log main..HEAD --oneline
 
 Fail loudly if `HEAD` has no commits ahead of `main`.
 
-## Step 2 — Identify the linked issue
+## Step 3 — Identify the linked issue
 
 Scan commit messages for `Closes #N` / `Refs #N`. Read the issue body via
 `gh issue view <N>` to recover the original spec. If no issue is linked,
 **abort** — the `tau-github-workflow` rule requires every non-trivial
 change to be issue-driven.
 
-## Step 3 — Spawn `critic` (design veto)
+## Step 4 — Spawn `critic` (design veto)
 
 NOTE: `.claude/agents/critic.md` cannot be auto-registered by Claude Code from
 a project-local path. Invoke via the Task tool **without** `subagent_type`.
@@ -56,7 +72,7 @@ Parse `ok` from the JSON object on the agent's **last line** (`{"ok": true}` or
 `{"ok": false, "reason": "..."}`). The critic does not emit a `verdict` field —
 use `ok` only.
 
-## Step 4 — On `critic` veto
+## Step 5 — On `critic` veto
 
 If `critic` returned `{"ok": false, ...}`:
 
@@ -72,9 +88,9 @@ If `critic` returned `{"ok": false, ...}`:
    ```
    Initialise the file with `{"task_id": "<branch-name>", "attempts": []}` if it does not exist.
 2. Print the full reason to the user.
-3. **Abort.** Do not proceed to step 5; do not run `gh pr create`.
+3. **Abort.** Do not proceed to step 6; do not run `gh pr create`.
 
-## Step 5 — Spawn `reviewer` (quality veto)
+## Step 6 — Spawn `reviewer` (quality veto)
 
 NOTE: `.claude/agents/reviewer.md` cannot be auto-registered by Claude Code from
 a project-local path. Invoke via the Task tool **without** `subagent_type`.
@@ -100,11 +116,11 @@ Parse `ok` from the JSON object on the agent's **last line** (`{"ok": true}` or
 immediately before the final line containing a `"verdict": "PASS|FAIL|PARTIAL"`
 field — extract that for the solution tree and PR body.
 
-## Step 6 — On `reviewer` veto
+## Step 7 — On `reviewer` veto
 
-Same as step 4, but with `kill_reason: "reviewer_blocked: <reason>"`.
+Same as step 5, but with `kill_reason: "reviewer_blocked: <reason>"`.
 
-## Step 7 — Both passed
+## Step 8 — Both passed
 
 Append to the solution tree with `outcome: "pr_gates_passed"` and the
 two verdicts. Compose the PR body:
