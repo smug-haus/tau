@@ -188,7 +188,8 @@ defmodule Tau.Providers.Shared.FinchStream do
     %{s | partial: partial, pending: s.pending ++ events}
   end
 
-  defp handle({:data, chunk}, %{status: n} = s, _decoder) when is_integer(n) and n not in 200..299 do
+  defp handle({:data, chunk}, %{status: n} = s, _decoder)
+       when is_integer(n) and n not in 200..299 do
     %{s | error_body: (s.error_body || "") <> chunk}
   end
 
