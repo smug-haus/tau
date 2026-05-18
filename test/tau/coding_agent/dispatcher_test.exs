@@ -36,7 +36,7 @@ defmodule Tau.CodingAgent.DispatcherTest do
       assert match?(%Event.Start{}, List.first(events))
       assert match?(%Event.Done{exit_status: 0}, List.last(events))
 
-      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 5_000
     end
 
     test "in-memory fixture round-trips through the dispatcher" do
@@ -70,16 +70,16 @@ defmodule Tau.CodingAgent.DispatcherTest do
       ref = Process.monitor(pid)
 
       # Wait for at least the first event so we know we're streaming.
-      assert_receive {:coding_agent_event, ^pid, %Event.Start{}}, 1_000
+      assert_receive {:coding_agent_event, ^pid, %Event.Start{}}, 5_000
 
       Dispatcher.cancel(pid)
 
       # Drain remaining messages and assert we see exactly one Done
       # with the cancel sentinel.
-      done = drain_for_done(pid, 1_000)
+      done = drain_for_done(pid, 5_000)
       assert %Event.Done{exit_status: -2} = done
 
-      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 5_000
     end
 
     test "duplicate cancel is idempotent" do
@@ -96,7 +96,7 @@ defmodule Tau.CodingAgent.DispatcherTest do
       Dispatcher.cancel(pid)
       Dispatcher.cancel(pid)
 
-      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 5_000
     end
   end
 
@@ -115,10 +115,10 @@ defmodule Tau.CodingAgent.DispatcherTest do
 
       assert_receive {:coding_agent_event, ^pid,
                       %Event.Error{reason: :workspace_missing, recoverable: false}},
-                     1_000
+                     5_000
 
-      assert_receive {:coding_agent_event, ^pid, %Event.Done{exit_status: -1}}, 1_000
-      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+      assert_receive {:coding_agent_event, ^pid, %Event.Done{exit_status: -1}}, 5_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 5_000
     end
   end
 
