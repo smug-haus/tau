@@ -29,6 +29,10 @@ defmodule Tau.Settings.Vault.Keychain.Windows do
   def put(_name, _value), do: {:error, :not_implemented}
 
   @impl true
+  @spec delete(String.t()) :: {:error, :not_implemented}
+  def delete(_name), do: {:error, :not_implemented}
+
+  @impl true
   @spec list() :: {:error, :not_implemented}
   def list, do: {:error, :not_implemented}
 end

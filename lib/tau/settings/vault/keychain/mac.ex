@@ -69,6 +69,22 @@ defmodule Tau.Settings.Vault.Keychain.Mac do
   end
 
   @impl true
+  @spec delete(String.t()) :: :ok | {:error, term()}
+  def delete(name) when is_binary(name) do
+    if File.exists?(@security) do
+      args = ["delete-generic-password", "-s", @service, "-a", name]
+
+      case System.cmd(@security, args, stderr_to_stdout: false) do
+        {_, 0} -> :ok
+        {_, 44} -> {:error, :not_found}
+        {_, code} -> {:error, {:security_exit, code}}
+      end
+    else
+      {:error, :security_unavailable}
+    end
+  end
+
+  @impl true
   @spec list() :: {:error, :not_supported}
   def list, do: {:error, :not_supported}
 end
