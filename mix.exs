@@ -121,11 +121,44 @@ defmodule Tau.MixProject do
   defp releases do
     [
       tau: [
+        # Release version is stamped with the git short-hash so Burrito's
+        # extraction-cache path (`<app>_erts-<erts>_<release-version>`) is
+        # unique per commit — a fresh build is never served from a stale
+        # extraction (issue #200). The `+<sha>` form is SemVer build
+        # metadata; `@version` (the Hex package version) stays unchanged.
+        version: @version <> git_descriptor(),
         include_executables_for: [:unix],
         applications: [tau: :permanent],
         steps: [:assemble, &maybe_burrito/1]
       ]
     ]
+  end
+
+  # Compile-time git descriptor for the release version. Mirrors
+  # `Tau.Build.descriptor/2`; the duplication is intentional — `mix.exs` is
+  # compiled before `lib/` and cannot reference `Tau.Build`.
+  # Clean → `"+<sha>"`, dirty → `"+<sha>.dirty"`, no git → `""`.
+  defp git_descriptor do
+    if System.find_executable("git") do
+      case System.cmd("git", ["rev-parse", "--short", "HEAD"], stderr_to_stdout: true) do
+        {sha, 0} ->
+          dirty? =
+            case System.cmd("git", ["status", "--porcelain"], stderr_to_stdout: true) do
+              {out, 0} -> String.trim(out) != ""
+              _ -> false
+            end
+
+          suffix = if dirty?, do: ".dirty", else: ""
+          "+" <> String.trim(sha) <> suffix
+
+        _ ->
+          ""
+      end
+    else
+      ""
+    end
+  rescue
+    _ -> ""
   end
 
   defp maybe_burrito(release) do
