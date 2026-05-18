@@ -8,6 +8,8 @@
 | **Method** | PSDH (`.claude/skills/design-reasoning`); L0 + L1 + boundary contracts. L2 deferred. |
 | **Self-hosting target** | Working TUI is the prerequisite for Tau replacing the vendored claude-harness as the dev tool for Tau itself (see memory: `project_1_0_self_hosting.md`). |
 
+**Changelog:** WI-C / #202: D-009 reworded — visible-content guarantee unified into `Assembler.finalize/3`.
+
 ## 0. Why this spec exists
 
 Three days of activity (May 1–3 2026) produced 110 commits and a binary that
@@ -359,7 +361,7 @@ Each entry: id, statement, severity, detection_method, source_constraint.
 | D-006 | When `Tau.send/2` returns non-:ok, TUI MUST surface to user | medium | review criterion + property test on submit/1 | [C15] |
 | D-007 | `Settings.Cache` values consumed in a turn are snapshotted at `:start_provider` | medium | property test: mutate settings during a Replay turn; assert in-flight uses old | [C5] |
 | D-008 | Watcher degraded mode emits `[:tau, :settings, :watcher_degraded]` telemetry | low | unit test: start watcher without inotify; assert telemetry | [C8] |
-| D-009 | Provider sync error path produces a non-empty `content` block (text: "Error: ...") | high | unit test on Session.start_provider error branch | [C12] structural fix |
+| D-009 | The visible-content guarantee — every finalized `%Assistant{}` carries a non-empty `content` block so no render path drops it silently — is implemented exactly once, in `Tau.Message.Assembler.ensure_visible_content/1`, and reached by every finalize path (provider and coding-agent) via `Tau.Message.Assembler.finalize/3`. No consumer-side or path-specific mirror is permitted. | high | unit + property test on `Assembler.finalize/3`; coding-agent finalize test | [C12] structural fix |
 | D-010 | TUI MUST monitor the Session FSM pid; on `:DOWN`, surface "session crashed" line | medium | unit test simulating FSM crash | [L1-C45] |
 | D-011 | Stopped FSM MUST terminate `data.provider_task` before exiting | high | unit test: stop session during streaming; assert task pid !alive after stop | [L1-C43] |
 | D-012 | `Settings.Watcher` reconciles disk state on (re)boot | medium | unit test: edit settings while watcher down; restart; assert cache reflects edit | [L1-C44] |
@@ -475,6 +477,7 @@ For each constraint, the file:line where it lives in the current codebase:
 | C7 | `lib/tau/tui/app.ex:76` (`quit_events`) |
 | C8 | `lib/tau/settings/watcher.ex` (on file_system absence) |
 | C12, C19 | `lib/tau/session.ex:650-654` (sync error branch) + `lib/tau/tui/app.ex:183-200` (on_message_end) |
+| D-009 | `lib/tau/message/assembler.ex` (`ensure_visible_content/1` + `finalize/3` — the single source-agnostic terminal fold) |
 | C15 | `lib/tau/tui/app.ex:156-165` (submit ignores Tau.send return) |
 | C24 | `lib/tau/session.ex:1056-1066` (no iteration cap) |
 | C29 | `lib/tau/session.ex:362-363` (model: opts[:model], no default) |

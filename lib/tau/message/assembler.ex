@@ -144,29 +144,50 @@ defmodule Tau.Message.Assembler do
 
   # SPEC-USER-TURN [C12]/[C19] / D-009: render paths that iterate
   # `msg.content` (Tau.TUI.App.on_message_end/2) silently drop a
-  # message with empty content. When the provider stream errors before
-  # emitting any TextDelta — e.g. Anthropic auth failure, network
-  # error, OAuth expiry — `build_content/1` returns []. This guard
-  # synthesizes a single text block carrying the error so the TUI,
-  # CLI streamer, and any other consumer surface SOMETHING instead of
-  # going silent. Mirrors the shape used by the synchronous-error
-  # branch at lib/tau/session.ex:677-681.
-  defp ensure_visible_content(%{content: [_ | _]} = msg), do: msg
+  # message with empty content. When a stream errors before emitting
+  # any TextDelta — e.g. Anthropic auth failure, network error, OAuth
+  # expiry — `build_content/1` returns []. This guard synthesizes a
+  # single text block carrying the error so the TUI, CLI streamer, and
+  # any other consumer surface SOMETHING instead of going silent.
+  #
+  # This is the single source-agnostic D-009 implementation: both the
+  # provider and coding-agent finalize paths route through it via
+  # `finalize/3`. No path may carry a parallel copy.
+  @doc """
+  D-009 guarantee: ensure a finalized `%Assistant{}` has non-empty
+  `content` so no render path drops it silently. Source-agnostic.
+  """
+  @spec ensure_visible_content(Assistant.t()) :: Assistant.t()
+  def ensure_visible_content(%{content: [_ | _]} = msg), do: msg
 
-  defp ensure_visible_content(%{content: [], stop_reason: :error, error_message: em} = msg)
-       when is_binary(em) and em != "" do
+  def ensure_visible_content(%{content: [], stop_reason: :error, error_message: em} = msg)
+      when is_binary(em) and em != "" do
     %{msg | content: [%{type: :text, text: "Error: " <> em}]}
   end
 
-  defp ensure_visible_content(%{content: [], stop_reason: :error} = msg) do
-    %{msg | content: [%{type: :text, text: "Error: provider stream ended with no content"}]}
+  def ensure_visible_content(%{content: [], stop_reason: :error} = msg) do
+    %{msg | content: [%{type: :text, text: "Error: stream ended with no content"}]}
   end
 
-  defp ensure_visible_content(%{content: []} = msg) do
+  def ensure_visible_content(%{content: []} = msg) do
     %{msg | content: [%{type: :text, text: "(empty response)"}]}
   end
 
-  defp ensure_visible_content(msg), do: msg
+  def ensure_visible_content(msg), do: msg
+
+  @doc """
+  Source-agnostic terminal fold: build the final `%Assistant{}` from a
+  base message and a list of content blocks, applying the D-009
+  visible-content guarantee. Both the provider and coding-agent
+  finalize paths route through this.
+  """
+  @spec finalize(Assistant.t(), [map()], keyword()) :: Assistant.t()
+  def finalize(%Assistant{} = base, blocks, opts \\ []) when is_list(blocks) do
+    stop_reason = opts[:stop_reason] || base.stop_reason
+
+    %{base | content: blocks, stop_reason: stop_reason}
+    |> ensure_visible_content()
+  end
 
   @doc "Has the stream finished (cleanly or with an error)?"
   @spec done?(t()) :: boolean()
@@ -174,13 +195,6 @@ defmodule Tau.Message.Assembler do
 
   @doc "Get the assembled `%Assistant{}` (only meaningful after `done?/1`)."
   @spec assistant(t()) :: Assistant.t()
-  def assistant(%__MODULE__{message: msg, error: nil} = s) do
-    %{msg | content: build_content(s)}
-    |> ensure_visible_content()
-  end
-
-  def assistant(%__MODULE__{message: msg} = s) do
-    %{msg | content: build_content(s)}
-    |> ensure_visible_content()
-  end
+  def assistant(%__MODULE__{message: msg} = s),
+    do: finalize(msg, build_content(s), stop_reason: msg.stop_reason)
 end
