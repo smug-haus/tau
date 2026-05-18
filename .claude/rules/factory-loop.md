@@ -46,10 +46,27 @@ order; do not reorder, skip, or batch.
    below. This is a single mandatory action, not two discretionary ones.
 6. **Outcome.** Green (both halves PASS) → merge. Red (either half FAIL) →
    refine/pivot/escalate per "Outcomes" below.
-7. **On green: merge to `main`.** Merge the PR, then immediately sync local
-   `main` in the same turn (`git fetch origin && git checkout main &&
-   git pull --ff-only origin main`) and remove finished agent worktrees per
-   `worktree-discipline.md`.
+7. **On green: re-check freshness, merge, then verify `main` health.**
+   a. **Pre-merge freshness re-check.** Immediately before merging, re-fetch
+      `origin/main` (`git fetch origin`). The gate ran against a diff anchored
+      at some `origin/main` commit; if `origin/main` has advanced since then,
+      the gate-green verdict no longer covers what would actually land. In that
+      case the branch MUST be rebased onto current `origin/main` and the FULL
+      gate — BOTH `critic` and `reviewer` — MUST be re-run on the rebased diff
+      (see "The gate"). Only a gate-green diff that is current with
+      `origin/main` may merge. If `origin/main` is unchanged since the gate
+      ran, proceed directly to (b).
+   b. **Merge.** Merge the PR with the explicit command
+      `gh pr merge <n> --merge --delete-branch`.
+   c. **Sync local `main`.** Immediately in the same turn, sync local `main`
+      (`git fetch origin && git checkout main && git pull --ff-only origin
+      main`) and remove finished agent worktrees per `worktree-discipline.md`.
+   d. **Post-merge `main` health check.** Run a full health check on the
+      synced `main`: `mix compile --warnings-as-errors` and `mix test`. The
+      per-PR gate is stateless and cannot catch a subtly-wrong-but-gate-passing
+      change accumulating across many cycles; this check is the standing
+      backstop. If `main` is red (failing compile or tests), the loop HALTS and
+      surfaces to the user — see "Stop / escalate conditions".
 8. **Next item.** Return to step 1. Do not pause for human input between steps.
 
 ## The gate
@@ -65,9 +82,15 @@ BOTH `critic` and `reviewer` on the actual PR diff before it is merged.
   draft, not an earlier revision.
 - **No "promote later".** A PR is merged only after the gate is green now; there
   is no deferred-gate or merge-then-review path.
+- **No stale-diff merge.** A gate-green verdict covers only the diff it ran
+  against. If `origin/main` advances between the gate passing and the merge,
+  the verdict is void: the branch is rebased onto current `origin/main` and the
+  FULL gate is re-run on the rebased diff before merge (cycle step 7a).
 
-`/pr` runs the gate and opens the PR; the factory cycle adds the merge-on-green
-step (step 7). Both verdicts are recorded in the solution tree.
+`/pr` runs the gate and opens the PR; the factory cycle adds the
+freshness-recheck, merge-on-green, and post-merge health-check steps (step 7).
+Both verdicts are recorded in the solution tree, and a re-run gate replaces the
+prior verdicts for that PR.
 
 ## Outcomes
 
@@ -81,6 +104,37 @@ step (step 7). Both verdicts are recorded in the solution tree.
   restart the attempt count for the new approach.
 - **If a pivot also fails to reach green within its bound** — **escalate**
   (see "Stop / escalate conditions").
+
+### Reconciling N = 3 with the harness meta-restart
+
+Two mechanisms key off the number 3 and must not be conflated. The
+factory-loop refine bound (N = 3 refine attempts, then pivot, then escalate) is
+a **product-level** policy: it governs how many times one roadmap item may be
+reworked before the loop changes strategy or halts. The harness's
+3-consecutive-failure rule (`CLAUDE.md` Hard Rules; `retry-strategy` §4
+"Meta-Restart Protocol") is a **context-hygiene** mechanism: after three failed
+attempts it compresses attempt history to ≤ 1000 tokens, clears the working
+context, and restarts the coordinator from the archived solution-tree state.
+The meta-restart changes *how the coordinator is run*; it does not change *what
+the loop has decided*.
+
+Precedence and interaction:
+
+- The factory-loop safety circuit takes precedence over silent continuation.
+  When the N = 3 refine budget is exhausted and a pivot has not reached green,
+  the loop **escalates** — it HALTS and surfaces to the user (Stop / escalate
+  condition 1). Escalation is a terminal state for that item; the harness
+  meta-restart does NOT override it into another retry.
+- A harness meta-restart is not a fourth attempt. If the meta-restart fires
+  (e.g. mid-pivot, before the bound is reached), the coordinator resumes the
+  factory loop **from the archived solution-tree state** — same item, same
+  attempt count, same chosen strategy — rather than silently restarting the
+  attempt count or re-attempting from scratch. The solution tree is the single
+  source of truth across a meta-restart.
+- If the meta-restart and the N = 3 escalation would fire on the same failure,
+  the escalation wins: the loop halts and reports to the user. The compressed
+  briefing the meta-restart would have produced is folded into the escalation
+  report instead of seeding a fresh attempt.
 
 ## Stop / escalate conditions — the safety circuit
 
@@ -98,6 +152,13 @@ retry forever — on any of:
    judgement, not an engineering one. Do not guess; surface it.
 5. **Budget exhaustion** — the loop's configured budget (time, token, or
    iteration) is spent.
+6. **A red `main` after merge** — the post-merge health check (cycle step 7d)
+   reports failing `mix compile --warnings-as-errors` or `mix test` on the
+   synced `main`. The per-PR gate is stateless and cannot detect a
+   subtly-wrong-but-gate-passing change that only surfaces once integrated;
+   this condition is the standing backstop for that. The loop halts with
+   `main` left in its current (red) state, the failing check named, so the
+   user can decide whether to revert the offending merge or fix forward.
 
 On any condition, write the reason and current state to the solution tree and
 report to the user. Halting on a safety condition is correct behaviour, not a
@@ -125,8 +186,17 @@ periods. The driver re-runs "execute one factory step" until stopped.
   for this sentinel at the start of every factory step and, if present, finish
   no new work, report current state, and halt.
 
-A halt from the kill switch is clean: it stops between factory steps, never
-mid-merge, and leaves `main` synced.
+**Kill-switch latency.** State this plainly: the `.claude/STOP-FACTORY`
+sentinel is checked only at the **start** of each factory step. Creating the
+sentinel mid-step does not interrupt the step in progress — the current step
+runs to completion, including its merge and post-merge sync, and the loop halts
+before the NEXT step. The kill switch therefore has a worst-case latency of one
+full factory step; it never aborts a step partway and never interrupts a
+mid-merge. A halt from the kill switch is consequently clean: it stops between
+factory steps, never mid-merge, and leaves `main` synced.
+
+The sentinel is operator state, never project state: `.claude/STOP-FACTORY` is
+listed in the repo's `.gitignore` so it can never be accidentally committed.
 
 ## What this rule forbids
 
@@ -135,8 +205,14 @@ mid-merge, and leaves `main` synced.
 - MUST NOT run only one gate half and treat the PR as gated.
 - MUST NOT override a FAIL verdict or self-certify a PR as mergeable.
 - MUST NOT defer the gate ("merge now, review later") or run it on a stale diff.
+- MUST NOT merge a PR whose gate ran against an `origin/main` older than the
+  current `origin/main`; the branch is rebased and the FULL gate re-run first.
+- MUST NOT skip the post-merge `main` health check, nor continue the loop when
+  that check reports a red `main`.
 - MUST NOT exceed N = 3 refine attempts on one item without pivoting, nor
   continue past a pivot's failure without escalating.
+- MUST NOT treat a harness meta-restart as a fresh attempt or as an override of
+  an N = 3 escalation; resume from the archived solution-tree state.
 - MUST NOT continue the loop through a safety-circuit condition; it MUST halt
   and surface to the user.
 - MUST NOT insert per-step human checkpoints in normal operation, nor skip the

@@ -58,6 +58,10 @@ coverage.json
 !/.claude/logs/.gitkeep
 /.claude/settings.local.json
 
+# factory-loop kill switch — an operator sentinel, never project state.
+# See .claude/rules/factory-loop.md "Continuity and the kill switch".
+/.claude/STOP-FACTORY
+
 # Defensive: kill-signal and observations belong under .claude/logs/, but
 # guard against any hook accidentally writing them at the repo root.
 /kill-signal.json
