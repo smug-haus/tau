@@ -68,6 +68,11 @@ defmodule Tau.Commands.Builtin.Logout do
           {:error, :not_found} ->
             {:error, "No credential stored for #{provider}."}
 
+          {:error, :not_implemented} ->
+            {:error,
+             "Credential removal is not supported on this platform. " <>
+               "Remove the credential manually via your system credential store."}
+
           {:error, :read_only} ->
             {:error,
              "Vault backend does not support credential removal. " <>

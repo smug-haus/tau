@@ -7,10 +7,11 @@ defmodule Tau.Settings.Vault do
 
   ## Behaviour
 
-  Implementations provide three callbacks:
+  Implementations provide four callbacks:
 
       @callback get(name :: String.t()) :: {:ok, String.t()} | {:error, term()}
       @callback put(name :: String.t(), value :: String.t()) :: :ok | {:error, term()}
+      @callback delete(name :: String.t()) :: :ok | {:error, term()}
       @callback list() :: {:ok, [String.t()]} | {:error, term()}
 
   The four shipped backends live under `Tau.Settings.Vault`:

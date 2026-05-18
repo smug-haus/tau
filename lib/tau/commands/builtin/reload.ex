@@ -5,13 +5,29 @@ defmodule Tau.Commands.Builtin.Reload do
   Re-discovers skills from disk and re-reads the settings cascade for
   the current session without restarting the session process.
 
-  Returns `{:mutate, fun, notice}` where `fun` is a pure `data -> data`
-  transform that:
+  Returns `{:mutate, fun, notice}` where `fun` is a `data -> data`
+  closure that:
 
   1. Calls `Tau.Skills.Loader.discover(data.cwd)` and
      `Tau.Skills.Loader.list_extension_skills/0` to rebuild the skill
      list, matching the merge/dedup/sort logic in `Session.load_skills/1`.
   2. Replaces `data.skills` with the refreshed list.
+
+  **IO note:** `Skills.Loader.discover/1` performs a bounded local-disk
+  scan (`File.ls`, `File.regular?`, `File.read` across `~/.tau/skills`,
+  `<cwd>/.tau/skills`, and `priv/skills`).  This IO runs inline on the
+  session `:gen_statem` process when `session.ex`'s
+  `handle_builtin_command/4` calls `fun.(data)`.
+
+  **Justification for inline IO:** `/reload` is dispatched only from the
+  `:awaiting_user` / `command_task: nil` arm — i.e. the FSM is quiescent
+  and the user is waiting for the result of the command they just
+  explicitly invoked.  The scan is the same bounded local-directory
+  operation the session already performs unconditionally at `init/1`
+  (`load_skills/1`).  No provider turn is in flight during dispatch.
+  Off-loading the IO to a task process would add scheduling complexity
+  for no practical benefit on a command that is driven by human
+  interaction.
 
   Settings re-read is implicit: `Tau.Settings.Cache` is a supervised
   process that caches the parsed settings file.  Any provider or tool
@@ -28,8 +44,8 @@ defmodule Tau.Commands.Builtin.Reload do
   while the FSM is in another state (`:provider_streaming`, etc.) is
   postponed by the outer `when state != :awaiting_user` guard and
   re-delivered only when the FSM returns to `:awaiting_user`.  The
-  `fun` closure is therefore always applied to a quiescent `data`
-  snapshot — no mid-stream data corruption is possible.
+  `fun` closure is applied to a quiescent `data` snapshot — no
+  mid-stream data corruption is possible.
   """
 
   @behaviour Tau.Commands.Builtin
