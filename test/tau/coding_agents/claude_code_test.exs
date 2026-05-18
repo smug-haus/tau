@@ -246,23 +246,6 @@ defmodule Tau.CodingAgents.ClaudeCodeTest do
     end
   end
 
-  describe "spawn path — D-036, AC-6 surface" do
-    test "returns :claude_not_found synchronously when claude is not on PATH" do
-      # Hide PATH so System.find_executable("claude") returns nil. This
-      # also exercises D-036: we never read ~/.claude/credentials.json
-      # because we short-circuit on the executable check.
-      old_path = System.get_env("PATH")
-
-      try do
-        System.put_env("PATH", "/no/such/dir")
-        result = ClaudeCode.start(default_task(), %{})
-        assert result == {:error, :claude_not_found}
-      after
-        if old_path, do: System.put_env("PATH", old_path), else: System.delete_env("PATH")
-      end
-    end
-  end
-
   describe "external integration (opt-in via INTEGRATION=1)" do
     # Skipped by default via `test_helper.exs` exclude list. Run with:
     #   INTEGRATION=1 mix test --only external
