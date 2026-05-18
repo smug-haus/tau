@@ -62,6 +62,7 @@ defmodule Tau.Settings.Vault do
 
   @callback get(name :: String.t()) :: {:ok, String.t()} | {:error, term()}
   @callback put(name :: String.t(), value :: String.t()) :: :ok | {:error, term()}
+  @callback delete(name :: String.t()) :: :ok | {:error, term()}
   @callback list() :: {:ok, [String.t()]} | {:error, term()}
 
   @type backend ::
@@ -135,6 +136,12 @@ defmodule Tau.Settings.Vault do
   @spec put(String.t(), String.t()) :: :ok | {:error, term()}
   def put(name, value) when is_binary(name) and is_binary(value) do
     backend().put(name, value)
+  end
+
+  @doc "Delete a credential by name through the configured backend."
+  @spec delete(String.t()) :: :ok | {:error, term()}
+  def delete(name) when is_binary(name) do
+    backend().delete(name)
   end
 
   @doc "List the credential names known to the configured backend."

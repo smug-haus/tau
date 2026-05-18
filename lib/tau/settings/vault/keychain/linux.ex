@@ -67,6 +67,24 @@ defmodule Tau.Settings.Vault.Keychain.Linux do
   end
 
   @impl true
+  @spec delete(String.t()) :: :ok | {:error, term()}
+  def delete(name) when is_binary(name) do
+    case System.find_executable("secret-tool") do
+      nil ->
+        {:error, :secret_tool_unavailable}
+
+      path ->
+        case System.cmd(path, ["clear", "service", @service, "account", name],
+               stderr_to_stdout: false,
+               into: ""
+             ) do
+          {_, 0} -> :ok
+          {_, _code} -> {:error, :not_found}
+        end
+    end
+  end
+
+  @impl true
   @spec list() :: {:error, :not_supported}
   def list, do: {:error, :not_supported}
 

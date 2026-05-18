@@ -34,6 +34,14 @@ defmodule Tau.Commands.BuiltinTest do
       assert Builtin.table()["/export"] == Tau.Commands.Builtin.Export
     end
 
+    test "contains /reload => Tau.Commands.Builtin.Reload" do
+      assert Builtin.table()["/reload"] == Tau.Commands.Builtin.Reload
+    end
+
+    test "contains /logout => Tau.Commands.Builtin.Logout" do
+      assert Builtin.table()["/logout"] == Tau.Commands.Builtin.Logout
+    end
+
     test "all values are modules (atoms)" do
       Builtin.table()
       |> Map.values()

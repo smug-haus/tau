@@ -58,7 +58,9 @@ defmodule Tau.Commands.Builtin do
       "/export" => Tau.Commands.Builtin.Export,
       "/fork" => Tau.Commands.Builtin.Fork,
       "/clone" => Tau.Commands.Builtin.Clone,
-      "/new" => Tau.Commands.Builtin.New
+      "/new" => Tau.Commands.Builtin.New,
+      "/reload" => Tau.Commands.Builtin.Reload,
+      "/logout" => Tau.Commands.Builtin.Logout
     }
   end
 end

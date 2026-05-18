@@ -32,6 +32,10 @@ defmodule Tau.Settings.Vault.Env do
   def put(_name, _value), do: {:error, :read_only}
 
   @impl true
+  @spec delete(String.t()) :: {:error, :read_only}
+  def delete(_name), do: {:error, :read_only}
+
+  @impl true
   @spec list() :: {:error, :not_supported}
   def list, do: {:error, :not_supported}
 end
