@@ -65,7 +65,5 @@ defmodule Tau.Commands.Builtin.Fork do
       nil -> {:error, :no_events}
       id -> {:ok, id}
     end
-  rescue
-    _ -> {:error, :no_events}
   end
 end

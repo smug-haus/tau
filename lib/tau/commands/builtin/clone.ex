@@ -70,7 +70,5 @@ defmodule Tau.Commands.Builtin.Clone do
       nil -> {:error, :no_events}
       id -> {:ok, id}
     end
-  rescue
-    _ -> {:error, :no_events}
   end
 end
