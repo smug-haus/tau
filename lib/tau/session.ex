@@ -694,6 +694,9 @@ defmodule Tau.Session do
     emit_user_message_telemetry(:delivered, data, :awaiting_user)
 
     case classify_slash_command(msg, data.skills) do
+      {:builtin, mod, args, msg} ->
+        handle_builtin_command(mod, args, msg, data)
+
       {:async, mod, args, msg} ->
         spawn_command_task(mod, args, msg, data)
 
@@ -3046,29 +3049,36 @@ defmodule Tau.Session do
         {:model_command, String.trim(args), msg}
 
       {:command, "/" <> bare_name = name, args} ->
-        case Tau.Commands.Parser.lookup(name) do
-          {:ok, mod} when is_atom(mod) ->
-            if function_exported?(mod, :execute, 2) do
-              {:async, mod, args, msg}
-            else
-              {:sync, msg}
-            end
-
-          {:ok, path} when is_binary(path) ->
-            {:sync, invoke_file_command(path, args, msg)}
+        # [C55-B4]: built-ins shadow same-named extensions.
+        case Tau.Commands.Parser.lookup_builtin(name) do
+          {:ok, mod} ->
+            {:builtin, mod, args, msg}
 
           :error ->
-            # Not a built-in command — check the session's loaded skills.
-            case Tau.Commands.Parser.lookup_skill(bare_name, skills) do
-              {:ok, skill} ->
-                rewritten = %Tau.Message.User{msg | content: args}
-                {:skill_activation, skill, rewritten}
+            case Tau.Commands.Parser.lookup(name) do
+              {:ok, mod} when is_atom(mod) ->
+                if function_exported?(mod, :execute, 2) do
+                  {:async, mod, args, msg}
+                else
+                  {:sync, msg}
+                end
+
+              {:ok, path} when is_binary(path) ->
+                {:sync, invoke_file_command(path, args, msg)}
 
               :error ->
-                # Unknown slash command; pass through verbatim — the model
-                # can handle it as a stylistic preface or report that it's
-                # unknown.
-                {:sync, msg}
+                # Not a built-in or extension command — check skills.
+                case Tau.Commands.Parser.lookup_skill(bare_name, skills) do
+                  {:ok, skill} ->
+                    rewritten = %Tau.Message.User{msg | content: args}
+                    {:skill_activation, skill, rewritten}
+
+                  :error ->
+                    # Unknown slash command; pass through verbatim — the
+                    # model can handle it as a stylistic preface or report
+                    # that it's unknown.
+                    {:sync, msg}
+                end
             end
         end
 
@@ -3163,6 +3173,57 @@ defmodule Tau.Session do
   end
 
   defp prepare_command_args(_mod, args), do: {:ok, args}
+
+  # D-042 / [C55-B4]: built-in slash-command inline handler.
+  #
+  # Dispatches `mod.run(args, data)` and maps the typed outcome to FSM
+  # actions.  CRITICAL: {:notice}, {:mutate}, and {:error} branches MUST
+  # NOT call process_user_message/2 — no provider turn is started.
+  # Only :passthrough falls through to the normal provider path.
+  defp handle_builtin_command(mod, args, original_msg, data) do
+    outcome = mod.run(args, data)
+
+    :telemetry.execute(
+      [:tau, :session, :builtin_command],
+      %{},
+      %{session_id: data.id, command: mod.name(), outcome: outcome_tag(outcome)}
+    )
+
+    case outcome do
+      {:notice, text} when is_binary(text) ->
+        broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: text})
+        {:keep_state, data}
+
+      {:notice, lines} when is_list(lines) ->
+        Enum.each(lines, fn line ->
+          broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: line})
+        end)
+
+        {:keep_state, data}
+
+      {:mutate, fun, notice} when is_function(fun, 1) ->
+        data2 = fun.(data)
+
+        if is_binary(notice) do
+          broadcast(data2.id, %Events.SystemNotice{session_id: data2.id, text: notice})
+        end
+
+        {:keep_state, data2}
+
+      {:error, text} ->
+        broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: "Error: " <> text})
+        {:keep_state, data}
+
+      :passthrough ->
+        # Fall through to the normal provider turn with the original message.
+        process_user_message(original_msg, data)
+    end
+  end
+
+  defp outcome_tag({:notice, _}), do: :notice
+  defp outcome_tag({:mutate, _, _}), do: :mutate
+  defp outcome_tag({:error, _}), do: :error
+  defp outcome_tag(:passthrough), do: :passthrough
 
   # D-041: /model <id> slash-command handler. Runs the same validate +
   # mutate + telemetry + persist logic as the {:swap_model} call handler

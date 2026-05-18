@@ -11,6 +11,8 @@ defmodule Tau.Commands.Parser do
   command from args.
   """
 
+  alias Tau.Commands.Builtin
+
   @doc "Parse one user input line."
   @spec parse(String.t()) :: {:command, String.t(), String.t()} | :passthrough | :empty
   def parse(""), do: :empty
@@ -23,6 +25,18 @@ defmodule Tau.Commands.Parser do
   end
 
   def parse(_other), do: :passthrough
+
+  @doc """
+  Resolve a slash-command name against the built-in registry.
+
+  Returns `{:ok, module}` when `name` matches an entry in
+  `Tau.Commands.Builtin.table/0`, `:error` otherwise.
+
+  Built-in resolution is intended to be called BEFORE `lookup/1` so that
+  built-in commands shadow same-named extensions ([C55-B4]).
+  """
+  @spec lookup_builtin(String.t()) :: {:ok, module()} | :error
+  def lookup_builtin(name), do: Map.fetch(Builtin.table(), name)
 
   @doc "Resolve a command name to a module via the Commands.Registry."
   @spec lookup(String.t()) :: {:ok, module() | binary()} | :error

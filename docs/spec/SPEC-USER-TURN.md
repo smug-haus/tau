@@ -8,7 +8,7 @@
 | **Method** | PSDH (`.claude/skills/design-reasoning`); L0 + L1 + boundary contracts. L2 deferred. |
 | **Self-hosting target** | Working TUI is the prerequisite for Tau replacing the vendored claude-harness as the dev tool for Tau itself (see memory: `project_1_0_self_hosting.md`). |
 
-**Changelog:** WI-C / #202: D-009 reworded — visible-content guarantee unified into `Assembler.finalize/3`. #211: C53, D-040 — plain-release CLI dispatch via `TAU_CLI_ARGV`; B2 contract amended with three argv sources. #179: C54, D-041 — mid-session model swap via `/model`; AC-8 added; D-002 amended to name the sanctioned swap path; B4 boundary contract note added.
+**Changelog:** WI-C / #202: D-009 reworded — visible-content guarantee unified into `Assembler.finalize/3`. #211: C53, D-040 — plain-release CLI dispatch via `TAU_CLI_ARGV`; B2 contract amended with three argv sources. #179: C54, D-041 — mid-session model swap via `/model`; AC-8 added; D-002 amended to name the sanctioned swap path; B4 boundary contract note added. #227: C55, D-042 — built-in slash-command registry + inline dispatch; B4 amended with built-in outcome INV; D-042 added.
 
 ## 0. Why this spec exists
 
@@ -91,6 +91,7 @@ Each question lists raw constraints. Format: `[Cn-Bm]` = constraint number + bou
 - **★ [C51-B3]** The TUI prompt MUST render a visible cursor glyph at the end of `model.input`. Without it, an empty input field is indistinguishable from a frozen or blank render — the user cannot tell whether the TUI is waiting for input or has hung. Silent-failure category: the render path produces output, but the output is ambiguous to the human observer. Detection: tmux `capture-pane` must contain the cursor glyph character after a render-settle delay.
 - **★ [C53-B2]** The CLI argv for a plain `mix release` MUST come from the explicit `TAU_CLI_ARGV` env marker (US-separated tokens), never inferred from positional VM arguments. The marker MUST NOT be inherited by `tau`-spawned subprocesses: `cli_argv/0` deletes it (via `System.delete_env/1`) immediately after reading, before returning the decoded argv. A plain-release boot with no marker resolves to `:no_cli`; the OTP app stays up with no `System.halt`. Positional VM args passed to the release launcher (`bin/tau start`) MUST NOT influence dispatch. (Closes D-040.)
 - **★ [C54-B4]** `data.model` in `Tau.Session` FSM data MUST have a single mutation site: `do_swap_model/2` (a pure function). All paths that update `data.model` — the `{:swap_model}` synchronous call handler, the `/model` slash-command path, and the `{:reconfigure}` cast — MUST route through `do_swap_model/2`. Direct `Map.put(data, :model, ...)` outside of `do_swap_model/2` is forbidden. `Tau.Session.swap_model/2` is the only public surface; `update_provider/2`'s `:reconfigure` path routes model through `do_swap_model/2` but MUST NOT emit a `model_swap` event — it emits a single `reconfigure` event preserving today's contract. (Closes D-041.)
+- **★ [C55-B4]** Built-in slash commands run inline in the session FSM and return a typed `Tau.Commands.Builtin.outcome()`. The `{:notice, _}`, `{:mutate, _, _}`, and `{:error, _}` outcome branches MUST terminate in `:awaiting_user` without calling `process_user_message/2` — no provider or coding-agent turn is started (D-042). Built-in resolution via `Tau.Commands.Parser.lookup_builtin/1` MUST precede the extension-registry lookup (`Tau.Commands.Parser.lookup/1`) so built-ins shadow same-named extensions. The `{:mutate, fun, _}` fun is a pure `data -> data` transform; it MUST NOT start side-effecting processes. (Closes D-042.)
 
 ### Q4: What information crosses a boundary, and what is lost?
 
@@ -236,6 +237,13 @@ INV (queued message visibility)
 INV (cleanup)
   - on_session_end MUST Phoenix.PubSub.unsubscribe before mutating model.
     (Closes [C35].)
+INV (built-in outcome)
+  - A built-in slash command resolved via Tau.Commands.Parser.lookup_builtin/1
+    returns one of: {:notice, binary | [binary]}, {:mutate, fun/1, binary | nil},
+    {:error, binary}, or :passthrough.  The {:notice}, {:mutate}, and {:error}
+    branches MUST NOT call process_user_message/2.  Only :passthrough may start a
+    provider turn.  Built-in resolution precedes extension lookup.  (Closes [C55-B4],
+    D-042.)
 ```
 
 ### B5 — `Tau.Session` ↔ `Tau.Provider` (stream)
@@ -391,8 +399,9 @@ Each entry: id, statement, severity, detection_method, source_constraint.
 | D-028 | Assistant text content rendered to the TUI transcript MUST be parsed as CommonMark with GFM tables (`Tau.Markdown.render/1`) before display. Raw markdown source MUST NOT appear in the rendered pane for valid CommonMark input. Output MUST be ASCII-only: tables use `\|` / `-` / `+` (NOT Unicode box-drawing — Ratatouille 0.5.1's `Renderer.Cells.to_char/1` crashes on multi-byte UTF-8 in label content; see Ratatouille tracking issue). Bold and italic markers are STRIPPED (Ratatouille labels render flat text with no inline attributes); inline-code backticks preserved as visual cue. On parse error, a `[markdown-parse-error]` prefix surfaces the failure rather than silently dropping the content. | medium | unit test on `Tau.Markdown.render/1` over a markdown fixture containing a table + bold + inline code + fenced code; assert the output list contains ASCII pipe-and-plus tables and no Unicode box-drawing chars | [C52-B5] |
 | D-040 | A plain (non-Burrito) `mix release` boot with no explicit CLI-dispatch marker (`TAU_CLI_ARGV`) MUST NOT dispatch the Tau CLI and MUST NOT call `System.halt`. Positional VM arguments passed to the release launcher (`bin/tau start`) MUST NOT be consulted for dispatch. The `TAU_CLI_ARGV` marker is consumed-and-deleted (`System.delete_env/1`) by `Tau.Application.cli_argv/0` immediately after reading so it is NOT inherited by tau-spawned subprocesses. Encoding: tokens are joined by ASCII Unit Separator (`\x1f`); `Tau.Application.encode_cli_argv/1` is the single source of truth — no other code path may duplicate the separator literal. | high | `test/tau/application/cli_argv_test.exs` (all six tests); `test/tau/cli/tui_smoke_test.exs` AC-H1 and AC-H2 against `_build/prod/rel/tau/bin/tau` | [C53-B2] |
 | D-041 | `data.model` in the session FSM MUST be treated as immutable within a provider turn. `Tau.Session.swap_model/2` is the sole sanctioned mid-session mutation of `data.model`, gated to `:awaiting_user` state with `command_task == nil`; any other state MUST return `{:error, :busy}`. `do_swap_model/2` is the single `data.model` mutation site ([C54-B4]). On success the FSM MUST emit `[:tau, :session, :model_swapped]` telemetry and persist a `model_swap` JSONL event. The persisted event is folded back into `data.model` on resume/fork via `model_from_preload/1` in `init/1`. | high | `test/tau/session/swap_model_test.exs` — 7 cases covering success, busy, JSONL persistence, not_found, idempotent, invalid_model (empty + whitespace) | [C54-B4], [C29] |
+| D-042 | A built-in slash command MUST NOT drive a provider or coding-agent turn. When `Tau.Commands.Parser.lookup_builtin/1` resolves a command name, the FSM dispatches `mod.run(args, data)` and handles the typed outcome inline: `{:notice, _}`, `{:mutate, _, _}`, and `{:error, _}` branches return `{:keep_state, data}` or `{:keep_state, data2}` — they MUST NOT call `process_user_message/2`. Only `:passthrough` may proceed to `process_user_message/2`. On every dispatch the FSM MUST emit `[:tau, :session, :builtin_command]` telemetry with metadata `%{session_id: id, command: name, outcome: tag}`. Built-in lookup precedes extension lookup (`[C55-B4]`). | high | `test/tau/session/builtin_command_dispatch_test.exs` — D-042 proof: drive `/ping` into a session backed by `RecordingProvider` that records `stream/3` calls; assert zero provider calls, a `SystemNotice` with `"pong"` is broadcast, FSM snapshot is responsive; assert `[:tau, :session, :builtin_command]` telemetry fires with correct metadata | [C55-B4] |
 
-25 D-xxx entries. Each is enforceable. None require speculation.
+26 D-xxx entries. Each is enforceable. None require speculation.
 
 ## 7. Acceptance criteria — "working TUI"
 
@@ -510,5 +519,6 @@ For each constraint, the file:line where it lives in the current codebase:
 | C50 | `lib/tau/session.ex` init/1 — `max_tool_iterations` resolution (opts → Settings.Cache → 20) |
 | C53 | `lib/tau/application.ex` — `cli_argv/0` (env-marker read → delete → decode); `test/support/tui_pty_helper.ex` — `start/2` plain-release branch; `test/tau/application/cli_argv_test.exs` |
 | C54 | `lib/tau/session.ex` — `do_swap_model/2` (pure mutation core), `apply_model_swap/2` (shared helper with telemetry+persist), `handle_event({:call, from}, {:swap_model, _}, ...)` (gated call handler), `handle_slash_model_swap/2` (/model slash path), `reconfigure_model/2` ({:reconfigure} cast routing); `lib/tau/session/events.ex` — `%SystemNotice{}`; `lib/tau/tui/app.ex` — `%SystemNotice{}` dispatch clause; `test/tau/session/swap_model_test.exs`; `test/tau/session/slash_model_command_test.exs` |
+| C55 | `lib/tau/commands/builtin.ex` — `Tau.Commands.Builtin` behaviour + `table/0`; `lib/tau/commands/builtin/ping.ex` — `Tau.Commands.Builtin.Ping` seed entry; `lib/tau/commands/parser.ex` — `lookup_builtin/1`; `lib/tau/session.ex` — `classify_slash_command/2` (builtin arm before extension lookup), `handle_event` `{:builtin, mod, args, msg}` arm, `handle_builtin_command/4`, `outcome_tag/1`; `test/tau/commands/builtin_test.exs`; `test/tau/session/builtin_command_dispatch_test.exs` |
 
 Other constraints map to sites named in their text.
