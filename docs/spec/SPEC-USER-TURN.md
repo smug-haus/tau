@@ -8,7 +8,7 @@
 | **Method** | PSDH (`.claude/skills/design-reasoning`); L0 + L1 + boundary contracts. L2 deferred. |
 | **Self-hosting target** | Working TUI is the prerequisite for Tau replacing the vendored claude-harness as the dev tool for Tau itself (see memory: `project_1_0_self_hosting.md`). |
 
-**Changelog:** WI-C / #202: D-009 reworded — visible-content guarantee unified into `Assembler.finalize/3`.
+**Changelog:** WI-C / #202: D-009 reworded — visible-content guarantee unified into `Assembler.finalize/3`. #211: C53, D-040 — plain-release CLI dispatch via `TAU_CLI_ARGV`; B2 contract amended with three argv sources.
 
 ## 0. Why this spec exists
 
@@ -89,6 +89,7 @@ Each question lists raw constraints. Format: `[Cn-Bm]` = constraint number + bou
 - **★ [C48-B8]** OAuth `accessToken` has `expiresAt` (ms epoch). When expired, Anthropic returns 401. Without a refresh path, the user sees a generic auth error and has to know to run `claude /login` to renew. Refresh requires writing back to `.credentials.json`, which races with Claude Code itself if it's running — single-writer constraint.
 - **[C49-B8]** OAuth `scopes` must include `user:inference` for the Messages API. Tau should validate this at config-load time and surface a clear error if missing.
 - **★ [C51-B3]** The TUI prompt MUST render a visible cursor glyph at the end of `model.input`. Without it, an empty input field is indistinguishable from a frozen or blank render — the user cannot tell whether the TUI is waiting for input or has hung. Silent-failure category: the render path produces output, but the output is ambiguous to the human observer. Detection: tmux `capture-pane` must contain the cursor glyph character after a render-settle delay.
+- **★ [C53-B2]** The CLI argv for a plain `mix release` MUST come from the explicit `TAU_CLI_ARGV` env marker (US-separated tokens), never inferred from positional VM arguments. The marker MUST NOT be inherited by `tau`-spawned subprocesses: `cli_argv/0` deletes it (via `System.delete_env/1`) immediately after reading, before returning the decoded argv. A plain-release boot with no marker resolves to `:no_cli`; the OTP app stays up with no `System.halt`. Positional VM args passed to the release launcher (`bin/tau start`) MUST NOT influence dispatch. (Closes D-040.)
 
 ### Q4: What information crosses a boundary, and what is lost?
 
@@ -163,7 +164,16 @@ INV
 ```
 PRE
   - Tau.Supervisor up.
-  - argv resolved from Burrito (when in_burrito) or escript args (otherwise).
+  - argv resolved from exactly one of three ordered, mutually exclusive sources:
+      A (Burrito)       — Burrito.Util.Args.get_bin_path/0 != :not_in_burrito;
+                          argv = Burrito.Util.Args.get_arguments/0 || [].
+      B (escript)       — direct escript invocation (not used in prod release path).
+      C (plain release) — TAU_CLI_ARGV env marker present and non-empty;
+                          tokens are US-separated (\x1f); marker is deleted
+                          immediately after read so it is NOT inherited by
+                          tau-spawned subprocesses.
+  - No marker (source C absent) AND not in Burrito (source A absent) → :no_cli;
+    OTP app stays up, no System.halt.
 POST
   - For empty argv (or `tui` subcommand): tui_cmd/0 invoked; halt(0|1).
   - For `run`/`resume`/`config`/etc: corresponding command run; halt(exit_code).
@@ -171,6 +181,9 @@ INV
   - tui_cmd/0 MUST surface non-OK return from Tau.TUI.start/0 to stderr
     AND set non-zero exit. (Closes [C12]'s downstream half: even if the TUI
     error didn't render in-UI, the binary exits with a diagnostic.)
+  - Positional VM arguments passed to a plain `mix release` launcher MUST NOT
+    influence dispatch. A :no_cli resolution MUST leave the OTP app running
+    with no System.halt. (Closes [C53-B2].)
 ```
 
 ### B3 — `Tau.CLI` ↔ `Tau.TUI.App.run/0` (TUI runtime start)
@@ -375,8 +388,9 @@ Each entry: id, statement, severity, detection_method, source_constraint.
 | D-026 | The TUI prompt bar MUST render a solid block cursor glyph ("█", U+2588) appended after `model.input` on every render frame. The glyph indicates the active insertion point and distinguishes an idle, waiting-for-input state from a frozen or blank render. No animation required in v1. | medium | tmux smoke test (`test/tau/cli/tui_smoke_test.exs` AC-H1): `tmux capture-pane` output after a 150 ms render-settle MUST contain "█"; absence indicates the render path is broken or the glyph is being stripped | [C51-B3] |
 | D-027 | Session FSM MUST cap tool-call iterations per turn at `max_tool_iterations` (default 20, readable from `opts[:max_tool_iterations]` or `Settings.Cache.get()[:session][:max_tool_iterations]`). When the cap is exceeded, the FSM MUST emit `[:tau, :session, :tool_iteration_cap]` telemetry with measurements `%{iterations: N, cap: K}` — where `N` is the count of completed dispatches in the aborted turn (equals `K` at the abort boundary; resets to 0 at the start of the next turn) — and metadata `%{session_id: id}`, then abort the turn with `stop_reason: :tool_loop_aborted`. The per-turn counter resets to 0 on every return to `:awaiting_user`. | high | property test `test/tau/session/tool_iteration_cap_property_test.exs`: drives a session backed by bespoke `AlwaysToolCallProvider` (a `Tau.Provider` behaviour implementation that always emits a `tool_call` event stream, independent of Replay); asserts turn terminates within `max_tool_iterations` with `stop_reason: :tool_loop_aborted` and that the telemetry event fires with `iterations == cap` | [C24], [C50] |
 | D-028 | Assistant text content rendered to the TUI transcript MUST be parsed as CommonMark with GFM tables (`Tau.Markdown.render/1`) before display. Raw markdown source MUST NOT appear in the rendered pane for valid CommonMark input. Output MUST be ASCII-only: tables use `\|` / `-` / `+` (NOT Unicode box-drawing — Ratatouille 0.5.1's `Renderer.Cells.to_char/1` crashes on multi-byte UTF-8 in label content; see Ratatouille tracking issue). Bold and italic markers are STRIPPED (Ratatouille labels render flat text with no inline attributes); inline-code backticks preserved as visual cue. On parse error, a `[markdown-parse-error]` prefix surfaces the failure rather than silently dropping the content. | medium | unit test on `Tau.Markdown.render/1` over a markdown fixture containing a table + bold + inline code + fenced code; assert the output list contains ASCII pipe-and-plus tables and no Unicode box-drawing chars | [C52-B5] |
+| D-040 | A plain (non-Burrito) `mix release` boot with no explicit CLI-dispatch marker (`TAU_CLI_ARGV`) MUST NOT dispatch the Tau CLI and MUST NOT call `System.halt`. Positional VM arguments passed to the release launcher (`bin/tau start`) MUST NOT be consulted for dispatch. The `TAU_CLI_ARGV` marker is consumed-and-deleted (`System.delete_env/1`) by `Tau.Application.cli_argv/0` immediately after reading so it is NOT inherited by tau-spawned subprocesses. Encoding: tokens are joined by ASCII Unit Separator (`\x1f`); `Tau.Application.encode_cli_argv/1` is the single source of truth — no other code path may duplicate the separator literal. | high | `test/tau/application/cli_argv_test.exs` (all six tests); `test/tau/cli/tui_smoke_test.exs` AC-H1 and AC-H2 against `_build/prod/rel/tau/bin/tau` | [C53-B2] |
 
-22 D-xxx entries. Each is enforceable. None require speculation.
+23 D-xxx entries. Each is enforceable. None require speculation.
 
 ## 7. Acceptance criteria — "working TUI"
 
@@ -487,5 +501,6 @@ For each constraint, the file:line where it lives in the current codebase:
 | L1-C45 | `lib/tau/tui/app.ex:18-21` (no monitor on FSM pid) |
 
 | C50 | `lib/tau/session.ex` init/1 — `max_tool_iterations` resolution (opts → Settings.Cache → 20) |
+| C53 | `lib/tau/application.ex` — `cli_argv/0` (env-marker read → delete → decode); `test/support/tui_pty_helper.ex` — `start/2` plain-release branch; `test/tau/application/cli_argv_test.exs` |
 
 Other constraints map to sites named in their text.

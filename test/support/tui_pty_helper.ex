@@ -57,9 +57,21 @@ defmodule Tau.Test.TuiPtyHelper do
       name = unique_session_name()
       {cols, rows} = Keyword.get(opts, :geometry, {200, 50})
       args = Keyword.get(opts, :args, ["tui"])
-      env_args = build_env_args(Keyword.get(opts, :env, []))
+      base_env = Keyword.get(opts, :env, [])
 
-      cmd = Enum.join([binary | args], " ")
+      {cmd, env_args} =
+        if String.contains?(binary, "/rel/") do
+          # Plain mix release: boot via `<binary> start` and pass CLI argv
+          # through the TAU_CLI_ARGV env marker so Application.cli_argv/0
+          # picks it up without consulting positional VM args (D-040 / [C53-B2]).
+          marker = Tau.Application.encode_cli_argv(args)
+          release_env = [{"TAU_CLI_ARGV", marker} | base_env]
+          {binary <> " start", build_env_args(release_env)}
+        else
+          # Burrito binary: invoke directly with positional args (source A).
+          cmd_str = Enum.join([binary | args], " ")
+          {cmd_str, build_env_args(base_env)}
+        end
 
       # `-e KEY=VAL` is an option of tmux's `new-session` subcommand, not
       # of tmux itself, so it must follow `new-session` (tmux ≥ 3.2).

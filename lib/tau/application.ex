@@ -115,17 +115,45 @@ defmodule Tau.Application do
 
   def filter_file_system_log(event, _), do: event
 
-  defp maybe_dispatch_cli do
+  @cli_argv_env "TAU_CLI_ARGV"
+  @cli_argv_sep "\x1f"
+
+  @doc false
+  def cli_argv do
     case Burrito.Util.Args.get_bin_path() do
       :not_in_burrito ->
-        :ok
+        case System.get_env(@cli_argv_env) do
+          nil ->
+            :no_cli
+
+          "" ->
+            :no_cli
+
+          raw ->
+            decoded = decode_cli_argv(raw)
+            System.delete_env(@cli_argv_env)
+            {:dispatch, decoded}
+        end
 
       _bin_path ->
-        args = Burrito.Util.Args.get_arguments() || []
+        {:dispatch, Burrito.Util.Args.get_arguments() || []}
+    end
+  end
 
+  @doc false
+  def encode_cli_argv(args) when is_list(args), do: Enum.join(args, @cli_argv_sep)
+
+  defp decode_cli_argv(raw), do: String.split(raw, @cli_argv_sep)
+
+  defp maybe_dispatch_cli do
+    case cli_argv() do
+      :no_cli ->
+        :ok
+
+      {:dispatch, argv} ->
         Task.start(fn ->
           exit_code =
-            case Tau.CLI.main(args) do
+            case Tau.CLI.main(argv) do
               n when is_integer(n) -> n
               _ -> 0
             end
