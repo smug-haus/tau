@@ -23,7 +23,7 @@ defmodule Tau.CLI.MCPTest do
   end
 
   describe "list/1" do
-    test "prints a header and a row per server, reading from Tau.MCP.Manager" do
+    test "prints a header and a row per server, reading from Tau.MCP.Reconciler" do
       out = capture_io(fn -> assert 0 == CLI.list([]) end)
       # When MCP is up under the application, list returns whatever's
       # configured in settings; an empty list is fine. The handler
@@ -52,9 +52,9 @@ defmodule Tau.CLI.MCPTest do
   end
 
   describe "reload/1" do
-    test "asks Tau.MCP.Manager to reconcile and exits 0" do
+    test "asks Tau.MCP.Reconciler to reconcile and exits 0" do
       out = capture_io(fn -> assert 0 == CLI.reload([]) end)
-      assert out =~ "reload"
+      assert out =~ "reconcile"
     end
 
     test "--json emits {ok: true}" do

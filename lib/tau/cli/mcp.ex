@@ -6,12 +6,13 @@ defmodule Tau.CLI.MCP do
       command/url).
     * `tau mcp status` — health: which entries have a live `Tau.MCP.Server`
       pid.
-    * `tau mcp reload` — force `Tau.MCP.Manager` to re-reconcile against
+    * `tau mcp reload` — force `Tau.MCP.Reconciler` to re-reconcile against
       the current settings.
     * `--json` on any subcommand for piping.
 
-  Reads come from `Tau.MCP.Manager.list/0`, which returns desired entries
-  from `Tau.Settings.Cache` joined with the manager's `started` map.
+  Reads come from `Tau.MCP.Reconciler.list/0`, which returns desired
+  entries from `Tau.Settings.Cache` joined with the running pids derived
+  from `Tau.MCP.Registry`.
   """
 
   @type opts :: [json: boolean()]
@@ -83,7 +84,7 @@ defmodule Tau.CLI.MCP do
         if Keyword.get(opts, :json, false) do
           IO.puts(Jason.encode!(%{ok: true}))
         else
-          IO.puts("mcp manager reload requested")
+          IO.puts("mcp reconcile requested")
         end
 
         0
@@ -95,7 +96,7 @@ defmodule Tau.CLI.MCP do
   end
 
   defp safe_list do
-    Tau.MCP.Manager.list()
+    Tau.MCP.Reconciler.list()
   rescue
     _ -> []
   catch
@@ -103,7 +104,7 @@ defmodule Tau.CLI.MCP do
   end
 
   defp safe_reload do
-    Tau.MCP.Manager.reload()
+    Tau.MCP.Reconciler.reload()
   rescue
     e -> {:error, Exception.message(e)}
   catch
