@@ -837,16 +837,19 @@ defmodule Tau.Session do
   end
 
   # Forward dispatcher events into the FSM. Stale events (from a
-  # previous run that was cancelled and superseded) are dropped by
-  # the pid mismatch — analogous to `stream_ref` for the provider
-  # path (ADR-0012).
+  # previous run that was cancelled and superseded) are dropped by the
+  # `current_run?/2` pid check — analogous to `stream_ref` for the
+  # provider path (ADR-0012). This clause MUST stay before the
+  # state-agnostic catch-all below.
   def handle_event(
         :info,
         {:coding_agent_event, pid, event},
         :coding_agent_streaming,
-        %{coding_agent_dispatcher: pid} = data
+        data
       ) do
-    handle_coding_agent_event(event, data)
+    if current_run?(data, {:coding_agent, pid}),
+      do: handle_coding_agent_event(event, data),
+      else: {:keep_state, data}
   end
 
   # Stale or out-of-order event — dispatcher mismatch. Drop silently;
@@ -861,6 +864,13 @@ defmodule Tau.Session do
   # :provider_event clause so a non-empty chain takes over before the
   # error reaches the assembler. Empty chain → fall through to the
   # generic clause, which records the error and finalises the message.
+  #
+  # CLAUSE ORDERING IS LOAD-BEARING: the generic :provider_event clause
+  # below no longer head-discriminates on `stream_ref` (it uses
+  # `current_run?/2` in its body), so only source order keeps this
+  # fallback clause winning. If reordered, retryable mid-stream errors
+  # would silently skip the ADR-0012 fallback and finalize as terminal
+  # errors. This fallback clause MUST stay first.
   def handle_event(
         :info,
         {:provider_event, ref, %PEvent.Error{retryable?: true} = ev},
@@ -926,20 +936,24 @@ defmodule Tau.Session do
         :info,
         {:provider_event, ref, ev},
         :provider_streaming,
-        %{stream_ref: ref} = data
+        data
       ) do
-    new_assembler = Assembler.step(data.assembler, ev)
+    if current_run?(data, {:provider, ref}) do
+      new_assembler = Assembler.step(data.assembler, ev)
 
-    broadcast(data.id, %Events.MessageUpdate{
-      session_id: data.id,
-      event: ev,
-      message: new_assembler.message
-    })
+      broadcast(data.id, %Events.MessageUpdate{
+        session_id: data.id,
+        event: ev,
+        message: new_assembler.message
+      })
 
-    if Assembler.done?(new_assembler) do
-      finalize_assistant(new_assembler, data)
+      if Assembler.done?(new_assembler) do
+        finalize_assistant(new_assembler, data)
+      else
+        {:keep_state, %{data | assembler: new_assembler}}
+      end
     else
-      {:keep_state, %{data | assembler: new_assembler}}
+      {:keep_state, data}
     end
   end
 
@@ -947,16 +961,20 @@ defmodule Tau.Session do
         :info,
         {:provider_done, ref},
         :provider_streaming,
-        %{stream_ref: ref} = data
+        data
       ) do
-    if data.assembler && Assembler.done?(data.assembler) do
-      {:keep_state, data}
-    else
-      # Stream ended without a Done event — synthesise one.
-      assembler =
-        Assembler.step(data.assembler || Assembler.new(), %PEvent.Done{stop_reason: :stop})
+    if current_run?(data, {:provider, ref}) do
+      if data.assembler && Assembler.done?(data.assembler) do
+        {:keep_state, data}
+      else
+        # Stream ended without a Done event — synthesise one.
+        assembler =
+          Assembler.step(data.assembler || Assembler.new(), %PEvent.Done{stop_reason: :stop})
 
-      finalize_assistant(assembler, data)
+        finalize_assistant(assembler, data)
+      end
+    else
+      {:keep_state, data}
     end
   end
 
@@ -964,15 +982,19 @@ defmodule Tau.Session do
         :info,
         {:provider_failed, ref, msg},
         :provider_streaming,
-        %{stream_ref: ref} = data
+        data
       ) do
-    assembler =
-      Assembler.step(data.assembler || Assembler.new(), %PEvent.Error{
-        reason: msg,
-        retryable?: false
-      })
+    if current_run?(data, {:provider, ref}) do
+      assembler =
+        Assembler.step(data.assembler || Assembler.new(), %PEvent.Error{
+          reason: msg,
+          retryable?: false
+        })
 
-    finalize_assistant(assembler, data)
+      finalize_assistant(assembler, data)
+    else
+      {:keep_state, data}
+    end
   end
 
   # ADR-0014 (#92): bookkeeping casts from the (future) `Agent` tool task.
@@ -1144,6 +1166,18 @@ defmodule Tau.Session do
   end
 
   def handle_event(_type, _event, _state, data), do: {:keep_state, data}
+
+  # Is the inbound event tagged with the currently-live run token?
+  # Provider events carry a `stream_ref`; coding-agent events carry a
+  # dispatcher pid. Stale events from superseded runs return false and
+  # are dropped by the caller (ADR-0012).
+  @spec current_run?(map(), {:provider, reference()} | {:coding_agent, pid()}) :: boolean()
+  defp current_run?(%{stream_ref: ref}, {:provider, ref}) when is_reference(ref), do: true
+
+  defp current_run?(%{coding_agent_dispatcher: pid}, {:coding_agent, pid}) when is_pid(pid),
+    do: true
+
+  defp current_run?(_data, _token), do: false
 
   # --- Helpers --------------------------------------------------------------
 
@@ -2227,12 +2261,12 @@ defmodule Tau.Session do
     do: {data, nil}
 
   defp flush_pending_assistant(data, stop_reason) do
-    msg = %{
-      data.coding_agent_pending
-      | content:
-          ensure_visible_assistant_content(data.coding_agent_blocks, data.coding_agent_pending),
-        stop_reason: data.coding_agent_pending.stop_reason || stop_reason
-    }
+    effective_stop = data.coding_agent_pending.stop_reason || stop_reason
+
+    msg =
+      Assembler.finalize(data.coding_agent_pending, data.coding_agent_blocks,
+        stop_reason: effective_stop
+      )
 
     data =
       data
@@ -2243,24 +2277,6 @@ defmodule Tau.Session do
 
     {data, msg}
   end
-
-  # Mirrors the Assembler's `ensure_visible_content/1` so an
-  # error-with-empty-content message still surfaces a text block to the
-  # TUI (D-009 invariant preserved on the coding-agent path).
-  defp ensure_visible_assistant_content([], %{stop_reason: :error, error_message: em})
-       when is_binary(em) and em != "" do
-    [%{type: :text, text: "Error: " <> em}]
-  end
-
-  defp ensure_visible_assistant_content([], %{stop_reason: :error}) do
-    [%{type: :text, text: "Error: coding-agent ended with no content"}]
-  end
-
-  defp ensure_visible_assistant_content([], _pending) do
-    [%{type: :text, text: "(empty response)"}]
-  end
-
-  defp ensure_visible_assistant_content(blocks, _pending), do: blocks
 
   defp finalize_coding_agent_turn(%CAEvent.Done{exit_status: status} = done, data) do
     stop_reason =

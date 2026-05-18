@@ -202,6 +202,23 @@ defmodule Tau.Session.CodingAgentStreamingTest do
     end
   end
 
+  describe "empty turn surfaces a visible assistant message (D-009)" do
+    test "Done{exit_status: 0} with no AssistantText / no final_message → \"(empty response)\"" do
+      fixture = [
+        %CAE.Start{agent: :replay, version: "test"},
+        %CAE.Done{exit_status: 0, final_message: nil}
+      ]
+
+      sid = start_with_fixture(fixture)
+      Tau.send(sid, "anything")
+
+      assert_receive %SE.MessageEnd{message: msg}, 2_000
+
+      assert msg.content == [%{type: :text, text: "(empty response)"}],
+             "D-009: an empty coding-agent turn MUST finalize with visible content, not []"
+    end
+  end
+
   describe "non-recoverable Error event surfaces a visible assistant message" do
     test "Error{recoverable: false} → assistant with stop_reason: :error and non-empty content" do
       fixture = [

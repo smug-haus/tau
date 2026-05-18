@@ -140,6 +140,9 @@ defmodule Tau.Session.ProviderFallbackTest do
     assert msg.stop_reason == :stop
     assert [%{type: :text, text: "from-secondary"}] = msg.content
 
+    assert msg.stop_reason != :error,
+           "retryable mid-stream error MUST trigger fallback, not terminal finalize (clause-order guard)"
+
     # Fallback PubSub event reached the subscriber.
     assert_receive %SE.ProviderFallback{
                      from_provider: @primary,

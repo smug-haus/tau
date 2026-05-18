@@ -69,6 +69,7 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
 - **★ [C6-B2]** Subprocess writes garbage to stdout (e.g. mixed stream-json with rogue prints). Normalizer MUST emit `%Event.Error{}` on parse failure and continue draining; MUST NOT crash the dispatcher.
 - **[C7-B2]** Subprocess hangs (no output, no exit). Dispatcher MUST enforce an inactivity timeout (configurable, default 120s) and SIGTERM the subprocess on timeout.
 - **★ [C8-B6]** Host config dir absent / corrupted (e.g. expired Claude Code OAuth). Subprocess fails immediately with auth error. Adapter MUST surface a user-actionable message ("run `claude /login`") in the `%Event.Error{}` reason.
+- **[C14-B1]** Before WI-C the coding-agent finalize path carried its own mirror of the Assembler's D-009 guarantee; two copies of one invariant drift silently. Mitigation: the terminal fold is unified in `Tau.Message.Assembler.finalize/3`; no path holds independent visible-content logic.
 
 ### Q4: What invariants must hold across restarts?
 
@@ -143,7 +144,8 @@ to** the existing `:provider_streaming` state. The transition rules:
   broadcasts a `%Events.ToolEnd{}`, and starts a fresh pending
   assistant message; `Event.FileEdit` and `Event.Cost` emit telemetry
   only (cost aggregation lands in Phase 1B Team D); `Event.Done`
-  finalizes and returns to `:awaiting_user`.
+  finalizes — through the shared source-agnostic fold
+  `Tau.Message.Assembler.finalize/3` — and returns to `:awaiting_user`.
 
 The normalization step is deliberate: **coding-agent events become
 `Tau.Message` structs**, which means the existing TUI render path,
@@ -252,7 +254,7 @@ worktree vs cwd. `:coding_agent_workspace_backend` can be passed to
 | **D-034** | Telemetry parity with `Tau.Provider`. Start/event/stop/exception in the documented shape. |
 | **D-035** | Adapter failures surface in-stream as `%CodingAgent.Event.Error{}` events. Adapters MUST NOT raise for transport, auth, or parse errors. Hard configuration errors (no executable on PATH, malformed argv) may return synchronous `{:error, reason}` from `start/2`. |
 | **D-036** | Auth boundary — tau MUST NOT inject or copy credentials. The subprocess inherits the host user's config dir. Tau MAY check existence and emit a user-actionable "not configured" error. |
-| **D-037** | Coding-agent runs are **first-class sessions**: dispatcher events normalize into `Tau.Message.Assistant{}` / `Tau.Message.ToolResult{}` on ingestion so the session FSM's existing `data.messages` list, JSONL persistence, `%Events.MessageEnd{}` broadcast, TUI render path, and `/resume` apply unchanged. The `:coding_agent_streaming` state lives parallel to `:provider_streaming` and is selected at `process_user_message/2` time when `data.coding_agent != nil`. The no-coding-agent path remains byte-identical to today's provider flow. |
+| **D-037** | Coding-agent runs are **first-class sessions**: dispatcher events normalize into `Tau.Message.Assistant{}` / `Tau.Message.ToolResult{}` on ingestion so the session FSM's existing `data.messages` list, JSONL persistence, `%Events.MessageEnd{}` broadcast, TUI render path, and `/resume` apply unchanged. The `:coding_agent_streaming` state lives parallel to `:provider_streaming` and is selected at `process_user_message/2` time when `data.coding_agent != nil`. The no-coding-agent path remains byte-identical to today's provider flow. The terminal fold producing the final `%Tau.Message.Assistant{}`, including the D-009 visible-content guarantee, is source-agnostic: both the provider and coding-agent finalize paths route through `Tau.Message.Assembler.finalize/3`. No path may carry a parallel `ensure_visible_content` implementation. |
 | **D-038** | Cost line items MUST be tagged by source so the user sees the split. Each `%Tau.CodingAgent.Event.Cost{}` folds into the session-cost aggregator as a `%Tau.CodingAgent.Cost{}` record carrying the adapter atom (`source/1` yields `"coding_agent.<agent>"`); provider-direct cost continues to land tagged `"provider.<provider>"` via the existing `[:tau, :provider, :request, :stop]` event. The session FSM emits `[:tau, :coding_agent, :cost]` per fold (D-034 parity) and persists a `coding_agent_cost` JSONL event so `/resume` recomputes totals from disk. Cost-folding failures MUST degrade gracefully (D-035): `[:tau, :coding_agent, :cost, :failed]` surfaces the reason but does not crash the session. |
 | **D-039** | Delegate-tool recursion MUST bottom out. `Tau.Tools.Builtin.Delegate` carries a `depth` parameter (default 0) and refuses calls at `depth >= 2`, returning a `ToolResult{is_error: true, details.kind: :depth_exceeded}` synchronously before any dispatcher starts. The same ceiling propagates through the per-run tau-context MCP server's `tau_delegate` tool (`tau_context_max_depth` in `Tau.CodingAgent.Dispatcher.ctx`), so coding-agent-driven re-entry hits the same limit. Each Delegate invocation is **stateless** (no resume id is persisted across calls — SPEC §7 Q5). |
 
@@ -337,7 +339,7 @@ lib/tau/coding_agent/workspace/cwd.ex            # passthrough backend
 lib/tau/cli.ex                                   # --coding-agent flag + resolver
 lib/tau/tui/app.ex                               # plumbs flag through RuntimeOpts
 lib/tau/tui/runtime_opts.ex                      # documented :coding_agent key
-lib/tau/session.ex                               # :coding_agent_streaming state + helpers
+lib/tau/session.ex                               # :coding_agent_streaming state + helpers; finalize via Assembler.finalize/3
 lib/tau/settings/schema.ex                       # coding_agent.default_agent
 test/tau/cli_coding_agent_flag_test.exs          # CLI flag parse + resolver
 test/tau/coding_agent/workspace_test.exs         # worktree create/cleanup
