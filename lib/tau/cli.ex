@@ -117,7 +117,7 @@ defmodule Tau.CLI do
     Optimus.new!(
       name: "tau",
       description: "Tau — an OTP/BEAM agentic coding harness.",
-      version: version(),
+      version: Tau.Build.version(),
       subcommands: [
         run: [
           name: "run",
@@ -301,7 +301,7 @@ defmodule Tau.CLI do
   end
 
   defp version_cmd do
-    IO.puts("tau #{version()}")
+    IO.puts("tau #{Tau.Build.version()}")
     0
   end
 
@@ -409,13 +409,6 @@ defmodule Tau.CLI do
   # custom provider modules a caller registers themselves.
   defp resolve_provider(other) when is_binary(other) do
     Module.concat(["Tau", "Providers", String.capitalize(other)])
-  end
-
-  defp version do
-    case Application.spec(:tau, :vsn) do
-      nil -> "0.0.0-dev"
-      v -> to_string(v)
-    end
   end
 
   defp halt(code) when is_integer(code), do: System.halt(code)
