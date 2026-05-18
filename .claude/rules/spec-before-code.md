@@ -29,6 +29,15 @@ The current spec catalog:
   `lib/tau/tools/builtin/delegate.ex` (Phase 2; D-039). Triage score
   4/5; D-031..D-039 live here.
 
+- `docs/spec/SPEC-CIRCUIT-BREAKER.md` — the per-provider circuit breaker:
+  `:closed/:open/:half_open` state machine, ETS-owner lifecycle anchor
+  (`Tau.CircuitBreaker.Store`), and `Tau.CircuitBreaker` façade.
+  Mandatory for any PR touching `lib/tau/circuit_breaker.ex`,
+  `lib/tau/circuit_breaker/state.ex`, `lib/tau/circuit_breaker/store.ex`,
+  `test/tau/circuit_breaker/`, or the supervision-tree entry for `Store`
+  in `lib/tau/application.ex`. Triage score 5/5; D-029, D-030, D-043,
+  D-044 live here.
+
 Future SPECs land here as new components reach triage threshold.
 
 ## What this rule requires
