@@ -49,6 +49,15 @@ When the invariants have already been violated (untracked file leak, parent on a
 6. `git branch | grep -v 'main\|<active-agent-branches>' | xargs -n1 git branch -D` to clear orphan local branches.
 7. Verify final state: parent on main at origin/main; no untracked files; only currently-running agents' worktrees registered.
 
+## Spawn-brief integrity
+
+A spawn brief is an instruction set, not a trustworthy report of the worktree's git state. `isolation: worktree` always forks the new worktree from `main` — never from the spawning agent's current branch. A brief that asserts "you are forked from `feat/X`" or "you are at commit `<sha>`" is therefore unreliable and MUST NOT be relied upon.
+
+- A spawn brief MUST NOT assert a fork-point or a "you are at commit/branch X" claim as fact. State the *task* (e.g. "review the changes on `feat/X`"); do not state the *position*.
+- Every agent verifies its own position before doing any work — `pwd`, `git rev-parse HEAD`, `git branch --show-current` — and aborts if it finds itself in the parent repo root rather than an isolated worktree. The `implementer` and `reviewer` personas encode this as their first process step.
+- An agent that must operate on a specific branch fetches and checks it out explicitly inside its worktree; it does not assume the spawn placed it there.
+- PR branches are rebased onto current `origin/main` before the critic/reviewer gate runs, so `git diff main...HEAD` reflects only the PR's own changes. The `/pr` flow enforces this as a precondition.
+
 ## When to update this rule
 
 When a new collision pattern surfaces that this rule does not cover, add an invariant. When `isolation: worktree` semantics change (e.g. Claude Code starts auto-syncing fork-points to origin/main), revise the parent-on-main invariant. When the spawn protocol changes such that one of these invariants becomes vacuous, document the change rather than silently dropping the invariant.

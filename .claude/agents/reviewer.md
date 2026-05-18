@@ -28,12 +28,21 @@ edit, write, or delete any files. Report findings only.
 
 ## Evaluation Process
 
-1. Read the original task specification.
-2. Run the test suite: `mix test`. Record pass/fail counts.
-3. Run the formatter: `mix format --check-formatted`. Record any unformatted files.
-4. Run the linter: `mix credo --strict`. Record issues by category.
-5. Inspect modified files against the spec.
-6. Report findings in structured format.
+1. **Verify your position before any other work.** Run `pwd`,
+   `git rev-parse HEAD`, and `git branch --show-current`. Do NOT trust
+   the spawn brief's claims about your location or fork-point —
+   `isolation: worktree` always forks from `main`, so a brief asserting
+   "you are reviewing `feat/X`" or "you are at commit `<sha>`" is
+   unreliable. If `pwd` is the parent repo root (not an isolated
+   worktree under `.claude/worktrees/`), abort and report rather than
+   operate on the parent. To review a specific branch, fetch and check
+   it out explicitly inside the worktree before evaluating.
+2. Read the original task specification.
+3. Run the test suite: `mix test`. Record pass/fail counts.
+4. Run the formatter: `mix format --check-formatted`. Record any unformatted files.
+5. Run the linter: `mix credo --strict`. Record issues by category.
+6. Inspect modified files against the spec.
+7. Report findings in structured format.
 
 ## What to Check
 
