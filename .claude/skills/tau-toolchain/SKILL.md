@@ -1,9 +1,9 @@
 ---
 name: tau-toolchain
-description: Install and verify the Erlang/OTP + Elixir + Hex + rebar3 toolchain Tau needs to build. Use whenever a session starts with `mix` or `elixir` not on PATH, when `mix compile` / `mix test` / `mix format` fail with "command not found", when the user asks you to set up the BEAM, or when CI failures suggest a toolchain mismatch with `.tool-versions`.
+description: Install and verify the Erlang/OTP + Elixir + Hex + rebar3 + Zig toolchain Tau needs to build. Use whenever a session starts with `mix` or `elixir` not on PATH, when `mix compile` / `mix test` / `mix format` fail with "command not found", when Burrito release builds fail with "You MUST have zig and xz installed", when the user asks you to set up the BEAM, or when CI failures suggest a toolchain mismatch with `.tool-versions`.
 ---
 
-# tau-toolchain — install BEAM + Elixir for this repo
+# tau-toolchain — install BEAM + Elixir + Zig for this repo
 
 This skill is the canonical answer to "how do I get `mix` working in this
 repo". **Read it before re-deriving anything.**
@@ -15,11 +15,18 @@ sudo bash scripts/install-toolchain.sh
 . /etc/profile.d/elixir.sh
 elixir --version    # → Elixir 1.18.1 (compiled with Erlang/OTP 27)
 mix --version       # → Mix 1.18.1
+zig version         # → 0.15.2
 ```
 
-That installs Erlang/OTP 27.2, Elixir 1.18.1, Hex archive, and rebar3 —
-**without using apt** and without any `--unsafe` flags. Versions are pinned
-from `.tool-versions`.
+That installs Erlang/OTP 27.2, Elixir 1.18.1, Hex archive, rebar3, and
+Zig 0.15.2 — **without using apt** and without any `--unsafe` flags.
+Versions are pinned from `.tool-versions` (BEAM) and from the script itself
+(Zig; see `ZIG_VERSION` in `scripts/install-toolchain.sh`).
+
+`xz` is also required (for Zig's `.tar.xz` distribution and for Burrito's
+packing step). The preflight check will fail with an explicit message if
+`xz` is absent; install it via your distro package manager (`apt install
+xz-utils` on Ubuntu).
 
 If `mix compile` then fails because `deps/` is empty, run `mix deps.get`
 first.
@@ -40,8 +47,11 @@ already publishes:
 | Elixir 1.18.1 (otp-27) | elixir-lang/elixir GitHub release | `https://github.com/elixir-lang/elixir/releases/download/v1.18.1/elixir-otp-27.zip` |
 | Hex archive | builds.hex.pm | `https://builds.hex.pm/installs/1.18.0/hex.ez` |
 | rebar3 | erlang/rebar3 GitHub release | `https://github.com/erlang/rebar3/releases/latest/download/rebar3` |
+| Zig 0.15.2 | ziglang.org official release | `https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz` |
 
-All four are reachable via curl.
+All five are reachable via curl. The Zig tarball uses `.tar.xz` compression,
+so `xz` must be on PATH before the script runs (verified in the preflight
+check).
 
 ## What `mix` commands work and what they verify
 
@@ -89,12 +99,36 @@ tracks the underlying waf incompatibility.
 
 In those cases, skip installation and work directly.
 
+## Verify the full toolchain
+
+After installation, confirm all components are on PATH:
+
+```sh
+elixir --version   # → Elixir 1.18.1 (compiled with Erlang/OTP 27)
+mix --version      # → Mix 1.18.1 (compiled with Erlang/OTP 27)
+zig version        # → 0.15.2
+xz --version       # → xz (XZ Utils) 5.x.x  [distro-provided]
+```
+
+If `zig version` is missing or wrong, re-run
+`sudo bash scripts/install-toolchain.sh` or set `ZIG_VERSION=0.15.2 sudo
+bash scripts/install-toolchain.sh` to force the pinned version.
+
 ## Versions
 
-Single source of truth: `.tool-versions` at the repo root. The install
-script honours `ERLANG_VERSION` / `ELIXIR_VERSION` / `ELIXIR_OTP_MAJOR`
-env overrides if they ever drift; bump them in `.tool-versions` first
-and re-run the script.
+Single source of truth for BEAM: `.tool-versions` at the repo root. The
+install script honours `ERLANG_VERSION` / `ELIXIR_VERSION` /
+`ELIXIR_OTP_MAJOR` env overrides if they ever drift; bump them in
+`.tool-versions` first and re-run the script.
+
+Zig version is pinned at `ZIG_VERSION=0.15.2` inside
+`scripts/install-toolchain.sh` (matches `mlugg/setup-zig@v1` pin in
+`release.yml` and `ci.yml`). To upgrade: change `ZIG_VERSION` in the
+script, update this skill's TL;DR and table, and update the version string
+in `release.yml` / `ci.yml`.
+
+`xz` is a distro package and is not pinned; any recent version of
+`xz-utils` (Ubuntu 20.04+) is sufficient.
 
 ## Slash command
 
