@@ -55,7 +55,10 @@ defmodule Tau.Commands.Builtin do
       "/ping" => Tau.Commands.Builtin.Ping,
       "/tree" => Tau.Commands.Builtin.Tree,
       "/copy" => Tau.Commands.Builtin.Copy,
-      "/export" => Tau.Commands.Builtin.Export
+      "/export" => Tau.Commands.Builtin.Export,
+      "/fork" => Tau.Commands.Builtin.Fork,
+      "/clone" => Tau.Commands.Builtin.Clone,
+      "/new" => Tau.Commands.Builtin.New
     }
   end
 end
