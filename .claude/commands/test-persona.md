@@ -24,103 +24,154 @@ Spawn a Task agent (do NOT use `subagent_type: "critic"` — project-local agent
 
 **Prompt to critic (inline persona + task):**
 
-> Review this Python rate limiter design. Identify all design flaws, architectural risks, and testing gaps.
+> Review this Elixir module design. Identify all design flaws, OTP violations, and testing gaps. Reference `.claude/rules/otp-non-negotiables.md` for each violation.
 >
-> ```python
-> import threading
-> import time
+> ```elixir
+> defmodule Tau.SessionCache do
+>   @moduledoc """
+>   Caches active session metadata for fast lookup.
+>   User-visible operation: `lookup/1` is called on every tool dispatch.
+>   """
 >
-> # Global rate limit state — shared across all callers
-> _rate_cache = {}
+>   use GenServer
 >
-> def check_rate_limit(user_id: str, max_calls: int = 10) -> bool:
->     now = time.time()
->     calls = _rate_cache.get(user_id, [])
->     calls = [t for t in calls if now - t < 60]
->     if len(calls) >= max_calls:
->         return False
->     calls.append(now)
->     _rate_cache[user_id] = calls
->     return True
+>   # Module-level ETS table — not owned by any supervised process
+>   @table :session_cache
 >
-> def start_cleanup_timer():
->     def cleanup():
->         while True:
->             time.sleep(300)
->             _rate_cache.clear()
->     t = threading.Thread(target=cleanup, daemon=True)
->     t.start()
+>   def start_link(_opts) do
+>     GenServer.start_link(__MODULE__, [], name: __MODULE__)
+>   end
 >
-> # Tests
-> def test_rate_limit():
->     assert check_rate_limit("alice") == True
+>   @impl GenServer
+>   def init(_) do
+>     :ets.new(@table, [:set, :public, :named_table])
+>     {:ok, %{}}
+>   end
+>
+>   @doc "Store runtime API key override for a session."
+>   def put_api_key(session_id, key) do
+>     Application.put_env(:tau, {:api_key, session_id}, key)
+>   end
+>
+>   @doc "Look up a session by id."
+>   def lookup(session_id) do
+>     case :ets.lookup(@table, session_id) do
+>       [{^session_id, data}] -> {:ok, data}
+>       [] -> {:error, :not_found}
+>     end
+>   end
+>
+>   @doc "Notify all subscribers that a session was evicted."
+>   def evict(session_id) do
+>     :ets.delete(@table, session_id)
+>     subscribers = Application.get_env(:tau, :cache_subscribers, [])
+>     Enum.each(subscribers, fn pid -> send(pid, {:evicted, session_id}) end)
+>   end
+>
+>   @doc "Wraps pure key derivation in a server call."
+>   def derive_cache_key(session_id, suffix) do
+>     GenServer.call(__MODULE__, {:derive, session_id, suffix})
+>   end
+>
+>   @impl GenServer
+>   def handle_call({:derive, session_id, suffix}, _from, state) do
+>     {:reply, "#{session_id}:#{suffix}", state}
+>   end
+> end
 > ```
 
-**Expected critic output — all three must be present:**
-- Shared mutable state (`_rate_cache`) with no locking — race condition under concurrent access
-- No error handling in the cleanup timer — silent failure if `_rate_cache.clear()` raises
-- Test only covers the happy path (first call succeeds); no test for limit enforcement, concurrency, or edge cases
+**Expected critic output — all four must be present:**
+- `Application.put_env/3` used for runtime state (`put_api_key/2`) — violates OTP non-negotiable #1 (no `Application.put_env/3` for runtime state)
+- `:ets` table created with `:public` and not owned by its managing process — violates OTP non-negotiable #1 (no `:ets` outside an owner process); if the GenServer crashes the ETS table is orphaned or its owner crashes without cleanup
+- Cross-process event delivery via bare `send/2` to pid list from `Application.get_env` — violates OTP non-negotiable #4 (must use `Phoenix.PubSub` or monitored refs, never `Process.whereis/1 |> send(...)` pattern)
+- `derive_cache_key/2` wraps pure string concatenation in a `GenServer.call` — violates OTP non-negotiable #3 (must not wrap stateless logic in a GenServer)
+- `lookup/1` is user-visible and perf-sensitive (called on every tool dispatch per the moduledoc) but emits no telemetry — violates OTP non-negotiable #5
 
-**Failure criteria:** If the critic praises the design, gives vague feedback ("looks reasonable"), or misses any of the three flaws, Exercise 1 fails.
+**Failure criteria:** If the critic praises the design, gives vague feedback ("looks reasonable"), or misses more than one of the five planted flaws, Exercise 1 fails.
 
 ---
 
 ## Exercise 2: Reviewer Validation
 
-First, spawn a Task agent with the implementer persona (do NOT use
-`subagent_type: "implementer"` for the same reason as Exercise 1):
-1. Read `.claude/agents/implementer.md`. Skip the first two standalone `---` lines and paste the remaining body verbatim.
-2. Append the task below.
-
-Then spawn a second Task agent with the reviewer persona:
+Spawn a Task agent with the reviewer persona (do NOT use `subagent_type: "reviewer"` for the same reason as Exercise 1):
 1. Read `.claude/agents/reviewer.md`. Skip the first two standalone `---` lines and paste the remaining body verbatim.
-2. Append the reviewer task (implementer's output).
+2. Append the reviewer task below.
 
-**Implementer prompt (inline persona + task):**
+**Prompt to reviewer (inline persona + task):**
 
-> Write a Python function `fibonacci(n)` that returns the nth Fibonacci number (0-indexed: fibonacci(0)=0, fibonacci(1)=1). Include a test suite. Use a hardcoded `max_n = 100` guard.
+> An implementer has delivered the following Elixir module and test. The task was:
+> "Implement `Tau.Permissions.Evaluator` — a pure module that checks whether a
+> tool call is permitted given a permission list. Must be invariant-bearing
+> (property tests required), must not use hardcoded configuration, and must
+> return tagged tuples — never raise."
+>
+> Evaluate this output. Run `mix compile --warnings-as-errors` and
+> `mix format --check-formatted` before issuing a verdict.
+>
+> **Delivered file: `lib/tau/permissions/evaluator.ex`**
+>
+> ```elixir
+> defmodule Tau.Permissions.Evaluator do
+>   @moduledoc "Evaluates tool-call permissions against a permission list."
+>
+>   @anthropic_api_base "https://api.anthropic.com/v1"
+>
+>   @spec evaluate(tool :: String.t(), permissions :: [String.t()]) ::
+>           {:ok, :allowed} | {:error, :denied}
+>   def evaluate(tool, permissions) do
+>     if tool in permissions do
+>       {:ok, :allowed}
+>     else
+>       try do
+>         maybe_remote_check(tool)
+>       rescue
+>         _ -> {:error, :denied}
+>       end
+>     end
+>   end
+>
+>   defp maybe_remote_check(_tool) do
+>     # Placeholder: remote policy lookup not yet implemented
+>     {:error, :denied}
+>   end
+> end
+> ```
+>
+> **Delivered file: `test/tau/permissions/evaluator_test.exs`**
+>
+> ```elixir
+> defmodule Tau.Permissions.EvaluatorTest do
+>   use ExUnit.Case, async: true
+>
+>   alias Tau.Permissions.Evaluator
+>
+>   test "allowed when tool in permissions" do
+>     assert Evaluator.evaluate("Bash(ls *)", ["Bash(ls *)"]) == {:ok, :allowed}
+>   end
+>
+>   test "denied when tool not in permissions" do
+>     assert Evaluator.evaluate("Bash(rm -rf *)", ["Bash(ls *)"]) == {:error, :denied}
+>   end
+> end
+> ```
 
-The implementer will produce something like:
+**Expected reviewer output — all three must be present:**
+- `@anthropic_api_base "https://api.anthropic.com/v1"` is a hardcoded URL — a configurable value that should come from application config or be passed as a parameter; BLOCKING finding
+- Empty `try/rescue` block in `evaluate/2` swallows all errors silently and returns a default (`{:error, :denied}`) rather than propagating or tagging the failure — violates OTP non-negotiable #7 and the reviewer checklist's "silent failures" criterion; BLOCKING finding
+- No property tests for an invariant-bearing module (`Tau.Permissions.Evaluator` is named in the OTP non-negotiables as an example requiring `StreamData` properties) — the two example-based tests do not substitute for property coverage of the permission-matching invariant; BLOCKING finding
 
-```python
-MAX_N = 100
-
-def fibonacci(n: int) -> int:
-    if n > MAX_N:
-        raise ValueError(f"n must be <= {MAX_N}")
-    if n <= 1:
-        return n
-    a, b = 0, 1
-    for _ in range(n - 1):  # off-by-one: range should be range(n-1) → correct is range(2, n+1) style
-        a, b = b, a + b
-    return b
-
-def test_fibonacci():
-    assert fibonacci(0) == 0
-    assert fibonacci(1) == 1
-    assert fibonacci(2) == 1
-    assert fibonacci(10) == 55
-```
-
-Use the Task agent constructed above (verbatim reviewer persona + the implementer's output as context).
-
-**Expected reviewer output — all must be present:**
-- Run the tests — they will fail (off-by-one produces wrong values for n >= 2 in some implementations)
-- Identify the hardcoded `MAX_N = 100` as a configurable value that should be a parameter
-- Produce a structured evaluation: PASS/FAIL verdict with specific findings
-
-**Failure criteria:** If the reviewer does not run the tests, issues a PASS verdict without catching the off-by-one, or produces an unstructured response, Exercise 2 fails.
+**Failure criteria:** If the reviewer issues a PASS verdict without catching all three flaws, does not run `mix compile --warnings-as-errors` or `mix format --check-formatted`, or produces an unstructured response lacking PASS/FAIL/PARTIAL verdict, Exercise 2 fails.
 
 ---
 
 ## Exercise 3: Kill Cascade Validation (Observational)
 
-This exercise validates hook infrastructure. No subagents are spawned. Observe the harness response to a stuck pattern.
+This exercise validates hook infrastructure. No subagents are spawned. Observe the harness response to a stuck pattern using commands in Tau's typical shape.
 
 **Steps:**
-1. Run a bash command that always fails, three or more times in succession. Example:
+1. Run a bash command that always fails in the shape of a typical Tau build command, three or more times in succession. Example — a `mix` subcommand that does not exist:
    ```
-   ls /nonexistent-path-xyz
+   mix nonexistent_task_xyz
    ```
    Run it at least 3 times via separate Bash tool calls.
 
@@ -134,7 +185,7 @@ This exercise validates hook infrastructure. No subagents are spawned. Observe t
 
 **Recovery:** Run `/clear-logs` to reset state after observing the cascade.
 
-**Failure criteria:** If H-003 does not trigger after 3+ repeated failures, or the kill signal is not written, the hook infrastructure is not functioning correctly.
+**Failure criteria:** If H-003 does not trigger after 3+ repeated failures in `mix`-command shape, or the kill signal is not written, the hook infrastructure is not functioning correctly — or the heuristic patterns do not cover Tau's typical command shape.
 
 ---
 
@@ -142,8 +193,8 @@ This exercise validates hook infrastructure. No subagents are spawned. Observe t
 
 | Exercise | Persona | Key Signal | Failure Signal |
 |----------|---------|-----------|----------------|
-| 1 | Critic | Identifies all 3 flaws explicitly | Vague praise or missed flaws |
-| 2 | Reviewer | Runs tests, catches off-by-one, flags hardcoded value | PASS verdict or no test execution |
-| 3 | Hooks | H-003 triggers, kill signal written, PreToolUse denies | No trigger after 3+ failures |
+| 1 | Critic | Names ≥ 4 of 5 OTP violations with rule references | Vague praise, missed violations, or no rule citations |
+| 2 | Reviewer | Runs compile+format, catches hardcoded URL + swallowed error + missing property tests | PASS verdict or missing any of the three BLOCKING findings |
+| 3 | Hooks | H-003 triggers on `mix`-shape failures, kill signal written, PreToolUse denies | No trigger after 3+ `mix` failures |
 
 All three exercises must pass for persona and hook validation to be considered complete.
