@@ -48,7 +48,7 @@ lib/tau/permissions/{rule_set,evaluator,matchers}.ex
 lib/tau/hook.ex                         — behaviour
 lib/tau/persistence.ex                  — behaviour (default: jsonl)
 lib/tau/compactor.ex                    — behaviour
-lib/tau/mcp/{server,manager,tool_adapter}.ex
+lib/tau/mcp/{server,reconciler,tool_adapter}.ex
 lib/tau/mcp/transport/{stdio,sse,http}.ex
 lib/tau/extension.ex + extension/dsl.ex — extension DSL
 lib/tau/cli.ex + tui/                   — escript + Ratatouille TUI

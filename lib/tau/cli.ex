@@ -178,7 +178,7 @@ defmodule Tau.CLI do
             ],
             reload: [
               name: "reload",
-              about: "Force MCP manager to reconcile against settings.",
+              about: "Force the MCP reconciler to reconcile against settings.",
               flags: [json: [long: "--json", help: "Emit JSON"]]
             ]
           ]
