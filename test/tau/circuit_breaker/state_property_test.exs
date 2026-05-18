@@ -186,4 +186,19 @@ defmodule Tau.CircuitBreaker.StatePropertyTest do
       assert result == :half_open
     end
   end
+
+  property "N failures in :closed sets opened_at_ms == now_ms on :open transition" do
+    check all(
+            threshold <- threshold_gen(),
+            now_ms <- now_ms_gen()
+          ) do
+      opts = [failure_threshold: threshold, now_ms: now_ms]
+
+      final_state =
+        Enum.reduce(1..threshold, %State{}, fn _, acc -> State.record_failure(acc, opts) end)
+
+      assert final_state.state == :open
+      assert final_state.opened_at_ms == now_ms
+    end
+  end
 end

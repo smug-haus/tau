@@ -146,56 +146,16 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
 **Probe-admission contract** (`probe_admitted?/1`):
 
 - Input: `provider :: module()`
-- Operation: `:ets.update_counter(:tau_circuit_breakers, provider, {probe_slot_pos, 1, 1, 1})`
-  where the threshold is `1` — the operation increments the field, caps it at 1,
-  and returns the new value. Return `1` → admitted; return value already `1`
-  before increment cannot occur because `update_counter` with threshold
-  `{pos, incr, threshold, default}` semantics clamp to `threshold`. Concretely:
-  the ETS call form is `{probe_slot_pos, +1, 1, 1}` meaning "increment by 1,
-  clamp at 1, default row counter to 1 if key missing" — so the first caller
-  gets `1` (admitted) and all subsequent callers also get `1` (clamped, but
-  the row already existed, so the default is not used). This approach requires
-  a separate `:ets.lookup/2` to distinguish "first to arrive" from "subsequent":
-  **the correct primitive is `update_counter` with a `{pos, 1, 1, 1}` spec;
-  the caller that finds the pre-increment value was `0` is admitted; all others
-  are rejected.** The pre-increment value is recoverable because
-  `update_counter` returns the post-increment value; a post-increment value of
-  `1` means pre-increment was `0` → admitted. Post-increment `1` from a
-  non-zero pre-increment is impossible given the clamp at `1`. Therefore:
-  **`update_counter` returns `1` → admitted; would not return other than `1` due
-  to clamp**. Clarification: the threshold form `{pos, increment, threshold, reset_value}`
-  in `:ets.update_counter/3` means the counter is set to `reset_value` when it
-  would exceed `threshold`. We use `{probe_slot_pos, 1, 0, 1}` — increment by 1,
-  if result would exceed 0... that is wrong. The correct form:
-
-  **Binding primitive (CRITIC-MANDATED):**
-  ```
-  :ets.update_counter(:tau_circuit_breakers, provider_key,
-    [{probe_slot_pos, 1, 1, 1}])
-  ```
-  Semantics: increment `probe_slot` by 1; if `probe_slot >= 1` after increment,
-  set it to 1 (clamp). The call returns the post-update value. Because the
-  counter starts at `0` on a fresh `:half_open` transition (reset by
-  `select_replace`), the first caller receives `1` and all subsequent callers
-  also receive `1` (clamped). To distinguish admission, use
-  `:ets.update_counter/4` with a default tuple: `{provider_key, 0}` as the
-  default row, and the update spec `[{probe_slot_pos, 1, 1, 1}]`. **The caller
-  is admitted if and only if it observed a pre-increment value of `0`.** Since
-  `update_counter` only returns the post-increment value, the Store MUST expose
-  `probe_admitted?/1` as a GenServer call that performs a `select_replace`
-  atomic swap on the `probe_slot` field from `0` to `1`, returning `true` iff
-  the match count was `1` (it was 0 before, now set to 1). This is the correct
-  single-probe admission primitive.
-
-  **Final binding form:** `probe_admitted?/1` in `Store` uses
-  `:ets.select_replace/2` with a match spec that matches the row when
-  `probe_slot == 0` and replaces it with the same row with `probe_slot = 1`.
-  Return value `1` → admitted; `0` → rejected. This is a full-row CAS on the
-  `probe_slot` field only, expressed as `select_replace` so no two probes are
-  simultaneously admitted. No other ETS primitive guarantees this — not
-  `update_counter` (which returns post-increment and cannot distinguish first
-  from nth caller when clamped), not `insert` (which is not conditional on
-  current value).
+- Operation: `:ets.select_replace/2` with a match spec that matches the row
+  when `probe_slot == 0` and replaces it with the same row with `probe_slot = 1`.
+  Return value `1` → admitted (this process is the sole probe); `0` → rejected
+  (another process already claimed the slot).
+- Why not `update_counter`: `:ets.update_counter/3` returns only the
+  post-increment value. With a clamp-at-1 spec, both the first and all
+  subsequent callers receive `1` — there is no way to distinguish the first
+  caller from the nth using the return value alone. `select_replace` performs a
+  conditional full-row CAS (match only when `probe_slot == 0`), so exactly one
+  caller receives match count `1`; all others receive `0`.
 
 ### B2: `Tau.CircuitBreaker.Store` (C2) ↔ ETS
 
@@ -247,10 +207,20 @@ without a data-migration step.
 ### B4: `Tau.CircuitBreaker.State` (C1) ↔ callers
 
 - Pure functions, no side effects.
-- `record_failure/2 :: (%State{}, opts) -> %State{}`
-- `record_success/2 :: (%State{}, opts) -> %State{}`
+- `record_failure/2 :: (%State{}, opts :: keyword()) -> %State{}`
+- `record_success/2 :: (%State{}, opts :: keyword()) -> %State{}`
 - `check/2 :: (%State{}, now_ms :: non_neg_integer()) -> :closed | :open | :half_open`
 - All functions are total — no raises on valid inputs.
+
+**`opts` keys for `record_failure/2` and `record_success/2`:**
+
+| Key | Type | Required? | Default | Purpose |
+|-----|------|-----------|---------|---------|
+| `:now_ms` | `non_neg_integer()` | **REQUIRED** when call can trigger `:open` transition (i.e. in `:closed` or `:half_open` state) | — | Wall-clock milliseconds at time of call; stored as `opened_at_ms` on `:open` transition. Omitting it raises `KeyError`. |
+| `:failure_threshold` | `pos_integer()` | optional | `5` | Consecutive failures before opening. |
+| `:success_threshold` | `pos_integer()` | optional | `1` | Successes in `:half_open` before closing. |
+
+`:now_ms` is a required key for any state that can transition to `:open`. Callers must supply a monotonic millisecond timestamp. Omitting `:now_ms` where it is required raises a `KeyError` (fail loud — silent `0` defaults cause the cooldown to appear already elapsed on any subsequent `check/2`).
 
 ## 5. State enumeration
 
@@ -304,7 +274,7 @@ A chain of N providers where all breakers are `:open` terminates in at most N
 `call/3` invocations, each returning `{:error, :circuit_open}`. The chain
 MUST NOT loop. Enforced by the fallback logic in PR3: a fallback sequence that
 encounters `:circuit_open` on every member reports the error immediately rather
-than retrying indefinitely. The property suite in PR2 MUST include an
+than retrying indefinitely. The property suite in PR3 MUST include an
 all-breakers-open fallback-termination property: given a list of providers all
 in `:open` state, `call/3` over each returns `{:error, :circuit_open}` and the
 total invocation count equals the length of the list (never exceeds it).
@@ -321,7 +291,8 @@ description.
 
 - **AC-1 (PR1):** `mix compile --warnings-as-errors` passes with `lib/tau/circuit_breaker/state.ex` present.
 - **AC-2 (PR1):** `mix test test/tau/circuit_breaker/state_property_test.exs` passes; all properties tagged `:property` exercise the D-029 invariant.
-- **AC-3 (PR2):** `mix test --only property` passes including the concurrent-probe race property (D-030) and the all-open termination property (D-043).
+- **AC-3 (PR2):** `mix test --only property` passes including the concurrent-probe race property (D-030).
+- **AC-3b (PR3):** `mix test --only property` passes including the all-open termination property (D-043).
 - **AC-4 (PR2):** `Tau.CircuitBreaker.Store` starts under `Tau.Application` supervision; `mix test` passes.
 - **AC-5 (PR3):** `Tau.CircuitBreaker.call/3` wraps a synthetic always-failing thunk; after `failure_threshold` failures, subsequent calls return `{:error, :circuit_open}` without invoking the thunk.
 - **AC-6 (PR3):** After `cooldown_ms`, `call/3` admits exactly one probe; if the probe fails, all subsequent calls are again `:circuit_open` until the next cooldown.

@@ -32,14 +32,14 @@ defmodule Tau.CircuitBreaker.State do
           failure_count: non_neg_integer(),
           success_count: non_neg_integer(),
           opened_at_ms: non_neg_integer(),
-          half_open_probe?: boolean()
+          probe_slot: 0 | 1
         }
 
   defstruct state: :closed,
             failure_count: 0,
             success_count: 0,
             opened_at_ms: 0,
-            half_open_probe?: false
+            probe_slot: 0
 
   @default_failure_threshold 5
   @default_cooldown_ms 30_000
@@ -85,10 +85,11 @@ defmodule Tau.CircuitBreaker.State do
 
   def record_failure(%__MODULE__{state: :closed} = s, opts) do
     threshold = Keyword.get(opts, :failure_threshold, @default_failure_threshold)
-    now_ms = Keyword.get(opts, :now_ms, 0)
     new_count = s.failure_count + 1
 
     if new_count >= threshold do
+      now_ms = Keyword.fetch!(opts, :now_ms)
+
       %__MODULE__{
         s
         | state: :open,
@@ -102,7 +103,7 @@ defmodule Tau.CircuitBreaker.State do
   end
 
   def record_failure(%__MODULE__{state: :half_open} = s, opts) do
-    now_ms = Keyword.get(opts, :now_ms, 0)
+    now_ms = Keyword.fetch!(opts, :now_ms)
 
     %__MODULE__{
       s
@@ -110,7 +111,7 @@ defmodule Tau.CircuitBreaker.State do
         failure_count: s.failure_count + 1,
         success_count: 0,
         opened_at_ms: now_ms,
-        half_open_probe?: false
+        probe_slot: 0
     }
   end
 
@@ -146,7 +147,7 @@ defmodule Tau.CircuitBreaker.State do
           failure_count: 0,
           success_count: 0,
           opened_at_ms: 0,
-          half_open_probe?: false
+          probe_slot: 0
       }
     else
       %__MODULE__{s | success_count: new_count}
