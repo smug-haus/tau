@@ -98,6 +98,7 @@ defmodule Tau.MarkdownTest do
       """
 
       lines = Markdown.render(md)
+
       assert Enum.any?(lines, &String.contains?(&1, "| def hello")),
              "code block not delimited: #{inspect(lines)}"
 
