@@ -22,6 +22,18 @@ defmodule Tau.Commands.BuiltinTest do
       assert Builtin.table()["/ping"] == Tau.Commands.Builtin.Ping
     end
 
+    test "contains /tree => Tau.Commands.Builtin.Tree" do
+      assert Builtin.table()["/tree"] == Tau.Commands.Builtin.Tree
+    end
+
+    test "contains /copy => Tau.Commands.Builtin.Copy" do
+      assert Builtin.table()["/copy"] == Tau.Commands.Builtin.Copy
+    end
+
+    test "contains /export => Tau.Commands.Builtin.Export" do
+      assert Builtin.table()["/export"] == Tau.Commands.Builtin.Export
+    end
+
     test "all values are modules (atoms)" do
       Builtin.table()
       |> Map.values()
@@ -51,6 +63,7 @@ defmodule Tau.Commands.BuiltinTest do
     end
 
     test "implements the Tau.Commands.Builtin behaviour" do
+      Code.ensure_loaded!(Ping)
       assert function_exported?(Ping, :name, 0)
       assert function_exported?(Ping, :run, 2)
     end

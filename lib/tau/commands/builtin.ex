@@ -52,7 +52,10 @@ defmodule Tau.Commands.Builtin do
   @spec table() :: %{String.t() => module()}
   def table do
     %{
-      "/ping" => Tau.Commands.Builtin.Ping
+      "/ping" => Tau.Commands.Builtin.Ping,
+      "/tree" => Tau.Commands.Builtin.Tree,
+      "/copy" => Tau.Commands.Builtin.Copy,
+      "/export" => Tau.Commands.Builtin.Export
     }
   end
 end
