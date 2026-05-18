@@ -8,7 +8,7 @@
 | **Method** | PSDH (`.claude/skills/design-reasoning`); L0 + L1 + boundary contracts. L2 deferred. |
 | **Self-hosting target** | Working TUI is the prerequisite for Tau replacing the vendored claude-harness as the dev tool for Tau itself (see memory: `project_1_0_self_hosting.md`). |
 
-**Changelog:** WI-C / #202: D-009 reworded — visible-content guarantee unified into `Assembler.finalize/3`. #211: C53, D-040 — plain-release CLI dispatch via `TAU_CLI_ARGV`; B2 contract amended with three argv sources.
+**Changelog:** WI-C / #202: D-009 reworded — visible-content guarantee unified into `Assembler.finalize/3`. #211: C53, D-040 — plain-release CLI dispatch via `TAU_CLI_ARGV`; B2 contract amended with three argv sources. #179: C54, D-041 — mid-session model swap via `/model`; AC-8 added; D-002 amended to name the sanctioned swap path; B4 boundary contract note added.
 
 ## 0. Why this spec exists
 
@@ -90,6 +90,7 @@ Each question lists raw constraints. Format: `[Cn-Bm]` = constraint number + bou
 - **[C49-B8]** OAuth `scopes` must include `user:inference` for the Messages API. Tau should validate this at config-load time and surface a clear error if missing.
 - **★ [C51-B3]** The TUI prompt MUST render a visible cursor glyph at the end of `model.input`. Without it, an empty input field is indistinguishable from a frozen or blank render — the user cannot tell whether the TUI is waiting for input or has hung. Silent-failure category: the render path produces output, but the output is ambiguous to the human observer. Detection: tmux `capture-pane` must contain the cursor glyph character after a render-settle delay.
 - **★ [C53-B2]** The CLI argv for a plain `mix release` MUST come from the explicit `TAU_CLI_ARGV` env marker (US-separated tokens), never inferred from positional VM arguments. The marker MUST NOT be inherited by `tau`-spawned subprocesses: `cli_argv/0` deletes it (via `System.delete_env/1`) immediately after reading, before returning the decoded argv. A plain-release boot with no marker resolves to `:no_cli`; the OTP app stays up with no `System.halt`. Positional VM args passed to the release launcher (`bin/tau start`) MUST NOT influence dispatch. (Closes D-040.)
+- **★ [C54-B4]** `data.model` in `Tau.Session` FSM data MUST have a single mutation site: `do_swap_model/2` (a pure function). All paths that update `data.model` — the `{:swap_model}` synchronous call handler, the `/model` slash-command path, and the `{:reconfigure}` cast — MUST route through `do_swap_model/2`. Direct `Map.put(data, :model, ...)` outside of `do_swap_model/2` is forbidden. `Tau.Session.swap_model/2` is the only public surface; `update_provider/2`'s `:reconfigure` path routes model through `do_swap_model/2` but MUST NOT emit a `model_swap` event — it emits a single `reconfigure` event preserving today's contract. (Closes D-041.)
 
 ### Q4: What information crosses a boundary, and what is lost?
 
@@ -367,7 +368,7 @@ Each entry: id, statement, severity, detection_method, source_constraint.
 | ID | Statement | Severity | Detection | Source |
 |---|---|---|---|---|
 | D-001 | TUI MUST render `Assistant.error_message` for `stop_reason: :error` messages | high | property test: feed Replay error → TUI render fixture; assert non-empty render | [C12], [C19] |
-| D-002 | `Tau.start_session/1` MUST resolve a non-nil model before reaching `:start_provider` | high | property test: start_session([]) ; assert data.model != nil | [C29] |
+| D-002 | `Tau.start_session/1` MUST resolve a non-nil model before reaching `:start_provider`. `data.model` is resolved at session init (from `opts[:model]` → last persisted `model_swap` → `provider.default_model()`). The ONLY sanctioned between-turn mutation is `Tau.Session.swap_model/2`, gated to `:awaiting_user` state (D-041). | high | property test: start_session([]) ; assert data.model != nil | [C29], [C54] |
 | D-003 | `Ratatouille.run` quit_events MUST NOT include bare `{:ch, ?q}` — quit must be context-aware | medium | source-level: refute regex match; manual-test gate | [C7] |
 | D-004 | TUI MUST `Phoenix.PubSub.subscribe/2` BEFORE `Tau.start_session/1` returns | high | property test: capture SessionStart event from TUI side | [C6] |
 | D-005 | _Superseded by D-027 (same invariant, fully specified there). Retained as placeholder; references to D-005 in code comments and commit history point here._ | — | _see D-027_ | [C24] |
@@ -389,8 +390,9 @@ Each entry: id, statement, severity, detection_method, source_constraint.
 | D-027 | Session FSM MUST cap tool-call iterations per turn at `max_tool_iterations` (default 20, readable from `opts[:max_tool_iterations]` or `Settings.Cache.get()[:session][:max_tool_iterations]`). When the cap is exceeded, the FSM MUST emit `[:tau, :session, :tool_iteration_cap]` telemetry with measurements `%{iterations: N, cap: K}` — where `N` is the count of completed dispatches in the aborted turn (equals `K` at the abort boundary; resets to 0 at the start of the next turn) — and metadata `%{session_id: id}`, then abort the turn with `stop_reason: :tool_loop_aborted`. The per-turn counter resets to 0 on every return to `:awaiting_user`. | high | property test `test/tau/session/tool_iteration_cap_property_test.exs`: drives a session backed by bespoke `AlwaysToolCallProvider` (a `Tau.Provider` behaviour implementation that always emits a `tool_call` event stream, independent of Replay); asserts turn terminates within `max_tool_iterations` with `stop_reason: :tool_loop_aborted` and that the telemetry event fires with `iterations == cap` | [C24], [C50] |
 | D-028 | Assistant text content rendered to the TUI transcript MUST be parsed as CommonMark with GFM tables (`Tau.Markdown.render/1`) before display. Raw markdown source MUST NOT appear in the rendered pane for valid CommonMark input. Output MUST be ASCII-only: tables use `\|` / `-` / `+` (NOT Unicode box-drawing — Ratatouille 0.5.1's `Renderer.Cells.to_char/1` crashes on multi-byte UTF-8 in label content; see Ratatouille tracking issue). Bold and italic markers are STRIPPED (Ratatouille labels render flat text with no inline attributes); inline-code backticks preserved as visual cue. On parse error, a `[markdown-parse-error]` prefix surfaces the failure rather than silently dropping the content. | medium | unit test on `Tau.Markdown.render/1` over a markdown fixture containing a table + bold + inline code + fenced code; assert the output list contains ASCII pipe-and-plus tables and no Unicode box-drawing chars | [C52-B5] |
 | D-040 | A plain (non-Burrito) `mix release` boot with no explicit CLI-dispatch marker (`TAU_CLI_ARGV`) MUST NOT dispatch the Tau CLI and MUST NOT call `System.halt`. Positional VM arguments passed to the release launcher (`bin/tau start`) MUST NOT be consulted for dispatch. The `TAU_CLI_ARGV` marker is consumed-and-deleted (`System.delete_env/1`) by `Tau.Application.cli_argv/0` immediately after reading so it is NOT inherited by tau-spawned subprocesses. Encoding: tokens are joined by ASCII Unit Separator (`\x1f`); `Tau.Application.encode_cli_argv/1` is the single source of truth — no other code path may duplicate the separator literal. | high | `test/tau/application/cli_argv_test.exs` (all six tests); `test/tau/cli/tui_smoke_test.exs` AC-H1 and AC-H2 against `_build/prod/rel/tau/bin/tau` | [C53-B2] |
+| D-041 | `data.model` in the session FSM MUST be treated as immutable within a provider turn. `Tau.Session.swap_model/2` is the sole sanctioned mid-session mutation of `data.model`, gated to `:awaiting_user` state with `command_task == nil`; any other state MUST return `{:error, :busy}`. `do_swap_model/2` is the single `data.model` mutation site ([C54-B4]). On success the FSM MUST emit `[:tau, :session, :model_swapped]` telemetry and persist a `model_swap` JSONL event. The persisted event is folded back into `data.model` on resume/fork via `model_from_preload/1` in `init/1`. | high | `test/tau/session/swap_model_test.exs` — 7 cases covering success, busy, JSONL persistence, not_found, idempotent, invalid_model (empty + whitespace) | [C54-B4], [C29] |
 
-23 D-xxx entries. Each is enforceable. None require speculation.
+25 D-xxx entries. Each is enforceable. None require speculation.
 
 ## 7. Acceptance criteria — "working TUI"
 
@@ -432,6 +434,11 @@ These are the bar for closing the umbrella issue (#153/#149) and unblocking the 
 
 ### AC-7: Resume sanity
 - After AC-2, `tau sessions list` shows the session. `tau sessions show <id>` prints the JSONL events. `tau resume <id>` opens a TUI for the resumed session whose transcript pane includes the prior turn.
+
+### AC-8: Mid-session model swap
+- `/model` with no argument broadcasts a `SystemNotice` showing the current model; no provider turn starts.
+- `/model <id>` mutates `data.model`, broadcasts a `SystemNotice` confirming the change, and the immediately following turn uses the new model string. The FSM MUST return `{:error, :busy}` if the swap is attempted while streaming or running a command task. The swap is persisted as a `model_swap` JSONL event and survives `Tau.resume/1`. Empty or whitespace-only model ids return `{:error, :invalid_model}`.
+- Tests: `test/tau/session/swap_model_test.exs` (7 cases) and `test/tau/session/slash_model_command_test.exs` (2 cases).
 
 ## 8. Out-of-scope hazards (explicitly deferred)
 
@@ -502,5 +509,6 @@ For each constraint, the file:line where it lives in the current codebase:
 
 | C50 | `lib/tau/session.ex` init/1 — `max_tool_iterations` resolution (opts → Settings.Cache → 20) |
 | C53 | `lib/tau/application.ex` — `cli_argv/0` (env-marker read → delete → decode); `test/support/tui_pty_helper.ex` — `start/2` plain-release branch; `test/tau/application/cli_argv_test.exs` |
+| C54 | `lib/tau/session.ex` — `do_swap_model/2` (pure mutation core), `apply_model_swap/2` (shared helper with telemetry+persist), `handle_event({:call, from}, {:swap_model, _}, ...)` (gated call handler), `handle_slash_model_swap/2` (/model slash path), `reconfigure_model/2` ({:reconfigure} cast routing); `lib/tau/session/events.ex` — `%SystemNotice{}`; `lib/tau/tui/app.ex` — `%SystemNotice{}` dispatch clause; `test/tau/session/swap_model_test.exs`; `test/tau/session/slash_model_command_test.exs` |
 
 Other constraints map to sites named in their text.

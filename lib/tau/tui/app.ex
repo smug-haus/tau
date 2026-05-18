@@ -87,6 +87,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         %Tau.Session.Events.ToolEnd{} = e -> on_tool_end(model, e)
         %Tau.Session.Events.Cancelled{} = e -> on_cancelled(model, e)
         %Tau.Session.Events.SessionEnd{} = e -> on_session_end(model, e)
+        %Tau.Session.Events.SystemNotice{text: t} -> %{model | transcript: model.transcript ++ [t]}
         _ -> model
       end
     end

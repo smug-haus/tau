@@ -271,6 +271,25 @@ defmodule Tau.Session do
     end
   end
 
+  @doc """
+  Swap the active model for a session mid-session. Gated: only allowed
+  while the FSM is in `:awaiting_user` with no command task in flight.
+
+  Returns `{:ok, %{from: old_model, to: new_model}}` on success.
+  Returns `{:error, :busy}` if the session is streaming or running a command.
+  Returns `{:error, :not_found}` if the session id is unknown.
+  Returns `{:error, :invalid_model}` if `model` is blank or whitespace.
+  """
+  @spec swap_model(id(), String.t()) ::
+          {:ok, %{from: String.t(), to: String.t()}}
+          | {:error, :busy | :not_found | :invalid_model}
+  def swap_model(id, model) do
+    case whereis(id) do
+      {:ok, pid} -> :gen_statem.call(pid, {:swap_model, model})
+      err -> err
+    end
+  end
+
   @spec list_sessions(map()) :: [Meta.t()]
   def list_sessions(filters \\ %{}), do: Tau.Persistence.impl().list(filters)
 
@@ -395,7 +414,13 @@ defmodule Tau.Session do
     # default at session init, NOT at stream-call time. Without this,
     # `data.model` stays nil through telemetry, persistence header, and
     # the assembler — all of which expect a real model id.
-    model = opts[:model] || provider.default_model()
+    #
+    # D-041 / [C54-B4]: fold the last persisted `model_swap` event from
+    # preload so resume and fork both converge on the swapped model.
+    # Mirrors `coding_agent_state_from_preload/1`.
+    model =
+      model_from_preload(opts[:preload_events] || []) || opts[:model] || provider.default_model()
+
     metadata = opts[:metadata] || %{}
     provider_ctx = opts[:provider_ctx] || %{}
     persistence = opts[:persistence] || Tau.Persistence.impl()
@@ -675,6 +700,16 @@ defmodule Tau.Session do
       {:skill_activation, skill, rewritten_msg} ->
         data = activate_skill_via_slash(data, skill)
         process_user_message(rewritten_msg, data)
+
+      {:model_command, "", _msg} ->
+        # /model with no args: show current model
+        notice = "Current model: #{data.model}"
+        broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: notice})
+        {:keep_state, data}
+
+      {:model_command, new_model, _msg} ->
+        # /model <id>: attempt swap
+        handle_slash_model_swap(data, new_model)
 
       {:sync, msg} ->
         process_user_message(msg, data)
@@ -1108,6 +1143,10 @@ defmodule Tau.Session do
   # #38: in-place provider/model/provider_ctx update. The change applies
   # to the next provider call — an in-flight :provider_streaming keeps
   # using the previous provider until it completes.
+  # [C54-B4]: when opts[:model] is present and non-nil, route it through
+  # do_swap_model/2 (the single data.model mutation site). A nil opts[:model]
+  # (provider-only reconfigure) MUST NOT touch data.model. No model_swap
+  # event is emitted here — only the single "reconfigure" event below.
   def handle_event(:cast, {:reconfigure, opts}, _state, data) do
     data =
       data
@@ -1116,7 +1155,7 @@ defmodule Tau.Session do
       # configured provider. Reconfigure replaces both — fallback chains
       # are looked up keyed by the *new* primary on the next turn.
       |> maybe_replace(:original_provider, opts[:provider])
-      |> maybe_replace(:model, opts[:model])
+      |> reconfigure_model(opts[:model])
       |> merge_provider_ctx(opts[:provider_ctx])
       # SPEC-CODING-AGENT (#191): reconfigure may also adjust the
       # coding-agent per-run ctx. Used by tests to thread a different
@@ -1163,6 +1202,24 @@ defmodule Tau.Session do
     else
       {:keep_state, %{data | tools_in_flight: tools}}
     end
+  end
+
+  # D-041 / [C54-B4]: synchronous, state-gated model swap. Allowed only in
+  # :awaiting_user with no in-flight command task. Any other state is :busy.
+  # do_swap_model/2 is the single data.model mutation site ([C54-B4]).
+  def handle_event({:call, from}, {:swap_model, model}, :awaiting_user, %{command_task: nil} = data) do
+    case apply_model_swap(data, model) do
+      {:error, :invalid_model} ->
+        {:keep_state_and_data, [{:reply, from, {:error, :invalid_model}}]}
+
+      {:ok, data2, result} ->
+        {:keep_state, data2, [{:reply, from, {:ok, result}}]}
+    end
+  end
+
+  # Busy: state is not :awaiting_user, or command_task is in flight.
+  def handle_event({:call, from}, {:swap_model, _model}, _state, _data) do
+    {:keep_state_and_data, [{:reply, from, {:error, :busy}}]}
   end
 
   def handle_event(_type, _event, _state, data), do: {:keep_state, data}
@@ -1763,6 +1820,50 @@ defmodule Tau.Session do
   end
 
   defp append_message(data, msg), do: %{data | messages: data.messages ++ [msg]}
+
+  # [C54-B4]: single data.model mutation site. Pure function — no side effects.
+  # Returns {:ok, updated_data, from_model} | {:error, :invalid_model}.
+  # "invalid" means nil, empty string, or whitespace-only.
+  defp do_swap_model(data, model) do
+    if is_binary(model) and String.trim(model) != "" do
+      {:ok, %{data | model: model}, data.model}
+    else
+      {:error, :invalid_model}
+    end
+  end
+
+  # D-041: shared helper for swap_model telemetry + persist, used by both the
+  # {:call, from} {:swap_model} FSM clause and the /model slash-command path.
+  defp apply_model_swap(data, model) do
+    case do_swap_model(data, model) do
+      {:error, :invalid_model} ->
+        {:error, :invalid_model}
+
+      {:ok, data2, from_model} ->
+        :telemetry.execute(
+          [:tau, :session, :model_swapped],
+          %{system_time: System.system_time()},
+          %{session_id: data2.id, from: from_model, to: model, provider: data2.provider}
+        )
+
+        data2 = persist_event(data2, "model_swap", %{"from" => from_model, "to" => model})
+        {:ok, data2, %{from: from_model, to: model}}
+    end
+  end
+
+  # [C54-B4]: route reconfigure's model opt through do_swap_model/2 so
+  # data.model has a single mutation site. nil means "no change" — a
+  # provider-only reconfigure must NOT touch data.model (preserves the
+  # update_provider_test.exs assertion that a model-only reconfigure
+  # persists one "reconfigure" event carrying data.model).
+  defp reconfigure_model(data, nil), do: data
+
+  defp reconfigure_model(data, model) do
+    case do_swap_model(data, model) do
+      {:ok, data2, _from} -> data2
+      {:error, :invalid_model} -> data
+    end
+  end
 
   # #38 helpers — in-place data updates for {:reconfigure, opts}.
   defp maybe_replace(data, _key, nil), do: data
@@ -2836,6 +2937,19 @@ defmodule Tau.Session do
 
   defp event_to_message(_), do: nil
 
+  # D-041 / [C54-B4]: fold the last persisted model_swap event from a
+  # preload list so resume and fork both converge on the swapped model.
+  # Returns the most recent "to" value, or nil when no swap is recorded.
+  # Mirrors coding_agent_state_from_preload/1.
+  defp model_from_preload(preload) when is_list(preload) do
+    Enum.reduce(preload, nil, fn
+      %{"kind" => "model_swap", "data" => %{"to" => to}}, _acc when is_binary(to) -> to
+      _, acc -> acc
+    end)
+  end
+
+  defp model_from_preload(_), do: nil
+
   # SPEC-CODING-AGENT §7 Q5: recover the most recent
   # adapter-side session_id from a preload event log so a resumed
   # session can pass it back as `task.resume_id`. Walks events in
@@ -2928,6 +3042,9 @@ defmodule Tau.Session do
   defp classify_slash_command(%Tau.Message.User{content: c} = msg, skills)
        when is_binary(c) do
     case Tau.Commands.Parser.parse(c) do
+      {:command, "/model", args} ->
+        {:model_command, String.trim(args), msg}
+
       {:command, "/" <> bare_name = name, args} ->
         case Tau.Commands.Parser.lookup(name) do
           {:ok, mod} when is_atom(mod) ->
@@ -3046,6 +3163,24 @@ defmodule Tau.Session do
   end
 
   defp prepare_command_args(_mod, args), do: {:ok, args}
+
+  # D-041: /model <id> slash-command handler. Runs the same validate +
+  # mutate + telemetry + persist logic as the {:swap_model} call handler
+  # via the shared apply_model_swap/2 helper. Does NOT start a provider
+  # turn — broadcasts a SystemNotice instead.
+  defp handle_slash_model_swap(data, new_model) do
+    case apply_model_swap(data, new_model) do
+      {:ok, data2, %{from: from, to: to}} ->
+        notice = "Model changed: #{from} → #{to}"
+        broadcast(data2.id, %Events.SystemNotice{session_id: data2.id, text: notice})
+        {:keep_state, data2}
+
+      {:error, :invalid_model} ->
+        notice = "Error: '#{new_model}' is not a valid model id (empty or whitespace)."
+        broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: notice})
+        {:keep_state, data}
+    end
+  end
 
   defp invoke_file_command(path, args, msg) do
     case File.read(path) do
