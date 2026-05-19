@@ -205,20 +205,19 @@ defmodule Tau.Memory.Store.SQLite do
         end
       )
 
-    # Dispatch embedding off-process after a successful write.
-    # The embedder is configured via :tau, :embedder (default: Tau.Memory.EmbeddingWorker).
-    # It calls back into this GenServer via store_embedding/3 when done.
+    # Dispatch embedding off-process after a successful write. Reply to the
+    # caller first; handle_continue then spawns a Task that calls the configured
+    # Embedder. This guarantees the GenServer mailbox is open to accept the
+    # {:store_embedding, ...} callback — even when the embedder calls back
+    # synchronously (e.g. StubEmbedder in tests). D-045.
     case result do
       {:ok, id} ->
         content = Map.get(entry, "content", "")
-        embedder = Application.get_env(:tau, :embedder, Tau.Memory.EmbeddingWorker)
-        embedder.embed(self(), id, content)
+        {:reply, result, state, {:continue, {:dispatch_embedding, id, content}}}
 
       _ ->
-        :ok
+        {:reply, result, state}
     end
-
-    {:reply, result, state}
   end
 
   def handle_call({:delete, id}, _from, %{db: db} = state) do
@@ -286,6 +285,32 @@ defmodule Tau.Memory.Store.SQLite do
       when kind in [:transient, :terminal] do
     result = do_mark_embedding_failed(db, entry_id, kind)
     {:reply, result, state}
+  end
+
+  # Discard Task completion messages from async_nolink embedding dispatches.
+  # async_nolink sends {ref, result} on success and {:DOWN, ref, :process, pid, reason}
+  # on failure. We do not await these tasks — the embedder calls back via
+  # store_embedding/3. Silencing them prevents spurious "unexpected message" logs.
+  @impl GenServer
+  def handle_info({ref, _result}, state) when is_reference(ref) do
+    Process.demonitor(ref, [:flush])
+    {:noreply, state}
+  end
+
+  def handle_info({:DOWN, _ref, :process, _pid, _reason}, state) do
+    {:noreply, state}
+  end
+
+  @impl GenServer
+  def handle_continue({:dispatch_embedding, id, content}, state) do
+    embedder = Application.get_env(:tau, :embedder, Tau.Memory.EmbeddingWorker)
+    server = self()
+
+    Task.Supervisor.async_nolink(Tau.Tools.TaskSupervisor, fn ->
+      embedder.embed(server, id, content)
+    end)
+
+    {:noreply, state}
   end
 
   @impl GenServer

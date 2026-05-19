@@ -682,9 +682,26 @@ defmodule Tau.Memory.Store.SQLiteTest do
     test "write dispatches to embedder; entry reaches 'ready' and appears in semantic_search/2",
          %{pid: pid, embedding: embedding} do
       entry = %{"kind" => "note", "scope" => "global", "content" => "end-to-end embedding test"}
+      test_pid = self()
+      handler_id = "embedding-ready-#{System.unique_integer()}"
+
+      # Subscribe before write so we don't miss the async stop event.
+      :telemetry.attach(
+        handler_id,
+        [:tau, :memory, :embedding, :stop],
+        fn _name, _meas, meta, _ -> send(test_pid, {:embedding_done, meta}) end,
+        nil
+      )
+
       assert {:ok, id} = SQLite.write(pid, entry)
 
-      # The stub embedder synchronously transitions the row to 'ready'.
+      # Wait for the stub embedder's telemetry stop event — deterministic sync
+      # point that replaces the previous assumption of synchronous transition.
+      assert_receive {:embedding_done, %{status: :ready}}, 2000
+
+      :telemetry.detach(handler_id)
+
+      # Row must now be 'ready'.
       [{^id, _, _, _, _, "ready", _, _}] = read_rows(pid, id)
 
       # The row should now appear in semantic_search/2 (AC-7 — not just present,
@@ -698,7 +715,23 @@ defmodule Tau.Memory.Store.SQLiteTest do
       Application.put_env(:tau, :stub_embedder_result, {:error, :terminal, :content_too_long})
 
       entry = %{"kind" => "note", "scope" => "global", "content" => "fail path test"}
+      test_pid = self()
+      handler_id = "embedding-failed-#{System.unique_integer()}"
+
+      # Subscribe before write so we don't miss the async stop event.
+      :telemetry.attach(
+        handler_id,
+        [:tau, :memory, :embedding, :stop],
+        fn _name, _meas, meta, _ -> send(test_pid, {:embedding_done, meta}) end,
+        nil
+      )
+
       assert {:ok, id} = SQLite.write(pid, entry)
+
+      # Wait for the stub embedder's telemetry stop event.
+      assert_receive {:embedding_done, %{status: :failed, kind: :terminal}}, 2000
+
+      :telemetry.detach(handler_id)
 
       [{^id, _, _, _, metadata_json, "failed", _, _}] = read_rows(pid, id)
       assert Jason.decode!(metadata_json)["embedding_error_kind"] == "terminal"
