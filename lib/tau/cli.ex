@@ -329,6 +329,26 @@ defmodule Tau.CLI do
         )
     end
 
+    # D-056 / C82: report Copilot auth state alongside Anthropic.
+    copilot_status =
+      case Tau.Providers.Copilot.Auth.resolve_oauth(%{}) do
+        {:ok, _oauth_token} ->
+          # Attempt to surface cached token expiry if the store has one.
+          case Tau.Providers.Copilot.TokenStore.get() do
+            {:ok, %{expires_at: exp}} ->
+              ttl_s = max(div(exp - :os.system_time(:millisecond), 1000), 0)
+              "oauth (token expires in #{ttl_s}s)"
+
+            _ ->
+              "oauth (token not yet fetched — will refresh on first use)"
+          end
+
+        {:error, _} = err ->
+          Tau.Providers.Copilot.Auth.describe_error(err)
+      end
+
+    IO.puts("provider Tau.Providers.Copilot: #{copilot_status}")
+
     deepseek_key =
       Application.get_env(:tau, Tau.Providers.DeepSeek, [])[:api_key] ||
         System.get_env("DEEPSEEK_API_KEY")

@@ -79,6 +79,10 @@ defmodule Tau.Application do
         {Finch, name: Tau.Providers.Finch},
         Tau.Providers.RateLimiter.Supervisor,
         Tau.CircuitBreaker.Store,
+        # Copilot token store — supervised home for the short-lived API
+        # token (D-056). Placed after Finch so the store can be refreshed
+        # via Finch without a forward-dependency on an unstarted HTTP client.
+        Tau.Providers.Copilot.TokenStore,
         {Task.Supervisor, name: Tau.Tools.TaskSupervisor},
         Tau.Extensions.Loader,
         Tau.MCP.Supervisor,
