@@ -366,6 +366,20 @@ defmodule Tau.CLI do
 
     IO.puts("provider Tau.Providers.AzureOpenAI: #{azure_status}")
 
+    custom_env = Application.get_env(:tau, Tau.Providers.Custom, [])
+    custom_base_url = custom_env[:base_url] || System.get_env("CUSTOM_BASE_URL")
+
+    custom_api_key =
+      custom_env[:api_key] ||
+        System.get_env("CUSTOM_API_KEY")
+
+    custom_base_url_status = if custom_base_url, do: "set (#{custom_base_url})", else: "not set"
+    custom_key_status = if custom_api_key, do: "configured", else: "none (optional)"
+
+    IO.puts(
+      "provider Tau.Providers.Custom: base_url #{custom_base_url_status}, api_key #{custom_key_status}"
+    )
+
     0
   end
 
@@ -442,6 +456,7 @@ defmodule Tau.CLI do
   defp resolve_provider("mistral"), do: Tau.Providers.Mistral
   defp resolve_provider("azure"), do: Tau.Providers.AzureOpenAI
   defp resolve_provider("azure-openai"), do: Tau.Providers.AzureOpenAI
+  defp resolve_provider("custom"), do: Tau.Providers.Custom
   defp resolve_provider("replay"), do: Tau.Providers.Replay
 
   # Last-resort fallback for "Foo" → Tau.Providers.Foo style atoms.
