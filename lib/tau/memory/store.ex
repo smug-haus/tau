@@ -12,7 +12,8 @@ defmodule Tau.Memory.Store do
   - D-045: Exactly one process holds the write connection. No handle escapes
     the owning process's heap.
   - D-046: `embedding_status` ∈ `"pending" | "ready" | "failed"`. The `"failed"`
-    state carries a `"transient"` / `"terminal"` kind in metadata.
+    state carries a `"transient"` / `"terminal"` kind in metadata. Pending rows
+    are included in FTS results (search/2); excluded from semantic_search/2.
   - D-047: Migrations run to completion before the owner reports `:ok`.
   """
 
@@ -21,6 +22,8 @@ defmodule Tau.Memory.Store do
         }
 
   @type id :: String.t()
+
+  @type search_opts :: [limit: pos_integer(), scope: String.t()]
 
   @doc """
   Persist a memory entry.
@@ -38,6 +41,19 @@ defmodule Tau.Memory.Store do
   `{:error, reason}` only on a DB error.
   """
   @callback delete(id()) :: :ok | {:error, term()}
+
+  @doc """
+  Full-text search over memory entries (FTS5).
+
+  Returns `{:ok, [map()]}` ordered by FTS rank descending. Rows with any
+  `embedding_status` (`"pending"`, `"ready"`, `"failed"`) are included (D-046).
+
+  Options:
+  - `:limit` — maximum number of results (default 10).
+  - `:scope` — filter results to this scope value.
+  """
+  @callback search(query :: String.t(), opts :: search_opts()) ::
+              {:ok, [map()]} | {:error, term()}
 
   @doc "Look up the configured store implementation."
   @spec impl() :: module()

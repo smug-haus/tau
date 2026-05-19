@@ -4,8 +4,10 @@ defmodule Tau.Memory.Store.SQLite do
 
   A `GenServer` that owns a single `Exqlite.Sqlite3` write connection (a NIF
   reference). The connection never escapes this process's heap (D-045). All
-  writes are serialised through the mailbox (D-045, ADR-0020): SQLite has a
-  single-writer constraint that the mailbox enforces without external locking.
+  writes and searches are serialised through the mailbox (D-045, ADR-0020):
+  SQLite has a single-writer constraint that the mailbox enforces without
+  external locking. Read operations (search/2) also route through the mailbox
+  to avoid exposing the db reference.
 
   Schema migrations run to completion in `init/1` before the process reports
   `{:ok, state}`. A DB-open failure causes `init/1` to return
@@ -15,16 +17,20 @@ defmodule Tau.Memory.Store.SQLite do
   Database location: `Path.join(Tau.Settings.data_dir(), "memory.db")`.
   WAL mode is enabled immediately after `open`.
 
+  PR2 adds `search/2` (FTS5 full-text search). The FTS index is maintained by
+  three triggers added in migrations 004–006 (insert, delete, update). Pending
+  and failed rows are included in FTS results per D-046.
+
   ## Telemetry
 
-  Every `write/1` and `delete/1` call emits:
+  Every `write/1`, `delete/1`, and `search/2` call emits:
 
-    - `[:tau, :memory, :write | :delete, :start]` — before the operation.
-    - `[:tau, :memory, :write | :delete, :stop]` — after a successful operation.
-    - `[:tau, :memory, :write | :delete, :exception]` — on error or exception.
+    - `[:tau, :memory, :write | :delete | :search, :start]` — before the operation.
+    - `[:tau, :memory, :write | :delete | :search, :stop]` — after a successful operation.
+    - `[:tau, :memory, :write | :delete | :search, :exception]` — on error or exception.
 
   Measurements on `:stop`: `%{duration: non_neg_integer()}` (nanoseconds).
-  Metadata on `:stop`: `%{id: binary()}` (write only).
+  Metadata on `:stop`: `%{id: binary()}` (write only); `%{count: non_neg_integer()}` (search).
 
   Events are emitted via `:telemetry.span/3` which guarantees pairing of
   `:start` with `:stop` or `:exception` on every code path.
@@ -92,6 +98,23 @@ defmodule Tau.Memory.Store.SQLite do
     GenServer.call(server, {:delete, id})
   end
 
+  @impl Tau.Memory.Store
+  @doc """
+  Full-text search via FTS5.
+
+  Returns `{:ok, [map()]}` ordered by FTS rank descending. Rows with any
+  `embedding_status` are included per D-046. Options: `:limit` (default 10),
+  `:scope` (filter by scope value).
+  """
+  @spec search(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def search(query, opts \\ []), do: search(__MODULE__, query, opts)
+
+  @doc "Search via a named or pid server. Useful in tests."
+  @spec search(GenServer.server(), String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def search(server, query, opts) do
+    GenServer.call(server, {:search, query, opts})
+  end
+
   # ---------------------------------------------------------------------------
   # GenServer callbacks
   # ---------------------------------------------------------------------------
@@ -142,6 +165,27 @@ defmodule Tau.Memory.Store.SQLite do
         fn ->
           r = do_delete(db, id)
           {r, %{id: id}}
+        end
+      )
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:search, query, opts}, _from, %{db: db} = state) do
+    result =
+      :telemetry.span(
+        [:tau, :memory, :search],
+        %{},
+        fn ->
+          r = do_search(db, query, opts)
+
+          meta =
+            case r do
+              {:ok, rows} -> %{count: length(rows)}
+              _ -> %{}
+            end
+
+          {r, meta}
         end
       )
 
@@ -220,6 +264,76 @@ defmodule Tau.Memory.Store.SQLite do
   end
 
   defp do_delete(_db, id), do: {:error, {:invalid_id, id}}
+
+  defp do_search(db, query, opts) when is_binary(query) do
+    limit = Keyword.get(opts, :limit, 10)
+    scope = Keyword.get(opts, :scope)
+
+    {sql, params} = build_search_sql(query, scope, limit)
+
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, sql),
+         :ok <- Exqlite.Sqlite3.bind(stmt, params),
+         {:ok, rows} <- Exqlite.Sqlite3.fetch_all(db, stmt),
+         :ok <- Exqlite.Sqlite3.release(db, stmt) do
+      {:ok, Enum.map(rows, &row_to_map/1)}
+    end
+  end
+
+  defp do_search(_db, query, _opts), do: {:error, {:invalid_query, query}}
+
+  # Build FTS5 search SQL. When scope is provided, filter on it.
+  # The FTS table is joined to memory_entries via rowid to retrieve all columns.
+  # Pending and failed rows are included (D-046).
+  defp build_search_sql(query, nil, limit) do
+    sql = """
+    SELECT e.id, e.kind, e.scope, e.content, e.metadata, e.embedding_status,
+           e.created_at, e.updated_at
+    FROM memory_fts AS f
+    JOIN memory_entries AS e ON e.rowid = f.rowid
+    WHERE memory_fts MATCH ?1
+    ORDER BY rank
+    LIMIT ?2
+    """
+
+    {String.trim(sql), [query, limit]}
+  end
+
+  defp build_search_sql(query, scope, limit) do
+    sql = """
+    SELECT e.id, e.kind, e.scope, e.content, e.metadata, e.embedding_status,
+           e.created_at, e.updated_at
+    FROM memory_fts AS f
+    JOIN memory_entries AS e ON e.rowid = f.rowid
+    WHERE memory_fts MATCH ?1
+      AND e.scope = ?2
+    ORDER BY rank
+    LIMIT ?3
+    """
+
+    {String.trim(sql), [query, scope, limit]}
+  end
+
+  defp row_to_map([
+         id,
+         kind,
+         scope,
+         content,
+         metadata_json,
+         embedding_status,
+         created_at,
+         updated_at
+       ]) do
+    %{
+      "id" => id,
+      "kind" => kind,
+      "scope" => scope,
+      "content" => content,
+      "metadata" => Jason.decode!(metadata_json),
+      "embedding_status" => embedding_status,
+      "created_at" => created_at,
+      "updated_at" => updated_at
+    }
+  end
 
   defp required_string(map, key) do
     case Map.get(map, key) do
