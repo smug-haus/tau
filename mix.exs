@@ -86,7 +86,7 @@ defmodule Tau.MixProject do
       {:aws_credentials, "~> 0.3", optional: true},
 
       # SQLite for persistent memory store (FTS5 ships in bundled build;
-      # no separate sqlite dep needed). See SPEC-MEMORY-STORE and ADR-0019.
+      # no separate sqlite dep needed). See SPEC-MEMORY-STORE and ADR-0020.
       {:exqlite, "~> 0.27"},
 
       # ULIDs for sortable session/event ids

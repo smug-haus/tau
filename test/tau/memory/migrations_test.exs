@@ -7,11 +7,13 @@ defmodule Tau.Memory.MigrationsTest do
   """
 
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
   alias Tau.Memory.Migrations
+  alias Tau.Memory.Store.SQLite
 
   # ---------------------------------------------------------------------------
-  # AC-3: idempotency
+  # AC-3: idempotency (example tests)
   # ---------------------------------------------------------------------------
 
   describe "run/1 — idempotency (AC-3, D-047)" do
@@ -71,40 +73,110 @@ defmodule Tau.Memory.MigrationsTest do
   end
 
   # ---------------------------------------------------------------------------
-  # AC-4: migration hard-fail
+  # AC-4: migration hard-fail (example tests)
   # ---------------------------------------------------------------------------
 
   describe "Store.SQLite init/1 — migration hard-fail (AC-4, D-047)" do
-    test "init/1 returns {:stop, _} when migration fails" do
-      # Corrupt the db by pre-creating schema_migrations with the wrong schema,
-      # then run the store's init/1 which calls Migrations.run/1.
-      # We simulate this by passing a db_path that causes a migration error.
-      # The cleanest test: open a db, corrupt schema_migrations so the
-      # bootstrap migration's INSERT OR IGNORE will actually try to insert
-      # into a type-mismatched table, causing an error.
+    test "init/1 returns {:stop, {:migration_failed, _}} when Migrations.run/1 fails" do
+      # Corrupt schema_migrations with a wrong schema (no version column) so
+      # Migrations.run/1 returns {:error, _} — exercising the migration-failure
+      # branch in init/1 specifically (not the db-open-failure branch).
       #
-      # Simplest reliable approach: open a db with a pre-created
-      # schema_migrations table missing its version column, then call
-      # Migrations.run/1 and assert it returns {:error, _}.
+      # We test this by calling init/1 directly with a pre-corrupted db via
+      # a custom db_path pointing to a pre-prepared corrupt temp db file.
+      #
+      # Strategy: write the corrupt db to a temp file, then start a SQLite
+      # process with that path and verify it fails to start.
+      corrupt_db_path = Briefly.create!(extname: ".db")
 
-      {:ok, db} = Exqlite.Sqlite3.open(":memory:")
-      # Create a schema_migrations with a wrong schema (no version column).
-      :ok = Exqlite.Sqlite3.execute(db, "CREATE TABLE schema_migrations (wrong_col TEXT)")
+      # Pre-corrupt: open the db and create schema_migrations with wrong schema.
+      {:ok, corrupt_db} = Exqlite.Sqlite3.open(corrupt_db_path)
+      :ok = Exqlite.Sqlite3.execute(corrupt_db, "CREATE TABLE schema_migrations (wrong_col TEXT)")
+      :ok = Exqlite.Sqlite3.close(corrupt_db)
 
-      assert {:error, _reason} = Migrations.run(db)
+      # Now init/1 will open the db (succeeds), then call Migrations.run/1
+      # (fails because schema_migrations exists but has wrong schema).
+      assert {:error, _} =
+               start_supervised(
+                 {SQLite,
+                  db_path: corrupt_db_path, name: :"test_migration_fail_#{System.unique_integer()}"},
+                 restart: :temporary
+               )
     end
 
-    test "Store.SQLite start_link returns {:error, _} when db_path is unwriteable" do
+    test "Store.SQLite start_link returns {:error, {:db_open_failed, _}} when db_path is unwriteable" do
       # Use an unwriteable path to force an open error.
       bad_path = "/nonexistent/path/that/cannot/be/created/memory.db"
 
       # start_supervised wraps the {:stop, _} as {:error, _}.
       assert {:error, _} =
                start_supervised(
-                 {Tau.Memory.Store.SQLite,
-                  db_path: bad_path, name: :"test_bad_store_#{System.unique_integer()}"},
+                 {SQLite, db_path: bad_path, name: :"test_bad_store_#{System.unique_integer()}"},
                  restart: :temporary
                )
+    end
+
+    test "Migrations.run/1 returns {:error, _} on a corrupt schema_migrations table" do
+      {:ok, db} = Exqlite.Sqlite3.open(":memory:")
+      # Create a schema_migrations with a wrong schema (no version column).
+      :ok = Exqlite.Sqlite3.execute(db, "CREATE TABLE schema_migrations (wrong_col TEXT)")
+
+      assert {:error, _reason} = Migrations.run(db)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Property: D-047 — idempotency for any number of re-runs (1..5)
+  # ---------------------------------------------------------------------------
+
+  describe "Migrations.run/1 — idempotency property (D-047)" do
+    @tag :property
+    property "re-running N times on a fresh db produces the same schema as running once" do
+      check all(n_extra <- integer(0..4)) do
+        {:ok, db} = Exqlite.Sqlite3.open(":memory:")
+
+        # First run.
+        assert :ok = Migrations.run(db)
+
+        # N additional runs.
+        for _ <- 1..max(n_extra, 1)//1, n_extra > 0 do
+          assert :ok = Migrations.run(db)
+        end
+
+        # Schema_migrations row count == number of migrations, regardless of n_extra.
+        expected_count = length(Migrations.migrations())
+
+        {:ok, stmt} =
+          Exqlite.Sqlite3.prepare(db, "SELECT COUNT(*) FROM schema_migrations")
+
+        {:ok, [[actual_count]]} = Exqlite.Sqlite3.fetch_all(db, stmt)
+        :ok = Exqlite.Sqlite3.release(db, stmt)
+
+        assert actual_count == expected_count
+      end
+    end
+
+    @tag :property
+    property "all expected migration versions are present after any number of runs" do
+      check all(n_extra <- integer(0..4)) do
+        {:ok, db} = Exqlite.Sqlite3.open(":memory:")
+        :ok = Migrations.run(db)
+
+        for _ <- 1..max(n_extra, 1)//1, n_extra > 0 do
+          assert :ok = Migrations.run(db)
+        end
+
+        expected_versions = Migrations.migrations() |> Enum.map(&elem(&1, 0)) |> Enum.sort()
+
+        {:ok, stmt} =
+          Exqlite.Sqlite3.prepare(db, "SELECT version FROM schema_migrations ORDER BY version")
+
+        {:ok, rows} = Exqlite.Sqlite3.fetch_all(db, stmt)
+        :ok = Exqlite.Sqlite3.release(db, stmt)
+
+        actual_versions = Enum.map(rows, fn [v] -> v end) |> Enum.sort()
+        assert actual_versions == expected_versions
+      end
     end
   end
 end

@@ -25,7 +25,7 @@ defmodule Tau.Memory.Store do
   @doc """
   Persist a memory entry.
 
-  Returns `{:ok, id}` where `id` is a ULID. The row is created with
+  Returns `{:ok, id}` where `id` is a UUIDv7 (time-sortable). The row is created with
   `embedding_status = "pending"`. Never raises on invalid input; returns
   `{:error, reason}` instead.
   """

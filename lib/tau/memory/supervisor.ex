@@ -12,7 +12,7 @@ defmodule Tau.Memory.Supervisor do
   since a broken memory store should not allow sessions to start with an
   inconsistent DB.
 
-  See `docs/spec/SPEC-MEMORY-STORE.md` and `docs/adr/0019-memory-store-sqlite-driver.md`.
+  See `docs/spec/SPEC-MEMORY-STORE.md` and `docs/adr/0020-memory-store-sqlite-driver.md`.
   """
 
   use Supervisor

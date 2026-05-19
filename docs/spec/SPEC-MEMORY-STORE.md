@@ -125,7 +125,7 @@ Tau.Memory.Store.write(entry :: map()) :: {:ok, id :: String.t()} | {:error, ter
 | `"content"` | String.t() | Yes | The memory text |
 | `"metadata"` | map() | No | Caller-defined; stored as JSON |
 
-Returns `{:ok, id}` where `id` is a ULID. Returns `{:error, reason}` on
+Returns `{:ok, id}` where `id` is a UUIDv7 (time-sortable). Returns `{:error, reason}` on
 constraint violation or DB error; never raises on invalid input.
 
 ### Delete contract
@@ -169,7 +169,7 @@ recovery path is provided in code; correctness over availability.
 ## §5 Acceptance Criteria
 
 **AC-1** — `Tau.Memory.Store.SQLite.write/1` inserts a row with
-`embedding_status = "pending"` and returns `{:ok, ulid}`.
+`embedding_status = "pending"` and returns `{:ok, uuid7}` (UUIDv7, time-sortable).
 
 **AC-2** — `Tau.Memory.Store.SQLite.delete/1` removes a row by id and returns
 `:ok` even if the id did not exist.
@@ -246,5 +246,5 @@ lib/tau/application.ex            (Memory.Supervisor entry only)
 test/tau/memory/store_sqlite_test.exs
 test/tau/memory/migrations_test.exs
 docs/spec/SPEC-MEMORY-STORE.md
-docs/adr/0019-memory-store-sqlite-driver.md
+docs/adr/0020-memory-store-sqlite-driver.md
 ```

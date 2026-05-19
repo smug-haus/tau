@@ -7,6 +7,7 @@ defmodule Tau.Memory.Store.SQLiteTest do
   """
 
   use ExUnit.Case, async: false
+  use ExUnitProperties
 
   alias Tau.Memory.Store.SQLite
 
@@ -159,6 +160,85 @@ defmodule Tau.Memory.Store.SQLiteTest do
 
       result = GenServer.call(pid, {:delete, id})
       assert result == :ok
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Public API — write/2 and delete/2 with explicit server arg
+  # ---------------------------------------------------------------------------
+
+  describe "public API with explicit server" do
+    test "write/2 accepts a pid and returns {:ok, id}", %{pid: pid} do
+      entry = %{"kind" => "note", "scope" => "global", "content" => "via write/2"}
+      assert {:ok, id} = SQLite.write(pid, entry)
+      assert is_binary(id)
+    end
+
+    test "delete/2 accepts a pid and returns :ok", %{pid: pid} do
+      {:ok, id} = SQLite.write(pid, %{"kind" => "note", "scope" => "s", "content" => "x"})
+      assert :ok = SQLite.delete(pid, id)
+    end
+
+    test "delete/2 is idempotent on non-existent id", %{pid: pid} do
+      assert :ok = SQLite.delete(pid, "nonexistent-uuid")
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Properties — D-045 (connection isolation) and D-046 (embedding_status)
+  # ---------------------------------------------------------------------------
+
+  describe "D-045/D-046 — write-then-read round-trip property" do
+    @tag :property
+    property "write preserves all required fields and sets embedding_status=pending", %{pid: pid} do
+      check all(
+              kind <- string(:alphanumeric, min_length: 1),
+              scope <- string(:alphanumeric, min_length: 1),
+              content <- string(:alphanumeric, min_length: 1)
+            ) do
+        entry = %{"kind" => kind, "scope" => scope, "content" => content}
+        {:ok, id} = SQLite.write(pid, entry)
+
+        rows = read_rows(pid, id)
+        assert length(rows) == 1
+
+        [{^id, row_kind, row_scope, row_content, _meta, embedding_status, _ca, _ua}] = rows
+        assert row_kind == kind
+        assert row_scope == scope
+        assert row_content == content
+        assert embedding_status == "pending"
+      end
+    end
+
+    @tag :property
+    property "returned id is always a non-empty binary (D-045 — not a reference)", %{pid: pid} do
+      check all(
+              kind <- string(:alphanumeric, min_length: 1),
+              scope <- string(:alphanumeric, min_length: 1),
+              content <- string(:alphanumeric, min_length: 1)
+            ) do
+        entry = %{"kind" => kind, "scope" => scope, "content" => content}
+        result = SQLite.write(pid, entry)
+
+        assert {:ok, id} = result
+        assert is_binary(id)
+        refute is_reference(id)
+        assert byte_size(id) > 0
+      end
+    end
+
+    @tag :property
+    property "write followed by delete leaves no row", %{pid: pid} do
+      check all(
+              kind <- string(:alphanumeric, min_length: 1),
+              scope <- string(:alphanumeric, min_length: 1),
+              content <- string(:alphanumeric, min_length: 1)
+            ) do
+        entry = %{"kind" => kind, "scope" => scope, "content" => content}
+        {:ok, id} = SQLite.write(pid, entry)
+        assert :ok = SQLite.delete(pid, id)
+        assert read_rows(pid, id) == []
+      end
     end
   end
 

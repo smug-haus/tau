@@ -8,8 +8,9 @@ defmodule Tau.Memory.Store.SQLite do
   single-writer constraint that the mailbox enforces without external locking.
 
   Schema migrations run to completion in `init/1` before the process reports
-  `{:ok, state}`. A migration failure causes `init/1` to return
-  `{:stop, {:migration_failed, reason}}`, hard-failing boot (D-047).
+  `{:ok, state}`. A DB-open failure causes `init/1` to return
+  `{:stop, {:db_open_failed, reason}}`. A migration failure causes `init/1` to
+  return `{:stop, {:migration_failed, reason}}`, hard-failing boot (D-047).
 
   Database location: `Path.join(Tau.Settings.data_dir(), "memory.db")`.
   WAL mode is enabled immediately after `open`.
@@ -20,15 +21,20 @@ defmodule Tau.Memory.Store.SQLite do
 
     - `[:tau, :memory, :write | :delete, :start]` — before the operation.
     - `[:tau, :memory, :write | :delete, :stop]` — after a successful operation.
-    - `[:tau, :memory, :write | :delete, :exception]` — if `handle_call` raises.
+    - `[:tau, :memory, :write | :delete, :exception]` — on error or exception.
 
   Measurements on `:stop`: `%{duration: non_neg_integer()}` (nanoseconds).
   Metadata on `:stop`: `%{id: binary()}` (write only).
+
+  Events are emitted via `:telemetry.span/3` which guarantees pairing of
+  `:start` with `:stop` or `:exception` on every code path.
   """
 
   @behaviour Tau.Memory.Store
 
   use GenServer
+
+  alias Tau.Memory.Migrations
 
   require Logger
 
@@ -50,11 +56,20 @@ defmodule Tau.Memory.Store.SQLite do
   Insert a memory entry.
 
   `entry` must have string keys `"kind"`, `"scope"`, `"content"`. `"metadata"`
-  is optional (defaults to `{}`). Returns `{:ok, ulid}` or `{:error, reason}`.
+  is optional (defaults to `{}`). Returns `{:ok, uuid7}` (UUIDv7) or `{:error, reason}`.
   """
   @spec write(map()) :: {:ok, String.t()} | {:error, term()}
-  def write(entry) do
-    GenServer.call(__MODULE__, {:write, entry})
+  def write(entry), do: write(__MODULE__, entry)
+
+  @doc """
+  Insert a memory entry via a named or pid server.
+
+  Allows tests to exercise the public callback rather than the raw
+  `GenServer.call` tuple.
+  """
+  @spec write(GenServer.server(), map()) :: {:ok, String.t()} | {:error, term()}
+  def write(server, entry) do
+    GenServer.call(server, {:write, entry})
   end
 
   @impl Tau.Memory.Store
@@ -64,8 +79,17 @@ defmodule Tau.Memory.Store.SQLite do
   Idempotent: `:ok` whether or not the row existed.
   """
   @spec delete(String.t()) :: :ok | {:error, term()}
-  def delete(id) do
-    GenServer.call(__MODULE__, {:delete, id})
+  def delete(id), do: delete(__MODULE__, id)
+
+  @doc """
+  Delete a memory entry by id via a named or pid server.
+
+  Allows tests to exercise the public callback rather than the raw
+  `GenServer.call` tuple.
+  """
+  @spec delete(GenServer.server(), String.t()) :: :ok | {:error, term()}
+  def delete(server, id) do
+    GenServer.call(server, {:delete, id})
   end
 
   # ---------------------------------------------------------------------------
@@ -76,59 +100,50 @@ defmodule Tau.Memory.Store.SQLite do
   def init(opts) do
     db_path = Keyword.get(opts, :db_path, default_db_path())
 
-    with :ok <- File.mkdir_p(Path.dirname(db_path)),
-         {:ok, db} <- Exqlite.Sqlite3.open(db_path),
-         :ok <- Exqlite.Sqlite3.execute(db, "PRAGMA journal_mode=WAL"),
-         :ok <- Tau.Memory.Migrations.run(db) do
-      {:ok, %{db: db}}
-    else
+    case File.mkdir_p(Path.dirname(db_path)) do
       {:error, reason} ->
-        {:stop, {:migration_failed, reason}}
+        {:stop, {:db_open_failed, reason}}
+
+      :ok ->
+        with {:ok, db} <- open_db(db_path),
+             :ok <- run_migrations(db) do
+          {:ok, %{db: db}}
+        end
     end
   end
 
   @impl GenServer
   def handle_call({:write, entry}, _from, %{db: db} = state) do
-    t0 = System.monotonic_time()
-    :telemetry.execute([:tau, :memory, :write, :start], %{system_time: System.system_time()}, %{})
+    result =
+      :telemetry.span(
+        [:tau, :memory, :write],
+        %{},
+        fn ->
+          r = do_write(db, entry)
 
-    result = do_write(db, entry)
+          meta =
+            case r do
+              {:ok, id} -> %{id: id}
+              _ -> %{}
+            end
 
-    duration = System.monotonic_time() - t0
-
-    case result do
-      {:ok, id} ->
-        :telemetry.execute(
-          [:tau, :memory, :write, :stop],
-          %{duration: duration},
-          %{id: id}
-        )
-
-      {:error, _} ->
-        :ok
-    end
+          {r, meta}
+        end
+      )
 
     {:reply, result, state}
   end
 
   def handle_call({:delete, id}, _from, %{db: db} = state) do
-    t0 = System.monotonic_time()
-
-    :telemetry.execute(
-      [:tau, :memory, :delete, :start],
-      %{system_time: System.system_time()},
-      %{id: id}
-    )
-
-    result = do_delete(db, id)
-
-    duration = System.monotonic_time() - t0
-
-    :telemetry.execute(
-      [:tau, :memory, :delete, :stop],
-      %{duration: duration},
-      %{id: id}
-    )
+    result =
+      :telemetry.span(
+        [:tau, :memory, :delete],
+        %{id: id},
+        fn ->
+          r = do_delete(db, id)
+          {r, %{id: id}}
+        end
+      )
 
     {:reply, result, state}
   end
@@ -147,6 +162,23 @@ defmodule Tau.Memory.Store.SQLite do
 
   defp default_db_path do
     Path.join(Tau.Settings.data_dir(), "memory.db")
+  end
+
+  # Separate db-open from migration so init/1 can return distinct stop reasons.
+  defp open_db(db_path) do
+    with {:ok, db} <- Exqlite.Sqlite3.open(db_path),
+         :ok <- Exqlite.Sqlite3.execute(db, "PRAGMA journal_mode=WAL") do
+      {:ok, db}
+    else
+      {:error, reason} -> {:stop, {:db_open_failed, reason}}
+    end
+  end
+
+  defp run_migrations(db) do
+    case Migrations.run(db) do
+      :ok -> :ok
+      {:error, reason} -> {:stop, {:migration_failed, reason}}
+    end
   end
 
   defp do_write(db, entry) do
