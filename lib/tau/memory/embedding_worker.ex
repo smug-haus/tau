@@ -3,9 +3,10 @@ defmodule Tau.Memory.EmbeddingWorker do
   Off-process embedding pipeline for `Tau.Memory.Store.SQLite`.
 
   Implements the `Tau.Memory.Embedder` behaviour. Each call to `embed/3` spawns
-  a `Task` under the caller's supervision context so the embedding network call
-  (via Finch/HTTP) never runs on the `Store.SQLite` owner GenServer (D-045,
-  SPEC-MEMORY-STORE §3 C-004).
+  a `Task` under `Tau.Tools.TaskSupervisor` (via `Task.Supervisor.async_nolink/2`)
+  so the embedding network call (via Finch/HTTP) never runs on the
+  `Store.SQLite` owner GenServer and an embedding crash is isolated to its task
+  rather than propagating to the caller (D-045, SPEC-MEMORY-STORE §3 C-004).
 
   ## Error classification
 
@@ -47,7 +48,7 @@ defmodule Tau.Memory.EmbeddingWorker do
   @spec embed(GenServer.server(), String.t(), String.t()) :: {:ok, Task.t()}
   def embed(store, entry_id, content) do
     task =
-      Task.async(fn ->
+      Task.Supervisor.async_nolink(Tau.Tools.TaskSupervisor, fn ->
         :telemetry.span(
           [:tau, :memory, :embedding],
           %{entry_id: entry_id},
@@ -118,8 +119,6 @@ defmodule Tau.Memory.EmbeddingWorker do
       {:error, reason} ->
         {:error, :transient, reason}
     end
-  rescue
-    exception -> {:error, :transient, exception}
   end
 
   defp parse_embedding_response(body) do

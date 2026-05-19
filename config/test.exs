@@ -9,3 +9,8 @@ config :tau,
 config :tau, default_provider: Tau.Providers.Replay
 
 config :logger, level: :warning
+
+# Use a no-op stub embedder by default in tests so write/1 does not attempt
+# real HTTP calls. Tests that need to verify the pipeline wire use
+# Tau.Memory.StubEmbedder or set their own implementation via put_env.
+config :tau, embedder: Tau.Memory.StubEmbedder

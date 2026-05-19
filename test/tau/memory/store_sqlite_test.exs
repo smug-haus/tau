@@ -4,6 +4,7 @@ defmodule Tau.Memory.Store.SQLiteTest do
 
   PR1: AC-1, AC-2, AC-5 from SPEC-MEMORY-STORE.md. D-045, D-046, D-047.
   PR2: search/2 (FTS5). D-046 (pending/failed rows included in FTS results).
+  PR3: AC-7 — embedding pipeline wire (write → embedder → store_embedding → ready).
   """
 
   use ExUnit.Case, async: false
@@ -658,6 +659,49 @@ defmodule Tau.Memory.Store.SQLiteTest do
         {:ok, results} = sem_search(pid, unit_vec(0))
         Enum.each(results, fn r -> assert r["embedding_status"] == "ready" end)
       end
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # AC-7: embedding pipeline end-to-end (write → embedder → store_embedding → ready)
+  # ---------------------------------------------------------------------------
+
+  describe "embedding pipeline end-to-end (AC-7)" do
+    setup do
+      # Configure the stub embedder to return a successful embedding.
+      # The StubEmbedder synchronously calls store_embedding/3 so the status
+      # transition happens before write/1 returns to the test.
+      embedding = unit_vec(0)
+      Application.put_env(:tau, :stub_embedder_result, {:ok, embedding})
+
+      on_exit(fn -> Application.delete_env(:tau, :stub_embedder_result) end)
+
+      %{embedding: embedding}
+    end
+
+    test "write dispatches to embedder; entry reaches 'ready' and appears in semantic_search/2",
+         %{pid: pid, embedding: embedding} do
+      entry = %{"kind" => "note", "scope" => "global", "content" => "end-to-end embedding test"}
+      assert {:ok, id} = SQLite.write(pid, entry)
+
+      # The stub embedder synchronously transitions the row to 'ready'.
+      [{^id, _, _, _, _, "ready", _, _}] = read_rows(pid, id)
+
+      # The row should now appear in semantic_search/2 (AC-7 — not just present,
+      # but retrievable end-to-end via the vector index).
+      assert {:ok, results} = sem_search(pid, embedding)
+      ids = Enum.map(results, & &1["id"])
+      assert id in ids
+    end
+
+    test "write dispatches to embedder on failure; entry reaches 'failed'", %{pid: pid} do
+      Application.put_env(:tau, :stub_embedder_result, {:error, :terminal, :content_too_long})
+
+      entry = %{"kind" => "note", "scope" => "global", "content" => "fail path test"}
+      assert {:ok, id} = SQLite.write(pid, entry)
+
+      [{^id, _, _, _, metadata_json, "failed", _, _}] = read_rows(pid, id)
+      assert Jason.decode!(metadata_json)["embedding_error_kind"] == "terminal"
     end
   end
 

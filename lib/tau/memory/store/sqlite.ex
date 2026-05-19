@@ -28,9 +28,11 @@ defmodule Tau.Memory.Store.SQLite do
 
   The embedding pipeline (populating `memory_vec` and transitioning
   `embedding_status` from `"pending"` to `"ready"` or `"failed"`) runs OFF this
-  GenServer via `Tau.Memory.EmbeddingWorker`. Callers request embedding via
-  `embed_entry/2`; the worker calls back into the GenServer with `store_embedding/3`
-  to update state, keeping the embedding network call off the owner process.
+  GenServer via `Tau.Memory.EmbeddingWorker`. After each successful `write/1`,
+  the store dispatches embedding via the configured `Tau.Memory.Embedder`
+  implementation (default: `Tau.Memory.EmbeddingWorker`). The worker calls back
+  into the GenServer with `store_embedding/3` to update state, keeping the
+  embedding network call off the owner process.
 
   ## Telemetry
 
@@ -203,6 +205,19 @@ defmodule Tau.Memory.Store.SQLite do
         end
       )
 
+    # Dispatch embedding off-process after a successful write.
+    # The embedder is configured via :tau, :embedder (default: Tau.Memory.EmbeddingWorker).
+    # It calls back into this GenServer via store_embedding/3 when done.
+    case result do
+      {:ok, id} ->
+        content = Map.get(entry, "content", "")
+        embedder = Application.get_env(:tau, :embedder, Tau.Memory.EmbeddingWorker)
+        embedder.embed(self(), id, content)
+
+      _ ->
+        :ok
+    end
+
     {:reply, result, state}
   end
 
@@ -304,7 +319,10 @@ defmodule Tau.Memory.Store.SQLite do
 
   defp load_vec_extension(db) do
     with :ok <- Exqlite.Sqlite3.enable_load_extension(db, true),
-         :ok <- Exqlite.Sqlite3.execute(db, "SELECT load_extension('#{SqliteVec.path()}')") do
+         {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, "SELECT load_extension(?1)"),
+         :ok <- Exqlite.Sqlite3.bind(stmt, [SqliteVec.path()]),
+         _result <- Exqlite.Sqlite3.step(db, stmt),
+         :ok <- Exqlite.Sqlite3.release(db, stmt) do
       # Disable general extension loading after the vec extension is loaded.
       # This closes the extension-loading channel while keeping vec0 active.
       Exqlite.Sqlite3.enable_load_extension(db, false)
@@ -466,14 +484,17 @@ defmodule Tau.Memory.Store.SQLite do
   end
 
   # Store a computed embedding: upsert into memory_vec (vec0 doesn't support
-  # SQL UPSERT syntax, so we DELETE then INSERT) and flip embedding_status to 'ready'.
+  # SQL UPSERT syntax, so we DELETE then INSERT inside an explicit transaction)
+  # and flip embedding_status to 'ready'. The transaction guarantees that a
+  # failed INSERT rolls back the DELETE rather than leaving the row vector-less.
   defp do_store_embedding(db, entry_id, embedding) when is_list(embedding) do
     case Jason.encode(embedding) do
       {:ok, embedding_json} ->
         delete_sql = "DELETE FROM memory_vec WHERE entry_id = ?1"
         insert_sql = "INSERT INTO memory_vec(entry_id, embedding) VALUES (?1, ?2)"
 
-        with {:ok, del_stmt} <- Exqlite.Sqlite3.prepare(db, delete_sql),
+        with :ok <- Exqlite.Sqlite3.execute(db, "BEGIN"),
+             {:ok, del_stmt} <- Exqlite.Sqlite3.prepare(db, delete_sql),
              :ok <- Exqlite.Sqlite3.bind(del_stmt, [entry_id]),
              _del_result <- Exqlite.Sqlite3.step(db, del_stmt),
              :ok <- Exqlite.Sqlite3.release(db, del_stmt),
@@ -482,9 +503,18 @@ defmodule Tau.Memory.Store.SQLite do
              step_result <- Exqlite.Sqlite3.step(db, ins_stmt),
              :ok <- Exqlite.Sqlite3.release(db, ins_stmt) do
           case step_result do
-            :done -> update_embedding_status(db, entry_id, "ready")
-            {:error, reason} -> {:error, reason}
+            :done ->
+              Exqlite.Sqlite3.execute(db, "COMMIT")
+              update_embedding_status(db, entry_id, "ready")
+
+            {:error, reason} ->
+              Exqlite.Sqlite3.execute(db, "ROLLBACK")
+              {:error, reason}
           end
+        else
+          {:error, reason} ->
+            Exqlite.Sqlite3.execute(db, "ROLLBACK")
+            {:error, reason}
         end
 
       {:error, reason} ->
