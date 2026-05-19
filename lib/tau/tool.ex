@@ -35,12 +35,19 @@ defmodule Tau.Tool do
 
   @optional_callbacks [execution_mode: 0, streams_updates?: 0]
 
-  @doc "Look up a registered tool by its public name."
+  @doc """
+  Look up a registered tool by its public name.
+
+  `Tau.Tools.Registry` is a `:duplicate` registry (see `Tau.Registries`):
+  built-in tools are registered once per live session, so a name may carry
+  several entries. Every registrant for a name holds the same module value,
+  so the first entry is authoritative.
+  """
   @spec lookup(String.t()) :: {:ok, module()} | :error
   def lookup(name) do
     case Registry.lookup(Tau.Tools.Registry, name) do
-      [{_pid, mod}] -> {:ok, mod}
-      _ -> :error
+      [{_pid, mod} | _] -> {:ok, mod}
+      [] -> :error
     end
   end
 
@@ -50,9 +57,16 @@ defmodule Tau.Tool do
     Registry.register(Tau.Tools.Registry, mod.name(), mod)
   end
 
-  @doc "All tool names currently registered."
+  @doc """
+  All tool names currently registered.
+
+  De-duplicated: under the `:duplicate` `Tau.Tools.Registry` a name appears
+  once per registrant process.
+  """
   @spec list() :: [String.t()]
   def list do
-    Registry.select(Tau.Tools.Registry, [{{:"$1", :_, :_}, [], [:"$1"]}])
+    Tau.Tools.Registry
+    |> Registry.select([{{:"$1", :_, :_}, [], [:"$1"]}])
+    |> Enum.uniq()
   end
 end
