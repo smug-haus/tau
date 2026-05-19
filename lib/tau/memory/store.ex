@@ -25,6 +25,8 @@ defmodule Tau.Memory.Store do
 
   @type search_opts :: [limit: pos_integer(), scope: String.t()]
 
+  @type embedding :: [float()]
+
   @doc """
   Persist a memory entry.
 
@@ -53,6 +55,20 @@ defmodule Tau.Memory.Store do
   - `:scope` — filter results to this scope value.
   """
   @callback search(query :: String.t(), opts :: search_opts()) ::
+              {:ok, [map()]} | {:error, term()}
+
+  @doc """
+  Semantic (vector) search over memory entries using the sqlite-vec extension.
+
+  Only rows with `embedding_status = "ready"` are returned. Pending and failed
+  rows are excluded (D-046). Results are ordered by cosine distance ascending
+  (nearest first).
+
+  Options:
+  - `:limit` — maximum number of results (default 10).
+  - `:scope` — filter results to this scope value.
+  """
+  @callback semantic_search(embedding :: embedding(), opts :: search_opts()) ::
               {:ok, [map()]} | {:error, term()}
 
   @doc "Look up the configured store implementation."

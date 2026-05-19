@@ -12,25 +12,36 @@ defmodule Tau.Memory.MigrationsTest do
   alias Tau.Memory.Migrations
   alias Tau.Memory.Store.SQLite
 
+  # Load the sqlite-vec extension into an in-memory db so vec0 virtual tables
+  # used in migration 007 can be created. This mirrors what Store.SQLite.init/1
+  # does via load_vec_extension/1.
+  defp open_with_vec(path \\ ":memory:") do
+    {:ok, db} = Exqlite.Sqlite3.open(path)
+    :ok = Exqlite.Sqlite3.enable_load_extension(db, true)
+    :ok = Exqlite.Sqlite3.execute(db, "SELECT load_extension('#{SqliteVec.path()}')")
+    :ok = Exqlite.Sqlite3.enable_load_extension(db, false)
+    {:ok, db}
+  end
+
   # ---------------------------------------------------------------------------
   # AC-3: idempotency (example tests)
   # ---------------------------------------------------------------------------
 
   describe "run/1 — idempotency (AC-3, D-047)" do
     test "runs successfully on a fresh db" do
-      {:ok, db} = Exqlite.Sqlite3.open(":memory:")
+      {:ok, db} = open_with_vec()
       assert :ok = Migrations.run(db)
     end
 
     test "re-running on a fully-migrated db is a no-op (AC-3)" do
-      {:ok, db} = Exqlite.Sqlite3.open(":memory:")
+      {:ok, db} = open_with_vec()
       assert :ok = Migrations.run(db)
       # Second run must also succeed with no error.
       assert :ok = Migrations.run(db)
     end
 
     test "schema_migrations table has exactly one row per migration after two runs" do
-      {:ok, db} = Exqlite.Sqlite3.open(":memory:")
+      {:ok, db} = open_with_vec()
       :ok = Migrations.run(db)
       :ok = Migrations.run(db)
 
@@ -47,7 +58,7 @@ defmodule Tau.Memory.MigrationsTest do
     end
 
     test "memory_fts virtual table exists after migration (PR2)" do
-      {:ok, db} = Exqlite.Sqlite3.open(":memory:")
+      {:ok, db} = open_with_vec()
       :ok = Migrations.run(db)
 
       # FTS5 virtual tables appear in sqlite_master with type='table'.
@@ -61,7 +72,7 @@ defmodule Tau.Memory.MigrationsTest do
     end
 
     test "sync triggers exist after migration (PR2)" do
-      {:ok, db} = Exqlite.Sqlite3.open(":memory:")
+      {:ok, db} = open_with_vec()
       :ok = Migrations.run(db)
 
       {:ok, stmt} =
@@ -80,7 +91,7 @@ defmodule Tau.Memory.MigrationsTest do
     end
 
     test "memory_entries table exists and has correct columns after migration" do
-      {:ok, db} = Exqlite.Sqlite3.open(":memory:")
+      {:ok, db} = open_with_vec()
       :ok = Migrations.run(db)
 
       # PRAGMA table_info returns one row per column.
@@ -95,7 +106,7 @@ defmodule Tau.Memory.MigrationsTest do
     end
 
     test "embedding_status CHECK constraint is enforced (D-046)" do
-      {:ok, db} = Exqlite.Sqlite3.open(":memory:")
+      {:ok, db} = open_with_vec()
       :ok = Migrations.run(db)
 
       bad_sql =
@@ -150,7 +161,7 @@ defmodule Tau.Memory.MigrationsTest do
     end
 
     test "Migrations.run/1 returns {:error, _} on a corrupt schema_migrations table" do
-      {:ok, db} = Exqlite.Sqlite3.open(":memory:")
+      {:ok, db} = open_with_vec()
       # Create a schema_migrations with a wrong schema (no version column).
       :ok = Exqlite.Sqlite3.execute(db, "CREATE TABLE schema_migrations (wrong_col TEXT)")
 
@@ -166,7 +177,7 @@ defmodule Tau.Memory.MigrationsTest do
     @tag :property
     property "re-running N times on a fresh db produces the same schema as running once" do
       check all(n_extra <- integer(0..4)) do
-        {:ok, db} = Exqlite.Sqlite3.open(":memory:")
+        {:ok, db} = open_with_vec()
 
         # First run.
         assert :ok = Migrations.run(db)
@@ -192,7 +203,7 @@ defmodule Tau.Memory.MigrationsTest do
     @tag :property
     property "all expected migration versions are present after any number of runs" do
       check all(n_extra <- integer(0..4)) do
-        {:ok, db} = Exqlite.Sqlite3.open(":memory:")
+        {:ok, db} = open_with_vec()
         :ok = Migrations.run(db)
 
         for _ <- 1..max(n_extra, 1)//1, n_extra > 0 do
