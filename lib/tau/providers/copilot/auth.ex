@@ -25,9 +25,12 @@ defmodule Tau.Providers.Copilot.Auth do
 
   ## Short-lived API tokens
 
-  `token/1` returns the usable API token, refreshing if needed.
-  `refresh/1` exchanges the OAuth token for a short-lived API token
-  via `POST https://api.github.com/copilot_internal/v2/token`.
+  `token/1` returns the usable API token, delegating the expiry check and
+  refresh action entirely to `Tau.Providers.Copilot.TokenStore`. The store
+  serializes both within a single `handle_call`, so concurrent callers
+  queue behind one in-flight refresh rather than each firing their own —
+  preventing the thundering-herd race that would otherwise trip GitHub's
+  rate limiter.
 
   D-056: The API token MUST be refreshed when `expires_at - now < 5 min`
   to avoid mid-turn token-expired failures. Refresh failure surfaces as
@@ -37,17 +40,16 @@ defmodule Tau.Providers.Copilot.Auth do
   ## Error variants
 
     * `{:error, :no_auth}` — no OAuth token found
-    * `{:error, :oauth_expired}` — OAuth token itself is expired
-    * `{:error, :oauth_refresh_failed}` — API token exchange failed
+    * `{:error, :oauth_expired}` — OAuth token itself is expired (401)
+    * `{:error, :oauth_refresh_failed}` — API token exchange failed (non-401 error)
     * `{:error, :oauth_malformed}` — hosts.json exists but cannot be parsed
   """
+
+  alias Tau.Providers.Copilot.TokenStore
 
   @hosts_json_path "~/.config/github-copilot/hosts.json"
   @apps_json_path "~/.config/github-copilot/apps.json"
   @token_endpoint "https://api.github.com/copilot_internal/v2/token"
-
-  # Refresh when fewer than 5 minutes remain
-  @refresh_threshold_ms 5 * 60 * 1000
 
   @type oauth_token :: String.t()
   @type api_token_info :: %{token: String.t(), expires_at: integer()}
@@ -83,10 +85,14 @@ defmodule Tau.Providers.Copilot.Auth do
   Return the usable short-lived API token, refreshing via the TokenStore
   if the cached token is absent or nearing expiry.
 
-  `opts[:token_store]` overrides the registered name used for the
-  `Tau.Providers.Copilot.TokenStore` GenServer (default:
-  `Tau.Providers.Copilot.TokenStore`). Pass a test-specific atom to
-  isolate tests without touching the real store.
+  Delegates the expiry check + refresh to `Tau.Providers.Copilot.TokenStore`
+  via a single serialized `handle_call`, eliminating the thundering-herd race.
+  At most one in-flight refresh exists per store instance; concurrent callers
+  queue and receive the result of that one refresh.
+
+  `opts[:token_store]` overrides the registered name (default:
+  `Tau.Providers.Copilot.TokenStore`). Pass a test-specific atom to isolate
+  tests.
 
   `opts[:hosts_json_path]` / `opts[:apps_json_path]` are forwarded to
   `resolve_oauth/1` when a refresh is needed.
@@ -97,17 +103,13 @@ defmodule Tau.Providers.Copilot.Auth do
   def token(opts \\ %{}) do
     store_name = opt(opts, :token_store) || Tau.Providers.Copilot.TokenStore
 
-    case GenServer.call(store_name, :get) do
-      {:ok, %{token: t, expires_at: exp}} when is_binary(t) ->
-        if needs_refresh?(exp) do
-          do_refresh(opts, store_name)
-        else
-          {:ok, t}
-        end
-
-      _ ->
-        do_refresh(opts, store_name)
+    refresh_fn = fn ->
+      with {:ok, oauth_token} <- resolve_oauth(opts) do
+        refresh(oauth_token, opts)
+      end
     end
+
+    TokenStore.token(refresh_fn, store_name)
   end
 
   @doc """
@@ -119,11 +121,12 @@ defmodule Tau.Providers.Copilot.Auth do
   `opts[:base_url]` overrides the default endpoint (for tests).
   `opts[:finch]` overrides the Finch instance (defaults to `Tau.Providers.Finch`).
 
-  Returns `{:ok, %{token: t, expires_at: epoch_ms}}` or
-  `{:error, :oauth_refresh_failed}`.
+  Returns `{:ok, %{token: t, expires_at: epoch_ms}}`,
+  `{:error, :oauth_expired}` (401 — OAuth token rejected or expired), or
+  `{:error, :oauth_refresh_failed}` (other HTTP / network error).
   """
   @spec refresh(oauth_token(), map() | keyword()) ::
-          {:ok, api_token_info()} | {:error, :oauth_refresh_failed}
+          {:ok, api_token_info()} | {:error, :oauth_expired | :oauth_refresh_failed}
   def refresh(oauth_token, opts \\ %{}) do
     base_url = opt(opts, :base_url) || @token_endpoint
     finch_name = opt(opts, :finch) || Tau.Providers.Finch
@@ -141,9 +144,18 @@ defmodule Tau.Providers.Copilot.Auth do
         ""
       )
 
-    case Finch.request(request, finch_name) do
+    case Finch.request(request, finch_name, receive_timeout: 30_000) do
       {:ok, %Finch.Response{status: 200, body: body}} ->
         parse_api_token(body)
+
+      {:ok, %Finch.Response{status: 401}} ->
+        :telemetry.execute(
+          [:tau, :copilot, :auth, :refresh_failed],
+          %{system_time: System.system_time()},
+          %{status: 401, reason: :oauth_expired}
+        )
+
+        {:error, :oauth_expired}
 
       {:ok, %Finch.Response{status: status}} ->
         :telemetry.execute(
@@ -277,9 +289,9 @@ defmodule Tau.Providers.Copilot.Auth do
 
   defp parse_api_token(body) do
     case Jason.decode(body) do
-      {:ok, %{"token" => token, "expires_at" => expires_at_str}}
-      when is_binary(token) and is_binary(expires_at_str) ->
-        case parse_expires_at(expires_at_str) do
+      {:ok, %{"token" => token, "expires_at" => expires_at}}
+      when is_binary(token) ->
+        case parse_expires_at(expires_at) do
           {:ok, expires_ms} ->
             {:ok, %{token: token, expires_at: expires_ms}}
 
@@ -292,27 +304,22 @@ defmodule Tau.Providers.Copilot.Auth do
     end
   end
 
-  # expires_at from the Copilot token endpoint is an ISO 8601 string,
-  # e.g. "2026-05-19T12:34:56Z". Convert to ms epoch.
-  defp parse_expires_at(str) do
+  # expires_at may be:
+  #   - an ISO 8601 string, e.g. "2026-05-19T12:34:56Z"
+  #   - a Unix epoch integer (seconds), as returned by some API versions
+  # Both are converted to milliseconds epoch.
+  defp parse_expires_at(str) when is_binary(str) do
     case DateTime.from_iso8601(str) do
       {:ok, dt, _} -> {:ok, DateTime.to_unix(dt, :millisecond)}
       _ -> :error
     end
   end
 
-  defp needs_refresh?(expires_at) do
-    now_ms = :os.system_time(:millisecond)
-    expires_at - now_ms < @refresh_threshold_ms
+  defp parse_expires_at(epoch_s) when is_integer(epoch_s) do
+    {:ok, DateTime.from_unix!(epoch_s, :second) |> DateTime.to_unix(:millisecond)}
   end
 
-  defp do_refresh(opts, store_name) do
-    with {:ok, oauth_token} <- resolve_oauth(opts),
-         {:ok, info} <- refresh(oauth_token, opts) do
-      GenServer.call(store_name, {:put, info})
-      {:ok, info.token}
-    end
-  end
+  defp parse_expires_at(_), do: :error
 
   defp opt(opts, key) when is_map(opts), do: Map.get(opts, key)
   defp opt(opts, key) when is_list(opts), do: Keyword.get(opts, key)

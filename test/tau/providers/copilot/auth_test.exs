@@ -127,7 +127,7 @@ defmodule Tau.Providers.Copilot.AuthTest do
   # ---------------------------------------------------------------------------
 
   describe "refresh/2" do
-    test "200 response with token + expires_at returns api token info", %{
+    test "200 response with ISO-8601 expires_at returns api token info", %{
       bypass: bypass,
       base_url: base_url
     } do
@@ -151,16 +151,46 @@ defmodule Tau.Providers.Copilot.AuthTest do
       assert is_integer(exp) and exp > :os.system_time(:millisecond)
     end
 
-    test "non-200 response returns :oauth_refresh_failed", %{bypass: bypass, base_url: base_url} do
+    test "200 response with integer Unix epoch expires_at returns api token info", %{
+      bypass: bypass,
+      base_url: base_url
+    } do
+      # Some Copilot API versions return expires_at as a Unix epoch integer (seconds).
+      expires_epoch_s = System.system_time(:second) + 1800
+
+      Bypass.expect_once(bypass, "POST", "/copilot_internal/v2/token", fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(
+          200,
+          Jason.encode!(%{
+            "token" => "tid_epoch",
+            "expires_at" => expires_epoch_s
+          })
+        )
+      end)
+
+      assert {:ok, %{token: "tid_epoch", expires_at: exp}} =
+               Auth.refresh("gho_oauth", %{base_url: base_url})
+
+      # expires_at should be converted to milliseconds
+      assert is_integer(exp) and exp > :os.system_time(:millisecond)
+      assert_in_delta exp, expires_epoch_s * 1000, 1000
+    end
+
+    test "401 response returns :oauth_expired", %{bypass: bypass, base_url: base_url} do
       Bypass.expect_once(bypass, "POST", "/copilot_internal/v2/token", fn conn ->
         Plug.Conn.send_resp(conn, 401, ~s({"message":"Bad credentials"}))
       end)
 
-      assert {:error, :oauth_refresh_failed} =
-               Auth.refresh("bad_token", %{base_url: base_url})
+      assert {:error, :oauth_expired} =
+               Auth.refresh("expired_oauth_token", %{base_url: base_url})
     end
 
-    test "503 response returns :oauth_refresh_failed", %{bypass: bypass, base_url: base_url} do
+    test "non-200/non-401 response returns :oauth_refresh_failed", %{
+      bypass: bypass,
+      base_url: base_url
+    } do
       Bypass.expect_once(bypass, "POST", "/copilot_internal/v2/token", fn conn ->
         Plug.Conn.send_resp(conn, 503, "Service Unavailable")
       end)
@@ -179,7 +209,7 @@ defmodule Tau.Providers.Copilot.AuthTest do
   end
 
   # ---------------------------------------------------------------------------
-  # token/1 — proactive refresh logic
+  # token/1 — proactive refresh logic via serialized TokenStore
   # ---------------------------------------------------------------------------
 
   describe "token/1 — token store interaction" do
@@ -267,6 +297,84 @@ defmodule Tau.Providers.Copilot.AuthTest do
                  base_url: base_url,
                  hosts_json_path: hosts_path
                })
+    end
+
+    # F1: thundering-herd — N concurrent callers against a cold store must
+    # hit the token endpoint EXACTLY ONCE.
+    test "concurrent callers against cold store hit endpoint exactly once", %{
+      store_name: name,
+      bypass: bypass,
+      base_url: base_url,
+      tmp: tmp
+    } do
+      # Use an Agent to count endpoint hits in a race-safe manner.
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+      on_exit(fn -> if Process.alive?(counter), do: Agent.stop(counter) end)
+
+      new_exp_str =
+        DateTime.utc_now() |> DateTime.add(1800, :second) |> DateTime.to_iso8601()
+
+      # Bypass stub: count every hit and introduce a small delay to allow
+      # concurrent callers to pile up behind the first in-flight refresh.
+      Bypass.stub(bypass, "POST", "/copilot_internal/v2/token", fn conn ->
+        Agent.update(counter, &(&1 + 1))
+        # Small sleep to widen the race window
+        Process.sleep(50)
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(
+          200,
+          Jason.encode!(%{"token" => "shared_tid", "expires_at" => new_exp_str})
+        )
+      end)
+
+      hosts_path = write_hosts_json(tmp, "github.com", "gho_oauth")
+      opts = %{token_store: name, base_url: base_url, hosts_json_path: hosts_path}
+      n = 10
+
+      results =
+        1..n
+        |> Enum.map(fn _ ->
+          Task.async(fn -> Auth.token(opts) end)
+        end)
+        |> Task.await_many(10_000)
+
+      # All callers must succeed and receive the same token
+      assert Enum.all?(results, fn r -> r == {:ok, "shared_tid"} end),
+             "Expected all #{n} callers to receive {:ok, 'shared_tid'}, got: #{inspect(results)}"
+
+      # The endpoint must have been hit EXACTLY ONCE — the store serialized the refresh
+      hit_count = Agent.get(counter, & &1)
+      assert hit_count == 1, "Expected token endpoint hit exactly 1 time, got #{hit_count}"
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # TokenStore.clear/0 — auth reset path (F4)
+  # ---------------------------------------------------------------------------
+
+  describe "TokenStore.clear/1" do
+    setup do
+      name = :"token_store_clear_#{System.unique_integer([:positive])}"
+      {:ok, pid} = GenServer.start_link(TokenStore, :empty, name: name)
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+      %{store_name: name}
+    end
+
+    test "clear/1 resets populated store to :empty", %{store_name: name} do
+      future_exp = :os.system_time(:millisecond) + @future_ms
+      TokenStore.put(%{token: "some_tid", expires_at: future_exp}, name)
+      assert {:ok, _} = TokenStore.get(name)
+
+      assert :ok = TokenStore.clear(name)
+      assert :empty = TokenStore.get(name)
+    end
+
+    test "clear/1 on already-empty store returns :ok", %{store_name: name} do
+      assert :empty = TokenStore.get(name)
+      assert :ok = TokenStore.clear(name)
+      assert :empty = TokenStore.get(name)
     end
   end
 
