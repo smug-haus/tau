@@ -46,6 +46,39 @@ defmodule Tau.Memory.MigrationsTest do
       assert actual_versions == expected_versions
     end
 
+    test "memory_fts virtual table exists after migration (PR2)" do
+      {:ok, db} = Exqlite.Sqlite3.open(":memory:")
+      :ok = Migrations.run(db)
+
+      # FTS5 virtual tables appear in sqlite_master with type='table'.
+      {:ok, stmt} =
+        Exqlite.Sqlite3.prepare(db, "SELECT name FROM sqlite_master WHERE name = 'memory_fts'")
+
+      {:ok, rows} = Exqlite.Sqlite3.fetch_all(db, stmt)
+      :ok = Exqlite.Sqlite3.release(db, stmt)
+
+      assert [["memory_fts"]] = rows
+    end
+
+    test "sync triggers exist after migration (PR2)" do
+      {:ok, db} = Exqlite.Sqlite3.open(":memory:")
+      :ok = Migrations.run(db)
+
+      {:ok, stmt} =
+        Exqlite.Sqlite3.prepare(
+          db,
+          "SELECT name FROM sqlite_master WHERE type='trigger' ORDER BY name"
+        )
+
+      {:ok, rows} = Exqlite.Sqlite3.fetch_all(db, stmt)
+      :ok = Exqlite.Sqlite3.release(db, stmt)
+
+      trigger_names = Enum.map(rows, fn [n] -> n end)
+      assert "memory_entries_ai" in trigger_names
+      assert "memory_entries_ad" in trigger_names
+      assert "memory_entries_au" in trigger_names
+    end
+
     test "memory_entries table exists and has correct columns after migration" do
       {:ok, db} = Exqlite.Sqlite3.open(":memory:")
       :ok = Migrations.run(db)

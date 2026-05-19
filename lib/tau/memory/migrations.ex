@@ -18,7 +18,7 @@ defmodule Tau.Memory.Migrations do
   after all existing versions; ISO-8601 prefix (e.g. `"20260518_001"`) is
   recommended.
 
-  PR2 adds the `memory_fts` FTS5 virtual table migration here.
+  PR2 adds `memory_fts` (FTS5 virtual table) and three sync triggers here.
   PR3 adds the `memory_vec` sqlite-vec virtual table migration here.
   """
 
@@ -43,6 +43,38 @@ defmodule Tau.Memory.Migrations do
        created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
        updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
      )
+     """},
+    {"20260518_003_memory_fts",
+     """
+     CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts
+       USING fts5(id UNINDEXED, kind, scope, content,
+                  content='memory_entries', content_rowid='rowid')
+     """},
+    {"20260518_004_memory_fts_triggers",
+     """
+     CREATE TRIGGER IF NOT EXISTS memory_entries_ai
+       AFTER INSERT ON memory_entries BEGIN
+         INSERT INTO memory_fts(rowid, id, kind, scope, content)
+           VALUES (new.rowid, new.id, new.kind, new.scope, new.content);
+       END
+     """},
+    {"20260518_005_memory_fts_delete_trigger",
+     """
+     CREATE TRIGGER IF NOT EXISTS memory_entries_ad
+       AFTER DELETE ON memory_entries BEGIN
+         INSERT INTO memory_fts(memory_fts, rowid, id, kind, scope, content)
+           VALUES ('delete', old.rowid, old.id, old.kind, old.scope, old.content);
+       END
+     """},
+    {"20260518_006_memory_fts_update_trigger",
+     """
+     CREATE TRIGGER IF NOT EXISTS memory_entries_au
+       AFTER UPDATE ON memory_entries BEGIN
+         INSERT INTO memory_fts(memory_fts, rowid, id, kind, scope, content)
+           VALUES ('delete', old.rowid, old.id, old.kind, old.scope, old.content);
+         INSERT INTO memory_fts(rowid, id, kind, scope, content)
+           VALUES (new.rowid, new.id, new.kind, new.scope, new.content);
+       END
      """}
   ]
 

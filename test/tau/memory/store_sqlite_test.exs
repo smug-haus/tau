@@ -1,9 +1,9 @@
 defmodule Tau.Memory.Store.SQLiteTest do
   @moduledoc """
-  Tests for `Tau.Memory.Store.SQLite` — write/delete + telemetry.
+  Tests for `Tau.Memory.Store.SQLite` — write/delete + FTS5 search + telemetry.
 
-  Advances AC-1, AC-2, AC-5 from SPEC-MEMORY-STORE.md.
-  Enforces D-045, D-046, D-047.
+  PR1: AC-1, AC-2, AC-5 from SPEC-MEMORY-STORE.md. D-045, D-046, D-047.
+  PR2: search/2 (FTS5). D-046 (pending/failed rows included in FTS results).
   """
 
   use ExUnit.Case, async: false
@@ -238,6 +238,166 @@ defmodule Tau.Memory.Store.SQLiteTest do
         {:ok, id} = SQLite.write(pid, entry)
         assert :ok = SQLite.delete(pid, id)
         assert read_rows(pid, id) == []
+      end
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # AC-6 / D-046: search/2 (FTS5 full-text search — PR2)
+  # ---------------------------------------------------------------------------
+
+  describe "search/2 — FTS5 full-text search (D-046)" do
+    test "returns matching rows by content", %{pid: pid} do
+      SQLite.write(pid, %{"kind" => "note", "scope" => "global", "content" => "the quick brown fox"})
+
+      SQLite.write(pid, %{
+        "kind" => "note",
+        "scope" => "global",
+        "content" => "completely unrelated entry"
+      })
+
+      assert {:ok, results} = SQLite.search(pid, "fox", [])
+      assert length(results) == 1
+      [result] = results
+      assert result["content"] == "the quick brown fox"
+    end
+
+    test "includes pending rows (D-046)", %{pid: pid} do
+      # write creates rows with embedding_status = 'pending'
+      SQLite.write(pid, %{"kind" => "fact", "scope" => "s1", "content" => "pending content here"})
+
+      assert {:ok, results} = SQLite.search(pid, "pending", [])
+      assert length(results) == 1
+      assert hd(results)["embedding_status"] == "pending"
+    end
+
+    test "includes failed rows (D-046)", %{pid: pid} do
+      {:ok, id} =
+        SQLite.write(pid, %{"kind" => "fact", "scope" => "s1", "content" => "failed entry content"})
+
+      # Manually flip the embedding_status to 'failed' via a direct SQL update.
+      %{db: db} = :sys.get_state(pid)
+
+      {:ok, stmt} =
+        Exqlite.Sqlite3.prepare(
+          db,
+          "UPDATE memory_entries SET embedding_status='failed' WHERE id=?1"
+        )
+
+      :ok = Exqlite.Sqlite3.bind(stmt, [id])
+      :done = Exqlite.Sqlite3.step(db, stmt)
+      :ok = Exqlite.Sqlite3.release(db, stmt)
+
+      assert {:ok, results} = SQLite.search(pid, "failed entry", [])
+      assert Enum.any?(results, fn r -> r["id"] == id end)
+    end
+
+    test "filters by scope when :scope opt is provided", %{pid: pid} do
+      SQLite.write(pid, %{"kind" => "note", "scope" => "ns1", "content" => "scoped result"})
+      SQLite.write(pid, %{"kind" => "note", "scope" => "ns2", "content" => "scoped result"})
+
+      assert {:ok, results} = SQLite.search(pid, "scoped", scope: "ns1")
+      assert length(results) == 1
+      assert hd(results)["scope"] == "ns1"
+    end
+
+    test "respects :limit option", %{pid: pid} do
+      for i <- 1..5 do
+        SQLite.write(pid, %{
+          "kind" => "note",
+          "scope" => "global",
+          "content" => "limit test entry #{i}"
+        })
+      end
+
+      assert {:ok, results} = SQLite.search(pid, "limit test", limit: 3)
+      assert length(results) <= 3
+    end
+
+    test "returns {:ok, []} when no rows match", %{pid: pid} do
+      assert {:ok, []} = SQLite.search(pid, "xyzzy_no_match_ever", [])
+    end
+
+    test "returns {:error, _} for non-binary query", %{pid: pid} do
+      assert {:error, {:invalid_query, 42}} = SQLite.search(pid, 42, [])
+    end
+
+    test "result maps include all expected keys", %{pid: pid} do
+      SQLite.write(pid, %{"kind" => "note", "scope" => "global", "content" => "key check entry"})
+
+      assert {:ok, [result]} = SQLite.search(pid, "key check", [])
+
+      expected_keys = ~w[id kind scope content metadata embedding_status created_at updated_at]
+      assert Enum.all?(expected_keys, &Map.has_key?(result, &1))
+    end
+
+    test "search emits :start and :stop telemetry events", %{pid: pid} do
+      SQLite.write(pid, %{"kind" => "k", "scope" => "s", "content" => "telemetry check"})
+
+      events =
+        capture_telemetry(
+          [:tau, :memory, :search, :start],
+          [:tau, :memory, :search, :stop],
+          fn -> SQLite.search(pid, "telemetry", []) end
+        )
+
+      assert Enum.any?(events, fn {name, _, _} -> name == [:tau, :memory, :search, :start] end)
+      assert Enum.any?(events, fn {name, _, _} -> name == [:tau, :memory, :search, :stop] end)
+    end
+
+    test "search :stop event includes duration measurement", %{pid: pid} do
+      SQLite.write(pid, %{"kind" => "k", "scope" => "s", "content" => "duration check"})
+
+      events =
+        capture_telemetry([:tau, :memory, :search, :stop], fn ->
+          SQLite.search(pid, "duration", [])
+        end)
+
+      [{_name, measurements, _meta}] =
+        Enum.filter(events, fn {name, _, _} -> name == [:tau, :memory, :search, :stop] end)
+
+      assert is_integer(measurements.duration)
+      assert measurements.duration >= 0
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Properties — search/2 (D-046)
+  # ---------------------------------------------------------------------------
+
+  describe "search/2 properties (D-046)" do
+    @tag :property
+    property "all written rows with matching content are returned by search", %{pid: pid} do
+      check all(
+              kind <- string(:alphanumeric, min_length: 1),
+              scope <- string(:alphanumeric, min_length: 1),
+              # Use a unique token to avoid cross-test collisions
+              token <- string(:alphanumeric, min_length: 6)
+            ) do
+        content = "searchable_#{token}"
+        {:ok, id} = SQLite.write(pid, %{"kind" => kind, "scope" => scope, "content" => content})
+
+        {:ok, results} = SQLite.search(pid, content, [])
+        ids = Enum.map(results, & &1["id"])
+        assert id in ids
+      end
+    end
+
+    @tag :property
+    property "search results always have embedding_status in pending|ready|failed", %{pid: pid} do
+      check all(
+              kind <- string(:alphanumeric, min_length: 1),
+              scope <- string(:alphanumeric, min_length: 1),
+              token <- string(:alphanumeric, min_length: 6)
+            ) do
+        content = "status_check_#{token}"
+        SQLite.write(pid, %{"kind" => kind, "scope" => scope, "content" => content})
+
+        {:ok, results} = SQLite.search(pid, content, [])
+
+        Enum.each(results, fn r ->
+          assert r["embedding_status"] in ["pending", "ready", "failed"]
+        end)
       end
     end
   end
