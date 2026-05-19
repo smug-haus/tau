@@ -55,6 +55,18 @@ gh repo view smug-haus/tau --json name   # must succeed
 
 If not authenticated: `gh auth login`.
 
+**Shadow-skill precheck.** The bundled coordinator sub-personas live under
+`priv/skills/`. A same-named user skill at `~/.tau/skills/` will silently
+shadow them and break the factory loop. Verify none are masked:
+
+```
+ls ~/.tau/skills/ 2>/dev/null | grep -E '^(implementer|critic|reviewer)$'
+# must produce no output
+```
+
+If any match appears, rename or remove the conflicting user skill before
+proceeding.
+
 **Provider credential.** See §3 below.
 
 ## 3. Provider setup
@@ -92,7 +104,7 @@ for a first verification run. Credential mechanism in parentheses:
 | OpenAI | `--provider openai` | `OPENAI_API_KEY` env var |
 | Gemini | `--provider gemini` | `GEMINI_API_KEY` env var |
 | Bedrock | `--provider bedrock` | AWS credentials (standard SDK chain) |
-| Copilot | `--provider copilot` | OAuth via `gh auth login --scopes copilot` |
+| Copilot | `--provider copilot` | OAuth via `gh auth login --scopes copilot` — **auth only; no stream adapter yet; will crash if selected** |
 | DeepSeek | `--provider deepseek` | `DEEPSEEK_API_KEY` env var |
 | Groq | `--provider groq` | `GROQ_API_KEY` env var |
 | Mistral | `--provider mistral` | `MISTRAL_API_KEY` env var |
@@ -100,6 +112,13 @@ for a first verification run. Credential mechanism in parentheses:
 
 All non-Anthropic providers require that the chosen model supports tool use.
 Verify before using.
+
+**Cost and budget.** A coordinator + implementer + critic + reviewer cycle
+on `claude-opus-4-7` can run several dollars per factory step. Set an
+Anthropic-side usage cap before running, or use a Sonnet model for an initial
+trial run (`--model claude-sonnet-4-6` is supported by the Anthropic
+provider). Do not run against a production key without a spending limit in
+place.
 
 ## 4. The invocation
 
@@ -109,30 +128,7 @@ Build Tau first (or use the compiled escript if already built):
 mix escript.build
 ```
 
-Then run:
-
-```
-./tau run "$(cat docs/m1-verification/smoke-task.md | grep -A200 'Verbatim smoke-task prompt' | tail -n +3 | sed 's/^```$//' | grep -v '^```')" \
-  --system-prompt-file priv/skills/tau-coordinator/SKILL.md \
-  --provider anthropic \
-  --model claude-opus-4-7
-```
-
-Or, more readably, store the prompt in a shell variable first:
-
-```
-SMOKE_PROMPT=$(cat docs/m1-verification/smoke-task.md | \
-  awk '/^```$/{if(p)exit; p=1; next} p' | head -n -1)
-
-./tau run "$SMOKE_PROMPT" \
-  --system-prompt-file priv/skills/tau-coordinator/SKILL.md \
-  --provider anthropic \
-  --model claude-opus-4-7
-```
-
-The exact verbatim prompt text is in `docs/m1-verification/smoke-task.md` §
-"Verbatim smoke-task prompt". Copy it and pass it as the positional `<prompt>`
-argument. The full literal command with the prompt inline is:
+Pass the prompt as an inline single-quoted string. The full command is:
 
 ```
 ./tau run \
@@ -195,56 +191,82 @@ Verbatim prompt (also in `smoke-task.md`):
 ## 6. What to watch for
 
 The session writes one JSONL record per event to
-`~/.tau/sessions/<cwd-hash>/<session-id>.jsonl`. Observable milestones, in
-order:
+`~/.tau/sessions/<cwd-hash>/<session-id>.jsonl`. The real record kinds
+(from `lib/tau/persistence/jsonl.ex` and `lib/tau/session.ex`) are:
+`session_header`, `user_message`, `assistant_message`, `tool_result`,
+`provider_fallback`, `cancellation`, `reconfigure`, `compaction`,
+`model_swap`, `coding_agent_cost`, `coding_agent_session`,
+`skill_activated`. There is **no** top-level `tool_call` or `session_end`
+JSONL record: tool invocations appear as content blocks of
+`type: "tool_call"` embedded in an `assistant_message` record's
+`data.content` array; session end is signalled by `tau run` exiting 0, not
+by a persisted record.
 
-1. **`session_header`** — first record in the JSONL file. Contains `session_id`,
-   `cwd`, `provider`, `model`. Confirms the FSM started and persistence is
-   working.
+Observable milestones, in order:
 
-2. **Coordinator first assistant turn** — an `assistant_message` record with
-   text output confirming the coordinator has read the persona and begun the
-   factory cycle.
+1. **`session_header`** — first record in the JSONL file. Contains
+   `session_id`, `cwd`, `provider`, `model`. Confirms the FSM started and
+   persistence is working.
 
-3. **`tool_call` for `Bash`** — coordinator runs `gh issue view 258` and `git
-   fetch origin` to verify preconditions.
+2. **`user_message`** — the smoke-task prompt as received. Confirms the FSM
+   accepted the user turn.
 
-4. **`tool_call` for `Agent`** (`subagent_type: "implementer"`) — coordinator
+3. **`assistant_message`** — coordinator's first reply. The `data.content`
+   array contains text blocks confirming the coordinator has read the persona
+   and begun the factory cycle. It also contains `type: "tool_call"` blocks
+   for each tool the model issued (e.g. `gh issue view 258`, `git fetch
+   origin`). Extract them:
+   ```
+   jq -r 'select(.kind == "assistant_message") | .data.content[]? |
+     select(.type == "tool_call") | {tool: .name, input: .input}' \
+     ~/.tau/sessions/*/<session-id>.jsonl
+   ```
+
+4. **`tool_result`** for the precondition `Bash` calls — `gh issue view 258`
+   and `git fetch origin` results returned to the coordinator.
+
+5. **`assistant_message`** with an embedded `tool_call` block for `Agent`
+   (`name: "Agent"`, `input.subagent_type: "implementer"`) — coordinator
    spawns the implementer child session. This is the critical M1 signal: the
    coordinator is using `Tau.Tools.Builtin.Agent` to drive a sub-session, not
    calling Claude Code.
 
-5. **Child `session_header`** — a second JSONL file (different `session_id`)
+6. **Child `session_header`** — a second JSONL file (different `session_id`)
    appears under the same cwd-hash directory. The implementer child is running.
 
-6. **`tool_result`** for the implementer `Agent` call — the implementer has
+7. **`tool_result`** for the implementer `Agent` call — the implementer has
    completed and returned its result text to the coordinator.
 
-7. **`tool_call` for `Bash`** — `gh pr create` is called. A real PR number
-   appears in the tool result.
+8. **`assistant_message`** with an embedded `tool_call` block for `Bash` with
+   `gh pr create` in the input — a real PR number appears in the subsequent
+   `tool_result`.
 
-8. **`tool_call` for `Agent`** (`subagent_type: "critic"`) — gate, first half.
+9. **`assistant_message`** with an embedded `tool_call` block for `Agent`
+   (`input.subagent_type: "critic"`) — gate, first half.
 
-9. **`tool_result`** for critic — last JSON line of the result is
-   `{"ok": true}` (or `{"ok": false, "reason": "..."}` on failure).
+10. **`tool_result`** for critic — last JSON line of the result is
+    `{"ok": true}` (or `{"ok": false, "reason": "..."}` on failure).
 
-10. **`tool_call` for `Agent`** (`subagent_type: "reviewer"`) — gate, second half.
+11. **`assistant_message`** with an embedded `tool_call` block for `Agent`
+    (`input.subagent_type: "reviewer"`) — gate, second half.
 
-11. **`tool_result`** for reviewer — last JSON line is `{"ok": true}`.
+12. **`tool_result`** for reviewer — last JSON line is `{"ok": true}`.
 
-12. **`tool_call` for `Bash`** — `gh pr merge <n> --merge --delete-branch`.
+13. **`assistant_message`** with an embedded `tool_call` block for `Bash` —
+    `gh pr merge <n> --merge --delete-branch`.
 
-13. **`tool_call` for `Bash`** — `git fetch origin && git checkout main && git
-    pull --ff-only origin main` (sync).
+14. **`assistant_message`** with an embedded `tool_call` block for `Bash` —
+    `git fetch origin && git checkout main && git pull --ff-only origin main`
+    (sync).
 
-14. **`tool_call` for `Bash`** — `mix compile --warnings-as-errors && mix test`
-    (post-merge health check).
+15. **`assistant_message`** with an embedded `tool_call` block for `Bash` —
+    `mix compile --warnings-as-errors && mix test` (post-merge health check).
 
-15. **`assistant_message`** (final) — coordinator's summary reporting the merged
-    PR, SHA, and confirmation that M1 factory cycle completed. `stop_reason:
-    :end_turn` or `:stop`.
-
-16. **`session_end`** — clean exit. `tau run` exits with code 0.
+16. **`assistant_message`** (final) — coordinator's summary reporting the
+    merged PR, SHA, and confirmation that M1 factory cycle completed.
+    `stop_reason: :end_turn` or `:stop`. The `tau run` process then exits 0;
+    that exit is the end-of-session signal (no `session_end` JSONL record is
+    written).
 
 You can tail the JSONL in real time:
 
@@ -264,14 +286,33 @@ a. **A PR with a real diff exists and is merged** on `smug-haus/tau`. Verify:
    `gh pr view <n> --json state,mergedAt,mergeCommit` shows `state: MERGED`.
 
 b. **The merge happened from inside the Tau session**, not from Claude Code or
-   the user's shell. Evidence: the JSONL transcript shows a `tool_call` record
-   with `tool: "Bash"` and `input` containing `gh pr merge`. The timestamp of
-   that record is within the session window.
+   the user's shell. Evidence: the JSONL transcript contains an
+   `assistant_message` record whose `data.content` array includes a
+   `type: "tool_call"` block with `name: "Bash"` and input containing
+   `gh pr merge`. The timestamp of that record is within the session window.
+   Verify with:
+   ```
+   jq -r 'select(.kind == "assistant_message") | .data.content[]? |
+     select(.type == "tool_call" and .name == "Bash") |
+     select(.input | tostring | contains("gh pr merge")) |
+     {tool: .name, input: .input}' \
+     ~/.tau/sessions/*/<session-id>.jsonl
+   ```
 
-c. **The JSONL transcript shows the coordinator-only flow.** The parent session's
-   JSONL file contains `tool_call` records for `Agent` (with `subagent_type:
-   "implementer"`, `"critic"`, and `"reviewer"`) and the corresponding
-   `tool_result` records. There is no Claude Code process in the process tree.
+c. **The JSONL transcript shows the coordinator-only flow.** The parent
+   session's JSONL file contains `assistant_message` records whose
+   `data.content` arrays include `type: "tool_call"` blocks with
+   `name: "Agent"` (for `subagent_type: "implementer"`, `"critic"`, and
+   `"reviewer"`) and corresponding `tool_result` records. There is no
+   Claude Code process in the process tree. Verify the Agent calls:
+   ```
+   jq -r 'select(.kind == "assistant_message") | .data.content[]? |
+     select(.type == "tool_call" and .name == "Agent") |
+     {tool: .name, subagent_type: .input.subagent_type}' \
+     ~/.tau/sessions/*/<session-id>.jsonl
+   ```
+   Expected output includes three entries: `subagent_type: "implementer"`,
+   `subagent_type: "critic"`, `subagent_type: "reviewer"`.
 
 d. **`main` health-checks green after the merge.** Run from the repo root after
    the session exits:
@@ -301,7 +342,7 @@ After a successful run, commit the following under `docs/m1-verification/evidenc
 4. **Summary note.** `evidence/<short-sha>-summary.md` containing:
    - Provider and model used.
    - Total session duration (wall time).
-   - Number of `tool_call` records in the parent JSONL (coordinator turns).
+   - Number of `tool_call` content blocks in `assistant_message` records (coordinator tool invocations).
    - Number of child session JSONL files created (one per sub-agent).
    - Any notable observations (gate failures encountered and resolved, etc.).
 
@@ -314,9 +355,21 @@ Commit these files on `main` with message:
 - Symptom: coordinator's first `Agent` call returns `is_error: true` with a
   message like "skill not found: implementer".
 - Cause: a user skill at `~/.tau/skills/implementer/SKILL.md` is shadowing the
-  bundled persona (issue #258 — ironically the very thing we are fixing).
+  bundled persona (issue #258 — ironically the very thing we are fixing). The
+  shadow-skill precheck in §2 should catch this before the run.
 - Remediation: temporarily rename or remove `~/.tau/skills/implementer/` and
   re-run. File the rename under a different name.
+
+**`tau run` reports `send error:` and exits 1 after a `session_header` was written**
+- Symptom: `tau run` prints `send error: <reason>` to stderr and exits 1
+  shortly after the session starts. A `session_header` JSONL record is
+  present but no `user_message` follows.
+- Cause: the session crashed during initialization (e.g. supervision tree
+  failed to start, provider module unavailable). `Tau.send/2` found the
+  session unresponsive after `start_session/1` returned `{:ok, session_id}`
+  (see `lib/tau/cli.ex` lines 317–323).
+- Diagnostic: tail the JSONL for any error records; inspect supervisor logs
+  (`Logger` output). Run `tau doctor` to confirm provider config.
 
 **Tau exits 1 — missing provider key**
 - Symptom: `tau run` immediately prints `system-prompt error: ...` or `session
@@ -354,8 +407,9 @@ Commit these files on `main` with message:
 - Symptom: coordinator reports red `main` and halts.
 - Diagnostic: `mix test` from the repo root to see which test is failing.
 - Remediation: this is a safety-circuit halt. Do not continue the factory loop.
-  Either revert the offending merge (`gh pr revert <n>`) or fix forward with a
-  new PR.
+  To revert the offending merge: `git revert -m 1 <merge-sha> && git push
+  origin main` (or open a revert PR if direct push to main is disabled). To
+  fix forward, create a new PR that addresses the failing test.
 
 **No JSONL file appears after `tau run` starts**
 - Symptom: session exits 0 or 1 but `~/.tau/sessions/` is empty or unchanged.
@@ -371,5 +425,5 @@ Once verification passes (all four success criteria in §7 are met):
 1. Commit evidence artifacts as described in §8.
 2. Close issue #256 with: `gh issue close 256 --comment "M1 verified. Evidence: docs/m1-verification/evidence/. Merged PR: <url>."`.
 3. Close milestone `M1 — Self-hosting`: `gh api repos/smug-haus/tau/milestones --jq '.[] | select(.title | test("M1")) | .number'` to find the milestone number, then `gh api -X PATCH repos/smug-haus/tau/milestones/<n> -f state=closed`.
-4. The factory loop stops being run. Per `.claude/rules/factory-loop.md` §"The sole objective": "The loop stops being run once M1 is met and verified." Do not start new factory steps.
+4. Halt the factory loop: `touch .claude/STOP-FACTORY` (this file is gitignored and is checked at the start of every factory step). Per `.claude/rules/factory-loop.md` §"The sole objective": "The loop stops being run once M1 is met and verified." Do not start new factory steps.
 5. Announce to any stakeholders monitoring the milestone.
