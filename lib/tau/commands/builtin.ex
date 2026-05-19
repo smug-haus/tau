@@ -18,6 +18,11 @@ defmodule Tau.Commands.Builtin do
     No provider turn is started (D-042).
   - `:passthrough` — the session falls through to `process_user_message/2`
     with the original message, starting a normal provider turn.
+  - `{:async_compact, notice}` — the **only** outcome that changes FSM
+    state.  The session broadcasts `notice` as a `SystemNotice`, launches
+    a supervised+monitored compaction worker, and transitions to the
+    `:compacting` state.  Does NOT call `process_user_message/2` (D-042,
+    C67-B4).
 
   ## Built-in table
 
@@ -29,6 +34,7 @@ defmodule Tau.Commands.Builtin do
           | {:notice, [String.t()]}
           | {:mutate, (map() -> map()), String.t() | nil}
           | {:error, String.t()}
+          | {:async_compact, String.t()}
           | :passthrough
 
   @doc "Returns the slash-command name including the leading slash, e.g. `\"/ping\"`."
@@ -60,7 +66,8 @@ defmodule Tau.Commands.Builtin do
       "/clone" => Tau.Commands.Builtin.Clone,
       "/new" => Tau.Commands.Builtin.New,
       "/reload" => Tau.Commands.Builtin.Reload,
-      "/logout" => Tau.Commands.Builtin.Logout
+      "/logout" => Tau.Commands.Builtin.Logout,
+      "/compact" => Tau.Commands.Builtin.Compact
     }
   end
 end
