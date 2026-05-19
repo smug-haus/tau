@@ -226,18 +226,23 @@ defmodule Tau.OtelReporter do
   end
 
   defp build_event_list(config) do
-    # PR2 mandatory set: only event families whose *.start/*.stop emit sites
-    # genuinely carry a correlating key in this PR.
+    # Mandatory set: event families whose *.start/*.stop emit sites carry a
+    # correlating key. PR3 adds provider.request after the C76 emit-site
+    # amendment in session.ex echoes span_ref through all terminal events.
     #
-    # - provider.request: DEFERRED to C76. The emit site does not yet echo a
-    #   span_ref through *.stop; attaching now would leak every provider span
-    #   (*.start opens with make_ref(), *.stop discards because span_ref is nil).
-    #   Attach when C76 emit-site amendment lands.
+    # - provider.request: C76 emit-site fix landed in PR3 (session.ex adds
+    #   span_ref to *.start and echoes it through *.stop / *.cancelled /
+    #   *.brutal_kill). Handler uses composite key {:provider_request, session_id,
+    #   provider, ref} and discards *.stop when span_ref is absent (C71). ✓
     # - tool.execute: correlates on tool_call_id (D-052 / C78 fix in PR2). ✓
     # - hook.run: correlates on span_ref discriminator (C77 fix in PR2). ✓
     # - session.stop: point event (open+close immediately). ✓
     # - circuit_breaker.transition: point event. ✓
     mandatory = [
+      [:tau, :provider, :request, :start],
+      [:tau, :provider, :request, :stop],
+      [:tau, :provider, :request, :cancelled],
+      [:tau, :provider, :request, :brutal_kill],
       [:tau, :tool, :execute, :start],
       [:tau, :tool, :execute, :stop],
       [:tau, :tool, :execute, :exception],

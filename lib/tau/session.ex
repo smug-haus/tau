@@ -512,6 +512,14 @@ defmodule Tau.Session do
           # handler. Stale messages whose ref doesn't match are dropped
           # by the catch-all clause.
           stream_ref: nil,
+          # C76 (SPEC-OTEL-REPORTER): per-request OTel span discriminator.
+          # Generated at [:tau, :provider, :request, :start] emit time;
+          # echoed through *.stop / *.cancelled / *.brutal_kill so the
+          # OTel reporter can correlate them to the open span. Cleared
+          # whenever the FSM leaves the request (reset to nil alongside
+          # stream_ref). Each fallback attempt generates a fresh ref —
+          # that is correct: a fallback is a distinct provider request.
+          provider_span_ref: nil,
           # ADR-0017: per-stream cooperative-cancel flag (a `:counters`
           # ref). Allocated freshly in `:start_provider`; consulted by the
           # `:cancel` handler before falling back to brutal-kill.
@@ -789,13 +797,28 @@ defmodule Tau.Session do
       data.provider_ctx
       |> Map.merge(%{session_id: data.id, cancel_flag: cancel_flag})
 
+    # C76 (SPEC-OTEL-REPORTER): generate a per-request discriminator ref so the
+    # OTel reporter can correlate *.stop / *.cancelled / *.brutal_kill back to
+    # this *.start span even when multiple requests from the same session to the
+    # same provider are in flight concurrently (e.g. parallel sessions).
+    #
+    # D-057 (SPEC-OTEL-REPORTER): store the ref in `data` immediately after
+    # emitting *.start so all downstream error paths (circuit_open fallback,
+    # circuit_open exhausted, synchronous error) read it from `data` rather than
+    # a local variable. Without this, error branches that never reach the {:ok,
+    # stream} arm would see provider_span_ref: nil and silently skip the terminal
+    # emit.
+    provider_span_ref = make_ref()
+    data = %{data | provider_span_ref: provider_span_ref}
+
     :telemetry.execute(
       [:tau, :provider, :request, :start],
       %{system_time: System.system_time()},
       %{
         provider: data.provider,
         model: data.model,
-        session_id: data.id
+        session_id: data.id,
+        span_ref: provider_span_ref
       }
     )
 
@@ -849,7 +872,8 @@ defmodule Tau.Session do
            | provider_task: task,
              assembler: assembler,
              cancel_flag: cancel_flag,
-             stream_ref: stream_ref
+             stream_ref: stream_ref,
+             provider_span_ref: provider_span_ref
          }}
 
       {:error, :circuit_open} ->
@@ -891,6 +915,11 @@ defmodule Tau.Session do
                 reason: "circuit_open"
               })
 
+            # D-057 (SPEC-OTEL-REPORTER): the *.start fired above; emit the
+            # terminal event before recursing into :start_provider so the span
+            # opened at *.start is closed and not leaked as a stale span.
+            emit_provider_request_terminal(:cancelled, data)
+
             transformed =
               Tau.Providers.Shared.ContentTransform.transform(
                 data.messages,
@@ -909,12 +938,16 @@ defmodule Tau.Session do
                   fallback_chain_remaining: rest,
                   assembler: nil,
                   provider_task: nil,
-                  stream_ref: nil
+                  stream_ref: nil,
+                  provider_span_ref: nil
               }
             )
 
           [] ->
             # All providers exhausted — surface terminal error.
+            # D-057 (SPEC-OTEL-REPORTER): emit terminal event before returning
+            # to :awaiting_user so the span opened at *.start is closed.
+            emit_provider_request_terminal(:cancelled, data)
             reason_str = describe_provider_error(:circuit_open)
 
             msg =
@@ -925,7 +958,9 @@ defmodule Tau.Session do
               )
 
             broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: msg})
-            {:next_state, :awaiting_user, %{data | cancel_flag: nil, stream_ref: nil}}
+
+            {:next_state, :awaiting_user,
+             %{data | cancel_flag: nil, stream_ref: nil, provider_span_ref: nil}}
         end
 
       {:error, reason} ->
@@ -941,6 +976,10 @@ defmodule Tau.Session do
         # human-readable, actionable renewal instruction so the user
         # learns to run `claude /login` instead of staring at an opaque
         # `:oauth_expired`.
+        #
+        # D-057 (SPEC-OTEL-REPORTER): emit terminal event before returning
+        # to :awaiting_user so the span opened at *.start is closed.
+        emit_provider_request_terminal(:cancelled, data)
         reason_str = describe_provider_error(reason)
 
         msg =
@@ -951,7 +990,9 @@ defmodule Tau.Session do
           )
 
         broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: msg})
-        {:next_state, :awaiting_user, %{data | cancel_flag: nil, stream_ref: nil}}
+
+        {:next_state, :awaiting_user,
+         %{data | cancel_flag: nil, stream_ref: nil, provider_span_ref: nil}}
     end
   end
 
@@ -1049,6 +1090,12 @@ defmodule Tau.Session do
         reason: inspect(ev.reason)
       })
 
+    # D-057 (SPEC-OTEL-REPORTER): emit the terminal event BEFORE killing the
+    # task so the span opened at *.start is closed with the correct mechanism.
+    # A brutal_kill event is appropriate here because we are force-terminating
+    # a running stream rather than cooperatively cancelling it.
+    emit_provider_request_terminal(:brutal_kill, data)
+
     # Shut down the still-running provider task (it might still be
     # emitting events or about to send :provider_done). Stragglers
     # already in the mailbox are tagged with the *previous* stream_ref
@@ -1072,7 +1119,8 @@ defmodule Tau.Session do
           fallback_chain_remaining: rest,
           assembler: nil,
           provider_task: nil,
-          stream_ref: nil
+          stream_ref: nil,
+          provider_span_ref: nil
       }
     )
   end
@@ -1236,6 +1284,9 @@ defmodule Tau.Session do
        | provider_task: nil,
          cancel_flag: nil,
          stream_ref: nil,
+         # C76 (SPEC-OTEL-REPORTER): clear discriminator; the OTel reporter
+         # consumed it at the *.cancelled / *.brutal_kill emit site above.
+         provider_span_ref: nil,
          tools_in_flight: %{},
          tool_dispatcher: nil,
          assembler: nil,
@@ -1516,6 +1567,35 @@ defmodule Tau.Session do
 
   # --- Helpers --------------------------------------------------------------
 
+  # D-057 (SPEC-OTEL-REPORTER): emit a terminal provider-request telemetry
+  # event to close the span opened by `[:tau, :provider, :request, :start]`.
+  # Every path that abandons an in-flight provider request MUST call this
+  # helper BEFORE re-entering `:start_provider` or returning to `:awaiting_user`,
+  # and MUST set `provider_span_ref: nil` on the data it passes forward.
+  #
+  # `event_suffix` is one of `:cancelled` | `:brutal_kill`. `:cancelled` is
+  # used when no provider task is running (circuit_open / synchronous error);
+  # `:brutal_kill` is used when the task is force-terminated mid-stream.
+  #
+  # The helper is a no-op when `provider_span_ref` is nil (guard against
+  # double-emit on re-entrant paths, or when called on a data struct that
+  # never started a request).
+  defp emit_provider_request_terminal(_suffix, %{provider_span_ref: nil}), do: :ok
+
+  defp emit_provider_request_terminal(suffix, data)
+       when suffix in [:cancelled, :brutal_kill] do
+    :telemetry.execute(
+      [:tau, :provider, :request, suffix],
+      %{system_time: System.system_time()},
+      %{
+        provider: data.provider,
+        model: data.model,
+        session_id: data.id,
+        span_ref: data.provider_span_ref
+      }
+    )
+  end
+
   # ADR-0017: drive the cooperative-then-brutal cancellation handshake
   # for the in-flight provider stream task. Returns `:cooperative` if
   # the task drained on its own within the 250ms grace period (in
@@ -1552,7 +1632,14 @@ defmodule Tau.Session do
       :telemetry.execute(
         [:tau, :provider, :request, telemetry_event_name],
         %{system_time: System.system_time()},
-        %{provider: data.provider, model: data.model, session_id: data.id}
+        %{
+          provider: data.provider,
+          model: data.model,
+          session_id: data.id,
+          # C76 (SPEC-OTEL-REPORTER): echo the per-request discriminator so
+          # the OTel reporter can close the span opened at *.start.
+          span_ref: data.provider_span_ref
+        }
       )
 
       mechanism
@@ -1618,7 +1705,10 @@ defmodule Tau.Session do
         provider: data.provider,
         model: data.model,
         session_id: data.id,
-        stop_reason: msg.stop_reason
+        stop_reason: msg.stop_reason,
+        # C76 (SPEC-OTEL-REPORTER): echo the per-request discriminator so the
+        # OTel reporter can close the span opened at *.start.
+        span_ref: data.provider_span_ref
       }
     )
 
@@ -1658,6 +1748,7 @@ defmodule Tau.Session do
              assembler: nil,
              cancel_flag: nil,
              stream_ref: nil,
+             provider_span_ref: nil,
              tool_iterations: 0
          }}
 
@@ -1711,6 +1802,7 @@ defmodule Tau.Session do
                  assembler: nil,
                  cancel_flag: nil,
                  stream_ref: nil,
+                 provider_span_ref: nil,
                  tool_iterations: 0
              }}
 
@@ -1756,6 +1848,7 @@ defmodule Tau.Session do
                    assembler: nil,
                    cancel_flag: nil,
                    stream_ref: nil,
+                   provider_span_ref: nil,
                    tool_iterations: 0
                }}
             else
@@ -1970,7 +2063,11 @@ defmodule Tau.Session do
          tool_dispatcher: dispatcher_pid,
          provider_task: nil,
          assembler: nil,
-         stream_ref: nil
+         stream_ref: nil,
+         # C76 (SPEC-OTEL-REPORTER): the provider.request span was closed in
+         # finalize_assistant/2 before dispatch_tools/2 is called. Clear the
+         # ref so it doesn't linger stale across the tool-execution phase.
+         provider_span_ref: nil
      }}
   end
 
