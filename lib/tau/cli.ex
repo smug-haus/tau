@@ -284,7 +284,8 @@ defmodule Tau.CLI do
   # happens AFTER start_session returns, violating D-004. We therefore
   # subscribe manually, start the session, send the message, then enumerate
   # the PubSub mailbox via receive instead of going through Tau.stream/2.
-  defp run_cmd(parsed) do
+  @doc false
+  def run_cmd(parsed) do
     prompt = parsed.args.prompt
     provider = resolve_provider(parsed.options[:provider])
     model = parsed.options[:model]
@@ -327,39 +328,60 @@ defmodule Tau.CLI do
   # Consume PubSub events for the headless run until SessionEnd.
   # Returns 0 on a clean stop, 1 on any error or abnormal end.
   #
-  # Logic: enumerate FAILURE stop_reasons (exit 1) and the CONTINUE
-  # stop_reason (loop); every other terminal stop_reason means the model
-  # produced a final assistant message → exit 0.
+  # Decision order on MessageEnd (f-1 fix, D-058 amendment):
   #
-  # Failure set (verified against session.ex, message.ex, providers/):
-  #   :error            — session-level error (session.ex:972, 1004, 2526, 2816)
-  #   :tool_loop_aborted — tool iteration cap reached (session.ex:1844)
-  #   :aborted          — coding-agent subprocess exited -2 (session.ex:2871)
-  #   :compaction_failed — 3 consecutive compaction failures (session.ex:1743)
+  #   1. CONTENT-FIRST: if msg.content has any %{type: :tool_call} block,
+  #      CONTINUE regardless of stop_reason. This is necessary because Gemini
+  #      and Bedrock emit stop_reason: :stop even on tool-call turns (they set
+  #      finishReason: "STOP" for all turns). The Session FSM itself dispatches
+  #      tools by content (session.ex ~line 1806:
+  #      Enum.filter(msg.content, &match?(%{type: :tool_call}, &1))), so we
+  #      mirror that exact decision. Killing the session on a Gemini tool-call
+  #      turn defeats M1 self-hosting (tau run --provider gemini cannot complete
+  #      any tool-using turn). The :tool_use arm below is subsumed by this check
+  #      (Anthropic/OpenAI :tool_use turns always have tool_call content).
   #
-  # Continue: :tool_use — more tool iterations follow; do NOT exit.
+  #   2. FAILURE stop_reasons → exit 1:
+  #      :error            — session-level error (session.ex:972, 1004, 2526, 2816)
+  #      :tool_loop_aborted — tool iteration cap reached (session.ex:1844)
+  #      :aborted          — coding-agent subprocess exited -2 (session.ex:2871)
+  #      :compaction_failed — 3 consecutive compaction failures (session.ex:1743)
   #
-  # Everything else (:stop, :length, :stop_sequence, :end_turn,
-  # :content_filter, and any future provider atom) means "model finished
-  # its turn and produced a usable response" → exit 0.  This inversion
-  # ensures new provider atoms default to success rather than misreporting
-  # as crashes (f-1 fix, D-058 amendment).
+  #   3. Everything else (:stop, :length, :stop_sequence, :end_turn,
+  #      :content_filter, and any future provider atom) means "model finished
+  #      its turn and produced a usable response" → exit 0. This inversion
+  #      ensures new provider atoms default to success rather than misreporting
+  #      as crashes.
+  #
+  # Grep verification: can :tool_use arrive with empty content?
+  #   lib/tau/providers/shared/openai_chat_wire.ex:195 maps "tool_calls" →
+  #   :tool_use stop_reason, but the ToolCallStart/ToolCallEnd events that
+  #   populate content blocks are emitted in the SAME stream, so the Assembler
+  #   will have decoded them into content blocks before Done fires. A :tool_use
+  #   MessageEnd with empty content would require a provider that sets
+  #   stop_reason: :tool_use but emits no ToolCallStart events — no such
+  #   provider exists in the codebase. We therefore do NOT add an explicit
+  #   :tool_use guard; step 1 (content check) subsumes it entirely.
   @doc false
   def drain_run_loop(session_id) do
     receive do
       %Events.MessageEnd{session_id: ^session_id, message: msg} ->
-        case msg.stop_reason do
-          :tool_use ->
-            # More tool iterations follow in the same session; keep waiting.
+        tool_calls =
+          is_list(msg.content) && Enum.any?(msg.content, &match?(%{type: :tool_call}, &1))
+
+        cond do
+          tool_calls ->
+            # Tool-call content present: the FSM will dispatch the tool(s).
+            # MUST continue regardless of stop_reason — Gemini emits :stop here.
             drain_run_loop(session_id)
 
-          failure when failure in [:error, :tool_loop_aborted, :aborted, :compaction_failed] ->
+          msg.stop_reason in [:error, :tool_loop_aborted, :aborted, :compaction_failed] ->
             error_text = extract_error_text(msg)
-            IO.puts(:stderr, "session error (#{failure}): #{error_text}")
+            IO.puts(:stderr, "session error (#{msg.stop_reason}): #{error_text}")
             Tau.stop(session_id)
             drain_session_end(session_id, 1)
 
-          _completed ->
+          true ->
             # Any other stop_reason means the model produced a final assistant
             # message (:stop, :length, :stop_sequence, :content_filter, etc.).
             text = extract_assistant_text(msg)

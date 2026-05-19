@@ -8,7 +8,7 @@
 | **Method** | PSDH (`.claude/skills/design-reasoning`); L0 + L1 + boundary contracts. L2 deferred. |
 | **Self-hosting target** | Working TUI is the prerequisite for Tau replacing the vendored claude-harness as the dev tool for Tau itself (see memory: `project_1_0_self_hosting.md`). |
 
-**Changelog:** WI-C / #202: D-009 reworded — visible-content guarantee unified into `Assembler.finalize/3`. #211: C53, D-040 — plain-release CLI dispatch via `TAU_CLI_ARGV`; B2 contract amended with three argv sources. #179: C54, D-041 — mid-session model swap via `/model`; AC-8 added; D-002 amended to name the sanctioned swap path; B4 boundary contract note added. #227: C55, D-042 — built-in slash-command registry + inline dispatch; B4 amended with built-in outcome INV; D-042 added. #178 PR2b: C67, D-016 (implemented), D-048, D-049, AC-9 — async `/compact` built-in; `:compacting` FSM state; B4 amended with `{:async_compact, binary}` outcome; [C26] partially resolved; Appendix B updated. #181 PR2: C68 — OpenAI-compatible provider failure surface (synchronous missing-key vs. in-stream HTTP error); Appendix B updated. #181 PR5: C80 — Azure OpenAI auth/URL shape constraint (api-key header, deployment-based URL); Appendix B updated. #181 PR6: C81 — Custom configure-by-URL provider; nil api_key valid (omits Authorization header); synchronous error only on missing_base_url; Appendix B updated. #182 PR-A: C82, D-056 — Copilot OAuth auth subsystem + API token refresh contract; Appendix B updated. #252: C83, D-058, AC-10 — headless FSM-backed `tau run`; B2 contract amended with headless run path INV; D-058 added; AC-10 added; Appendix B updated. Closes #213 (tau run bypassed the Session FSM). #252 (f-1 fix): D-058, B2 headless INV, AC-10 amended — drain loop now enumerates failure stop_reasons (exit 1 for `:error/:tool_loop_aborted/:aborted/:compaction_failed`); all other terminal atoms → exit 0; `:tool_use` continuation and `:stop_sequence` regression tests added.
+**Changelog:** WI-C / #202: D-009 reworded — visible-content guarantee unified into `Assembler.finalize/3`. #211: C53, D-040 — plain-release CLI dispatch via `TAU_CLI_ARGV`; B2 contract amended with three argv sources. #179: C54, D-041 — mid-session model swap via `/model`; AC-8 added; D-002 amended to name the sanctioned swap path; B4 boundary contract note added. #227: C55, D-042 — built-in slash-command registry + inline dispatch; B4 amended with built-in outcome INV; D-042 added. #178 PR2b: C67, D-016 (implemented), D-048, D-049, AC-9 — async `/compact` built-in; `:compacting` FSM state; B4 amended with `{:async_compact, binary}` outcome; [C26] partially resolved; Appendix B updated. #181 PR2: C68 — OpenAI-compatible provider failure surface (synchronous missing-key vs. in-stream HTTP error); Appendix B updated. #181 PR5: C80 — Azure OpenAI auth/URL shape constraint (api-key header, deployment-based URL); Appendix B updated. #181 PR6: C81 — Custom configure-by-URL provider; nil api_key valid (omits Authorization header); synchronous error only on missing_base_url; Appendix B updated. #182 PR-A: C82, D-056 — Copilot OAuth auth subsystem + API token refresh contract; Appendix B updated. #252: C83, D-058, AC-10 — headless FSM-backed `tau run`; B2 contract amended with headless run path INV; D-058 added; AC-10 added; Appendix B updated. Closes #213 (tau run bypassed the Session FSM). #252 (f-1 fix): D-058, B2 headless INV, AC-10 amended — drain loop now enumerates failure stop_reasons (exit 1 for `:error/:tool_loop_aborted/:aborted/:compaction_failed`); all other terminal atoms → exit 0; `:tool_use` continuation and `:stop_sequence` regression tests added. #252 (f-2 fix): D-058, B2 headless INV, AC-10 amended — content-first rule: a MessageEnd whose content carries `%{type: :tool_call}` blocks is a continuation regardless of `stop_reason`; this fixes Gemini/Bedrock which emit `stop_reason: :stop` even on tool-call turns. `run_cmd/1` made `@doc false` public; f-4 end-to-end tests added via `run_cmd/1`.
 
 ## 0. Why this spec exists
 
@@ -201,22 +201,33 @@ INV (headless run — D-058 / #252 / Closes #213)
   - The headless run loop MUST subscribe to "session:<id>" PubSub BEFORE calling
     Tau.start_session/1 (D-004 compliance — SessionStart is broadcast
     synchronously inside FSM init and would be lost if subscription comes after).
-  - The drain loop MUST enumerate failure stop_reasons (exit 1), not success
-    ones. The explicit failure set is:
-      :error            — session-level error
-      :tool_loop_aborted — tool iteration cap reached
-      :aborted          — coding-agent subprocess exited with status -2
-      :compaction_failed — 3 consecutive compaction failures
-    Every other terminal stop_reason (:stop, :length, :stop_sequence,
-    :end_turn, :content_filter, and any future provider atom) MUST be treated
-    as a completed turn → exit 0. This inversion ensures new provider atoms
-    default to success rather than misreporting as crashes.
+  - The drain loop MUST decide continuation vs. termination in this order:
+    1. CONTENT-FIRST (f-2 fix): if msg.content contains ANY %{type: :tool_call}
+       block, CONTINUE regardless of stop_reason. This is required because Gemini
+       and Bedrock emit stop_reason: :stop even on tool-call turns (finishReason:
+       "STOP" for all turns). The Session FSM itself dispatches tools by content
+       (session.ex ~line 1806: Enum.filter(msg.content, &match?(%{type: :tool_call}, &1)));
+       the drain loop MUST mirror that decision. Exiting on a Gemini tool-call
+       turn (stop_reason :stop, tool_call content present) kills the session
+       before the FSM dispatches the tool — tau run --provider gemini cannot
+       complete any tool-using turn. The :tool_use stop_reason (Anthropic/OpenAI)
+       is subsumed by this check; those providers always populate tool_call content
+       blocks alongside :tool_use, so step 1 catches them.
+    2. FAILURE stop_reasons → exit 1. The explicit failure set:
+         :error            — session-level error
+         :tool_loop_aborted — tool iteration cap reached
+         :aborted          — coding-agent subprocess exited with status -2
+         :compaction_failed — 3 consecutive compaction failures
+    3. Everything else (:stop, :length, :stop_sequence, :end_turn,
+       :content_filter, and any future provider atom) MUST be treated as a
+       completed turn → exit 0. This inversion ensures new provider atoms
+       default to success rather than misreporting as crashes.
+  - On MessageEnd with tool_call content: continue waiting (step 1 above). Do NOT exit.
   - On MessageEnd with stop_reason in the failure set: print to stderr,
     call Tau.stop/1, await SessionEnd. Exit code 1.
-  - On MessageEnd with stop_reason :tool_use: continue waiting (tool iteration
-    in progress). Do NOT exit.
-  - On MessageEnd with any other stop_reason: print assistant text to stdout,
-    call Tau.stop/1 to flush JSONL, await SessionEnd. Exit code 0.
+  - On MessageEnd with any other stop_reason (and no tool_call content): print
+    assistant text to stdout, call Tau.stop/1 to flush JSONL, await SessionEnd.
+    Exit code 0.
   - Tau.stop/1 MUST be called on every exit path INCLUDING the timeout branch so
     JSONL is flushed. After calling Tau.stop/1, drain_session_end/2 MUST be
     awaited (bounded 10 s) before returning — the timeout branch is NOT exempt.
@@ -449,7 +460,7 @@ Each entry: id, statement, severity, detection_method, source_constraint.
 | D-048 | **:compacting-state exit invariant (C67-B4).** Every exit edge from the `:compacting` gen_statem state MUST land in `:awaiting_user` with both `data.compaction_task` and `data.compaction_monitor` set to `nil`. Five terminal clauses cover all exit paths: (1) worker success `{ref, result}`; (2a) benign `{:DOWN, :normal}` (keep-state, result pending); (2b) crash `{:DOWN, reason}`; (3) live timeout; (4) stale timeout (no-op). `{:next_state, :awaiting_user, data}` is the return form for clauses 1, 2b, 3; clause 2a uses `{:keep_state, data}` because the result message is still pending. | high | `test/tau/session/compaction_test.exs`: happy path; postpone-and-flush; stale-result-drop after cancel; `:swap_model` busy during `:compacting` | [C67-B4] |
 | D-049 | **Compaction worker crash/timeout/cancel recovery (C67-B4).** The session FSM MUST NOT wedge when the compaction worker crashes, times out, or is cancelled — it MUST return to `:awaiting_user`. It MUST NOT trigger a spurious crash-recovery notice when `{ref,result}` and `{:DOWN, :normal}` arrive back-to-back (the double-message race). Achieved by: Clause 2a (`{:DOWN, :normal}`) is a `{:keep_state}` that preserves the pending result, so Clause 1 still processes it; all five typed clauses clear worker fields, so stale messages fail guards and reach the catch-all no-op. | high | `test/tau/session/compaction_test.exs`: worker-crash recovery (session not wedged); race test `{ref,result}` + `{:DOWN}` × 50 (NO spurious crash recovery); late-timeout-after-success (no FSM crash); `/cancel` outside `:compacting` (no FSM crash) | [C67-B4] |
 | D-056 | **Copilot API token refresh contract (C82-B8).** `Tau.Providers.Copilot.Auth.token/1` MUST refresh the short-lived API token when `expires_at - now < 5 min` (300,000 ms). The refresh path is: (1) call `resolve_oauth/1` to obtain the long-lived OAuth token; (2) `POST https://api.github.com/copilot_internal/v2/token` with `Authorization: token <oauth_token>`; (3) parse `{"token": "...", "expires_at": "ISO8601"}` from the 200 response; (4) store the result in `Tau.Providers.Copilot.TokenStore` (supervised GenServer, NOT module-level state). Any non-200 response or network error MUST return `{:error, :oauth_refresh_failed}` and emit `[:tau, :copilot, :auth, :refresh_failed]` telemetry. Missing OAuth token MUST return `{:error, :no_auth}`. All errors MUST surface a user-actionable message via `Auth.describe_error/1` naming the `gh auth login --scopes copilot` renewal path. | high | `test/tau/providers/copilot/auth_test.exs`: hosts.json parsing; apps.json fallback; env-var override; refresh/1 success (Bypass stub); refresh/1 non-200 → `:oauth_refresh_failed`; token/1 proactive-refresh when nearing expiry; token/1 skips refresh when token is fresh; missing file → `:no_auth`; malformed JSON → `:oauth_malformed` | [C82-B8] |
-| D-058 | **Headless FSM-backed `tau run` (C83-B2).** `tau run <prompt>` MUST start a full `Tau.Session` FSM via `Tau.start_session/1`, send the prompt via `Tau.send/2`, and consume the PubSub event stream until `%SessionEnd{}`. It MUST NOT call `provider.stream/3` directly (which bypasses tools, JSONL persistence, and permissions). The PubSub subscription MUST be established BEFORE `Tau.start_session/1` returns (D-004). `Tau.stop/1` MUST be called on every exit path (failure, success, timeout) to flush JSONL before the process exits; the timeout path MUST also await `drain_session_end/2` (bounded 10 s) before returning. Exit code: 1 iff the stop_reason is in the explicit failure set `[:error, :tool_loop_aborted, :aborted, :compaction_failed]` or `%SessionEnd{reason: :error}` arrives; 0 for every other completed turn (`:stop`, `:length`, `:stop_sequence`, `:content_filter`, and any future provider atom). This inversion ensures new provider atoms default to success rather than misreporting as crashes. `--system-prompt <text>` and `--system-prompt-file <path>` inject the text as `%Tau.Skill{}` with `:persona_lifetime :session`; the skill is prepended to `data.skills` in `Session.init/1` BEFORE `prepend_skill_messages/2` runs so it reaches the model-visible system blob — setting only `active_skill` is NOT sufficient. | high | `test/tau/cli/headless_run_test.exs` (AC-10): replay run exits 0; JSONL persisted; :length → exit 0; :tool_loop_aborted → exit 1; :error → exit 1; :stop_sequence → exit 0; :tool_use continuation; --system-prompt body in session messages; CLI option parser | [C83-B2] |
+| D-058 | **Headless FSM-backed `tau run` (C83-B2).** `tau run <prompt>` MUST start a full `Tau.Session` FSM via `Tau.start_session/1`, send the prompt via `Tau.send/2`, and consume the PubSub event stream until `%SessionEnd{}`. It MUST NOT call `provider.stream/3` directly (which bypasses tools, JSONL persistence, and permissions). The PubSub subscription MUST be established BEFORE `Tau.start_session/1` returns (D-004). `Tau.stop/1` MUST be called on every exit path (failure, success, timeout) to flush JSONL before the process exits; the timeout path MUST also await `drain_session_end/2` (bounded 10 s) before returning. **Turn-completion is decided by content, not `stop_reason` (f-2 fix):** a `MessageEnd` whose `msg.content` contains any `%{type: :tool_call}` block MUST be treated as a continuation regardless of `stop_reason` — Gemini/Bedrock emit `stop_reason: :stop` on tool-call turns. The drain loop checks content first (mirroring session.ex ~line 1806), then failure stop_reasons, then defaults to completed-turn. Exit code: 1 iff the stop_reason is in the explicit failure set `[:error, :tool_loop_aborted, :aborted, :compaction_failed]` or `%SessionEnd{reason: :error}` arrives (and no tool_call content was present); 0 for every other completed turn (`:stop`, `:length`, `:stop_sequence`, `:content_filter`, and any future provider atom). This inversion ensures new provider atoms default to success rather than misreporting as crashes. `--system-prompt <text>` and `--system-prompt-file <path>` inject the text as `%Tau.Skill{}` with `:persona_lifetime :session`; the skill is prepended to `data.skills` in `Session.init/1` BEFORE `prepend_skill_messages/2` runs so it reaches the model-visible system blob — setting only `active_skill` is NOT sufficient. | high | `test/tau/cli/headless_run_test.exs` (AC-10): replay run exits 0; JSONL persisted; :length → exit 0; :tool_loop_aborted → exit 1; :error → exit 1; :stop_sequence → exit 0; :tool_use continuation; tool_call-content+:stop (Gemini shape) → continuation (f-3); run_cmd/1 end-to-end (f-4); --system-prompt body in session messages; helper unit tests; CLI option parser | [C83-B2] |
 
 30 D-xxx entries. Each is enforceable. None require speculation.
 
@@ -521,7 +532,11 @@ These are the bar for closing the umbrella issue (#153/#149) and unblocking the 
     `:stop_sequence`, `:content_filter`, and any future provider atom).
     This inversion ensures new provider atoms default to success rather than
     misreporting as crashes.
-  - Continue looping (not exit) on `:tool_use` — more tool iterations follow.
+  - Continue looping (not exit) when `msg.content` contains any `%{type: :tool_call}` block,
+    regardless of `stop_reason` (f-2 fix — content-first rule). Gemini and Bedrock emit
+    `stop_reason: :stop` on tool-call turns; keying on `stop_reason` alone exits the session
+    before the FSM can dispatch the tool. The `:tool_use` stop_reason case is subsumed:
+    Anthropic/OpenAI always populate tool_call content alongside `:tool_use`.
   - Persist the session to JSONL; `tau sessions list` shows the session after the run.
 - `tau run "prompt" --system-prompt "text"` injects the text into the model-visible
   system blob; the skill body MUST appear in `data.messages` as a system-role
@@ -531,7 +546,9 @@ These are the bar for closing the umbrella issue (#153/#149) and unblocking the 
   (bounded 10 s) before returning exit code 1 (B3 fix).
 - Tests: `test/tau/cli/headless_run_test.exs` — replay run, JSONL persistence,
   stop_reason matrix (:stop/:length/:tool_loop_aborted/:error/:tool_use continuation/
-  :stop_sequence), system-prompt body in messages, helper unit tests, CLI option parser.
+  :stop_sequence), tool_call-content+:stop Gemini shape → continuation (f-3),
+  run_cmd/1 end-to-end via real @doc-false entry (f-4, including resolve_system_prompt
+  {:error,_} → exit 1), system-prompt body in messages, helper unit tests, CLI option parser.
   Tests exercise `Tau.CLI`'s real public/@doc-false functions, not private duplicates.
 - This test runs in CI on every PR and is a blocking gate.
 
