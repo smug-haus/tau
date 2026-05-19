@@ -84,6 +84,15 @@ defmodule Tau.Providers.Shared.ToolSpec do
     %{type: "function", name: n, description: d, parameters: p}
   end
 
+  # OpenAI-compatible providers — same Chat Completions wire shape.
+  # Enumerated explicitly (no blanket catch-all) so that a genuinely
+  # unknown provider still raises `FunctionClauseError` rather than
+  # silently producing a malformed tool spec.
+  # Each future OpenAI-compatible provider PR adds its own clause here.
+  defp shape(%{name: n, description: d, parameters: p}, Tau.Providers.DeepSeek) do
+    %{type: "function", function: %{name: n, description: d, parameters: p}}
+  end
+
   defp shape(%{name: n, description: d, parameters: p}, Tau.Providers.Gemini) do
     %{name: n, description: d, parameters: GeminiSubset.downshift(p)}
   end
