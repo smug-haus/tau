@@ -5,7 +5,7 @@ defmodule Tau.CLI do
   Subcommands currently registered in `spec/0`:
 
       tau                              # interactive TUI (M6+)
-      tau run "prompt" [opts]          # one-shot non-interactive
+      tau run "prompt" [opts]          # one-shot non-interactive, FSM-backed
       tau resume <session-id>          # replay <session-id>'s JSONL into
                                        # a NEW session (returns the new
                                        # session's id; the original is
@@ -23,9 +23,32 @@ defmodule Tau.CLI do
 
   `tau init` walks a fresh user from a clean clone to a working
   `.tau/settings.local.json`; see `Tau.CLI.Init`.
+
+  ## Headless FSM-backed run (D-058 / AC-10 / SPEC-USER-TURN §4 B2)
+
+  `tau run` drives a full `Tau.Session` FSM: tools (including `Agent` and
+  `Bash`) are registered, every turn is persisted to JSONL, and the session
+  receives the same permissions/compaction/PubSub infrastructure as a TUI
+  session. This resolves issue #213 (tau run bypassed the FSM entirely).
+
+  The run loop subscribes to the session's PubSub topic BEFORE calling
+  `Tau.start_session/1` (D-004 compliance), sends the prompt, and consumes
+  the event stream until `%Tau.Session.Events.SessionEnd{}` is received.
+  Text output is written to stdout; tool events are silently consumed.
+  Exit code: 0 for any terminal stop_reason that is not in the failure set
+  (`[:error, :tool_loop_aborted, :aborted, :compaction_failed]`); 1 for
+  failure stop_reasons or abnormal `SessionEnd` reason. Tool-call content
+  (regardless of stop_reason) causes the loop to continue rather than exit,
+  so Gemini-shaped turns (`stop_reason: :stop` + tool_call content) are
+  handled correctly.
+
+  Optional `--system-prompt <text>` (or `--system-prompt-file <path>`)
+  prepends a system-level persona to the session. The content is injected
+  as an `active_skill` with `:persona_lifetime :session` so it survives
+  multi-turn iteration inside a single `tau run` invocation.
   """
 
-  alias Tau.Provider.Event
+  alias Tau.Session.Events
 
   def main(argv \\ []) do
     Application.ensure_all_started(:tau)
@@ -121,12 +144,23 @@ defmodule Tau.CLI do
       subcommands: [
         run: [
           name: "run",
-          about: "Run a single prompt non-interactively (streams to stdout).",
+          about: "Run a single prompt non-interactively via the FSM (streams to stdout).",
           args: [prompt: [help: "The prompt", required: true]],
           options: [
             provider: [short: "-p", long: "--provider", help: "Provider id"],
             model: [short: "-m", long: "--model", help: "Model id"],
-            session: [short: "-s", long: "--session", help: "Session id (resume)"]
+            session: [short: "-s", long: "--session", help: "Session id (resume)"],
+            # D-058 / AC-10 (SPEC-USER-TURN): headless system-prompt injection
+            # seam. Contents are injected as an active_skill with
+            # :persona_lifetime :session so they survive multi-turn iteration.
+            system_prompt: [
+              long: "--system-prompt",
+              help: "System prompt text prepended to the session (persona injection seam)"
+            ],
+            system_prompt_file: [
+              long: "--system-prompt-file",
+              help: "Path to a file whose contents become the system prompt"
+            ]
           ]
         ],
         resume: [
@@ -240,37 +274,220 @@ defmodule Tau.CLI do
     )
   end
 
-  defp run_cmd(parsed) do
+  # D-058 / AC-10 (SPEC-USER-TURN §4 B2): headless FSM-backed session run.
+  #
+  # Drives a full Tau.Session FSM so that tools (Agent, Bash, etc.) are
+  # registered, every turn is JSONL-persisted, and the session is
+  # lifecycle-identical to a TUI session. Prior to this, `tau run` called
+  # provider.stream/3 directly — no FSM, no tools, no persistence (#213).
+  #
+  # Subscribe-before-start ordering (D-004): Phoenix.PubSub.subscribe/2 is
+  # called BEFORE Tau.start_session/1 returns so that the SessionStart event
+  # (broadcast synchronously inside init/1) is not lost even though we don't
+  # consume it here. Tau.stream/2 subscribes inside its Stream.resource
+  # setup function, which runs when we first pull from the stream — that
+  # happens AFTER start_session returns, violating D-004. We therefore
+  # subscribe manually, start the session, send the message, then enumerate
+  # the PubSub mailbox via receive instead of going through Tau.stream/2.
+  @doc false
+  def run_cmd(parsed) do
     prompt = parsed.args.prompt
     provider = resolve_provider(parsed.options[:provider])
-    model = parsed.options[:model] || provider.default_model()
+    model = parsed.options[:model]
 
-    msgs = [Tau.Message.User.new(prompt)]
-
-    case provider.stream(msgs, %{model: model}, %{}) do
-      {:ok, stream} ->
-        Enum.reduce_while(stream, 0, fn
-          %Event.TextDelta{text: t}, _ ->
-            IO.write(t)
-            {:cont, 0}
-
-          %Event.Done{}, _ ->
-            IO.puts("")
-            {:halt, 0}
-
-          %Event.Error{reason: r}, _ ->
-            IO.puts("\nerror: #{inspect(r)}")
-            {:halt, 1}
-
-          _, acc ->
-            {:cont, acc}
-        end)
-
+    case resolve_system_prompt(parsed.options) do
       {:error, reason} ->
-        IO.puts(:stderr, "provider error: #{inspect(reason)}")
+        IO.puts(:stderr, "system-prompt error: #{reason}")
         1
+
+      {:ok, system_prompt_text} ->
+        session_id = Tau.Session.generate_id()
+
+        # D-004: subscribe BEFORE start_session so SessionStart is not missed.
+        Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{session_id}")
+
+        start_opts =
+          [session_id: session_id, provider: provider]
+          |> put_if_not_nil(:model, model)
+          |> put_if_not_nil(:active_skill, build_headless_skill(system_prompt_text))
+          |> put_if_not_nil(:persona_lifetime, system_prompt_text && :session)
+
+        case Tau.start_session(start_opts) do
+          {:ok, ^session_id} ->
+            case Tau.send(session_id, prompt) do
+              :ok ->
+                drain_run_loop(session_id)
+
+              {:error, reason} ->
+                IO.puts(:stderr, "send error: #{inspect(reason)}")
+                1
+            end
+
+          {:error, reason} ->
+            IO.puts(:stderr, "session start error: #{inspect(reason)}")
+            1
+        end
     end
   end
+
+  # Consume PubSub events for the headless run until SessionEnd.
+  # Returns 0 on a clean stop, 1 on any error or abnormal end.
+  #
+  # Decision order on MessageEnd (f-1 fix, D-058 amendment):
+  #
+  #   1. CONTENT-FIRST: if msg.content has any %{type: :tool_call} block,
+  #      CONTINUE regardless of stop_reason. This is necessary because Gemini
+  #      and Bedrock emit stop_reason: :stop even on tool-call turns (they set
+  #      finishReason: "STOP" for all turns). The Session FSM itself dispatches
+  #      tools by content (session.ex ~line 1806:
+  #      Enum.filter(msg.content, &match?(%{type: :tool_call}, &1))), so we
+  #      mirror that exact decision. Killing the session on a Gemini tool-call
+  #      turn defeats M1 self-hosting (tau run --provider gemini cannot complete
+  #      any tool-using turn). The :tool_use arm below is subsumed by this check
+  #      (Anthropic/OpenAI :tool_use turns always have tool_call content).
+  #
+  #   2. FAILURE stop_reasons → exit 1:
+  #      :error            — session-level error (session.ex:972, 1004, 2526, 2816)
+  #      :tool_loop_aborted — tool iteration cap reached (session.ex:1844)
+  #      :aborted          — coding-agent subprocess exited -2 (session.ex:2871)
+  #      :compaction_failed — 3 consecutive compaction failures (session.ex:1743)
+  #
+  #   3. Everything else (:stop, :length, :stop_sequence, :end_turn,
+  #      :content_filter, and any future provider atom) means "model finished
+  #      its turn and produced a usable response" → exit 0. This inversion
+  #      ensures new provider atoms default to success rather than misreporting
+  #      as crashes.
+  #
+  # Grep verification: can :tool_use arrive with empty content?
+  #   lib/tau/providers/shared/openai_chat_wire.ex:195 maps "tool_calls" →
+  #   :tool_use stop_reason, but the ToolCallStart/ToolCallEnd events that
+  #   populate content blocks are emitted in the SAME stream, so the Assembler
+  #   will have decoded them into content blocks before Done fires. A :tool_use
+  #   MessageEnd with empty content would require a provider that sets
+  #   stop_reason: :tool_use but emits no ToolCallStart events — no such
+  #   provider exists in the codebase. We therefore do NOT add an explicit
+  #   :tool_use guard; step 1 (content check) subsumes it entirely.
+  @doc false
+  def drain_run_loop(session_id) do
+    receive do
+      %Events.MessageEnd{session_id: ^session_id, message: msg} ->
+        tool_calls =
+          is_list(msg.content) && Enum.any?(msg.content, &match?(%{type: :tool_call}, &1))
+
+        cond do
+          tool_calls ->
+            # Tool-call content present: the FSM will dispatch the tool(s).
+            # MUST continue regardless of stop_reason — Gemini emits :stop here.
+            drain_run_loop(session_id)
+
+          msg.stop_reason in [:error, :tool_loop_aborted, :aborted, :compaction_failed] ->
+            error_text = extract_error_text(msg)
+            IO.puts(:stderr, "session error (#{msg.stop_reason}): #{error_text}")
+            Tau.stop(session_id)
+            drain_session_end(session_id, 1)
+
+          true ->
+            # Any other stop_reason means the model produced a final assistant
+            # message (:stop, :length, :stop_sequence, :content_filter, etc.).
+            text = extract_assistant_text(msg)
+            if text != "", do: IO.puts(text)
+            # Stop the session to flush JSONL, then await SessionEnd.
+            Tau.stop(session_id)
+            drain_session_end(session_id, 0)
+        end
+
+      %Events.SessionEnd{session_id: ^session_id, reason: reason} ->
+        # SessionEnd may arrive before we call Tau.stop (e.g. error path).
+        case reason do
+          :normal -> 0
+          :user -> 0
+          _ -> 1
+        end
+
+      # Ignore other events (ToolStart, ToolEnd, MessageStart, MessageUpdate,
+      # SessionStart, SystemNotice, SkillActivated, Cancelled).
+      _ ->
+        drain_run_loop(session_id)
+    after
+      120_000 ->
+        # B3 fix (D-058): timeout MUST also flush JSONL before returning.
+        # Tau.stop/1 is async; drain_session_end/2 blocks until SessionEnd
+        # (bounded by 10 s) so the flush completes before we exit.
+        IO.puts(:stderr, "run timed out waiting for session response")
+        Tau.stop(session_id)
+        drain_session_end(session_id, 1)
+    end
+  end
+
+  # After calling Tau.stop/1, wait for SessionEnd to confirm JSONL flush.
+  @doc false
+  def drain_session_end(session_id, exit_code) do
+    receive do
+      %Events.SessionEnd{session_id: ^session_id} -> exit_code
+      _ -> drain_session_end(session_id, exit_code)
+    after
+      10_000 -> exit_code
+    end
+  end
+
+  # Extract plain text from an assistant message (TextBlock type: :text).
+  @doc false
+  def extract_assistant_text(%Tau.Message.Assistant{content: blocks})
+      when is_list(blocks) do
+    blocks
+    |> Enum.flat_map(fn
+      %{type: :text, text: t} when is_binary(t) -> [t]
+      _ -> []
+    end)
+    |> Enum.join("")
+  end
+
+  def extract_assistant_text(_), do: ""
+
+  # Extract error_message or synthesise one from content blocks.
+  @doc false
+  def extract_error_text(%Tau.Message.Assistant{error_message: msg})
+      when is_binary(msg) and msg != "",
+      do: msg
+
+  # Fallback: no dedicated error_message field — synthesise from text blocks.
+  def extract_error_text(message), do: extract_assistant_text(message)
+
+  # Resolve --system-prompt / --system-prompt-file to {:ok, text | nil}.
+  @doc false
+  def resolve_system_prompt(%{system_prompt: text})
+      when is_binary(text) and text != "",
+      do: {:ok, text}
+
+  def resolve_system_prompt(%{system_prompt_file: path})
+      when is_binary(path) and path != "" do
+    case File.read(path) do
+      {:ok, text} -> {:ok, text}
+      {:error, reason} -> {:error, "could not read #{path}: #{:file.format_error(reason)}"}
+    end
+  end
+
+  def resolve_system_prompt(_), do: {:ok, nil}
+
+  # Build a transient %Tau.Skill{} from inline system-prompt text so the
+  # session FSM injects it as a system-role message via prepend_skill_messages/2
+  # (the same mechanism used by on-disk skills loaded from CLAUDE.md / .claude/
+  # skills). :persona_lifetime :session is set by run_cmd/1 so the persona
+  # survives multi-turn tool iteration within a single `tau run` invocation.
+  @doc false
+  def build_headless_skill(nil), do: nil
+
+  def build_headless_skill(text) when is_binary(text) do
+    %Tau.Skill{
+      name: "headless-system-prompt",
+      body: text,
+      path: "<cli:--system-prompt>",
+      description: "System prompt injected via --system-prompt / --system-prompt-file"
+    }
+  end
+
+  defp put_if_not_nil(opts, _key, nil), do: opts
+  defp put_if_not_nil(opts, key, value), do: Keyword.put(opts, key, value)
 
   defp resume_cmd(parsed) do
     case Tau.resume(parsed.args.id) do
