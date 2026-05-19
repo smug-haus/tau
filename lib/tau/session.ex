@@ -852,6 +852,82 @@ defmodule Tau.Session do
              stream_ref: stream_ref
          }}
 
+      {:error, :circuit_open} ->
+        # D-043 (SPEC-CIRCUIT-BREAKER): an open breaker on one provider MUST
+        # advance the fallback chain rather than killing the turn immediately.
+        # Only when the chain is exhausted (every provider's breaker open or
+        # no fallback left) does the turn surface a terminal error. This
+        # mirrors the in-stream `%PEvent.Error{retryable?: true}` path
+        # (ADR-0012) and guarantees the all-open chain terminates: N providers
+        # all open ⇒ N synchronous `{:error, :circuit_open}` returns ⇒ one
+        # terminal error, no infinite loop (each recursive call pops one
+        # element from `fallback_chain_remaining`).
+        case data.fallback_chain_remaining do
+          [next | rest] ->
+            from_provider = data.provider
+
+            :telemetry.execute(
+              [:tau, :provider, :fallback],
+              %{system_time: System.system_time()},
+              %{
+                from_provider: from_provider,
+                to_provider: next,
+                reason: :circuit_open,
+                session_id: data.id
+              }
+            )
+
+            broadcast(data.id, %Events.ProviderFallback{
+              session_id: data.id,
+              from_provider: from_provider,
+              to_provider: next,
+              reason: :circuit_open
+            })
+
+            data =
+              persist_event(data, "provider_fallback", %{
+                from_provider: inspect(from_provider),
+                to_provider: inspect(next),
+                reason: "circuit_open"
+              })
+
+            transformed =
+              Tau.Providers.Shared.ContentTransform.transform(
+                data.messages,
+                from_provider,
+                next
+              )
+
+            handle_event(
+              :internal,
+              :start_provider,
+              :provider_streaming,
+              %{
+                data
+                | provider: next,
+                  messages: transformed,
+                  fallback_chain_remaining: rest,
+                  assembler: nil,
+                  provider_task: nil,
+                  stream_ref: nil
+              }
+            )
+
+          [] ->
+            # All providers exhausted — surface terminal error.
+            reason_str = describe_provider_error(:circuit_open)
+
+            msg =
+              Assistant.new(
+                stop_reason: :error,
+                error_message: reason_str,
+                content: [%{type: :text, text: "Error: " <> reason_str}]
+              )
+
+            broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: msg})
+            {:next_state, :awaiting_user, %{data | cancel_flag: nil, stream_ref: nil}}
+        end
+
       {:error, reason} ->
         # Synchronous provider error — emit and return to awaiting_user.
         # D-009 (SPEC-USER-TURN [C12]/[C19]): the assistant message MUST
