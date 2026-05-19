@@ -329,6 +329,13 @@ defmodule Tau.CLI do
         )
     end
 
+    deepseek_key =
+      Application.get_env(:tau, Tau.Providers.DeepSeek, [])[:api_key] ||
+        System.get_env("DEEPSEEK_API_KEY")
+
+    deepseek_status = if deepseek_key, do: "configured", else: "not configured"
+    IO.puts("provider Tau.Providers.DeepSeek: deepseek #{deepseek_status}")
+
     0
   end
 
@@ -400,6 +407,7 @@ defmodule Tau.CLI do
   defp resolve_provider("local"), do: Tau.Providers.OpenAI.Chat
   defp resolve_provider("bedrock"), do: Tau.Providers.Bedrock
   defp resolve_provider("gemini"), do: Tau.Providers.Gemini
+  defp resolve_provider("deepseek"), do: Tau.Providers.DeepSeek
   defp resolve_provider("replay"), do: Tau.Providers.Replay
 
   # Last-resort fallback for "Foo" → Tau.Providers.Foo style atoms.
