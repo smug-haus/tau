@@ -801,7 +801,15 @@ defmodule Tau.Session do
     # OTel reporter can correlate *.stop / *.cancelled / *.brutal_kill back to
     # this *.start span even when multiple requests from the same session to the
     # same provider are in flight concurrently (e.g. parallel sessions).
+    #
+    # D-057 (SPEC-OTEL-REPORTER): store the ref in `data` immediately after
+    # emitting *.start so all downstream error paths (circuit_open fallback,
+    # circuit_open exhausted, synchronous error) read it from `data` rather than
+    # a local variable. Without this, error branches that never reach the {:ok,
+    # stream} arm would see provider_span_ref: nil and silently skip the terminal
+    # emit.
     provider_span_ref = make_ref()
+    data = %{data | provider_span_ref: provider_span_ref}
 
     :telemetry.execute(
       [:tau, :provider, :request, :start],
@@ -907,6 +915,11 @@ defmodule Tau.Session do
                 reason: "circuit_open"
               })
 
+            # D-057 (SPEC-OTEL-REPORTER): the *.start fired above; emit the
+            # terminal event before recursing into :start_provider so the span
+            # opened at *.start is closed and not leaked as a stale span.
+            emit_provider_request_terminal(:cancelled, data)
+
             transformed =
               Tau.Providers.Shared.ContentTransform.transform(
                 data.messages,
@@ -925,12 +938,16 @@ defmodule Tau.Session do
                   fallback_chain_remaining: rest,
                   assembler: nil,
                   provider_task: nil,
-                  stream_ref: nil
+                  stream_ref: nil,
+                  provider_span_ref: nil
               }
             )
 
           [] ->
             # All providers exhausted — surface terminal error.
+            # D-057 (SPEC-OTEL-REPORTER): emit terminal event before returning
+            # to :awaiting_user so the span opened at *.start is closed.
+            emit_provider_request_terminal(:cancelled, data)
             reason_str = describe_provider_error(:circuit_open)
 
             msg =
@@ -959,6 +976,10 @@ defmodule Tau.Session do
         # human-readable, actionable renewal instruction so the user
         # learns to run `claude /login` instead of staring at an opaque
         # `:oauth_expired`.
+        #
+        # D-057 (SPEC-OTEL-REPORTER): emit terminal event before returning
+        # to :awaiting_user so the span opened at *.start is closed.
+        emit_provider_request_terminal(:cancelled, data)
         reason_str = describe_provider_error(reason)
 
         msg =
@@ -1069,6 +1090,12 @@ defmodule Tau.Session do
         reason: inspect(ev.reason)
       })
 
+    # D-057 (SPEC-OTEL-REPORTER): emit the terminal event BEFORE killing the
+    # task so the span opened at *.start is closed with the correct mechanism.
+    # A brutal_kill event is appropriate here because we are force-terminating
+    # a running stream rather than cooperatively cancelling it.
+    emit_provider_request_terminal(:brutal_kill, data)
+
     # Shut down the still-running provider task (it might still be
     # emitting events or about to send :provider_done). Stragglers
     # already in the mailbox are tagged with the *previous* stream_ref
@@ -1092,7 +1119,8 @@ defmodule Tau.Session do
           fallback_chain_remaining: rest,
           assembler: nil,
           provider_task: nil,
-          stream_ref: nil
+          stream_ref: nil,
+          provider_span_ref: nil
       }
     )
   end
@@ -1538,6 +1566,35 @@ defmodule Tau.Session do
   defp current_run?(_data, _token), do: false
 
   # --- Helpers --------------------------------------------------------------
+
+  # D-057 (SPEC-OTEL-REPORTER): emit a terminal provider-request telemetry
+  # event to close the span opened by `[:tau, :provider, :request, :start]`.
+  # Every path that abandons an in-flight provider request MUST call this
+  # helper BEFORE re-entering `:start_provider` or returning to `:awaiting_user`,
+  # and MUST set `provider_span_ref: nil` on the data it passes forward.
+  #
+  # `event_suffix` is one of `:cancelled` | `:brutal_kill`. `:cancelled` is
+  # used when no provider task is running (circuit_open / synchronous error);
+  # `:brutal_kill` is used when the task is force-terminated mid-stream.
+  #
+  # The helper is a no-op when `provider_span_ref` is nil (guard against
+  # double-emit on re-entrant paths, or when called on a data struct that
+  # never started a request).
+  defp emit_provider_request_terminal(_suffix, %{provider_span_ref: nil}), do: :ok
+
+  defp emit_provider_request_terminal(suffix, data)
+       when suffix in [:cancelled, :brutal_kill] do
+    :telemetry.execute(
+      [:tau, :provider, :request, suffix],
+      %{system_time: System.system_time()},
+      %{
+        provider: data.provider,
+        model: data.model,
+        session_id: data.id,
+        span_ref: data.provider_span_ref
+      }
+    )
+  end
 
   # ADR-0017: drive the cooperative-then-brutal cancellation handshake
   # for the in-flight provider stream task. Returns `:cooperative` if

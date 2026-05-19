@@ -8,7 +8,7 @@
 | **Method** | PSDH (`.claude/skills/design-reasoning`); L0 + boundary contracts. |
 | **Issue** | #35 (M2) |
 
-**Changelog:** Initial draft — §0–§7 + Appendix B. D-050..D-055 introduced. C68..C78 renumbered to C69..C79 (avoid collision with SPEC-USER-TURN C68). PR2 amendments: C70 fixed-handler-id clarification; §4 B1 PR2 attach set revised (provider-request deferred to C76; optional events made config-gated, default off).
+**Changelog:** Initial draft — §0–§7 + Appendix B. D-050..D-055 introduced. C68..C78 renumbered to C69..C79 (avoid collision with SPEC-USER-TURN C68). PR2 amendments: C70 fixed-handler-id clarification; §4 B1 PR2 attach set revised (provider-request deferred to C76; optional events made config-gated, default off). PR3 amendments: C76 delivered — provider-request family attached; D-057 introduced (terminal-event pairing invariant); §4 B1 updated to reflect delivery.
 
 ## 0. Why this spec exists
 
@@ -115,6 +115,20 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
   fresh; new spans from that point are correctly exported. Lost in-flight spans
   are surfaced as stale by the backend's own timeout mechanisms.
 
+- **★ [D-057-B1] Provider-request terminal-event pairing.** Every
+  `[:tau, :provider, :request, :start]` MUST be matched by exactly one terminal
+  event — `[:tau, :provider, :request, :stop]` on success, `*.cancelled` on
+  circuit-open or synchronous provider error, `*.brutal_kill` when the task is
+  force-terminated mid-stream — carrying the same `span_ref`. Any path in the
+  session FSM that abandons an in-flight provider request (re-enters
+  `:start_provider` for a fallback or returns to `:awaiting_user` on error) MUST
+  emit the terminal event with the current `provider_span_ref` BEFORE clearing
+  that field. Emitting after clearing or omitting the event leaves an open span
+  that will eventually surface as a stale-error in D-053's sweep. The
+  `emit_provider_request_terminal/2` helper in `lib/tau/session.ex` is the single
+  point of truth for this contract; all four non-`cancel_provider_task` paths
+  route through it.
+
 ### Q4: What information crosses a boundary, and what is lost?
 
 - **★ [C76-B1] B1 — span correlation (resolution of design defect B1).**
@@ -168,10 +182,10 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
   - `[:tau, :hook, :run, :start | :stop | :exception]` (correlates on `span_ref`; C77)
   - `[:tau, :session, :stop]` (point event)
   - `[:tau, :circuit_breaker, :transition]` (point event)
-- **Deferred to C76 (PR3):**
+- **Delivered in C76 (PR3) — now mandatory:**
   - `[:tau, :provider, :request, :start | :stop | :cancelled | :brutal_kill]` — the
-    emit site does not yet echo a `span_ref` through `*.stop`; attaching in PR2 would
-    leak every provider span. Attach when C76 emit-site amendment lands.
+    emit site echoes `span_ref` through all terminal events (D-057). The reporter
+    attaches these handlers in `init/1` alongside the PR2 event set.
 - Optional events (configurable via `Config`; **default off** — SPEC §4 B1):
   - `[:tau, :mcp, :rpc, :start | :stop]` — enabled by `otel.mcp_spans_enabled: true`
   - `[:tau, :compaction, :start | :stop]` — enabled by `otel.compaction_spans_enabled: true`
@@ -247,6 +261,7 @@ State transitions:
 | **D-053** | **Stale-span sweep.** The reporter MUST sweep open spans on a configurable interval (`otel.sweep_interval_ms`, default 60_000). Any span open longer than `otel.sweep_age_ms` (default 120_000) is force-finished with OTel status `ERROR` and attribute `tau.span.stale = true`. The sweep MUST run even when no new events arrive. |
 | **D-054** | **Bounded memory.** The `open_spans` map MUST NOT exceed `otel.max_open_spans` entries (default 1_000). When the limit is reached, the oldest entry (by `opened_at_mono`) is evicted before inserting a new one. Evicted spans are force-finished with attribute `tau.span.evicted = true`. |
 | **D-055** | The OTel deps (`:opentelemetry_api`, `:opentelemetry`, `:opentelemetry_exporter`) MUST be declared `optional: true` in `mix.exs`. A build that does not include them MUST compile cleanly. The reporter module MUST use `Code.ensure_loaded?/1` guards on OTel module references so compilation succeeds without the deps. |
+| **D-057** | Every `[:tau, :provider, :request, :start]` telemetry event MUST be matched by exactly one terminal event — `[:tau, :provider, :request, :stop]` on success, `*.cancelled` on circuit-open or synchronous error, `*.brutal_kill` on force-terminated stream — carrying the same `span_ref`. The session FSM MUST emit the terminal event BEFORE clearing `provider_span_ref` and BEFORE re-entering `:start_provider` for a fallback. No path may clear `provider_span_ref` without first emitting a terminal event. |
 
 ## 7. Deployment target
 
@@ -296,7 +311,7 @@ Any PR touching the following files MUST name the AC-N or D-NNN it advances:
 - `lib/tau/settings/schema.ex` — OTel settings schema addition
 - `config/runtime.exs` — OTel runtime config reading
 - `lib/tau/application.ex` — conditional supervisor child
-- `lib/tau/session.ex` (tool.execute.exception metadata only) — D-052
+- `lib/tau/session.ex` (tool.execute.exception metadata — D-052; provider-request terminal-event pairing — D-057)
 - `lib/tau/hooks/dispatcher.ex` (span_ref discriminator only) — C77
 - `mix.exs` (OTel optional deps only)
 - `test/tau/otel_reporter/` — all test files
