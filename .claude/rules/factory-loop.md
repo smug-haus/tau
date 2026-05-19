@@ -1,12 +1,28 @@
 # Factory-Loop Rule
 
 This rule is the authoritative operating procedure for the coordinator running
-as a continuous autonomous factory: it works the roadmap milestone-by-milestone,
-spawning implementer teams, gating every PR, and merging — with no per-step human
-checkpoints. The prior failure mode that this rule exists to correct is a
-**discretionary, half-run gate**: the coordinator chose whether and when to run
-each gate half and routinely completed only the reviewer half before handing
-work back. Under continuous operation the gate is not optional and not partial.
+as a continuous autonomous factory: it spawns implementer teams, gates every PR,
+and merges — with no per-step human checkpoints. The prior failure mode that
+this rule exists to correct is a **discretionary, half-run gate**: the
+coordinator chose whether and when to run each gate half and routinely completed
+only the reviewer half before handing work back. Under continuous operation the
+gate is not optional and not partial.
+
+## The sole objective — self-hosting (M1)
+
+**The factory loop exists for exactly one purpose: to reach self-hosting — milestone
+M1.** Self-hosting means a Tau session can take a roadmap issue from open to a
+gate-passed, merged PR with no external harness (Claude Code) in the loop — the
+coordinator workflow running end-to-end through `Tau.Tools.Builtin.Agent`.
+
+This is a standing user directive and overrides the milestone-walk ordering: the
+loop does NOT work milestones M2→M8 for their own sake. **Every factory step must
+be justified by how it advances self-hosting.** Work that does not move M1 closer
+is out of scope unless it is a hard prerequisite for M1 (e.g. a bug that blocks
+the coding-agent substrate, or M4 sub-agent dispatch that the coordinator loop
+depends on). When selecting work, the only question is: *does this unblock or
+advance self-hosting?* If not, do not spawn it. The loop stops being run once M1
+is met and verified.
 
 This rule **inherits and does not override**:
 
@@ -26,11 +42,15 @@ wins; this rule only sequences and gates work, it does not relax any other rule.
 One **factory step** delivers one roadmap item end-to-end. Execute the steps in
 order; do not reorder, skip, or batch.
 
-1. **Select the next roadmap item.** Walk GitHub milestones in order — M0 first,
-   then M1, and so on. Within the earliest milestone that has open work, pick an
-   open issue (prefer the smallest shippable unit, and issues that unblock
-   others). If the milestone has a clear next deliverable but no issue for it,
-   file one first per `tau-github-workflow`.
+1. **Select the next roadmap item — by what advances self-hosting (M1).** The
+   sole objective is M1 (see "The sole objective" above). Select the open issue
+   whose completion most directly unblocks or advances self-hosting — the
+   coding-agent substrate (`SPEC-CODING-AGENT`, `Tau.CodingAgent`), M4 sub-agent
+   dispatch (`Tau.Tools.Builtin.Agent`), and the coordinator orchestration
+   runnable from inside a Tau session. Prefer the smallest shippable unit and
+   issues that unblock others. Do NOT pick an issue merely because it is the
+   next in milestone order; if it does not serve M1, skip it. If a clear M1
+   prerequisite has no issue, file one first per `tau-github-workflow`.
 2. **Ensure a GitHub issue exists.** Every factory step is anchored to exactly
    one issue. If you filed it in step 1, it already exists; otherwise confirm
    the chosen issue is open and correctly milestoned.
