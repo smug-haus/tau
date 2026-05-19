@@ -24,7 +24,13 @@ defmodule Tau.Application do
     7. **Finch** — HTTP client, used by providers.
     8. **Providers.RateLimiter.Supervisor** — per-provider token-bucket
        limiters (ADR-0011). Boots after Finch (limiters wrap Finch
-       sends) and before the task supervisors.
+       sends) and before the circuit breaker.
+    9. **CircuitBreaker.Store** — ETS-owner lifecycle anchor for
+       `:tau_circuit_breakers` (SPEC-CIRCUIT-BREAKER §4 B2, ADR-0019).
+       Placed after rate limiters (circuit breakers wrap provider calls
+       at a higher level than rate limiting) and before task supervisors
+       so the table exists when any session-turn task first calls a
+       provider.
     9. **Task supervisors** — for tool dispatch.
     10. **Extensions.Loader** — registers tools/hooks/commands
         defined by extensions.
@@ -66,6 +72,7 @@ defmodule Tau.Application do
       Tau.Permissions.RuleSet,
       {Finch, name: Tau.Providers.Finch},
       Tau.Providers.RateLimiter.Supervisor,
+      Tau.CircuitBreaker.Store,
       {Task.Supervisor, name: Tau.Tools.TaskSupervisor},
       Tau.Extensions.Loader,
       Tau.MCP.Supervisor,
