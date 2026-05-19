@@ -350,6 +350,22 @@ defmodule Tau.CLI do
     mistral_status = if mistral_key, do: "configured", else: "not configured"
     IO.puts("provider Tau.Providers.Mistral: mistral #{mistral_status}")
 
+    azure_env = Application.get_env(:tau, Tau.Providers.AzureOpenAI, [])
+
+    azure_key = azure_env[:api_key] || System.get_env("AZURE_OPENAI_API_KEY")
+    azure_endpoint = azure_env[:endpoint] || System.get_env("AZURE_OPENAI_ENDPOINT")
+    azure_deployment = azure_env[:deployment] || System.get_env("AZURE_OPENAI_DEPLOYMENT")
+
+    azure_status =
+      cond do
+        is_nil(azure_key) or azure_key == "" -> "api_key not configured"
+        is_nil(azure_endpoint) or azure_endpoint == "" -> "endpoint not configured"
+        is_nil(azure_deployment) or azure_deployment == "" -> "deployment not configured"
+        true -> "configured (deployment: #{azure_deployment})"
+      end
+
+    IO.puts("provider Tau.Providers.AzureOpenAI: #{azure_status}")
+
     0
   end
 
@@ -424,6 +440,8 @@ defmodule Tau.CLI do
   defp resolve_provider("deepseek"), do: Tau.Providers.DeepSeek
   defp resolve_provider("groq"), do: Tau.Providers.Groq
   defp resolve_provider("mistral"), do: Tau.Providers.Mistral
+  defp resolve_provider("azure"), do: Tau.Providers.AzureOpenAI
+  defp resolve_provider("azure-openai"), do: Tau.Providers.AzureOpenAI
   defp resolve_provider("replay"), do: Tau.Providers.Replay
 
   # Last-resort fallback for "Foo" → Tau.Providers.Foo style atoms.

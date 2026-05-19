@@ -101,6 +101,10 @@ defmodule Tau.Providers.Shared.ToolSpec do
     %{type: "function", function: %{name: n, description: d, parameters: p}}
   end
 
+  defp shape(%{name: n, description: d, parameters: p}, Tau.Providers.AzureOpenAI) do
+    %{type: "function", function: %{name: n, description: d, parameters: p}}
+  end
+
   defp shape(%{name: n, description: d, parameters: p}, Tau.Providers.Gemini) do
     %{name: n, description: d, parameters: GeminiSubset.downshift(p)}
   end
