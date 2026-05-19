@@ -30,7 +30,7 @@ defmodule Tau.Memory.Store.SQLiteTest do
   # ---------------------------------------------------------------------------
 
   describe "write/1" do
-    test "inserts a row and returns {:ok, ulid}", %{pid: pid} do
+    test "inserts a row and returns {:ok, uuidv7}", %{pid: pid} do
       entry = %{"kind" => "note", "scope" => "global", "content" => "hello"}
       assert {:ok, id} = GenServer.call(pid, {:write, entry})
       assert is_binary(id)

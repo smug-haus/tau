@@ -159,8 +159,11 @@ Only `ready` rows are returned. `pending` rows are excluded (not yet embedded).
 
 ### Migration-hard-fail-on-boot contract
 
-If `Tau.Memory.Migrations.run/1` returns `{:error, reason}`, `init/1` returns
-`{:stop, {:migration_failed, reason}}`. The supervisor escalates the crash.
+`init/1` returns `{:stop, reason}` — hard-failing boot — on two distinct
+failure paths: `{:stop, {:db_open_failed, reason}}` when directory creation
+(`File.mkdir_p`), `Exqlite.Sqlite3.open`, or a `PRAGMA` call fails; and
+`{:stop, {:migration_failed, reason}}` when `Tau.Memory.Migrations.run/1`
+returns `{:error, reason}`. The supervisor escalates the crash in both cases.
 Operator remediation: fix the DB and restart the application. No partial-schema
 recovery path is provided in code; correctness over availability.
 
