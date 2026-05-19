@@ -471,6 +471,23 @@ defmodule Tau.Session do
 
         skills = load_skills(cwd)
 
+        # D-058 / AC-10 (SPEC-USER-TURN §4 B2): if a headless skill was
+        # injected via `:active_skill` opt (e.g. `--system-prompt` from
+        # `tau run`), prepend it to the skill list so
+        # `prepend_skill_messages/2` includes its body in the model-visible
+        # system blob. Without this the skill only gates permissions
+        # (`eval_ctx`) but never reaches the provider call. The entry is
+        # prepended (highest priority) and deliberately has no
+        # `disable_model_invocation` flag so it is always model-visible.
+        skills =
+          case opts[:active_skill] do
+            %Tau.Skill{name: name} = skill ->
+              [{name, skill} | skills]
+
+            _ ->
+              skills
+          end
+
         # ADR-0013 / ADR-0015: skills with `disable_model_invocation: true`
         # are background-only — their bodies (and `# Skill: <name>` headings)
         # MUST NOT enter the model-visible system_blob, lest internal

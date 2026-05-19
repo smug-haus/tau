@@ -325,16 +325,23 @@ defmodule Tau.CLI do
   end
 
   # Consume PubSub events for the headless run until SessionEnd.
-  # Returns 0 on :end_turn, 1 on any error or abnormal end.
-  defp drain_run_loop(session_id) do
+  # Returns 0 on a clean stop, 1 on any error or abnormal end.
+  #
+  # Terminal stop_reason atoms are those providers actually emit:
+  #   :stop   — Anthropic `end_turn`, OpenAI `stop`, Replay done (all
+  #              normalised to :stop by their respective wire decoders).
+  #   :length — Anthropic/OpenAI `max_tokens` / `length` (normalised by
+  #              openai_chat_wire.ex:194 and anthropic.ex:235); context
+  #              window exhausted but still a usable response → exit 0.
+  # Note: `:end_turn` and `:max_tokens` are NOT emitted by any provider;
+  # they were wire-format strings, not normalised atoms. Using them here
+  # would cause context-window stops to fall through to the error branch.
+  @doc false
+  def drain_run_loop(session_id) do
     receive do
       %Events.MessageEnd{session_id: ^session_id, message: msg} ->
         case msg.stop_reason do
-          stop when stop in [:end_turn, :stop, :max_tokens] ->
-            # `:end_turn` — Anthropic/OpenAI clean stop.
-            # `:stop` — Replay and OpenAI-compatible providers.
-            # `:max_tokens` — model hit its context window; still a usable
-            #   response; surface to stdout and exit 0.
+          stop when stop in [:stop, :length] ->
             text = extract_assistant_text(msg)
             if text != "", do: IO.puts(text)
             # Stop the session to flush JSONL, then await SessionEnd.
@@ -371,14 +378,18 @@ defmodule Tau.CLI do
         drain_run_loop(session_id)
     after
       120_000 ->
+        # B3 fix (D-058): timeout MUST also flush JSONL before returning.
+        # Tau.stop/1 is async; drain_session_end/2 blocks until SessionEnd
+        # (bounded by 10 s) so the flush completes before we exit.
         IO.puts(:stderr, "run timed out waiting for session response")
         Tau.stop(session_id)
-        1
+        drain_session_end(session_id, 1)
     end
   end
 
   # After calling Tau.stop/1, wait for SessionEnd to confirm JSONL flush.
-  defp drain_session_end(session_id, exit_code) do
+  @doc false
+  def drain_session_end(session_id, exit_code) do
     receive do
       %Events.SessionEnd{session_id: ^session_id} -> exit_code
       _ -> drain_session_end(session_id, exit_code)
@@ -388,8 +399,9 @@ defmodule Tau.CLI do
   end
 
   # Extract plain text from an assistant message (TextBlock type: :text).
-  defp extract_assistant_text(%Tau.Message.Assistant{content: blocks})
-       when is_list(blocks) do
+  @doc false
+  def extract_assistant_text(%Tau.Message.Assistant{content: blocks})
+      when is_list(blocks) do
     blocks
     |> Enum.flat_map(fn
       %{type: :text, text: t} when is_binary(t) -> [t]
@@ -398,38 +410,42 @@ defmodule Tau.CLI do
     |> Enum.join("")
   end
 
-  defp extract_assistant_text(_), do: ""
+  def extract_assistant_text(_), do: ""
 
   # Extract error_message or synthesise one from content blocks.
-  defp extract_error_text(%Tau.Message.Assistant{error_message: msg})
-       when is_binary(msg) and msg != "",
-       do: msg
+  @doc false
+  def extract_error_text(%Tau.Message.Assistant{error_message: msg})
+      when is_binary(msg) and msg != "",
+      do: msg
 
-  defp extract_error_text(msg), do: extract_assistant_text(msg)
+  # Fallback: no dedicated error_message field — synthesise from text blocks.
+  def extract_error_text(message), do: extract_assistant_text(message)
 
   # Resolve --system-prompt / --system-prompt-file to {:ok, text | nil}.
-  defp resolve_system_prompt(%{system_prompt: text})
-       when is_binary(text) and text != "",
-       do: {:ok, text}
+  @doc false
+  def resolve_system_prompt(%{system_prompt: text})
+      when is_binary(text) and text != "",
+      do: {:ok, text}
 
-  defp resolve_system_prompt(%{system_prompt_file: path})
-       when is_binary(path) and path != "" do
+  def resolve_system_prompt(%{system_prompt_file: path})
+      when is_binary(path) and path != "" do
     case File.read(path) do
       {:ok, text} -> {:ok, text}
       {:error, reason} -> {:error, "could not read #{path}: #{:file.format_error(reason)}"}
     end
   end
 
-  defp resolve_system_prompt(_), do: {:ok, nil}
+  def resolve_system_prompt(_), do: {:ok, nil}
 
   # Build a transient %Tau.Skill{} from inline system-prompt text so the
   # session FSM injects it as a system-role message via prepend_skill_messages/2
   # (the same mechanism used by on-disk skills loaded from CLAUDE.md / .claude/
   # skills). :persona_lifetime :session is set by run_cmd/1 so the persona
   # survives multi-turn tool iteration within a single `tau run` invocation.
-  defp build_headless_skill(nil), do: nil
+  @doc false
+  def build_headless_skill(nil), do: nil
 
-  defp build_headless_skill(text) when is_binary(text) do
+  def build_headless_skill(text) when is_binary(text) do
     %Tau.Skill{
       name: "headless-system-prompt",
       body: text,

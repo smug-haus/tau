@@ -201,19 +201,34 @@ INV (headless run — D-058 / #252 / Closes #213)
   - The headless run loop MUST subscribe to "session:<id>" PubSub BEFORE calling
     Tau.start_session/1 (D-004 compliance — SessionStart is broadcast
     synchronously inside FSM init and would be lost if subscription comes after).
-  - On MessageEnd with stop_reason in [:end_turn, :stop, :max_tokens]: print
-    assistant text to stdout, call Tau.stop/1 to flush JSONL, await SessionEnd.
-    Exit code 0.
+  - Terminal stop_reason atoms are those providers actually emit after
+    normalisation by their wire decoders:
+      :stop   — Anthropic end_turn, OpenAI stop, Replay done (all normalised
+                 to :stop by anthropic.ex:234 / openai_chat_wire.ex:193).
+      :length — Anthropic/OpenAI max_tokens / length (normalised by
+                 anthropic.ex:235 and openai_chat_wire.ex:194). Context-window
+                 exhausted; still a usable response.
+    Note: the wire strings "end_turn" and "max_tokens" are NOT atoms emitted
+    by providers. Using :end_turn or :max_tokens in the terminal set would cause
+    context-window stops (:length) to fall through to the error branch.
+  - On MessageEnd with stop_reason in [:stop, :length]: print assistant text to
+    stdout, call Tau.stop/1 to flush JSONL, await SessionEnd. Exit code 0.
   - On MessageEnd with stop_reason :tool_use: continue waiting (tool iteration
     in progress). Do NOT exit.
   - On MessageEnd with stop_reason :tool_loop_aborted or :error: print to stderr,
     call Tau.stop/1, await SessionEnd. Exit code 1.
-  - Tau.stop/1 MUST be called on every exit path (including timeout) so JSONL
-    is flushed. (Closes [C83-B2].)
+  - Tau.stop/1 MUST be called on every exit path INCLUDING the timeout branch so
+    JSONL is flushed. After calling Tau.stop/1, drain_session_end/2 MUST be
+    awaited (bounded 10 s) before returning — the timeout branch is NOT exempt.
+    (Closes [C83-B2].)
   - --system-prompt <text> (and --system-prompt-file <path>) inject the text
-    as a %Tau.Skill{} with :persona_lifetime :session, reaching the model via
-    the existing prepend_skill_messages/2 path (no new injection mechanism). The
-    seam is intentionally minimal — coordinator persona is a separate concern.
+    as a %Tau.Skill{} with :persona_lifetime :session. The skill is prepended
+    to data.skills in Session.init/1 (before prepend_skill_messages/2 runs) so
+    the body reaches the model-visible system blob. Setting only active_skill
+    (without adding to data.skills) is NOT sufficient — active_skill gates
+    permissions only, not system blob content. No new injection mechanism is
+    introduced; the skill enters via the existing prepend_skill_messages/2 path.
+    The seam is intentionally minimal — coordinator persona is a separate concern.
 ```
 
 ### B3 — `Tau.CLI` ↔ `Tau.TUI.App.run/0` (TUI runtime start)
@@ -434,7 +449,7 @@ Each entry: id, statement, severity, detection_method, source_constraint.
 | D-048 | **:compacting-state exit invariant (C67-B4).** Every exit edge from the `:compacting` gen_statem state MUST land in `:awaiting_user` with both `data.compaction_task` and `data.compaction_monitor` set to `nil`. Five terminal clauses cover all exit paths: (1) worker success `{ref, result}`; (2a) benign `{:DOWN, :normal}` (keep-state, result pending); (2b) crash `{:DOWN, reason}`; (3) live timeout; (4) stale timeout (no-op). `{:next_state, :awaiting_user, data}` is the return form for clauses 1, 2b, 3; clause 2a uses `{:keep_state, data}` because the result message is still pending. | high | `test/tau/session/compaction_test.exs`: happy path; postpone-and-flush; stale-result-drop after cancel; `:swap_model` busy during `:compacting` | [C67-B4] |
 | D-049 | **Compaction worker crash/timeout/cancel recovery (C67-B4).** The session FSM MUST NOT wedge when the compaction worker crashes, times out, or is cancelled — it MUST return to `:awaiting_user`. It MUST NOT trigger a spurious crash-recovery notice when `{ref,result}` and `{:DOWN, :normal}` arrive back-to-back (the double-message race). Achieved by: Clause 2a (`{:DOWN, :normal}`) is a `{:keep_state}` that preserves the pending result, so Clause 1 still processes it; all five typed clauses clear worker fields, so stale messages fail guards and reach the catch-all no-op. | high | `test/tau/session/compaction_test.exs`: worker-crash recovery (session not wedged); race test `{ref,result}` + `{:DOWN}` × 50 (NO spurious crash recovery); late-timeout-after-success (no FSM crash); `/cancel` outside `:compacting` (no FSM crash) | [C67-B4] |
 | D-056 | **Copilot API token refresh contract (C82-B8).** `Tau.Providers.Copilot.Auth.token/1` MUST refresh the short-lived API token when `expires_at - now < 5 min` (300,000 ms). The refresh path is: (1) call `resolve_oauth/1` to obtain the long-lived OAuth token; (2) `POST https://api.github.com/copilot_internal/v2/token` with `Authorization: token <oauth_token>`; (3) parse `{"token": "...", "expires_at": "ISO8601"}` from the 200 response; (4) store the result in `Tau.Providers.Copilot.TokenStore` (supervised GenServer, NOT module-level state). Any non-200 response or network error MUST return `{:error, :oauth_refresh_failed}` and emit `[:tau, :copilot, :auth, :refresh_failed]` telemetry. Missing OAuth token MUST return `{:error, :no_auth}`. All errors MUST surface a user-actionable message via `Auth.describe_error/1` naming the `gh auth login --scopes copilot` renewal path. | high | `test/tau/providers/copilot/auth_test.exs`: hosts.json parsing; apps.json fallback; env-var override; refresh/1 success (Bypass stub); refresh/1 non-200 → `:oauth_refresh_failed`; token/1 proactive-refresh when nearing expiry; token/1 skips refresh when token is fresh; missing file → `:no_auth`; malformed JSON → `:oauth_malformed` | [C82-B8] |
-| D-058 | **Headless FSM-backed `tau run` (C83-B2).** `tau run <prompt>` MUST start a full `Tau.Session` FSM via `Tau.start_session/1`, send the prompt via `Tau.send/2`, and consume the PubSub event stream until `%SessionEnd{}`. It MUST NOT call `provider.stream/3` directly (which bypasses tools, JSONL persistence, and permissions). The PubSub subscription MUST be established BEFORE `Tau.start_session/1` returns (D-004). `Tau.stop/1` MUST be called on every exit path (`:end_turn`, `:stop`, `:max_tokens`, `:tool_loop_aborted`, error, timeout) to flush JSONL before the process exits. Exit code: 0 on clean stop (`stop_reason in [:end_turn, :stop, :max_tokens]`); 1 otherwise. `--system-prompt <text>` and `--system-prompt-file <path>` inject the text as `%Tau.Skill{}` with `:persona_lifetime :session` via the existing `prepend_skill_messages/2` path — no new injection mechanism. | high | `test/tau/cli/headless_run_test.exs` (AC-10): replay provider produces assistant text and exits 0; JSONL persisted after run; --system-prompt injection; CLI option parser accepts --system-prompt/--system-prompt-file | [C83-B2] |
+| D-058 | **Headless FSM-backed `tau run` (C83-B2).** `tau run <prompt>` MUST start a full `Tau.Session` FSM via `Tau.start_session/1`, send the prompt via `Tau.send/2`, and consume the PubSub event stream until `%SessionEnd{}`. It MUST NOT call `provider.stream/3` directly (which bypasses tools, JSONL persistence, and permissions). The PubSub subscription MUST be established BEFORE `Tau.start_session/1` returns (D-004). `Tau.stop/1` MUST be called on every exit path (`:stop`, `:length`, `:tool_loop_aborted`, error, timeout) to flush JSONL before the process exits; the timeout path MUST also await `drain_session_end/2` (bounded 10 s) before returning. Exit code: 0 on clean stop (`stop_reason in [:stop, :length]`); 1 otherwise. Note: provider wire decoders normalise `"end_turn"`/`"max_tokens"` to `:stop`/`:length` — the atoms `:end_turn` and `:max_tokens` are NOT emitted by any provider. `--system-prompt <text>` and `--system-prompt-file <path>` inject the text as `%Tau.Skill{}` with `:persona_lifetime :session`; the skill is prepended to `data.skills` in `Session.init/1` BEFORE `prepend_skill_messages/2` runs so it reaches the model-visible system blob — setting only `active_skill` is NOT sufficient. | high | `test/tau/cli/headless_run_test.exs` (AC-10): replay run exits 0; JSONL persisted; :length → exit 0; :tool_loop_aborted → exit 1; :error → exit 1; --system-prompt body in session messages; CLI option parser | [C83-B2] |
 
 30 D-xxx entries. Each is enforceable. None require speculation.
 
@@ -500,11 +515,21 @@ These are the bar for closing the umbrella issue (#153/#149) and unblocking the 
 - `tau run "prompt" --provider replay --model replay` MUST:
   - Start a full `Tau.Session` FSM (not a bare provider.stream/3 call).
   - Print the assistant text response to stdout.
-  - Exit with code 0 on a clean stop (stop_reason in [:end_turn, :stop, :max_tokens]).
+  - Exit with code 0 on a clean stop (`stop_reason in [:stop, :length]`).
+    Note: `:end_turn` and `:max_tokens` are NOT emitted by providers (they are
+    wire strings normalised to `:stop`/`:length` by provider decoders).
+  - Exit with code 1 on `:tool_loop_aborted`, `:error`, or unknown stop_reason.
   - Persist the session to JSONL; `tau sessions list` shows the session after the run.
-- `tau run "prompt" --system-prompt "text"` injects the text as a system-level skill; the session starts without error and the CLI option is parsed correctly.
+- `tau run "prompt" --system-prompt "text"` injects the text into the model-visible
+  system blob; the skill body MUST appear in `data.messages` as a system-role
+  skill message after `Session.init/1` completes.
 - `tau run "prompt" --system-prompt-file <path>` reads the file and applies it the same way.
-- Tests: `test/tau/cli/headless_run_test.exs` (11 cases) — replay run, JSONL persistence, system-prompt injection, CLI option parser.
+- The timeout exit path MUST also call `Tau.stop/1` and await `drain_session_end/2`
+  (bounded 10 s) before returning exit code 1 (B3 fix).
+- Tests: `test/tau/cli/headless_run_test.exs` (22 cases) — replay run, JSONL persistence,
+  stop_reason matrix (:stop/:length/:tool_loop_aborted/:error), system-prompt body in
+  messages, helper unit tests, CLI option parser. Tests exercise `Tau.CLI`'s real
+  public/@doc-false functions, not private duplicates.
 - This test runs in CI on every PR and is a blocking gate.
 
 ## 8. Out-of-scope hazards (explicitly deferred)

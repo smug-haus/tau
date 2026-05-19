@@ -2,18 +2,21 @@ defmodule Tau.CLI.HeadlessRunTest do
   @moduledoc """
   AC-10 / D-058 (SPEC-USER-TURN §4 B2): headless FSM-backed `tau run`.
 
-  Verifies that `tau run` drives a full Tau.Session FSM (not a bare
+  Verifies that `tau run` drives a full `Tau.Session` FSM (not a bare
   provider.stream/3 call), that JSONL is persisted, and that the command
   surface works correctly with the Replay provider.
 
-  Tests do NOT invoke `Tau.CLI.main/1` directly because that function
-  calls `System.halt/1`. Instead they call `run_cmd_for_test/2` which
-  invokes the same session machinery the rewritten `run_cmd/1` uses, so
-  all observable contracts (PubSub ordering, JSONL output, exit code) are
-  tested against real FSM behaviour.
+  Tests exercise `Tau.CLI`'s real public/doc-false functions — NOT private
+  duplicates — so the AC-10 gate validates shipped code, not a parallel copy.
 
-  Replay provider is used for hermeticity; the default fixture emits
-  `"(replay) hello"` via a TextDelta event so stdout assertions are stable.
+  Functions under test:
+    - `Tau.CLI.drain_run_loop/1`   — event-drain loop (B2, B3)
+    - `Tau.CLI.drain_session_end/2` — post-stop flush wait
+    - `Tau.CLI.extract_assistant_text/1` — text extraction helper
+    - `Tau.CLI.extract_error_text/1`     — error text helper
+    - `Tau.CLI.resolve_system_prompt/1`  — CLI option resolver
+    - `Tau.CLI.build_headless_skill/1`   — skill builder (B1)
+    - `Tau.CLI.spec/0`                   — Optimus parser spec
   """
 
   use ExUnit.Case, async: false
@@ -21,7 +24,6 @@ defmodule Tau.CLI.HeadlessRunTest do
   import Tau.Test.SessionHelper, only: [start_session_for_test: 1]
 
   alias Tau.Provider.Event
-  alias Tau.Session.Events, as: SE
   alias Tau.Persistence.Jsonl, as: PJsonl
 
   setup do
@@ -38,109 +40,9 @@ defmodule Tau.CLI.HeadlessRunTest do
   end
 
   # ---------------------------------------------------------------------------
-  # Helper: run the headless FSM-backed session logic directly (no System.halt)
+  # Shared fixture helpers
   # ---------------------------------------------------------------------------
 
-  # Mirrors run_cmd/1 logic in Tau.CLI but returns {stdout_text, exit_code}
-  # instead of calling System.halt. Accepts :provider, :model, :system_prompt,
-  # :provider_ctx. All callers supply explicit opts.
-  defp run_headless(prompt, opts) do
-    provider = Keyword.get(opts, :provider, Tau.Providers.Replay)
-    model = Keyword.get(opts, :model, "replay")
-    system_prompt = Keyword.get(opts, :system_prompt)
-    provider_ctx = Keyword.get(opts, :provider_ctx, %{})
-
-    session_id = Tau.Session.generate_id()
-
-    # D-004: subscribe BEFORE start_session (mirrors run_cmd/1 discipline).
-    Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{session_id}")
-
-    start_opts =
-      [session_id: session_id, provider: provider, model: model, provider_ctx: provider_ctx]
-      |> then(fn o ->
-        if system_prompt do
-          skill = %Tau.Skill{
-            name: "headless-system-prompt",
-            body: system_prompt,
-            path: "<test>",
-            description: "test system prompt"
-          }
-
-          o
-          |> Keyword.put(:active_skill, skill)
-          |> Keyword.put(:persona_lifetime, :session)
-        else
-          o
-        end
-      end)
-
-    {:ok, ^session_id} = start_session_for_test(start_opts)
-
-    :ok = Tau.send(session_id, prompt)
-
-    {output, exit_code} = drain_headless(session_id)
-    {output, exit_code}
-  end
-
-  # Drain PubSub events and return {stdout_text, exit_code} — mirrors
-  # drain_run_loop/1 + drain_session_end/2 in Tau.CLI.
-  # After a terminal MessageEnd, calls Tau.stop/1 to flush JSONL,
-  # then awaits SessionEnd.
-  defp drain_headless(session_id, acc \\ "") do
-    receive do
-      %SE.MessageEnd{session_id: ^session_id, message: msg} ->
-        case msg.stop_reason do
-          stop when stop in [:end_turn, :stop, :max_tokens] ->
-            text = extract_text(msg)
-            new_acc = if text != "", do: acc <> text <> "\n", else: acc
-            Tau.stop(session_id)
-            drain_session_end(session_id, new_acc, 0)
-
-          :tool_use ->
-            drain_headless(session_id, acc)
-
-          :tool_loop_aborted ->
-            Tau.stop(session_id)
-            drain_session_end(session_id, acc, 1)
-
-          _other ->
-            Tau.stop(session_id)
-            drain_session_end(session_id, acc, 1)
-        end
-
-      %SE.SessionEnd{session_id: ^session_id, reason: reason} ->
-        exit_code = if reason in [:normal, :user], do: 0, else: 1
-        {acc, exit_code}
-
-      _ ->
-        drain_headless(session_id, acc)
-    after
-      15_000 ->
-        Tau.stop(session_id)
-        {acc, 1}
-    end
-  end
-
-  defp drain_session_end(session_id, acc, exit_code) do
-    receive do
-      %SE.SessionEnd{session_id: ^session_id} -> {acc, exit_code}
-      _ -> drain_session_end(session_id, acc, exit_code)
-    after
-      5_000 -> {acc, exit_code}
-    end
-  end
-
-  defp extract_text(%Tau.Message.Assistant{content: blocks}) when is_list(blocks) do
-    Enum.flat_map(blocks, fn
-      %{type: :text, text: t} when is_binary(t) -> [t]
-      _ -> []
-    end)
-    |> Enum.join("")
-  end
-
-  defp extract_text(_), do: ""
-
-  # Default Replay fixture so tests can inject deterministic events.
   defp replay_fixture do
     [
       %Event.Start{request_id: "r", model: "replay"},
@@ -151,142 +53,344 @@ defmodule Tau.CLI.HeadlessRunTest do
     ]
   end
 
-  # ---------------------------------------------------------------------------
-  # AC-10 / D-058: core headless run tests
-  # ---------------------------------------------------------------------------
+  # Start a session and subscribe, then send a prompt. Returns session_id.
+  defp start_and_send(prompt, extra_opts \\ []) do
+    session_id = Tau.Session.generate_id()
 
-  describe "headless FSM-backed session run (AC-10, D-058)" do
-    test "replay provider produces assistant text and exits 0", %{data_dir: _tmp} do
-      {output, exit_code} =
-        run_headless("ping",
-          provider: Tau.Providers.Replay,
-          model: "replay",
-          provider_ctx: %{replay_fixture: replay_fixture()}
-        )
+    # D-004: subscribe BEFORE start_session.
+    Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{session_id}")
 
-      assert exit_code == 0,
-             "expected exit code 0 from a clean replay run; got #{exit_code}"
-
-      assert output =~ "(replay) hello",
-             "expected Replay fixture token in captured output; got:\n#{inspect(output)}"
-    end
-
-    test "JSONL is persisted after headless run", %{data_dir: _tmp} do
-      session_id = Tau.Session.generate_id()
-
-      Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{session_id}")
-
-      start_opts = [
+    start_opts =
+      [
         session_id: session_id,
         provider: Tau.Providers.Replay,
         model: "replay",
         provider_ctx: %{replay_fixture: replay_fixture()}
-      ]
+      ] ++ extra_opts
 
-      {:ok, ^session_id} = start_session_for_test(start_opts)
-      :ok = Tau.send(session_id, "persist-test")
-      drain_headless(session_id)
+    {:ok, ^session_id} = start_session_for_test(start_opts)
+    :ok = Tau.send(session_id, prompt)
+    session_id
+  end
 
-      # Verify JSONL file exists and has content.
+  # ---------------------------------------------------------------------------
+  # B4: tests exercise Tau.CLI's real drain_run_loop/1 (not a duplicate).
+  # ---------------------------------------------------------------------------
+
+  describe "headless FSM-backed session run (AC-10, D-058)" do
+    test "replay provider produces assistant text and exits 0", %{data_dir: _tmp} do
+      session_id = start_and_send("ping")
+      exit_code = Tau.CLI.drain_run_loop(session_id)
+
+      assert exit_code == 0,
+             "expected exit code 0 from a clean replay run; got #{exit_code}"
+    end
+
+    test "JSONL is persisted after headless run", %{data_dir: _tmp} do
+      session_id = start_and_send("persist-test")
+      _exit_code = Tau.CLI.drain_run_loop(session_id)
+
       sessions = Tau.list_sessions()
       matching = Enum.filter(sessions, &(&1.id == session_id))
+      assert length(matching) == 1, "expected session to appear in Tau.list_sessions/0"
 
-      assert length(matching) == 1,
-             "expected the session to appear in Tau.list_sessions/0"
-
-      # Read the raw JSONL and confirm user + assistant events landed.
       events = PJsonl.stream(session_id) |> Enum.to_list()
       assert length(events) > 0, "expected non-empty JSONL for session #{session_id}"
 
       kinds = Enum.map(events, & &1["kind"])
-
-      assert "user_message" in kinds,
-             "expected a user_message event in JSONL; got kinds: #{inspect(kinds)}"
+      assert "user_message" in kinds, "expected user_message event; got: #{inspect(kinds)}"
     end
 
     test "default Replay provider used when none specified", %{data_dir: _tmp} do
-      # Explicitly pass the Replay provider; confirms the resolver path is wired.
-      {output, exit_code} =
-        run_headless("hello",
-          provider: Tau.Providers.Replay,
-          model: "replay",
-          provider_ctx: %{replay_fixture: replay_fixture()}
-        )
-
-      assert exit_code == 0
-      assert is_binary(output)
-    end
-  end
-
-  describe "--system-prompt injection seam (D-058 §system-prompt)" do
-    test "system prompt is prepended as a system-role skill message" do
-      # We verify by running a session with a system_prompt and confirming
-      # the session starts successfully with no error (the skill injection
-      # path is exercised via Session.init/1's prepend_skill_messages/2).
-      {_output, exit_code} =
-        run_headless("hello",
-          provider: Tau.Providers.Replay,
-          model: "replay",
-          provider_ctx: %{replay_fixture: replay_fixture()},
-          system_prompt: "You are a test assistant."
-        )
-
-      assert exit_code == 0,
-             "session with system_prompt should exit 0"
-    end
-
-    test "system prompt nil does not inject a skill" do
-      # No system_prompt → no active_skill → clean session.
-      {_output, exit_code} =
-        run_headless("hello",
-          provider: Tau.Providers.Replay,
-          model: "replay",
-          provider_ctx: %{replay_fixture: replay_fixture()}
-        )
+      session_id = start_and_send("hello")
+      exit_code = Tau.CLI.drain_run_loop(session_id)
 
       assert exit_code == 0
     end
   end
 
-  describe "resolve_system_prompt (CLI option parsing)" do
-    # These tests verify the option-parsing logic in Tau.CLI directly
-    # since we cannot call main/1 (it halts).
+  # ---------------------------------------------------------------------------
+  # B2: stop_reason matrix — test that :stop, :length, :tool_loop_aborted,
+  #     and :error all produce the correct exit codes.
+  # ---------------------------------------------------------------------------
 
-    test "--system-prompt text is passed through correctly" do
-      # Simulate parsed options map as Optimus delivers it.
-      opts = %{system_prompt: "inline system prompt", system_prompt_file: nil}
+  describe "drain_run_loop stop_reason matrix (B2 fix)" do
+    test ":stop maps to exit 0" do
+      session_id = Tau.Session.generate_id()
+      Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{session_id}")
 
-      # Call the private helper via the module's logic:
-      # build_headless_skill(text) should produce a %Tau.Skill{}.
-      text = "inline system prompt"
+      fixture = [
+        %Event.Start{request_id: "r", model: "replay"},
+        %Event.TextStart{block_id: "b"},
+        %Event.TextDelta{block_id: "b", text: "ok"},
+        %Event.TextEnd{block_id: "b"},
+        %Event.Done{stop_reason: :stop, usage: %{}}
+      ]
 
-      skill = %Tau.Skill{
-        name: "headless-system-prompt",
-        body: text,
-        path: "<cli:--system-prompt>",
-        description: "System prompt injected via --system-prompt / --system-prompt-file"
-      }
+      {:ok, ^session_id} =
+        start_session_for_test(
+          session_id: session_id,
+          provider: Tau.Providers.Replay,
+          model: "replay",
+          provider_ctx: %{replay_fixture: fixture}
+        )
 
-      assert skill.body == opts.system_prompt
+      :ok = Tau.send(session_id, "test")
+      assert Tau.CLI.drain_run_loop(session_id) == 0
+    end
+
+    test ":length maps to exit 0 (B2 — context-window stop)" do
+      # :length is what Anthropic/OpenAI emit for max_tokens;
+      # it MUST map to exit 0, not fall through to the error branch.
+      session_id = Tau.Session.generate_id()
+      Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{session_id}")
+
+      fixture = [
+        %Event.Start{request_id: "r", model: "replay"},
+        %Event.TextStart{block_id: "b"},
+        %Event.TextDelta{block_id: "b", text: "truncated"},
+        %Event.TextEnd{block_id: "b"},
+        %Event.Done{stop_reason: :length, usage: %{}}
+      ]
+
+      {:ok, ^session_id} =
+        start_session_for_test(
+          session_id: session_id,
+          provider: Tau.Providers.Replay,
+          model: "replay",
+          provider_ctx: %{replay_fixture: fixture}
+        )
+
+      :ok = Tau.send(session_id, "test")
+      assert Tau.CLI.drain_run_loop(session_id) == 0
+    end
+
+    test ":tool_loop_aborted maps to exit 1" do
+      session_id = Tau.Session.generate_id()
+      Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{session_id}")
+
+      fixture = [
+        %Event.Start{request_id: "r", model: "replay"},
+        %Event.TextStart{block_id: "b"},
+        %Event.TextDelta{block_id: "b", text: "aborting"},
+        %Event.TextEnd{block_id: "b"},
+        %Event.Done{stop_reason: :tool_loop_aborted, usage: %{}}
+      ]
+
+      {:ok, ^session_id} =
+        start_session_for_test(
+          session_id: session_id,
+          provider: Tau.Providers.Replay,
+          model: "replay",
+          provider_ctx: %{replay_fixture: fixture}
+        )
+
+      :ok = Tau.send(session_id, "test")
+      assert Tau.CLI.drain_run_loop(session_id) == 1
+    end
+
+    test ":error stop_reason maps to exit 1" do
+      session_id = Tau.Session.generate_id()
+      Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{session_id}")
+
+      fixture = [
+        %Event.Start{request_id: "r", model: "replay"},
+        %Event.Done{stop_reason: :error, usage: %{}}
+      ]
+
+      {:ok, ^session_id} =
+        start_session_for_test(
+          session_id: session_id,
+          provider: Tau.Providers.Replay,
+          model: "replay",
+          provider_ctx: %{replay_fixture: fixture}
+        )
+
+      :ok = Tau.send(session_id, "test")
+      assert Tau.CLI.drain_run_loop(session_id) == 1
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # B1: --system-prompt injection — text reaches the model (via session.ex).
+  # ---------------------------------------------------------------------------
+
+  describe "--system-prompt injection seam (B1 fix, D-058)" do
+    test "system prompt text is injected into the session's message list" do
+      # We start a session with an active_skill (the headless skill) and
+      # verify via Tau.Session.snapshot/1 that the skill body appears in the
+      # model-visible message list (prepended by prepend_skill_messages/2
+      # during session.ex init/1).
+      system_text = "You are a test assistant. Reply only with 'ok'."
+      skill = Tau.CLI.build_headless_skill(system_text)
+
+      session_id = Tau.Session.generate_id()
+      Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{session_id}")
+
+      fixture = [
+        %Event.Start{request_id: "r", model: "replay"},
+        %Event.TextStart{block_id: "b"},
+        %Event.TextDelta{block_id: "b", text: "(reply)"},
+        %Event.TextEnd{block_id: "b"},
+        %Event.Done{stop_reason: :stop, usage: %{}}
+      ]
+
+      {:ok, ^session_id} =
+        start_session_for_test(
+          session_id: session_id,
+          provider: Tau.Providers.Replay,
+          model: "replay",
+          provider_ctx: %{replay_fixture: fixture},
+          active_skill: skill,
+          persona_lifetime: :session
+        )
+
+      # Snapshot the session immediately after start (before sending a prompt)
+      # so we can inspect the initial message list built by init/1.
+      {:ok, snap} = Tau.Session.snapshot(session_id)
+
+      # The system prompt skill should appear as a user message (system-role)
+      # prepended to snap.messages by prepend_skill_messages/2.
+      system_messages =
+        Enum.filter(snap.messages, fn
+          %Tau.Message.User{metadata: %{role: :system, source: :skill}} -> true
+          _ -> false
+        end)
+
+      assert length(system_messages) >= 1,
+             "expected at least one system-role skill message in data.messages; " <>
+               "got: #{inspect(system_messages)}"
+
+      # Check the skill body is present in the rendered message.
+      bodies = Enum.map(system_messages, & &1.content)
+
+      assert Enum.any?(bodies, &String.contains?(&1, system_text)),
+             "expected system_text '#{system_text}' in messages; got: #{inspect(bodies)}"
+
+      :ok = Tau.send(session_id, "hello")
+      assert Tau.CLI.drain_run_loop(session_id) == 0
+    end
+
+    test "nil system prompt does not inject a headless-system-prompt skill" do
+      assert Tau.CLI.build_headless_skill(nil) == nil
+
+      session_id = start_and_send("hello")
+
+      {:ok, snap} = Tau.Session.snapshot(session_id)
+
+      # Specifically check that the "headless-system-prompt" skill is NOT
+      # injected. Other bundled/on-disk skills may be present in the skill list
+      # (e.g. the example skill in priv/skills/); we only care that the
+      # headless injection path was not triggered.
+      headless_messages =
+        Enum.filter(snap.messages, fn
+          %Tau.Message.User{
+            metadata: %{role: :system, source: :skill, name: "headless-system-prompt"}
+          } ->
+            true
+
+          _ ->
+            false
+        end)
+
+      assert length(headless_messages) == 0,
+             "expected no headless-system-prompt skill message when --system-prompt is not given; " <>
+               "got: #{inspect(headless_messages)}"
+
+      assert Tau.CLI.drain_run_loop(session_id) == 0
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Unit tests for the public helper functions (B4)
+  # ---------------------------------------------------------------------------
+
+  describe "build_headless_skill/1" do
+    test "nil returns nil" do
+      assert Tau.CLI.build_headless_skill(nil) == nil
+    end
+
+    test "text produces a %Tau.Skill{} with correct fields" do
+      skill = Tau.CLI.build_headless_skill("be helpful")
+
+      assert %Tau.Skill{} = skill
       assert skill.name == "headless-system-prompt"
+      assert skill.body == "be helpful"
+      assert skill.path == "<cli:--system-prompt>"
+    end
+  end
+
+  describe "resolve_system_prompt/1" do
+    test "--system-prompt text is returned as {:ok, text}" do
+      opts = %{system_prompt: "inline text", system_prompt_file: nil}
+      assert {:ok, "inline text"} = Tau.CLI.resolve_system_prompt(opts)
     end
 
     test "--system-prompt-file reads file contents" do
       path = Path.join(System.tmp_dir!(), "tau-sp-#{System.unique_integer([:positive])}.txt")
       File.write!(path, "file system prompt")
-
       on_exit(fn -> File.rm(path) end)
 
-      {:ok, text} = File.read(path)
-      assert text == "file system prompt"
+      opts = %{system_prompt: nil, system_prompt_file: path}
+      assert {:ok, "file system prompt"} = Tau.CLI.resolve_system_prompt(opts)
     end
 
-    test "missing --system-prompt-file returns error" do
+    test "missing --system-prompt-file returns {:error, reason}" do
       path = "/tmp/tau-nonexistent-sp-#{System.unique_integer([:positive])}.txt"
-      assert {:error, reason} = File.read(path)
-      assert reason in [:enoent, :eacces]
+      opts = %{system_prompt: nil, system_prompt_file: path}
+      assert {:error, reason} = Tau.CLI.resolve_system_prompt(opts)
+      assert is_binary(reason)
+    end
+
+    test "neither option returns {:ok, nil}" do
+      assert {:ok, nil} = Tau.CLI.resolve_system_prompt(%{})
     end
   end
+
+  describe "extract_assistant_text/1" do
+    test "extracts text blocks from an Assistant message" do
+      msg = %Tau.Message.Assistant{
+        timestamp: DateTime.utc_now(),
+        content: [
+          %{type: :text, text: "hello"},
+          %{type: :tool_use, id: "t1"},
+          %{type: :text, text: " world"}
+        ]
+      }
+
+      assert Tau.CLI.extract_assistant_text(msg) == "hello world"
+    end
+
+    test "returns empty string for non-Assistant messages" do
+      assert Tau.CLI.extract_assistant_text(%{}) == ""
+      assert Tau.CLI.extract_assistant_text(nil) == ""
+    end
+  end
+
+  describe "extract_error_text/1" do
+    test "returns error_message field when present" do
+      msg = %Tau.Message.Assistant{
+        timestamp: DateTime.utc_now(),
+        error_message: "something went wrong",
+        content: []
+      }
+
+      assert Tau.CLI.extract_error_text(msg) == "something went wrong"
+    end
+
+    test "falls back to extract_assistant_text when no error_message" do
+      msg = %Tau.Message.Assistant{
+        timestamp: DateTime.utc_now(),
+        content: [%{type: :text, text: "fallback text"}]
+      }
+
+      assert Tau.CLI.extract_error_text(msg) == "fallback text"
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # spec/0 argument parser (no System.halt)
+  # ---------------------------------------------------------------------------
 
   describe "spec/0 argument parser (no System.halt)" do
     test "run subcommand accepts --system-prompt option" do
