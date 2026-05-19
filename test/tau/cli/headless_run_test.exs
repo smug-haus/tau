@@ -219,10 +219,16 @@ defmodule Tau.CLI.HeadlessRunTest do
     # Inject PubSub events directly into the test process mailbox so we can
     # exercise drain_run_loop/1's logic without a full multi-turn FSM session.
 
-    test ":tool_use causes loop to continue, then terminal stop exits 0" do
-      # Regression test: :tool_use must NOT exit — it must keep waiting.
-      # We inject a :tool_use MessageEnd followed by a :stop MessageEnd and
-      # a SessionEnd into the mailbox, then assert exit_code == 0.
+    test ":tool_use with empty content exits 0 (not in failure set; empty content is not a tool-call turn)" do
+      # What this test actually asserts: a :tool_use MessageEnd whose content is []
+      # (no %{type: :tool_call} blocks) is treated as a terminal turn by the
+      # content-first rule. The loop exits 0 immediately on this MessageEnd because:
+      #   1. tool_calls = false (empty content)
+      #   2. :tool_use is NOT in the failure set [:error, :tool_loop_aborted, ...]
+      #   3. true branch fires → drain_session_end(session_id, 0)
+      #
+      # The subsequent msg_stop and SessionEnd are injected so drain_session_end
+      # (which ignores non-SessionEnd messages) can complete cleanly.
       session_id = Tau.Session.generate_id()
 
       msg_tool_use = %Tau.Message.Assistant{
@@ -245,7 +251,7 @@ defmodule Tau.CLI.HeadlessRunTest do
       exit_code = Tau.CLI.drain_run_loop(session_id)
 
       assert exit_code == 0,
-             "expected exit 0 after :tool_use continuation + :stop terminal; got #{exit_code}"
+             "expected exit 0 for :tool_use with empty content (terminal turn by content-first rule); got #{exit_code}"
     end
 
     test ":stop_sequence maps to exit 0 (f-1 regression lock)" do
@@ -329,54 +335,95 @@ defmodule Tau.CLI.HeadlessRunTest do
              "expected exit 1 for :compaction_failed; got #{exit_code}"
     end
 
-    # f-3 regression: Gemini emits stop_reason: :stop even on tool-call turns.
-    # The prior implementation keyed on stop_reason only — it would exit 0 on a
-    # tool-call MessageEnd whose stop_reason was :stop, killing the session
-    # before the FSM could dispatch the tool. This test exercises exactly that
-    # shape: msg.content has a :tool_call block, stop_reason is :stop.
+    # f-1 regression: Gemini emits stop_reason: :stop even on tool-call turns.
+    # The prior implementation keyed on stop_reason only — it would call
+    # Tau.stop/1 and exit after turn 1, so the FSM never dispatched the tool,
+    # no ToolResult was persisted, and the second assistant turn never reached
+    # JSONL. Under the fixed (content-first) logic the loop continues on turn 1,
+    # the FSM dispatches the tool, and JSONL records both assistant turns.
     #
-    # The existing :tool_use test (above) uses content: [] — that is the blind
-    # spot this test covers. Do NOT remove the empty-content test; it locks the
-    # :tool_use atom case. This test locks the content-first rule.
-    test "tool_call content + stop_reason :stop (Gemini shape) causes loop to continue" do
-      # Inject the exact Gemini shape: a MessageEnd whose content has a
-      # %{type: :tool_call} block AND stop_reason is :stop (not :tool_use).
-      # The drain loop MUST continue (not exit) when tool_call content is present,
-      # regardless of stop_reason. It exits 0 only after the subsequent terminal
-      # MessageEnd (no tool_call content, :stop stop_reason).
-      session_id = Tau.Session.generate_id()
+    # Observable difference:
+    #   Buggy  (stop_reason-only): JSONL has 1 assistant_message. No tool_result.
+    #   Fixed  (content-first):    JSONL has 2 assistant_messages + 1 tool_result.
+    #
+    # This test drives a REAL two-turn FSM session via MultiFixtureProvider so
+    # the JSONL difference is actually produced by the production code path,
+    # not by injected mailbox events. The mandatory verification step in the
+    # task brief confirms this test FAILS against the buggy logic and PASSES
+    # against the fixed logic — see the commit message for the empirical output.
+    @tag :regression_f1
+    test "Gemini-shape two-turn run: JSONL contains 2 assistant_messages (f-1 regression)",
+         %{data_dir: _tmp} do
+      alias Tau.Test.MultiFixtureProvider
+      alias Tau.Provider.Event
 
-      # First event: Gemini-style tool-call turn — :stop + tool_call content.
-      msg_gemini_tool = %Tau.Message.Assistant{
-        timestamp: DateTime.utc_now(),
-        content: [
-          %{
-            type: :tool_call,
-            id: "call-gemini-1",
-            name: "bash",
-            arguments: %{"command" => "echo hi"}
-          }
-        ],
-        stop_reason: :stop
+      parent_sid = Tau.Session.generate_id()
+      Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{parent_sid}")
+
+      # A readable temp file the Read tool can resolve without error.
+      read_path =
+        Path.join(System.tmp_dir!(), "tau-f1-probe-#{System.unique_integer([:positive])}.txt")
+
+      File.write!(read_path, "f1 probe")
+      on_exit(fn -> File.rm(read_path) end)
+
+      call_id = "gemini-read-#{System.unique_integer([:positive])}"
+
+      # Turn 1 — Gemini shape: ToolCallStart + ToolCallEnd + Done{stop_reason: :stop}.
+      # The content-first rule must detect the tool_call block and recurse rather
+      # than calling Tau.stop/1 and exiting.
+      gemini_turn_1 = [
+        %Event.Start{request_id: "gemini-r1", model: "multi-fixture"},
+        %Event.ToolCallStart{tool_call_id: call_id, name: "Read"},
+        %Event.ToolCallEnd{tool_call_id: call_id, params: %{"path" => read_path}},
+        %Event.Done{stop_reason: :stop, usage: %{}}
+      ]
+
+      # Turn 2 — terminal text response after the FSM dispatches the tool.
+      terminal_turn_2 = [
+        %Event.Start{request_id: "gemini-r2", model: "multi-fixture"},
+        %Event.TextStart{block_id: "b2"},
+        %Event.TextDelta{block_id: "b2", text: "all done after tool"},
+        %Event.TextEnd{block_id: "b2"},
+        %Event.Done{stop_reason: :stop, usage: %{}}
+      ]
+
+      provider_ctx = %{
+        parent_session_id: parent_sid,
+        parent_first_fixture: gemini_turn_1,
+        parent_second_fixture: terminal_turn_2
       }
 
-      # Second event: terminal turn — :stop, no tool_call content.
-      msg_terminal = %Tau.Message.Assistant{
-        timestamp: DateTime.utc_now(),
-        content: [%{type: :text, text: "all done"}],
-        stop_reason: :stop
-      }
+      {:ok, ^parent_sid} =
+        start_session_for_test(
+          session_id: parent_sid,
+          provider: MultiFixtureProvider,
+          model: "multi-fixture",
+          provider_ctx: provider_ctx
+        )
 
-      send(self(), %Tau.Session.Events.MessageEnd{session_id: session_id, message: msg_gemini_tool})
-      send(self(), %Tau.Session.Events.MessageEnd{session_id: session_id, message: msg_terminal})
-      # drain_session_end awaits SessionEnd after Tau.stop/1; inject it.
-      send(self(), %Tau.Session.Events.SessionEnd{session_id: session_id, reason: :normal})
+      :ok = Tau.send(parent_sid, "run the read tool")
 
-      exit_code = Tau.CLI.drain_run_loop(session_id)
+      exit_code = Tau.CLI.drain_run_loop(parent_sid)
 
       assert exit_code == 0,
-             "expected exit 0 after Gemini tool-call turn (:stop+tool_call content) " <>
-               "followed by terminal :stop; got #{exit_code}"
+             "expected exit 0 after two-turn Gemini-shape run; got #{exit_code}"
+
+      # Assert JSONL completeness — the key regression guard.
+      # Buggy logic stops after turn 1 → only 1 assistant_message, no tool_result.
+      # Fixed logic continues through tool dispatch → 2 assistant_messages + tool_result.
+      events = PJsonl.stream(parent_sid) |> Enum.to_list()
+      kinds = Enum.map(events, & &1["kind"])
+
+      assert "tool_result" in kinds,
+             "expected 'tool_result' in JSONL (loop must continue past turn 1 to dispatch the Read tool); " <>
+               "got kinds: #{inspect(kinds)}"
+
+      assistant_msg_count = Enum.count(kinds, &(&1 == "assistant_message"))
+
+      assert assistant_msg_count == 2,
+             "expected 2 assistant_messages in JSONL (turn 1 tool-call + turn 2 terminal); " <>
+               "got #{assistant_msg_count}: #{inspect(kinds)}"
     end
   end
 

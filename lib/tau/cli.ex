@@ -35,7 +35,12 @@ defmodule Tau.CLI do
   `Tau.start_session/1` (D-004 compliance), sends the prompt, and consumes
   the event stream until `%Tau.Session.Events.SessionEnd{}` is received.
   Text output is written to stdout; tool events are silently consumed.
-  Exit code: 0 on `:end_turn`, 1 on error or abnormal session end.
+  Exit code: 0 for any terminal stop_reason that is not in the failure set
+  (`[:error, :tool_loop_aborted, :aborted, :compaction_failed]`); 1 for
+  failure stop_reasons or abnormal `SessionEnd` reason. Tool-call content
+  (regardless of stop_reason) causes the loop to continue rather than exit,
+  so Gemini-shaped turns (`stop_reason: :stop` + tool_call content) are
+  handled correctly.
 
   Optional `--system-prompt <text>` (or `--system-prompt-file <path>`)
   prepends a system-level persona to the session. The content is injected
