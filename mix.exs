@@ -61,6 +61,13 @@ defmodule Tau.MixProject do
       {:telemetry, "~> 1.3"},
       {:telemetry_metrics, "~> 1.0"},
 
+      # OpenTelemetry export (SPEC-OTEL-REPORTER / D-055).
+      # Optional: a build without these deps compiles cleanly. Include in
+      # a release by setting MIX_OTEL=1 at build time (wired in PR2).
+      {:opentelemetry_api, "~> 1.5", optional: true},
+      {:opentelemetry, "~> 1.7", optional: true},
+      {:opentelemetry_exporter, "~> 1.10", optional: true},
+
       # PubSub for session event fanout
       {:phoenix_pubsub, "~> 2.1"},
 

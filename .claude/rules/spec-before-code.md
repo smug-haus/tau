@@ -45,6 +45,14 @@ The current spec catalog:
   `lib/tau/memory/supervisor.ex`, or the `Tau.Memory.Supervisor` entry in
   `lib/tau/application.ex`. Triage score 3/5; D-045, D-046, D-047 live here.
 
+- `docs/spec/SPEC-OTEL-REPORTER.md` — the OpenTelemetry reporter: supervised
+  GenServer that subscribes to `[:tau, ...]` telemetry events and exports spans
+  and metrics via OTLP. Mandatory for any PR touching `lib/tau/otel_reporter.ex`,
+  `lib/tau/otel_reporter/`, `config/runtime.exs` (the `otel` block),
+  `lib/tau/settings/schema.ex` (the `"otel"` property), or the
+  `Tau.OtelReporter` entry in `lib/tau/application.ex`. Triage score 4/5;
+  D-050..D-055 live here.
+
 Future SPECs land here as new components reach triage threshold.
 
 ## What this rule requires
