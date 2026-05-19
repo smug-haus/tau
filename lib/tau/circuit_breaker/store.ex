@@ -2,16 +2,17 @@ defmodule Tau.CircuitBreaker.Store do
   @moduledoc """
   ETS-owner lifecycle anchor for the circuit-breaker table (SPEC-CIRCUIT-BREAKER §4 B2, C2).
 
-  This GenServer's only job is to own the `:tau_circuit_breakers` ETS table
-  and expose two atomic CAS operations:
+  This GenServer's ONLY job is to own the `:tau_circuit_breakers` ETS table —
+  it creates the table in `init/1` and holds it alive. All reads and writes,
+  including the two atomic CAS operations, execute directly in the CALLER'S
+  process against the `:public` ETS table — no GenServer mailbox hop (§3 [C57-B1]).
 
-  - `transition/2` — full-row state transition via `:ets.select_replace/2` with
-    a guard on the current `state_atom` field. Serialises only the CAS, not reads
-    or counter bumps.
+  - `transition/3` — full-row CAS state transition via `:ets.select_replace/2`
+    with a guard on `state_atom`. Called directly by the caller process.
   - `probe_admitted?/1` — half-open single-probe admission via `:ets.select_replace/2`
-    on `probe_slot` (0 → 1). Returns `true` (admitted) or `false` (rejected).
+    on `probe_slot` (0 → 1). Called directly by the caller process.
 
-  All direct reads and `failure_count` / `success_count` counter bumps go
+  All direct reads and `failure_count` / `success_count` counter bumps also go
   straight to ETS from the caller process — no GenServer mailbox hop.
 
   ## ETS table
@@ -104,6 +105,9 @@ defmodule Tau.CircuitBreaker.Store do
   @doc """
   Performs a full-row CAS state transition via `:ets.select_replace/2`.
 
+  Executes directly in the CALLER'S process against the `:public` ETS table
+  — no GenServer mailbox hop (§3 [C57-B1]).
+
   The match spec guards on `current_state` (position 2) so the replace
   only fires if the row still holds the state the caller observed. Returns
   `1` if the transition succeeded (this caller wins), `0` if a concurrent
@@ -114,11 +118,14 @@ defmodule Tau.CircuitBreaker.Store do
   @spec transition(module(), :closed | :open | :half_open, Tau.CircuitBreaker.State.t()) ::
           0 | 1
   def transition(provider, current_state_atom, new_state) do
-    GenServer.call(__MODULE__, {:transition, provider, current_state_atom, new_state})
+    do_transition(provider, current_state_atom, new_state)
   end
 
   @doc """
   Atomic half-open probe admission via `:ets.select_replace/2` on `probe_slot`.
+
+  Executes directly in the CALLER'S process against the `:public` ETS table
+  — no GenServer mailbox hop (§3 [C57-B1]).
 
   Returns `true` if admitted (probe_slot 0 → 1), `false` if rejected
   (probe_slot was already 1). Only one concurrent caller can receive `true`
@@ -126,7 +133,7 @@ defmodule Tau.CircuitBreaker.Store do
   """
   @spec probe_admitted?(module()) :: boolean()
   def probe_admitted?(provider) do
-    GenServer.call(__MODULE__, {:probe_admitted, provider})
+    do_probe_admission(provider)
   end
 
   # ---------------------------------------------------------------------------
@@ -151,23 +158,6 @@ defmodule Tau.CircuitBreaker.Store do
     )
 
     {:ok, %{table: table}}
-  end
-
-  @impl true
-  def terminate(_reason, _state) do
-    :ets.delete(@table)
-    :ok
-  end
-
-  @impl true
-  def handle_call({:transition, provider, current_state_atom, new_state}, _from, state) do
-    match_count = do_transition(provider, current_state_atom, new_state)
-    {:reply, match_count, state}
-  end
-
-  def handle_call({:probe_admitted, provider}, _from, state) do
-    admitted = do_probe_admission(provider)
-    {:reply, admitted, state}
   end
 
   # ---------------------------------------------------------------------------
