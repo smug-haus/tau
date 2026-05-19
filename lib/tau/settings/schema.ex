@@ -168,6 +168,47 @@ defmodule Tau.Settings.Schema do
           "default_agent" => %{"type" => ["string", "null"]},
           "expose_tau_context" => %{"type" => "boolean"}
         }
+      },
+      # SPEC-OTEL-REPORTER (#35 / AC-2): OpenTelemetry export settings.
+      # `enabled` gates reporter startup; all other keys are optional and
+      # take the defaults documented in SPEC-OTEL-REPORTER §6 (D-053/D-054).
+      "otel" => %{
+        "type" => "object",
+        "additionalProperties" => false,
+        "properties" => %{
+          "enabled" => %{"type" => "boolean"},
+          "endpoint" => %{
+            "type" => "string",
+            "description" => "OTLP gRPC or HTTP endpoint, e.g. http://localhost:4317"
+          },
+          "headers" => %{
+            "type" => "object",
+            "additionalProperties" => %{"type" => "string"},
+            "description" => "Extra HTTP headers for OTLP export, e.g. authentication tokens."
+          },
+          "sampling_ratio" => %{
+            "type" => "number",
+            "minimum" => 0,
+            "maximum" => 1,
+            "description" => "Probability [0.0, 1.0] that any given span is exported. Default 1.0."
+          },
+          "max_open_spans" => %{
+            "type" => "integer",
+            "minimum" => 1,
+            "description" => "Upper bound on in-flight spans (D-054). Default 1000."
+          },
+          "sweep_interval_ms" => %{
+            "type" => "integer",
+            "minimum" => 1000,
+            "description" => "How often to sweep for stale spans in ms (D-053). Default 60000."
+          },
+          "sweep_age_ms" => %{
+            "type" => "integer",
+            "minimum" => 1000,
+            "description" =>
+              "Age threshold in ms after which an open span is force-finished (D-053). Default 120000."
+          }
+        }
       }
     }
   }
