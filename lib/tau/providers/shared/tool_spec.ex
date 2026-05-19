@@ -88,23 +88,8 @@ defmodule Tau.Providers.Shared.ToolSpec do
   # Enumerated explicitly (no blanket catch-all) so that a genuinely
   # unknown provider still raises `FunctionClauseError` rather than
   # silently producing a malformed tool spec.
+  # Each future OpenAI-compatible provider PR adds its own clause here.
   defp shape(%{name: n, description: d, parameters: p}, Tau.Providers.DeepSeek) do
-    %{type: "function", function: %{name: n, description: d, parameters: p}}
-  end
-
-  defp shape(%{name: n, description: d, parameters: p}, Tau.Providers.Groq) do
-    %{type: "function", function: %{name: n, description: d, parameters: p}}
-  end
-
-  defp shape(%{name: n, description: d, parameters: p}, Tau.Providers.Mistral) do
-    %{type: "function", function: %{name: n, description: d, parameters: p}}
-  end
-
-  defp shape(%{name: n, description: d, parameters: p}, Tau.Providers.AzureOpenAI) do
-    %{type: "function", function: %{name: n, description: d, parameters: p}}
-  end
-
-  defp shape(%{name: n, description: d, parameters: p}, Tau.Providers.Custom) do
     %{type: "function", function: %{name: n, description: d, parameters: p}}
   end
 
