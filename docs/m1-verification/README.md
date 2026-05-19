@@ -116,9 +116,9 @@ Verify before using.
 **Cost and budget.** A coordinator + implementer + critic + reviewer cycle
 on `claude-opus-4-7` can run several dollars per factory step. Set an
 Anthropic-side usage cap before running, or use a Sonnet model for an initial
-trial run (`--model claude-sonnet-4-6` is supported by the Anthropic
-provider). Do not run against a production key without a spending limit in
-place.
+trial run (pass `--model <latest-sonnet-id>` — check Anthropic's model catalog
+for the current id; no Sonnet model id is pinned in this codebase). Do not run
+against a production key without a spending limit in place.
 
 ## 4. The invocation
 
@@ -218,7 +218,7 @@ Observable milestones, in order:
    origin`). Extract them:
    ```
    jq -r 'select(.kind == "assistant_message") | .data.content[]? |
-     select(.type == "tool_call") | {tool: .name, input: .input}' \
+     select(.type == "tool_call") | {tool: .name, arguments: .arguments}' \
      ~/.tau/sessions/*/<session-id>.jsonl
    ```
 
@@ -226,7 +226,7 @@ Observable milestones, in order:
    and `git fetch origin` results returned to the coordinator.
 
 5. **`assistant_message`** with an embedded `tool_call` block for `Agent`
-   (`name: "Agent"`, `input.subagent_type: "implementer"`) — coordinator
+   (`name: "Agent"`, `arguments.subagent_type: "implementer"`) — coordinator
    spawns the implementer child session. This is the critical M1 signal: the
    coordinator is using `Tau.Tools.Builtin.Agent` to drive a sub-session, not
    calling Claude Code.
@@ -242,13 +242,13 @@ Observable milestones, in order:
    `tool_result`.
 
 9. **`assistant_message`** with an embedded `tool_call` block for `Agent`
-   (`input.subagent_type: "critic"`) — gate, first half.
+   (`arguments.subagent_type: "critic"`) — gate, first half.
 
 10. **`tool_result`** for critic — last JSON line of the result is
     `{"ok": true}` (or `{"ok": false, "reason": "..."}` on failure).
 
 11. **`assistant_message`** with an embedded `tool_call` block for `Agent`
-    (`input.subagent_type: "reviewer"`) — gate, second half.
+    (`arguments.subagent_type: "reviewer"`) — gate, second half.
 
 12. **`tool_result`** for reviewer — last JSON line is `{"ok": true}`.
 
@@ -264,9 +264,10 @@ Observable milestones, in order:
 
 16. **`assistant_message`** (final) — coordinator's summary reporting the
     merged PR, SHA, and confirmation that M1 factory cycle completed.
-    `stop_reason: :end_turn` or `:stop`. The `tau run` process then exits 0;
-    that exit is the end-of-session signal (no `session_end` JSONL record is
-    written).
+    `stop_reason: :stop` (the Anthropic provider normalises wire `"end_turn"`
+    to `:stop`; non-Anthropic providers that do not normalise may show
+    `:end_turn`). The `tau run` process then exits 0; that exit is the
+    end-of-session signal (no `session_end` JSONL record is written).
 
 You can tail the JSONL in real time:
 
@@ -294,8 +295,8 @@ b. **The merge happened from inside the Tau session**, not from Claude Code or
    ```
    jq -r 'select(.kind == "assistant_message") | .data.content[]? |
      select(.type == "tool_call" and .name == "Bash") |
-     select(.input | tostring | contains("gh pr merge")) |
-     {tool: .name, input: .input}' \
+     select(.arguments | tostring | contains("gh pr merge")) |
+     {tool: .name, arguments: .arguments}' \
      ~/.tau/sessions/*/<session-id>.jsonl
    ```
 
@@ -308,7 +309,7 @@ c. **The JSONL transcript shows the coordinator-only flow.** The parent
    ```
    jq -r 'select(.kind == "assistant_message") | .data.content[]? |
      select(.type == "tool_call" and .name == "Agent") |
-     {tool: .name, subagent_type: .input.subagent_type}' \
+     {tool: .name, subagent_type: .arguments.subagent_type}' \
      ~/.tau/sessions/*/<session-id>.jsonl
    ```
    Expected output includes three entries: `subagent_type: "implementer"`,
