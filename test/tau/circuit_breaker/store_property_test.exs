@@ -193,35 +193,41 @@ defmodule Tau.CircuitBreaker.StorePropertyTest do
   # D-044: Field positions are stable across transitions
   # ---------------------------------------------------------------------------
 
-  property "D-044 — transition preserves all row fields at correct positions" do
+  property "D-044 — transition writes state columns; counter columns preserved from ETS" do
     check all(
             provider <- atom(:alphanumeric),
-            fc <- integer(0..20),
-            sc <- integer(0..5),
+            pre_fc <- integer(0..20),
+            pre_sc <- integer(0..5),
             oat <- integer(0..1_000_000),
             max_runs: 50
           ) do
       :ets.delete_all_objects(@table)
       Store.ensure_row(provider)
 
+      # Seed counters via atomic bumps so ETS holds known values.
+      for _ <- 1..pre_fc//1, do: Store.bump_failure_count(provider)
+      for _ <- 1..pre_sc//1, do: Store.bump_success_count(provider)
+
       new_state = %State{
         state: :open,
-        failure_count: fc,
-        success_count: sc,
+        # counter fields in new_state are intentionally different — must be ignored
+        failure_count: 999,
+        success_count: 999,
         opened_at_ms: oat,
         probe_slot: 0
       }
 
       assert Store.transition(provider, :closed, new_state) == 1
 
-      # Read raw row and assert field positions match D-044
+      # Read raw row and assert field positions match D-044.
       [{row_key, row_state, row_fc, row_sc, row_oat, row_probe_slot}] =
         :ets.lookup(@table, provider)
 
       assert row_key == provider
       assert row_state == :open
-      assert row_fc == fc
-      assert row_sc == sc
+      # Counter columns are PRESERVED from ETS, not taken from new_state.
+      assert row_fc == pre_fc, "failure_count must be preserved from ETS, not overwritten"
+      assert row_sc == pre_sc, "success_count must be preserved from ETS, not overwritten"
       assert row_oat == oat
       assert row_probe_slot == 0
     end
