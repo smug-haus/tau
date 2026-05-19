@@ -336,6 +336,13 @@ defmodule Tau.CLI do
     deepseek_status = if deepseek_key, do: "configured", else: "not configured"
     IO.puts("provider Tau.Providers.DeepSeek: deepseek #{deepseek_status}")
 
+    groq_key =
+      Application.get_env(:tau, Tau.Providers.Groq, [])[:api_key] ||
+        System.get_env("GROQ_API_KEY")
+
+    groq_status = if groq_key, do: "configured", else: "not configured"
+    IO.puts("provider Tau.Providers.Groq: groq #{groq_status}")
+
     0
   end
 
@@ -408,6 +415,7 @@ defmodule Tau.CLI do
   defp resolve_provider("bedrock"), do: Tau.Providers.Bedrock
   defp resolve_provider("gemini"), do: Tau.Providers.Gemini
   defp resolve_provider("deepseek"), do: Tau.Providers.DeepSeek
+  defp resolve_provider("groq"), do: Tau.Providers.Groq
   defp resolve_provider("replay"), do: Tau.Providers.Replay
 
   # Last-resort fallback for "Foo" → Tau.Providers.Foo style atoms.
