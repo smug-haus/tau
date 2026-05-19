@@ -512,6 +512,14 @@ defmodule Tau.Session do
           # handler. Stale messages whose ref doesn't match are dropped
           # by the catch-all clause.
           stream_ref: nil,
+          # C76 (SPEC-OTEL-REPORTER): per-request OTel span discriminator.
+          # Generated at [:tau, :provider, :request, :start] emit time;
+          # echoed through *.stop / *.cancelled / *.brutal_kill so the
+          # OTel reporter can correlate them to the open span. Cleared
+          # whenever the FSM leaves the request (reset to nil alongside
+          # stream_ref). Each fallback attempt generates a fresh ref —
+          # that is correct: a fallback is a distinct provider request.
+          provider_span_ref: nil,
           # ADR-0017: per-stream cooperative-cancel flag (a `:counters`
           # ref). Allocated freshly in `:start_provider`; consulted by the
           # `:cancel` handler before falling back to brutal-kill.
@@ -789,13 +797,20 @@ defmodule Tau.Session do
       data.provider_ctx
       |> Map.merge(%{session_id: data.id, cancel_flag: cancel_flag})
 
+    # C76 (SPEC-OTEL-REPORTER): generate a per-request discriminator ref so the
+    # OTel reporter can correlate *.stop / *.cancelled / *.brutal_kill back to
+    # this *.start span even when multiple requests from the same session to the
+    # same provider are in flight concurrently (e.g. parallel sessions).
+    provider_span_ref = make_ref()
+
     :telemetry.execute(
       [:tau, :provider, :request, :start],
       %{system_time: System.system_time()},
       %{
         provider: data.provider,
         model: data.model,
-        session_id: data.id
+        session_id: data.id,
+        span_ref: provider_span_ref
       }
     )
 
@@ -849,7 +864,8 @@ defmodule Tau.Session do
            | provider_task: task,
              assembler: assembler,
              cancel_flag: cancel_flag,
-             stream_ref: stream_ref
+             stream_ref: stream_ref,
+             provider_span_ref: provider_span_ref
          }}
 
       {:error, :circuit_open} ->
@@ -925,7 +941,9 @@ defmodule Tau.Session do
               )
 
             broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: msg})
-            {:next_state, :awaiting_user, %{data | cancel_flag: nil, stream_ref: nil}}
+
+            {:next_state, :awaiting_user,
+             %{data | cancel_flag: nil, stream_ref: nil, provider_span_ref: nil}}
         end
 
       {:error, reason} ->
@@ -951,7 +969,9 @@ defmodule Tau.Session do
           )
 
         broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: msg})
-        {:next_state, :awaiting_user, %{data | cancel_flag: nil, stream_ref: nil}}
+
+        {:next_state, :awaiting_user,
+         %{data | cancel_flag: nil, stream_ref: nil, provider_span_ref: nil}}
     end
   end
 
@@ -1236,6 +1256,9 @@ defmodule Tau.Session do
        | provider_task: nil,
          cancel_flag: nil,
          stream_ref: nil,
+         # C76 (SPEC-OTEL-REPORTER): clear discriminator; the OTel reporter
+         # consumed it at the *.cancelled / *.brutal_kill emit site above.
+         provider_span_ref: nil,
          tools_in_flight: %{},
          tool_dispatcher: nil,
          assembler: nil,
@@ -1552,7 +1575,14 @@ defmodule Tau.Session do
       :telemetry.execute(
         [:tau, :provider, :request, telemetry_event_name],
         %{system_time: System.system_time()},
-        %{provider: data.provider, model: data.model, session_id: data.id}
+        %{
+          provider: data.provider,
+          model: data.model,
+          session_id: data.id,
+          # C76 (SPEC-OTEL-REPORTER): echo the per-request discriminator so
+          # the OTel reporter can close the span opened at *.start.
+          span_ref: data.provider_span_ref
+        }
       )
 
       mechanism
@@ -1618,7 +1648,10 @@ defmodule Tau.Session do
         provider: data.provider,
         model: data.model,
         session_id: data.id,
-        stop_reason: msg.stop_reason
+        stop_reason: msg.stop_reason,
+        # C76 (SPEC-OTEL-REPORTER): echo the per-request discriminator so the
+        # OTel reporter can close the span opened at *.start.
+        span_ref: data.provider_span_ref
       }
     )
 
@@ -1658,6 +1691,7 @@ defmodule Tau.Session do
              assembler: nil,
              cancel_flag: nil,
              stream_ref: nil,
+             provider_span_ref: nil,
              tool_iterations: 0
          }}
 
@@ -1711,6 +1745,7 @@ defmodule Tau.Session do
                  assembler: nil,
                  cancel_flag: nil,
                  stream_ref: nil,
+                 provider_span_ref: nil,
                  tool_iterations: 0
              }}
 
@@ -1756,6 +1791,7 @@ defmodule Tau.Session do
                    assembler: nil,
                    cancel_flag: nil,
                    stream_ref: nil,
+                   provider_span_ref: nil,
                    tool_iterations: 0
                }}
             else
@@ -1970,7 +2006,11 @@ defmodule Tau.Session do
          tool_dispatcher: dispatcher_pid,
          provider_task: nil,
          assembler: nil,
-         stream_ref: nil
+         stream_ref: nil,
+         # C76 (SPEC-OTEL-REPORTER): the provider.request span was closed in
+         # finalize_assistant/2 before dispatch_tools/2 is called. Clear the
+         # ref so it doesn't linger stale across the tool-execution phase.
+         provider_span_ref: nil
      }}
   end
 
