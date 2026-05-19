@@ -803,7 +803,18 @@ defmodule Tau.Session do
       %{model: data.model}
       |> maybe_put_tools(skill_activation_tool_spec(data.skills))
 
-    case data.provider.stream(data.messages, stream_opts, ctx) do
+    # AC-7 (SPEC-CIRCUIT-BREAKER): wrap the provider call with the circuit
+    # breaker façade. The thunk returns `{:ok, stream}` or `{:error, reason}`;
+    # the façade records the outcome and, when the breaker is `:open`, short-
+    # circuits with `{:error, :circuit_open}` before the thunk is invoked
+    # (B3 contract, D-043). An open breaker falls through to the synchronous
+    # error path below and surfaces as a user-visible `%Events.MessageEnd{}`
+    # — it does NOT trigger ADR-0012 fallback (the fallback path is only
+    # entered via in-stream `%PEvent.Error{retryable?: true}` events, not by
+    # synchronous `{:error, _}` returns from this call site).
+    case Tau.CircuitBreaker.call(data.provider, [], fn ->
+           data.provider.stream(data.messages, stream_opts, ctx)
+         end) do
       {:ok, stream} ->
         # ADR-0012: tag each stream's mailbox traffic with a fresh ref so
         # stragglers from a killed predecessor (e.g. a provider task whose
@@ -840,6 +851,82 @@ defmodule Tau.Session do
              cancel_flag: cancel_flag,
              stream_ref: stream_ref
          }}
+
+      {:error, :circuit_open} ->
+        # D-043 (SPEC-CIRCUIT-BREAKER): an open breaker on one provider MUST
+        # advance the fallback chain rather than killing the turn immediately.
+        # Only when the chain is exhausted (every provider's breaker open or
+        # no fallback left) does the turn surface a terminal error. This
+        # mirrors the in-stream `%PEvent.Error{retryable?: true}` path
+        # (ADR-0012) and guarantees the all-open chain terminates: N providers
+        # all open ⇒ N synchronous `{:error, :circuit_open}` returns ⇒ one
+        # terminal error, no infinite loop (each recursive call pops one
+        # element from `fallback_chain_remaining`).
+        case data.fallback_chain_remaining do
+          [next | rest] ->
+            from_provider = data.provider
+
+            :telemetry.execute(
+              [:tau, :provider, :fallback],
+              %{system_time: System.system_time()},
+              %{
+                from_provider: from_provider,
+                to_provider: next,
+                reason: :circuit_open,
+                session_id: data.id
+              }
+            )
+
+            broadcast(data.id, %Events.ProviderFallback{
+              session_id: data.id,
+              from_provider: from_provider,
+              to_provider: next,
+              reason: :circuit_open
+            })
+
+            data =
+              persist_event(data, "provider_fallback", %{
+                from_provider: inspect(from_provider),
+                to_provider: inspect(next),
+                reason: "circuit_open"
+              })
+
+            transformed =
+              Tau.Providers.Shared.ContentTransform.transform(
+                data.messages,
+                from_provider,
+                next
+              )
+
+            handle_event(
+              :internal,
+              :start_provider,
+              :provider_streaming,
+              %{
+                data
+                | provider: next,
+                  messages: transformed,
+                  fallback_chain_remaining: rest,
+                  assembler: nil,
+                  provider_task: nil,
+                  stream_ref: nil
+              }
+            )
+
+          [] ->
+            # All providers exhausted — surface terminal error.
+            reason_str = describe_provider_error(:circuit_open)
+
+            msg =
+              Assistant.new(
+                stop_reason: :error,
+                error_message: reason_str,
+                content: [%{type: :text, text: "Error: " <> reason_str}]
+              )
+
+            broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: msg})
+            {:next_state, :awaiting_user, %{data | cancel_flag: nil, stream_ref: nil}}
+        end
 
       {:error, reason} ->
         # Synchronous provider error — emit and return to awaiting_user.
@@ -2233,6 +2320,16 @@ defmodule Tau.Session do
 
   defp describe_provider_error(:oauth_malformed) do
     Tau.Providers.Anthropic.Auth.describe_error({:error, :oauth_malformed})
+  end
+
+  # AC-7 (SPEC-CIRCUIT-BREAKER §4 B3): breaker is open — surface a
+  # user-actionable message. The user can wait for the cooldown or switch
+  # providers; the exact cooldown duration is not surfaced here because it
+  # is an ETS-internal value. Generic wording avoids surfacing internals.
+  defp describe_provider_error(:circuit_open) do
+    "Provider is temporarily unavailable (circuit breaker open). " <>
+      "The provider has returned too many consecutive errors. " <>
+      "Please wait a moment and try again, or switch providers."
   end
 
   defp describe_provider_error(other), do: inspect(other)
