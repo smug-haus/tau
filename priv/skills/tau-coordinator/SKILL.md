@@ -1,10 +1,6 @@
 ---
 name: tau-coordinator
-description: >
-  Coordinator persona for a Tau session. Injects the factory-loop operating
-  procedure so a `tau run` session can execute the M1 self-hosting factory
-  cycle end-to-end via the Agent builtin tool, with no external harness in
-  the loop.
+description: "Coordinator persona for a Tau session. Injects the factory-loop operating procedure so a `tau run` session can execute the M1 self-hosting factory cycle end-to-end via the Agent builtin tool, with no external harness in the loop."
 ---
 
 # Tau Coordinator
@@ -49,6 +45,11 @@ Rules: spawn `critic` before `implementer` for components with PSDH triage
 score ≥ 2 (shared mutable state, temporal coupling, cross-process
 coordination). Both `critic` and `reviewer` MUST PASS before any PR merges.
 
+In a Tau session, sub-agent children inherit the parent session's `cwd` —
+there is no git worktree isolation (a Tau child session IS a `Tau.Session`
+under `Tau.Sessions.Supervisor`, not a separate checkout). Brief children to
+operate on the inherited cwd, not an assumed worktree path.
+
 ## Factory cycle
 
 One factory step delivers one roadmap item end-to-end. Execute in order; do
@@ -69,21 +70,25 @@ not reorder, skip, or batch.
    `subagent_type: "implementer"`. Each child receives the issue scope and,
    if `docs/spec/SPEC-*.md` is in scope, the spec-before-code requirement
    (see below).
-6. **Run the FULL gate.** When work is committed and stable:
-   - Spawn `Agent` with `subagent_type: "critic"` on the actual PR diff.
-   - Spawn `Agent` with `subagent_type: "reviewer"` on the same diff.
-   Both MUST return PASS. Running only one half is a gate bypass.
-7. **Outcome.** Green (both PASS) → step 8. Red (either FAIL) → refine:
-   address the named findings and re-run the FULL gate. Refinement is bounded
-   to N = 3 attempts per item; then pivot (materially different approach,
-   reset attempt count); then escalate if pivot also fails.
+6. **Run the FULL gate.** When work is committed and stable, brief each gate
+   child to read the diff with `git diff origin/main...HEAD` from the
+   inherited cwd. Spawn both in order:
+   - `Agent` with `subagent_type: "critic"` — pre-merge design review.
+   - `Agent` with `subagent_type: "reviewer"` — post-impl verification.
+   Both MUST return `{"ok": true}` as the last JSON line of their response.
+   Running only one half is a gate bypass.
+7. **Outcome.** Green (both `{"ok": true}`) → step 8. Red (either
+   `{"ok": false, ...}`) → refine: address the named findings and re-run the
+   FULL gate. Refinement is bounded to N = 3 attempts per item; then pivot
+   (materially different approach, reset attempt count); then escalate if
+   pivot also fails.
 8. **Pre-merge freshness re-check.** `git fetch origin`. If `origin/main` has
    advanced since the gate ran, rebase the branch onto current `origin/main`
    and re-run the FULL gate on the rebased diff. Only a gate-green diff that
    is current with `origin/main` may merge.
 9. **Merge.** `gh pr merge <n> --merge --delete-branch`.
 10. **Sync local `main`.** `git fetch origin && git checkout main && git pull
-    --ff-only origin main`. Remove finished agent worktrees.
+    --ff-only origin main`.
 11. **Post-merge health check.** `mix compile --warnings-as-errors` and
     `mix test`. If either fails, HALT and surface to the user — do not
     continue the loop.
@@ -96,6 +101,14 @@ Mandatory and complete. MUST NOT:
 - Override a FAIL verdict or self-certify a PR as mergeable.
 - Run either half on a draft or earlier revision — always the final PR diff.
 - Merge a PR whose gate ran against a stale `origin/main` (step 8).
+
+**Gate spawn-brief contract.** When calling `Agent` for a gate role:
+- Include the PR branch and base ref in the brief, e.g.: "Read the diff with
+  `git diff origin/main...HEAD` from the inherited cwd."
+- Expect the structured `{"ok": true}` or `{"ok": false, "reason": "..."}` JSON
+  envelope as the **last line** of the child's response.
+- BOTH critic and reviewer must return `{"ok": true}` to proceed with merge.
+- If either returns `{"ok": false, ...}`, treat as FAIL and record the reason.
 
 Both verdicts are recorded in the solution tree. A re-run gate replaces the
 prior verdicts for that PR.
@@ -122,16 +135,15 @@ No human checkpoints in normal operation. Report only at:
 
 ## Spec-before-code
 
+Apply `.claude/rules/spec-before-code.md`'s spec catalog without
+modification. The rule's source-of-truth file list (`docs/spec/SPEC-*.md`
+Appendix B entries plus cross-cutting anchors like `lib/tau/application.ex`,
+`config/runtime.exs`, `lib/tau/settings/schema.ex`) is the authority — do
+not maintain a duplicate catalog here.
+
 Any PR touching files listed in a `docs/spec/SPEC-*.md` Appendix B MUST:
 1. Name the AC-N or D-xxx it advances.
 2. Include any new constraint as a spec amendment in the same PR.
-
-Current spec catalog (mandatory coverage):
-- `SPEC-USER-TURN.md` → `lib/tau/cli.ex`, `lib/tau/tui/`, `lib/tau/session.ex`, `lib/tau/application.ex`, `lib/tau/providers/*`, `lib/tau/settings/cache.ex`
-- `SPEC-CODING-AGENT.md` → `lib/tau/coding_agent.ex`, `lib/tau/coding_agent/`, `lib/tau/coding_agents/`, `lib/tau/tools/builtin/delegate.ex`, `lib/tau/cost.ex`
-- `SPEC-CIRCUIT-BREAKER.md` → `lib/tau/circuit_breaker.ex`, `lib/tau/circuit_breaker/`
-- `SPEC-MEMORY-STORE.md` → `lib/tau/memory/`
-- `SPEC-OTEL-REPORTER.md` → `lib/tau/otel_reporter.ex`, `lib/tau/otel_reporter/`
 
 ## OTP non-negotiables
 
