@@ -2157,7 +2157,9 @@ defmodule Tau.Session do
           :telemetry.execute(
             [:tau, :tool, :execute, :exception],
             %{duration: System.monotonic_time(:millisecond) - started},
-            %{tool: name, error: Exception.message(e)}
+            # D-052 / C78 (SPEC-OTEL-REPORTER): tool_call_id MUST be present so
+            # the OTel reporter can correlate this exception span to its *.start span.
+            %{tool: name, tool_call_id: call_id, error: Exception.message(e)}
           )
 
           ToolResult.new(

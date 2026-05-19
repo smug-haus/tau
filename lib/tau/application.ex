@@ -57,29 +57,35 @@ defmodule Tau.Application do
   def start(_type, _args) do
     install_file_system_log_filter()
 
-    children = [
-      Tau.Telemetry.Supervisor,
-      {Phoenix.PubSub, name: Tau.PubSub},
-      Tau.Registries,
-      Tau.Settings.Cache,
-      Tau.Settings.Watcher,
-      # Memory store (SPEC-MEMORY-STORE, ADR-0020, D-045/D-046/D-047).
-      # Must follow Settings.Watcher (data_dir/0 depends on it) and precede
-      # Finch (embedding pipeline uses Finch in PR3). Under :rest_for_one a
-      # crash cascades forward — intentional; a broken memory store should
-      # not allow new sessions to start.
-      Tau.Memory.Supervisor,
-      Tau.Permissions.RuleSet,
-      {Finch, name: Tau.Providers.Finch},
-      Tau.Providers.RateLimiter.Supervisor,
-      Tau.CircuitBreaker.Store,
-      {Task.Supervisor, name: Tau.Tools.TaskSupervisor},
-      Tau.Extensions.Loader,
-      Tau.MCP.Supervisor,
-      Tau.CodingAgent.Supervisor,
-      Tau.TUI.Supervisor,
-      Tau.Sessions.Supervisor
-    ]
+    children =
+      List.flatten([
+        Tau.Telemetry.Supervisor,
+        # SPEC-OTEL-REPORTER (#35 / AC-3, B4): conditional start gated on
+        # otel.enabled. Placed immediately after Telemetry.Supervisor so the
+        # reporter is up before any session-turn telemetry fires, but still
+        # under :rest_for_one so a reporter crash cascades correctly.
+        otel_reporter_spec(),
+        {Phoenix.PubSub, name: Tau.PubSub},
+        Tau.Registries,
+        Tau.Settings.Cache,
+        Tau.Settings.Watcher,
+        # Memory store (SPEC-MEMORY-STORE, ADR-0020, D-045/D-046/D-047).
+        # Must follow Settings.Watcher (data_dir/0 depends on it) and precede
+        # Finch (embedding pipeline uses Finch in PR3). Under :rest_for_one a
+        # crash cascades forward — intentional; a broken memory store should
+        # not allow new sessions to start.
+        Tau.Memory.Supervisor,
+        Tau.Permissions.RuleSet,
+        {Finch, name: Tau.Providers.Finch},
+        Tau.Providers.RateLimiter.Supervisor,
+        Tau.CircuitBreaker.Store,
+        {Task.Supervisor, name: Tau.Tools.TaskSupervisor},
+        Tau.Extensions.Loader,
+        Tau.MCP.Supervisor,
+        Tau.CodingAgent.Supervisor,
+        Tau.TUI.Supervisor,
+        Tau.Sessions.Supervisor
+      ])
 
     opts = [strategy: :rest_for_one, name: Tau.Supervisor]
 
@@ -95,6 +101,17 @@ defmodule Tau.Application do
 
       other ->
         other
+    end
+  end
+
+  # SPEC-OTEL-REPORTER (#35 / AC-3, B4): returns a child spec for the OTel
+  # reporter when otel.enabled is true, otherwise returns an empty list so
+  # Supervisor.start_link/2 skips it (flat-list children).
+  defp otel_reporter_spec do
+    if Application.get_env(:tau, :otel, []) |> Keyword.get(:enabled, false) do
+      [Tau.OtelReporter]
+    else
+      []
     end
   end
 
