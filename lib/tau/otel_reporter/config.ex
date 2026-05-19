@@ -20,7 +20,13 @@ defmodule Tau.OtelReporter.Config do
     :max_open_spans,
     :sweep_interval_ms,
     :sweep_age_ms,
-    :headers
+    :headers,
+    # Optional event families (SPEC §4 B1 — default off).
+    # MCP and compaction spans require their emit sites to carry span_ref
+    # before they can correlate; attach only when explicitly enabled.
+    :mcp_spans_enabled,
+    :compaction_spans_enabled,
+    :permissions_spans_enabled
   ]
 
   @type t :: %__MODULE__{
@@ -30,7 +36,10 @@ defmodule Tau.OtelReporter.Config do
           max_open_spans: pos_integer(),
           sweep_interval_ms: pos_integer(),
           sweep_age_ms: pos_integer(),
-          headers: [{String.t(), String.t()}]
+          headers: [{String.t(), String.t()}],
+          mcp_spans_enabled: boolean(),
+          compaction_spans_enabled: boolean(),
+          permissions_spans_enabled: boolean()
         }
 
   @doc """
@@ -56,7 +65,10 @@ defmodule Tau.OtelReporter.Config do
       sweep_interval_ms:
         pos_integer(Keyword.get(kw, :sweep_interval_ms, @default_sweep_interval_ms)),
       sweep_age_ms: pos_integer(Keyword.get(kw, :sweep_age_ms, @default_sweep_age_ms)),
-      headers: Keyword.get(kw, :headers, [])
+      headers: Keyword.get(kw, :headers, []),
+      mcp_spans_enabled: Keyword.get(kw, :mcp_spans_enabled, false),
+      compaction_spans_enabled: Keyword.get(kw, :compaction_spans_enabled, false),
+      permissions_spans_enabled: Keyword.get(kw, :permissions_spans_enabled, false)
     }
   end
 

@@ -31,27 +31,40 @@ defmodule Tau.OtelReporterTest do
   # ---------------------------------------------------------------------------
 
   describe "AC-3: reporter start lifecycle" do
-    test "returns :ignore when OTel SDK is not running (correct D-055 behaviour)" do
+    test "starts or gracefully declines when OTel SDK may or may not be running (C74-B4)" do
       Application.put_env(:tau, :otel, enabled: true)
-      on_exit(fn -> Application.delete_env(:tau, :otel) end)
 
-      # Without :opentelemetry app started, init/1 should return {:stop, :otel_not_started}
-      # or :ignore depending on whether the API module is loaded.
-      # Either way, no crash — the supervisor does not loop-restart.
+      on_exit(fn ->
+        Application.delete_env(:tau, :otel)
+        # Detach any handler attached by the reporter under the fixed id.
+        :telemetry.detach(Tau.OtelReporter)
+      end)
+
+      # Possible outcomes depending on the test environment:
+      #   - {:ok, pid}    — OTel SDK present and started (test build includes OTel deps)
+      #   - {:error, :ignore}               — API module absent (D-055 guard fires)
+      #   - {:error, {:shutdown, :otel_not_started}} — API present but app not running
+      # All are correct; the supervisor MUST NOT loop-restart (D-050 / C74).
       result = start_supervised(Tau.OtelReporter)
 
-      # Valid outcomes: {:error, :ignore} or {:error, {:shutdown, :otel_not_started}}.
-      # The key property: no unhandled exception.
-      assert match?({:error, _}, result) or match?({:ok, _}, result)
+      assert match?({:ok, _}, result) or
+               result in [
+                 {:error, :ignore},
+                 {:error, {:shutdown, :otel_not_started}}
+               ],
+             "Expected successful start or graceful decline, got: #{inspect(result)}"
     end
 
-    test "does not start when otel.enabled is false (no-op)" do
+    test "returns :ignore (via :ok/:undefined) when otel.enabled is false (no-op)" do
       Application.put_env(:tau, :otel, enabled: false)
       on_exit(fn -> Application.delete_env(:tau, :otel) end)
 
       result = start_supervised(Tau.OtelReporter)
-      # :ignore when disabled
-      assert match?({:error, :ignore}, result) or match?({:ok, _}, result)
+
+      # ExUnit's start_supervised wraps a GenServer returning :ignore as {:ok, :undefined}.
+      # The supervisor does NOT restart an :ignore child — which is the D-050 / C74 guarantee.
+      assert result == {:ok, :undefined},
+             "Expected {:ok, :undefined} (GenServer :ignore) when disabled, got: #{inspect(result)}"
     end
 
     test "Config.from_keyword/1 returns correct defaults" do

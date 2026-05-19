@@ -8,7 +8,7 @@
 | **Method** | PSDH (`.claude/skills/design-reasoning`); L0 + boundary contracts. |
 | **Issue** | #35 (M2) |
 
-**Changelog:** Initial draft — §0–§7 + Appendix B. D-050..D-055 introduced. C68..C78 renumbered to C69..C79 (avoid collision with SPEC-USER-TURN C68).
+**Changelog:** Initial draft — §0–§7 + Appendix B. D-050..D-055 introduced. C68..C78 renumbered to C69..C79 (avoid collision with SPEC-USER-TURN C68). PR2 amendments: C70 fixed-handler-id clarification; §4 B1 PR2 attach set revised (provider-request deferred to C76; optional events made config-gated, default off).
 
 ## 0. Why this spec exists
 
@@ -74,11 +74,13 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
   casts to the reporter. The reporter GenServer serialises all span-map mutations
   through its mailbox; the map itself is never touched from outside the GenServer.
   This is the correct isolation boundary: no ETS, no lock, no shared table.
-- **[C70-B1]** The reporter MUST attach telemetry handlers with a unique
-  `handler_id` per reporter instance (e.g. `{Tau.OtelReporter, self()}`). If a
-  second reporter instance starts (supervisor restart), it must detach the prior
-  handler before attaching a new one; stale handlers from a crashed instance leak
-  callbacks into the restarted GenServer's mailbox indefinitely.
+- **[C70-B1]** The reporter MUST attach telemetry handlers with a **fixed**
+  `handler_id` (`Tau.OtelReporter`, not pid-scoped). A pid-scoped id
+  (e.g. `{Tau.OtelReporter, self()}`) would make the crashed instance's handler
+  undetachable after restart, because the new pid cannot reconstruct the old
+  pid's id. A fixed id ensures `detach_before_attach` works across supervisor
+  restarts: the restarted reporter calls `:telemetry.detach(Tau.OtelReporter)`
+  which genuinely removes the prior instance's handler.
 
 ### Q2: What ordering assumptions are implicit?
 
@@ -160,17 +162,23 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
 **Attach contract:**
 
 - Called in `init/1`; detached in `terminate/2`.
-- Handler ID: `{Tau.OtelReporter, self()}` — unique per instance.
-- Events attached (PR2 initial set):
-  - `[:tau, :provider, :request, :start | :stop | :cancelled | :brutal_kill]`
-  - `[:tau, :tool, :execute, :start | :stop | :exception]`
-  - `[:tau, :hook, :run, :start | :stop | :exception]` (requires C77 discriminator)
-  - `[:tau, :session, :stop]`
-  - `[:tau, :circuit_breaker, :transition]`
-- Optional events (configurable; default off):
-  - `[:tau, :mcp, :rpc, :start | :stop]`
-  - `[:tau, :compaction, :start | :stop]`
-  - `[:tau, :permissions, :decision]`
+- Handler ID: `Tau.OtelReporter` (fixed, not pid-scoped — see C70 amendment).
+- Events attached in PR2 (mandatory — correlatable in this PR):
+  - `[:tau, :tool, :execute, :start | :stop | :exception]` (correlates on `tool_call_id`; C78)
+  - `[:tau, :hook, :run, :start | :stop | :exception]` (correlates on `span_ref`; C77)
+  - `[:tau, :session, :stop]` (point event)
+  - `[:tau, :circuit_breaker, :transition]` (point event)
+- **Deferred to C76 (PR3):**
+  - `[:tau, :provider, :request, :start | :stop | :cancelled | :brutal_kill]` — the
+    emit site does not yet echo a `span_ref` through `*.stop`; attaching in PR2 would
+    leak every provider span. Attach when C76 emit-site amendment lands.
+- Optional events (configurable via `Config`; **default off** — SPEC §4 B1):
+  - `[:tau, :mcp, :rpc, :start | :stop]` — enabled by `otel.mcp_spans_enabled: true`
+  - `[:tau, :compaction, :start | :stop]` — enabled by `otel.compaction_spans_enabled: true`
+  - `[:tau, :permissions, :decision]` — enabled by `otel.permissions_spans_enabled: true`
+  - Note: MCP and compaction emit sites do not yet carry `span_ref`; when enabled,
+    spans will leak until their emit sites are amended. The config flag is an explicit
+    operator opt-in acknowledging this.
 
 **Handler callback:**
 

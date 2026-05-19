@@ -202,7 +202,10 @@ defmodule Tau.OtelReporter do
   # Private — handler attach/detach (D-050, C70-B1)
   # ---------------------------------------------------------------------------
 
-  defp handler_id, do: {__MODULE__, self()}
+  # C70 amended: fixed handler id (not pid-scoped) so a restarted reporter can
+  # detach the crashed instance's handler. A pid-scoped id would be undetachable
+  # after crash because the new pid cannot construct the old pid's id.
+  defp handler_id, do: __MODULE__
 
   defp attach_handlers(config) do
     # C70: detach any stale handler from a prior instance before attaching.
@@ -222,12 +225,19 @@ defmodule Tau.OtelReporter do
     :telemetry.detach(handler_id())
   end
 
-  defp build_event_list(_config) do
+  defp build_event_list(config) do
+    # PR2 mandatory set: only event families whose *.start/*.stop emit sites
+    # genuinely carry a correlating key in this PR.
+    #
+    # - provider.request: DEFERRED to C76. The emit site does not yet echo a
+    #   span_ref through *.stop; attaching now would leak every provider span
+    #   (*.start opens with make_ref(), *.stop discards because span_ref is nil).
+    #   Attach when C76 emit-site amendment lands.
+    # - tool.execute: correlates on tool_call_id (D-052 / C78 fix in PR2). ✓
+    # - hook.run: correlates on span_ref discriminator (C77 fix in PR2). ✓
+    # - session.stop: point event (open+close immediately). ✓
+    # - circuit_breaker.transition: point event. ✓
     mandatory = [
-      [:tau, :provider, :request, :start],
-      [:tau, :provider, :request, :stop],
-      [:tau, :provider, :request, :cancelled],
-      [:tau, :provider, :request, :brutal_kill],
       [:tau, :tool, :execute, :start],
       [:tau, :tool, :execute, :stop],
       [:tau, :tool, :execute, :exception],
@@ -238,17 +248,29 @@ defmodule Tau.OtelReporter do
       [:tau, :circuit_breaker, :transition]
     ]
 
-    # Optional events (always included when OTel is enabled).
-    optional = [
-      [:tau, :mcp, :rpc, :start],
-      [:tau, :mcp, :rpc, :stop],
-      [:tau, :compaction, :start],
-      [:tau, :compaction, :stop],
-      [:tau, :permissions, :decision]
-    ]
+    # Optional events (SPEC §4 B1: configurable, default off).
+    # MCP and compaction emit sites do not yet carry span_ref — when enabled,
+    # spans will leak until their emit sites are amended. The config flag is
+    # the operator's explicit opt-in acknowledging this limitation.
+    optional =
+      []
+      |> maybe_add(config.mcp_spans_enabled, [
+        [:tau, :mcp, :rpc, :start],
+        [:tau, :mcp, :rpc, :stop]
+      ])
+      |> maybe_add(config.compaction_spans_enabled, [
+        [:tau, :compaction, :start],
+        [:tau, :compaction, :stop]
+      ])
+      |> maybe_add(config.permissions_spans_enabled, [
+        [:tau, :permissions, :decision]
+      ])
 
     mandatory ++ optional
   end
+
+  defp maybe_add(acc, true, events), do: acc ++ events
+  defp maybe_add(acc, _, _events), do: acc
 
   # ---------------------------------------------------------------------------
   # Private — sweep timer (D-053)
