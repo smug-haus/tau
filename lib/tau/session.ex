@@ -803,7 +803,18 @@ defmodule Tau.Session do
       %{model: data.model}
       |> maybe_put_tools(skill_activation_tool_spec(data.skills))
 
-    case data.provider.stream(data.messages, stream_opts, ctx) do
+    # AC-7 (SPEC-CIRCUIT-BREAKER): wrap the provider call with the circuit
+    # breaker façade. The thunk returns `{:ok, stream}` or `{:error, reason}`;
+    # the façade records the outcome and, when the breaker is `:open`, short-
+    # circuits with `{:error, :circuit_open}` before the thunk is invoked
+    # (B3 contract, D-043). An open breaker falls through to the synchronous
+    # error path below and surfaces as a user-visible `%Events.MessageEnd{}`
+    # — it does NOT trigger ADR-0012 fallback (the fallback path is only
+    # entered via in-stream `%PEvent.Error{retryable?: true}` events, not by
+    # synchronous `{:error, _}` returns from this call site).
+    case Tau.CircuitBreaker.call(data.provider, [], fn ->
+           data.provider.stream(data.messages, stream_opts, ctx)
+         end) do
       {:ok, stream} ->
         # ADR-0012: tag each stream's mailbox traffic with a fresh ref so
         # stragglers from a killed predecessor (e.g. a provider task whose
@@ -2233,6 +2244,16 @@ defmodule Tau.Session do
 
   defp describe_provider_error(:oauth_malformed) do
     Tau.Providers.Anthropic.Auth.describe_error({:error, :oauth_malformed})
+  end
+
+  # AC-7 (SPEC-CIRCUIT-BREAKER §4 B3): breaker is open — surface a
+  # user-actionable message. The user can wait for the cooldown or switch
+  # providers; the exact cooldown duration is not surfaced here because it
+  # is an ETS-internal value. Generic wording avoids surfacing internals.
+  defp describe_provider_error(:circuit_open) do
+    "Provider is temporarily unavailable (circuit breaker open). " <>
+      "The provider has returned too many consecutive errors. " <>
+      "Please wait a moment and try again, or switch providers."
   end
 
   defp describe_provider_error(other), do: inspect(other)
