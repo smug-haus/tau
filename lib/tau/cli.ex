@@ -327,41 +327,46 @@ defmodule Tau.CLI do
   # Consume PubSub events for the headless run until SessionEnd.
   # Returns 0 on a clean stop, 1 on any error or abnormal end.
   #
-  # Terminal stop_reason atoms are those providers actually emit:
-  #   :stop   — Anthropic `end_turn`, OpenAI `stop`, Replay done (all
-  #              normalised to :stop by their respective wire decoders).
-  #   :length — Anthropic/OpenAI `max_tokens` / `length` (normalised by
-  #              openai_chat_wire.ex:194 and anthropic.ex:235); context
-  #              window exhausted but still a usable response → exit 0.
-  # Note: `:end_turn` and `:max_tokens` are NOT emitted by any provider;
-  # they were wire-format strings, not normalised atoms. Using them here
-  # would cause context-window stops to fall through to the error branch.
+  # Logic: enumerate FAILURE stop_reasons (exit 1) and the CONTINUE
+  # stop_reason (loop); every other terminal stop_reason means the model
+  # produced a final assistant message → exit 0.
+  #
+  # Failure set (verified against session.ex, message.ex, providers/):
+  #   :error            — session-level error (session.ex:972, 1004, 2526, 2816)
+  #   :tool_loop_aborted — tool iteration cap reached (session.ex:1844)
+  #   :aborted          — coding-agent subprocess exited -2 (session.ex:2871)
+  #   :compaction_failed — 3 consecutive compaction failures (session.ex:1743)
+  #
+  # Continue: :tool_use — more tool iterations follow; do NOT exit.
+  #
+  # Everything else (:stop, :length, :stop_sequence, :end_turn,
+  # :content_filter, and any future provider atom) means "model finished
+  # its turn and produced a usable response" → exit 0.  This inversion
+  # ensures new provider atoms default to success rather than misreporting
+  # as crashes (f-1 fix, D-058 amendment).
   @doc false
   def drain_run_loop(session_id) do
     receive do
       %Events.MessageEnd{session_id: ^session_id, message: msg} ->
         case msg.stop_reason do
-          stop when stop in [:stop, :length] ->
+          :tool_use ->
+            # More tool iterations follow in the same session; keep waiting.
+            drain_run_loop(session_id)
+
+          failure when failure in [:error, :tool_loop_aborted, :aborted, :compaction_failed] ->
+            error_text = extract_error_text(msg)
+            IO.puts(:stderr, "session error (#{failure}): #{error_text}")
+            Tau.stop(session_id)
+            drain_session_end(session_id, 1)
+
+          _completed ->
+            # Any other stop_reason means the model produced a final assistant
+            # message (:stop, :length, :stop_sequence, :content_filter, etc.).
             text = extract_assistant_text(msg)
             if text != "", do: IO.puts(text)
             # Stop the session to flush JSONL, then await SessionEnd.
             Tau.stop(session_id)
             drain_session_end(session_id, 0)
-
-          :tool_use ->
-            # More tool iterations follow in the same session; keep waiting.
-            drain_run_loop(session_id)
-
-          :tool_loop_aborted ->
-            IO.puts(:stderr, "session aborted: tool iteration cap reached")
-            Tau.stop(session_id)
-            drain_session_end(session_id, 1)
-
-          reason ->
-            error_text = extract_error_text(msg)
-            IO.puts(:stderr, "session error (#{reason}): #{error_text}")
-            Tau.stop(session_id)
-            drain_session_end(session_id, 1)
         end
 
       %Events.SessionEnd{session_id: ^session_id, reason: reason} ->

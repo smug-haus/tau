@@ -212,6 +212,125 @@ defmodule Tau.CLI.HeadlessRunTest do
   end
 
   # ---------------------------------------------------------------------------
+  # f-1 regression: :tool_use continuation and success-atom coverage (f-3)
+  # ---------------------------------------------------------------------------
+
+  describe "drain_run_loop stop_reason inverted-logic coverage (f-1 fix)" do
+    # Inject PubSub events directly into the test process mailbox so we can
+    # exercise drain_run_loop/1's logic without a full multi-turn FSM session.
+
+    test ":tool_use causes loop to continue, then terminal stop exits 0" do
+      # Regression test: :tool_use must NOT exit — it must keep waiting.
+      # We inject a :tool_use MessageEnd followed by a :stop MessageEnd and
+      # a SessionEnd into the mailbox, then assert exit_code == 0.
+      session_id = Tau.Session.generate_id()
+
+      msg_tool_use = %Tau.Message.Assistant{
+        timestamp: DateTime.utc_now(),
+        content: [],
+        stop_reason: :tool_use
+      }
+
+      msg_stop = %Tau.Message.Assistant{
+        timestamp: DateTime.utc_now(),
+        content: [%{type: :text, text: "done"}],
+        stop_reason: :stop
+      }
+
+      send(self(), %Tau.Session.Events.MessageEnd{session_id: session_id, message: msg_tool_use})
+      send(self(), %Tau.Session.Events.MessageEnd{session_id: session_id, message: msg_stop})
+      # drain_session_end waits for SessionEnd after Tau.stop/1 is called; inject it.
+      send(self(), %Tau.Session.Events.SessionEnd{session_id: session_id, reason: :normal})
+
+      exit_code = Tau.CLI.drain_run_loop(session_id)
+
+      assert exit_code == 0,
+             "expected exit 0 after :tool_use continuation + :stop terminal; got #{exit_code}"
+    end
+
+    test ":stop_sequence maps to exit 0 (f-1 regression lock)" do
+      # :stop_sequence is emitted by Anthropic when a stop_sequence is hit
+      # (anthropic.ex:237). Under the old enumeration it fell through to exit 1.
+      # Under the new failure-list logic it must be exit 0.
+      session_id = Tau.Session.generate_id()
+
+      msg = %Tau.Message.Assistant{
+        timestamp: DateTime.utc_now(),
+        content: [%{type: :text, text: "stopped at seq"}],
+        stop_reason: :stop_sequence
+      }
+
+      send(self(), %Tau.Session.Events.MessageEnd{session_id: session_id, message: msg})
+      send(self(), %Tau.Session.Events.SessionEnd{session_id: session_id, reason: :normal})
+
+      exit_code = Tau.CLI.drain_run_loop(session_id)
+
+      assert exit_code == 0,
+             "expected exit 0 for :stop_sequence (completed turn); got #{exit_code}"
+    end
+
+    test ":content_filter maps to exit 0 (unknown-atom defaults to success)" do
+      # OpenAI may emit "content_filter" which maps to :content_filter via
+      # String.to_atom (openai_chat_wire.ex:196). Must exit 0.
+      session_id = Tau.Session.generate_id()
+
+      msg = %Tau.Message.Assistant{
+        timestamp: DateTime.utc_now(),
+        content: [%{type: :text, text: "filtered"}],
+        stop_reason: :content_filter
+      }
+
+      send(self(), %Tau.Session.Events.MessageEnd{session_id: session_id, message: msg})
+      send(self(), %Tau.Session.Events.SessionEnd{session_id: session_id, reason: :normal})
+
+      exit_code = Tau.CLI.drain_run_loop(session_id)
+
+      assert exit_code == 0,
+             "expected exit 0 for :content_filter (unknown provider atom → success); got #{exit_code}"
+    end
+
+    test ":aborted maps to exit 1" do
+      # :aborted is produced by session.ex:2871 when coding agent exits with -2.
+      session_id = Tau.Session.generate_id()
+
+      msg = %Tau.Message.Assistant{
+        timestamp: DateTime.utc_now(),
+        content: [],
+        stop_reason: :aborted,
+        error_message: "aborted"
+      }
+
+      send(self(), %Tau.Session.Events.MessageEnd{session_id: session_id, message: msg})
+      send(self(), %Tau.Session.Events.SessionEnd{session_id: session_id, reason: :error})
+
+      exit_code = Tau.CLI.drain_run_loop(session_id)
+
+      assert exit_code == 1,
+             "expected exit 1 for :aborted; got #{exit_code}"
+    end
+
+    test ":compaction_failed maps to exit 1" do
+      # :compaction_failed is produced by session.ex:1743 after 3 failures.
+      session_id = Tau.Session.generate_id()
+
+      msg = %Tau.Message.Assistant{
+        timestamp: DateTime.utc_now(),
+        content: [],
+        stop_reason: :compaction_failed,
+        error_message: "compaction failed"
+      }
+
+      send(self(), %Tau.Session.Events.MessageEnd{session_id: session_id, message: msg})
+      send(self(), %Tau.Session.Events.SessionEnd{session_id: session_id, reason: :error})
+
+      exit_code = Tau.CLI.drain_run_loop(session_id)
+
+      assert exit_code == 1,
+             "expected exit 1 for :compaction_failed; got #{exit_code}"
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # B1: --system-prompt injection — text reaches the model (via session.ex).
   # ---------------------------------------------------------------------------
 
