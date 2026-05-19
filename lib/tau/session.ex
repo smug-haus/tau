@@ -7,6 +7,7 @@ defmodule Tau.Session do
       :awaiting_user
       :provider_streaming
       :tool_executing
+      :compacting
       :stopped
 
   Cross-cutting events (`{:cancel, _}`, `{:DOWN, _, ...}`) are handled
@@ -632,7 +633,26 @@ defmodule Tau.Session do
           # active session. Persisted line-by-line via the
           # `coding_agent_cost` JSONL event so `/resume` can fold
           # the totals back.
-          coding_agent_costs: coding_agent_costs_from_preload(preload)
+          coding_agent_costs: coding_agent_costs_from_preload(preload),
+          # D-048 / D-049 / C67-B4: async compaction worker state.
+          #
+          # `compaction_task` — pid of the running compaction worker task, or nil.
+          # Set in the {:async_compact, _} arm of handle_builtin_command/4;
+          # cleared by every terminal clause of the :compacting state (worker
+          # success, worker crash, timeout, :cancel).
+          #
+          # `compaction_monitor` — monitor ref returned by Task.Supervisor.async_nolink/3,
+          # the discriminating guard key for the five terminal clauses. Presence
+          # guards on demonitor/exit calls (BLOCKING-2/3 fixes).
+          #
+          # `compaction_failures` — per-session consecutive failure counter (D-016).
+          # Shared across sync (maybe_compact/2) and async paths — NOT path-tagged.
+          # Reset to 0 on any successful compaction; NOT reset by :cancel (a
+          # cancelled compaction is not a success; resetting would let users mask
+          # a broken compactor). Re-initialised to 0 on resume/fork (not persisted).
+          compaction_task: nil,
+          compaction_monitor: nil,
+          compaction_failures: 0
         }
 
         {:ok, :awaiting_user, data}
@@ -1093,6 +1113,18 @@ defmodule Tau.Session do
       Process.exit(data.command_task, :brutal_kill)
     end
 
+    # C67-B4 (BLOCKING-3 fix): guard every demonitor/exit on the compaction
+    # worker fields — an unguarded demonitor(nil) crashes the FSM. This handler
+    # runs in _state so it fires even outside :compacting (e.g. user types
+    # /cancel while the FSM is in :awaiting_user with no compaction running).
+    # compaction_failures is NOT reset by :cancel — a cancelled compaction is
+    # not a success; resetting would let users mask a broken compactor.
+    if data.compaction_monitor,
+      do: Process.demonitor(data.compaction_monitor, [:flush])
+
+    if data.compaction_task && Process.alive?(data.compaction_task),
+      do: Process.exit(data.compaction_task, :brutal_kill)
+
     # SPEC-CODING-AGENT D-032: subprocess lifecycle bound to session.
     # Cancel the dispatcher cooperatively; it will emit a synthetic
     # `%Done{exit_status: -2}` event that we ignore here (the cancel
@@ -1131,7 +1163,11 @@ defmodule Tau.Session do
          # cancel. Workspace is per-session — preserved.
          coding_agent_dispatcher: nil,
          coding_agent_pending: nil,
-         coding_agent_blocks: []
+         coding_agent_blocks: [],
+         # C67-B4: clear compaction worker fields. compaction_failures
+         # is intentionally NOT reset (see guard comment above).
+         compaction_task: nil,
+         compaction_monitor: nil
      }}
   end
 
@@ -1224,6 +1260,158 @@ defmodule Tau.Session do
   def handle_event({:call, from}, {:swap_model, _model}, _state, _data) do
     {:keep_state_and_data, [{:reply, from, {:error, :busy}}]}
   end
+
+  # ---------------------------------------------------------------------------
+  # :compacting state — five terminal clauses (D-048, D-049, C67-B4)
+  #
+  # Source order is LOAD-BEARING. Clauses must precede the catch-all below.
+  # Ordering rationale:
+  #
+  #   Clause 1  — worker success {ref, result}: typed, guards on compaction_monitor
+  #   Clause 2a — benign {:DOWN, :normal}: typed, guards on compaction_monitor
+  #   Clause 2b — crash {:DOWN, reason}: typed, guards on compaction_monitor
+  #   Clause 3  — live timeout: typed, guards on compaction_task pid
+  #   Clause 4  — stale timeout: catch-all (MUST come AFTER Clause 3)
+  #
+  # After any terminal clause both compaction_task and compaction_monitor are
+  # set to nil. Stale {ref,result} / {:DOWN} messages that arrive after the
+  # fields are cleared fail the %{compaction_monitor: ref} guard and fall
+  # through to the catch-all (which drops them via {:keep_state, data}).
+  # This is the BLOCKING-1 fix.
+  #
+  # All five clauses MUST precede the catch-all (next clause below).
+  # ---------------------------------------------------------------------------
+
+  # Clause 1 — worker success: Task.Supervisor.async_nolink/3 delivers
+  # {ref, result} on completion. Guard on compaction_monitor (the ref)
+  # ensures stale results from a prior worker (cleared fields) are ignored.
+  def handle_event(:info, {ref, result}, :compacting, %{compaction_monitor: ref} = data)
+      when is_reference(ref) do
+    # Demonitor first to flush any pending {:DOWN} that is already enqueued.
+    # Process.demonitor with [:flush] removes the monitor and purges any
+    # {:DOWN, ref, ...} already in the mailbox. Combined with clearing both
+    # worker fields, stale {:DOWN} messages from this worker can no longer
+    # match Clauses 2a/2b (BLOCKING-1 fix).
+    Process.demonitor(ref, [:flush])
+
+    data = %{data | compaction_task: nil, compaction_monitor: nil}
+
+    {notice, data} =
+      case result do
+        {:ok, new_messages, summary_text} ->
+          data =
+            persist_event(data, "compaction", %{
+              before_count: length(data.messages),
+              after_count: length(new_messages),
+              summary: format_summary_for_persist(summary_text)
+            })
+
+          :telemetry.execute(
+            [:tau, :compaction, :stop],
+            %{system_time: System.system_time()},
+            %{session_id: data.id, after_count: length(new_messages), async: true}
+          )
+
+          data = %{data | messages: new_messages, compaction_failures: 0}
+          {"Compaction complete.", data}
+
+        {:error, reason} ->
+          :telemetry.execute(
+            [:tau, :compaction, :exception],
+            %{system_time: System.system_time()},
+            %{session_id: data.id, reason: reason, kind: :compactor_error, async: true}
+          )
+
+          failures = data.compaction_failures + 1
+          data = %{data | compaction_failures: failures}
+          {"Compaction failed (#{failures} consecutive failure(s)).", data}
+      end
+
+    broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: notice})
+
+    {:next_state, :awaiting_user, data}
+  end
+
+  # Clause 2a — benign {:DOWN, :normal}: async_nolink emits both {ref, result}
+  # AND {:DOWN, ref, :process, _, :normal} on clean task exit. The mailbox
+  # ordering is non-deterministic; :normal DOWN may arrive before the result.
+  # Guard on compaction_monitor; do NOT demonitor here — the result (Clause 1)
+  # may arrive next and will perform the demonitor+flush. Keep state.
+  def handle_event(
+        :info,
+        {:DOWN, ref, :process, _pid, :normal},
+        :compacting,
+        %{compaction_monitor: ref} = data
+      )
+      when is_reference(ref) do
+    # The pending {ref, result} message will drive Clause 1. Keep waiting.
+    {:keep_state, data}
+  end
+
+  # Clause 2b — worker crash: {:DOWN, reason} where reason != :normal means
+  # the task process died without delivering a result. Increment failure counter,
+  # clear worker fields, return to :awaiting_user.
+  def handle_event(
+        :info,
+        {:DOWN, ref, :process, _pid, reason},
+        :compacting,
+        %{compaction_monitor: ref} = data
+      )
+      when is_reference(ref) do
+    :telemetry.execute(
+      [:tau, :compaction, :exception],
+      %{system_time: System.system_time()},
+      %{session_id: data.id, reason: reason, kind: :worker_down, async: true}
+    )
+
+    failures = data.compaction_failures + 1
+    notice = "Compaction worker crashed (#{failures} consecutive failure(s))."
+    data = %{data | compaction_task: nil, compaction_monitor: nil, compaction_failures: failures}
+    broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: notice})
+
+    {:next_state, :awaiting_user, data}
+  end
+
+  # Clause 3 — live timeout: fired while the worker is still running.
+  # Guard on compaction_task pid ensures this is the timeout for the CURRENT
+  # worker. Only this clause calls demonitor/exit (BLOCKING-2 fix: an unguarded
+  # demonitor(nil) would crash the FSM). MUST be ordered BEFORE Clause 4.
+  def handle_event(
+        :info,
+        {:compaction_timeout, pid, _ms},
+        :compacting,
+        %{compaction_task: pid} = data
+      )
+      when is_pid(pid) do
+    if data.compaction_monitor, do: Process.demonitor(data.compaction_monitor, [:flush])
+
+    if pid && Process.alive?(pid), do: Process.exit(pid, :brutal_kill)
+
+    :telemetry.execute(
+      [:tau, :compaction, :exception],
+      %{system_time: System.system_time()},
+      %{session_id: data.id, kind: :timeout, async: true}
+    )
+
+    failures = data.compaction_failures + 1
+    notice = "Compaction timed out (#{failures} consecutive failure(s))."
+    data = %{data | compaction_task: nil, compaction_monitor: nil, compaction_failures: failures}
+    broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: notice})
+
+    {:next_state, :awaiting_user, data}
+  end
+
+  # Clause 4 — stale timeout: arrives AFTER the worker already completed
+  # (Clause 1 cleared compaction_task to nil, so pid != data.compaction_task).
+  # Drop with NO demonitor — both worker fields are already nil (BLOCKING-2 fix).
+  # MUST be ordered AFTER Clause 3.
+  def handle_event(:info, {:compaction_timeout, _pid, _ms}, _state, data) do
+    {:keep_state, data}
+  end
+
+  # ---------------------------------------------------------------------------
+  # End of :compacting terminal clauses
+  # ---------------------------------------------------------------------------
 
   def handle_event(_type, _event, _state, data), do: {:keep_state, data}
 
@@ -1347,43 +1535,35 @@ defmodule Tau.Session do
       }
     )
 
-    data = maybe_compact(data, msg.usage || %{})
+    # D-016: maybe_compact/2 delegates to do_compact/2 which can return
+    # {:abort, data} when compaction_failures reaches 3 consecutive failures
+    # (shared across sync and async paths — NOT path-tagged). On abort, surface
+    # the failure as a synthetic assistant message with stop_reason:
+    # :compaction_failed and return to :awaiting_user without continuing.
+    # {:soft_error, data} increments the counter but lets the turn continue.
+    # Plain data (or unwrapped soft_error) proceeds to tool dispatch.
+    case maybe_compact(data, msg.usage || %{}) do
+      {:abort, data} ->
+        abort_msg =
+          Assistant.new(
+            stop_reason: :compaction_failed,
+            content: [
+              %{
+                type: :text,
+                text:
+                  "Turn aborted: repeated or background compaction failure (3 consecutive errors). " <>
+                    "Check the compactor configuration or contact support if this persists."
+              }
+            ]
+          )
 
-    # ADR-0012: per-message fallback semantics. Restore the working
-    # provider to the user-configured original_provider so the next
-    # turn's :start_provider re-derives the chain freshly and starts
-    # against the primary. A still-running tool call keeps using the
-    # provider that produced *this* message until the next provider
-    # turn — that's correct: the tool result feeds the same model
-    # that asked for the call.
-    data = %{data | provider: data.original_provider, fallback_chain_remaining: []}
+        data =
+          data
+          |> append_message(abort_msg)
+          |> persist_event("assistant_message", message_to_data(abort_msg))
 
-    # ADR-0013 (#16): skill activation is per-turn by default. The
-    # skill's lifetime ends when the model decides the task is complete
-    # (`:end_turn`). Tool-call turns keep the active skill so subsequent
-    # dispatch is still gated; only `:end_turn` clears it.
-    #
-    # ADR-0015 sub-agent persona: when `:persona_lifetime` is `:session`
-    # (set by `Tau.Tools.Builtin.Agent` at start time) the persona is
-    # pinned for the session's whole life — `:end_turn` does NOT clear
-    # it. The child can't dismiss its own persona this way, which is
-    # the safety property the ADR demands.
-    data =
-      if msg.stop_reason == :end_turn and Map.get(data, :persona_lifetime, :turn) == :turn do
-        %{data | active_skill: nil}
-      else
-        data
-      end
+        broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: abort_msg})
 
-    tool_calls = Enum.filter(msg.content, &match?(%{type: :tool_call}, &1))
-
-    cond do
-      tool_calls == [] ->
-        # ADR-0017: drop the now-stale cancel flag — the stream that
-        # owned it has finished. The next turn's :start_provider
-        # allocates a fresh one. Same applies to ADR-0012's stream_ref.
-        # D-005: reset the per-turn tool-iteration counter on clean
-        # return to :awaiting_user.
         {:next_state, :awaiting_user,
          %{
            data
@@ -1394,86 +1574,174 @@ defmodule Tau.Session do
              tool_iterations: 0
          }}
 
-      true ->
-        # D-005 / AC-6 (SPEC-USER-TURN [C24]): enforce the per-turn
-        # tool-call iteration cap before dispatching the next round.
-        # Check against the already-dispatched count so that cap=N allows
-        # exactly N dispatches (tool_iterations counts rounds dispatched).
-        cap = data.max_tool_iterations
+      compact_result ->
+        # Unwrap {:soft_error, data} — soft_error increments compaction_failures
+        # but the turn continues normally.
+        data =
+          if match?({:soft_error, _}, compact_result),
+            do: elem(compact_result, 1),
+            else: compact_result
 
-        if data.tool_iterations >= cap do
-          aborted_iter = data.tool_iterations
+        # ADR-0012: per-message fallback semantics. Restore the working
+        # provider to the user-configured original_provider so the next
+        # turn's :start_provider re-derives the chain freshly and starts
+        # against the primary. A still-running tool call keeps using the
+        # provider that produced *this* message until the next provider
+        # turn — that's correct: the tool result feeds the same model
+        # that asked for the call.
+        data = %{data | provider: data.original_provider, fallback_chain_remaining: []}
 
-          :telemetry.execute(
-            [:tau, :session, :tool_iteration_cap],
-            %{iterations: aborted_iter, cap: cap},
-            %{session_id: data.id}
-          )
-
-          abort_msg =
-            Assistant.new(
-              stop_reason: :tool_loop_aborted,
-              content: [
-                %{
-                  type: :text,
-                  text:
-                    "Tool-call iteration cap (#{cap}) exceeded. Turn aborted to prevent runaway loops."
-                }
-              ]
-            )
-
-          data =
+        # ADR-0013 (#16): skill activation is per-turn by default. The
+        # skill's lifetime ends when the model decides the task is complete
+        # (`:end_turn`). Tool-call turns keep the active skill so subsequent
+        # dispatch is still gated; only `:end_turn` clears it.
+        #
+        # ADR-0015 sub-agent persona: when `:persona_lifetime` is `:session`
+        # (set by `Tau.Tools.Builtin.Agent` at start time) the persona is
+        # pinned for the session's whole life — `:end_turn` does NOT clear
+        # it. The child can't dismiss its own persona this way, which is
+        # the safety property the ADR demands.
+        data =
+          if msg.stop_reason == :end_turn and Map.get(data, :persona_lifetime, :turn) == :turn do
+            %{data | active_skill: nil}
+          else
             data
-            |> append_message(abort_msg)
-            |> persist_event("assistant_message", message_to_data(abort_msg))
+          end
 
-          broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: abort_msg})
+        tool_calls = Enum.filter(msg.content, &match?(%{type: :tool_call}, &1))
 
-          {:next_state, :awaiting_user,
-           %{
-             data
-             | provider_task: nil,
-               assembler: nil,
-               cancel_flag: nil,
-               stream_ref: nil,
-               tool_iterations: 0
-           }}
-        else
-          dispatch_tools(tool_calls, %{data | tool_iterations: data.tool_iterations + 1})
+        cond do
+          tool_calls == [] ->
+            # ADR-0017: drop the now-stale cancel flag — the stream that
+            # owned it has finished. The next turn's :start_provider
+            # allocates a fresh one. Same applies to ADR-0012's stream_ref.
+            # D-005: reset the per-turn tool-iteration counter on clean
+            # return to :awaiting_user.
+            {:next_state, :awaiting_user,
+             %{
+               data
+               | provider_task: nil,
+                 assembler: nil,
+                 cancel_flag: nil,
+                 stream_ref: nil,
+                 tool_iterations: 0
+             }}
+
+          true ->
+            # D-005 / AC-6 (SPEC-USER-TURN [C24]): enforce the per-turn
+            # tool-call iteration cap before dispatching the next round.
+            # Check against the already-dispatched count so that cap=N allows
+            # exactly N dispatches (tool_iterations counts rounds dispatched).
+            cap = data.max_tool_iterations
+
+            if data.tool_iterations >= cap do
+              aborted_iter = data.tool_iterations
+
+              :telemetry.execute(
+                [:tau, :session, :tool_iteration_cap],
+                %{iterations: aborted_iter, cap: cap},
+                %{session_id: data.id}
+              )
+
+              abort_msg =
+                Assistant.new(
+                  stop_reason: :tool_loop_aborted,
+                  content: [
+                    %{
+                      type: :text,
+                      text:
+                        "Tool-call iteration cap (#{cap}) exceeded. Turn aborted to prevent runaway loops."
+                    }
+                  ]
+                )
+
+              data =
+                data
+                |> append_message(abort_msg)
+                |> persist_event("assistant_message", message_to_data(abort_msg))
+
+              broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: abort_msg})
+
+              {:next_state, :awaiting_user,
+               %{
+                 data
+                 | provider_task: nil,
+                   assembler: nil,
+                   cancel_flag: nil,
+                   stream_ref: nil,
+                   tool_iterations: 0
+               }}
+            else
+              dispatch_tools(tool_calls, %{data | tool_iterations: data.tool_iterations + 1})
+            end
         end
     end
   end
 
+  # Thin sync adapter: decides whether to compact, then delegates to do_compact/2.
+  # Returns data | {:abort, data} (D-016: on 3 consecutive failures, aborts the turn).
   defp maybe_compact(data, usage) do
     compactor = Tau.Compactor.impl()
 
     if compactor.should_compact?(data.messages, usage) do
-      :telemetry.execute([:tau, :compaction, :start], %{system_time: System.system_time()}, %{
-        session_id: data.id,
-        message_count: length(data.messages)
-      })
-
-      case compactor.compact(data.messages, %{provider: data.provider, model: data.model}) do
-        {:ok, new_messages, summary_text} ->
-          data =
-            persist_event(data, "compaction", %{
-              before_count: length(data.messages),
-              after_count: length(new_messages),
-              summary: format_summary_for_persist(summary_text)
-            })
-
-          :telemetry.execute([:tau, :compaction, :stop], %{system_time: System.system_time()}, %{
-            session_id: data.id,
-            after_count: length(new_messages)
-          })
-
-          %{data | messages: new_messages}
-
-        {:error, _} ->
-          data
-      end
+      do_compact(data, %{provider: data.provider, model: data.model})
     else
       data
+    end
+  end
+
+  # Shared compaction core — invoked by the sync post-turn path (maybe_compact/2)
+  # and by the async `:compacting` worker handler (Clause 1 in handle_event).
+  #
+  # Returns:
+  #   data2            — {:ok, ...} success; messages swapped, telemetry emitted,
+  #                      compaction_failures reset to 0
+  #   {:soft_error, data2} — {:error, ...} but failures < 3; caller broadcasts
+  #                      a notice and continues
+  #   {:abort, data2}  — {:error, ...} and failures >= 3 (D-016); caller aborts
+  #                      the turn with stop_reason: :compaction_failed
+  #
+  # D-016: compaction_failures is SHARED across sync and async paths (NOT path-tagged).
+  # A broken compactor is a session-level fault; alternating paths must not
+  # mask it by keeping separate counters.
+  defp do_compact(data, ctx) do
+    compactor = Tau.Compactor.impl()
+
+    :telemetry.execute([:tau, :compaction, :start], %{system_time: System.system_time()}, %{
+      session_id: data.id,
+      message_count: length(data.messages)
+    })
+
+    case compactor.compact(data.messages, ctx) do
+      {:ok, new_messages, summary_text} ->
+        data =
+          persist_event(data, "compaction", %{
+            before_count: length(data.messages),
+            after_count: length(new_messages),
+            summary: format_summary_for_persist(summary_text)
+          })
+
+        :telemetry.execute([:tau, :compaction, :stop], %{system_time: System.system_time()}, %{
+          session_id: data.id,
+          after_count: length(new_messages)
+        })
+
+        %{data | messages: new_messages, compaction_failures: 0}
+
+      {:error, reason} ->
+        :telemetry.execute(
+          [:tau, :compaction, :exception],
+          %{system_time: System.system_time()},
+          %{session_id: data.id, reason: reason, kind: :compactor_error}
+        )
+
+        failures = data.compaction_failures + 1
+
+        if failures >= 3 do
+          {:abort, %{data | compaction_failures: failures}}
+        else
+          {:soft_error, %{data | compaction_failures: failures}}
+        end
     end
   end
 
@@ -3214,6 +3482,30 @@ defmodule Tau.Session do
         broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: "Error: " <> text})
         {:keep_state, data}
 
+      {:async_compact, notice} ->
+        # C67-B4: the only outcome that changes FSM state (to :compacting).
+        # Does NOT call process_user_message/2 (D-042).
+        broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: notice})
+
+        ctx = %{provider: data.provider, model: data.model}
+        timeout_ms = Application.get_env(:tau, :compaction_timeout_ms, 60_000)
+
+        task =
+          Task.Supervisor.async_nolink(Tau.Tools.TaskSupervisor, fn ->
+            Tau.Compactor.impl().compact(data.messages, ctx)
+          end)
+
+        :telemetry.execute([:tau, :compaction, :start], %{system_time: System.system_time()}, %{
+          session_id: data.id,
+          message_count: length(data.messages),
+          async: true
+        })
+
+        Process.send_after(self(), {:compaction_timeout, task.pid, timeout_ms}, timeout_ms)
+
+        {:next_state, :compacting,
+         %{data | compaction_task: task.pid, compaction_monitor: task.ref}}
+
       :passthrough ->
         # Fall through to the normal provider turn with the original message.
         process_user_message(original_msg, data)
@@ -3223,6 +3515,7 @@ defmodule Tau.Session do
   defp outcome_tag({:notice, _}), do: :notice
   defp outcome_tag({:mutate, _, _}), do: :mutate
   defp outcome_tag({:error, _}), do: :error
+  defp outcome_tag({:async_compact, _}), do: :async_compact
   defp outcome_tag(:passthrough), do: :passthrough
 
   # D-041: /model <id> slash-command handler. Runs the same validate +
