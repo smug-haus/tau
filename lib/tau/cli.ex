@@ -343,6 +343,13 @@ defmodule Tau.CLI do
     groq_status = if groq_key, do: "configured", else: "not configured"
     IO.puts("provider Tau.Providers.Groq: groq #{groq_status}")
 
+    mistral_key =
+      Application.get_env(:tau, Tau.Providers.Mistral, [])[:api_key] ||
+        System.get_env("MISTRAL_API_KEY")
+
+    mistral_status = if mistral_key, do: "configured", else: "not configured"
+    IO.puts("provider Tau.Providers.Mistral: mistral #{mistral_status}")
+
     0
   end
 
@@ -416,6 +423,7 @@ defmodule Tau.CLI do
   defp resolve_provider("gemini"), do: Tau.Providers.Gemini
   defp resolve_provider("deepseek"), do: Tau.Providers.DeepSeek
   defp resolve_provider("groq"), do: Tau.Providers.Groq
+  defp resolve_provider("mistral"), do: Tau.Providers.Mistral
   defp resolve_provider("replay"), do: Tau.Providers.Replay
 
   # Last-resort fallback for "Foo" → Tau.Providers.Foo style atoms.
