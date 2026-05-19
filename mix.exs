@@ -96,6 +96,10 @@ defmodule Tau.MixProject do
       # no separate sqlite dep needed). See SPEC-MEMORY-STORE and ADR-0020.
       {:exqlite, "~> 0.27"},
 
+      # sqlite-vec extension for vector/semantic search (PR3, SPEC-MEMORY-STORE §2).
+      # Downloads a precompiled loadable library; SqliteVec.path/0 returns its path.
+      {:sqlite_vec, "~> 0.1"},
+
       # ULIDs for sortable session/event ids
       {:uniq, "~> 0.6"},
 

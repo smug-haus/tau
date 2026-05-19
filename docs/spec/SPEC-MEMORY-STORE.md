@@ -41,9 +41,13 @@ Score 3/5. Spec is mandatory under `spec-before-code.md`.
 Tau.Memory.Supervisor            ── Supervisor (one_for_one)
   └── Tau.Memory.Store.SQLite    ── GenServer; owns write connection
                                     runs migrations in init/1
+                                    loads sqlite-vec extension in init/1
 
-Tau.Memory.Store                 ── Behaviour (write/1, delete/1; search/1 PR2+)
+Tau.Memory.Store                 ── Behaviour (write/1, delete/1; search/2 PR2+;
+                                    semantic_search/2 PR3+)
 Tau.Memory.Migrations            ── Pure module; ordered migration list
+Tau.Memory.Embedder              ── Behaviour (embed/3); PR3 embedding provider seam
+Tau.Memory.EmbeddingWorker       ── Default embedder; runs off-process via Task
 ```
 
 **PR 1 of 3 scope:** `Supervisor`, `Store` behaviour, `Store.SQLite` (write +
@@ -188,6 +192,19 @@ error, no duplicate rows in `schema_migrations`).
 `[:tau, :memory, :write, :stop]`, `[:tau, :memory, :delete, :start]`,
 `[:tau, :memory, :delete, :stop]` are emitted on each operation.
 
+**AC-6** — `Tau.Memory.Store.SQLite.search/2` (FTS5 full-text search) returns
+`{:ok, [map()]}` ordered by FTS rank descending. Rows with any `embedding_status`
+(`"pending"`, `"ready"`, `"failed"`) are included (D-046). Accepts `:limit` and
+`:scope` options. Returns `{:error, _}` on non-binary query.
+
+**AC-7** — `Tau.Memory.Store.SQLite.semantic_search/2` returns `{:ok, [map()]}`
+ordered by cosine distance ascending. Only rows with `embedding_status = "ready"`
+are included (D-046). `store_embedding/3` transitions `embedding_status` from
+`"pending"` to `"ready"` (on `{:ok, embedding}`) or `"failed"` (on
+`{:error, kind, reason}`), encoding the `"embedding_error_kind"` in `metadata`
+per D-046. Telemetry events `[:tau, :memory, :semantic_search, :start]` and
+`[:tau, :memory, :semantic_search, :stop]` are emitted.
+
 ---
 
 ## §6 D-NNN Invariants
@@ -231,7 +248,14 @@ CREATE TABLE IF NOT EXISTS memory_entries (
 ```
 
 PR2 adds: `CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(...)`.  
-PR3 adds: `CREATE VIRTUAL TABLE IF NOT EXISTS memory_vec USING vec0(...)`.
+PR3 adds:
+```sql
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_vec
+  USING vec0(entry_id TEXT PRIMARY KEY, embedding float[1536])
+```
+The `sqlite-vec` loadable extension must be loaded before this migration runs;
+`Store.SQLite.init/1` loads it via `Exqlite.Sqlite3.enable_load_extension/2`
+and `SELECT load_extension(SqliteVec.path())`.
 
 ---
 
@@ -245,6 +269,8 @@ lib/tau/memory/store.ex
 lib/tau/memory/store/sqlite.ex
 lib/tau/memory/migrations.ex
 lib/tau/memory/supervisor.ex
+lib/tau/memory/embedder.ex        (PR3: Embedder behaviour)
+lib/tau/memory/embedding_worker.ex (PR3: default off-process embedder)
 lib/tau/application.ex            (Memory.Supervisor entry only)
 test/tau/memory/store_sqlite_test.exs
 test/tau/memory/migrations_test.exs

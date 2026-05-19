@@ -19,7 +19,10 @@ defmodule Tau.Memory.Migrations do
   recommended.
 
   PR2 adds `memory_fts` (FTS5 virtual table) and three sync triggers here.
-  PR3 adds the `memory_vec` sqlite-vec virtual table migration here.
+  PR3 adds the `memory_vec` vec0 virtual table (sqlite-vec) migration here.
+  The vec0 extension must be loaded before `run/1` is called when using PR3 migrations;
+  `Store.SQLite` loads it in `init/1` via `Exqlite.Sqlite3.enable_load_extension/2`
+  and a `SELECT load_extension(?)` call.
   """
 
   @migrations [
@@ -75,6 +78,11 @@ defmodule Tau.Memory.Migrations do
          INSERT INTO memory_fts(rowid, id, kind, scope, content)
            VALUES (new.rowid, new.id, new.kind, new.scope, new.content);
        END
+     """},
+    {"20260518_007_memory_vec",
+     """
+     CREATE VIRTUAL TABLE IF NOT EXISTS memory_vec
+       USING vec0(entry_id TEXT PRIMARY KEY, embedding float[1536])
      """}
   ]
 

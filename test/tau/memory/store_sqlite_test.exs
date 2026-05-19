@@ -403,6 +403,265 @@ defmodule Tau.Memory.Store.SQLiteTest do
   end
 
   # ---------------------------------------------------------------------------
+  # AC-7 / D-046: semantic_search/2 (sqlite-vec PR3)
+  # ---------------------------------------------------------------------------
+
+  # Helpers for embedding tests.
+  # We use 4-dimensional float vectors so tests are fast (the vec0 table uses
+  # float[1536] in production, but for test isolation we inject embeddings
+  # directly via store_embedding/3 and query with matching-dim vectors).
+  #
+  # NOTE: The vec0 table dimension is fixed at migration time (float[1536]).
+  # To keep tests fast and correct, we pass 1536-element vectors filled mostly
+  # with zeros and a single distinguishing value.
+
+  defp zero_vec(dim \\ 1536), do: List.duplicate(0.0, dim)
+  defp unit_vec(pos, dim \\ 1536), do: List.replace_at(zero_vec(dim), pos, 1.0)
+
+  defp store_ready_embedding(pid, entry_id, embedding) do
+    :ok = SQLite.store_embedding(pid, entry_id, {:ok, embedding})
+  end
+
+  # Use GenServer.call to exercise semantic_search via an explicit pid/server,
+  # avoiding the 2-arity default (which uses __MODULE__ as server).
+  defp sem_search(pid, embedding, opts \\ []) do
+    GenServer.call(pid, {:semantic_search, embedding, opts})
+  end
+
+  describe "semantic_search/2 — vector search (D-046, AC-7)" do
+    test "returns empty list when no ready rows exist", %{pid: pid} do
+      query_vec = zero_vec()
+      assert {:ok, []} = sem_search(pid, query_vec)
+    end
+
+    test "returns a ready row when queried with its own embedding", %{pid: pid} do
+      {:ok, id} =
+        SQLite.write(pid, %{"kind" => "note", "scope" => "global", "content" => "vec test"})
+
+      embedding = unit_vec(0)
+      store_ready_embedding(pid, id, embedding)
+
+      assert {:ok, results} = sem_search(pid, embedding)
+      assert length(results) == 1
+      assert hd(results)["id"] == id
+    end
+
+    test "excludes pending rows (D-046)", %{pid: pid} do
+      {:ok, _id} =
+        SQLite.write(pid, %{"kind" => "note", "scope" => "global", "content" => "pending vec"})
+
+      # Do NOT call store_embedding — row stays 'pending'
+      query_vec = unit_vec(0)
+      assert {:ok, []} = sem_search(pid, query_vec)
+    end
+
+    test "excludes failed rows (D-046)", %{pid: pid} do
+      {:ok, id} =
+        SQLite.write(pid, %{"kind" => "note", "scope" => "global", "content" => "failed vec"})
+
+      :ok = SQLite.store_embedding(pid, id, {:error, :terminal, :policy_rejection})
+
+      query_vec = unit_vec(0)
+      assert {:ok, results} = sem_search(pid, query_vec)
+      refute Enum.any?(results, fn r -> r["id"] == id end)
+    end
+
+    test "orders results by distance (nearest first)", %{pid: pid} do
+      # Write two entries with embeddings along different axes.
+      {:ok, id1} = SQLite.write(pid, %{"kind" => "note", "scope" => "global", "content" => "axis0"})
+      {:ok, id2} = SQLite.write(pid, %{"kind" => "note", "scope" => "global", "content" => "axis1"})
+
+      store_ready_embedding(pid, id1, unit_vec(0))
+      store_ready_embedding(pid, id2, unit_vec(1))
+
+      # Query closer to axis0
+      {:ok, results} = sem_search(pid, unit_vec(0))
+      ids = Enum.map(results, & &1["id"])
+      # id1 (axis0) should appear before id2 (axis1)
+      assert Enum.find_index(ids, &(&1 == id1)) < Enum.find_index(ids, &(&1 == id2))
+    end
+
+    test "respects :limit option", %{pid: pid} do
+      for i <- 0..4 do
+        {:ok, id} =
+          SQLite.write(pid, %{"kind" => "note", "scope" => "global", "content" => "limit #{i}"})
+
+        store_ready_embedding(pid, id, unit_vec(i))
+      end
+
+      {:ok, results} = sem_search(pid, unit_vec(0), limit: 2)
+      assert length(results) <= 2
+    end
+
+    test "filters by :scope option", %{pid: pid} do
+      {:ok, id1} =
+        SQLite.write(pid, %{"kind" => "note", "scope" => "ns1", "content" => "scoped vec"})
+
+      {:ok, id2} =
+        SQLite.write(pid, %{"kind" => "note", "scope" => "ns2", "content" => "scoped vec"})
+
+      store_ready_embedding(pid, id1, unit_vec(0))
+      store_ready_embedding(pid, id2, unit_vec(0))
+
+      {:ok, results} = sem_search(pid, unit_vec(0), scope: "ns1")
+      assert Enum.all?(results, fn r -> r["scope"] == "ns1" end)
+      assert Enum.any?(results, fn r -> r["id"] == id1 end)
+      refute Enum.any?(results, fn r -> r["id"] == id2 end)
+    end
+
+    test "result maps include all expected keys plus distance", %{pid: pid} do
+      {:ok, id} =
+        SQLite.write(pid, %{"kind" => "note", "scope" => "global", "content" => "key check"})
+
+      store_ready_embedding(pid, id, unit_vec(0))
+
+      assert {:ok, [result]} = sem_search(pid, unit_vec(0), limit: 1)
+
+      expected_keys =
+        ~w[id kind scope content metadata embedding_status created_at updated_at distance]
+
+      assert Enum.all?(expected_keys, &Map.has_key?(result, &1))
+    end
+
+    test "returns {:error, _} for non-list embedding", %{pid: pid} do
+      assert {:error, {:invalid_embedding, _}} =
+               GenServer.call(pid, {:semantic_search, "not a list", []})
+    end
+
+    test "semantic_search emits :start and :stop telemetry events", %{pid: pid} do
+      {:ok, id} = SQLite.write(pid, %{"kind" => "note", "scope" => "s", "content" => "tele check"})
+      store_ready_embedding(pid, id, unit_vec(0))
+
+      events =
+        capture_telemetry(
+          [:tau, :memory, :semantic_search, :start],
+          [:tau, :memory, :semantic_search, :stop],
+          fn -> sem_search(pid, unit_vec(0)) end
+        )
+
+      assert Enum.any?(events, fn {name, _, _} ->
+               name == [:tau, :memory, :semantic_search, :start]
+             end)
+
+      assert Enum.any?(events, fn {name, _, _} ->
+               name == [:tau, :memory, :semantic_search, :stop]
+             end)
+    end
+
+    test "semantic_search :stop event includes duration measurement", %{pid: pid} do
+      query_vec = zero_vec()
+
+      events =
+        capture_telemetry([:tau, :memory, :semantic_search, :stop], fn ->
+          sem_search(pid, query_vec)
+        end)
+
+      [{_name, measurements, _meta}] =
+        Enum.filter(events, fn {name, _, _} -> name == [:tau, :memory, :semantic_search, :stop] end)
+
+      assert is_integer(measurements.duration)
+      assert measurements.duration >= 0
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # D-046 / D-047: store_embedding/3 embedding status lifecycle
+  # ---------------------------------------------------------------------------
+
+  describe "store_embedding/3 — embedding status lifecycle (D-046)" do
+    test "transitions entry to 'ready' on {:ok, embedding}", %{pid: pid} do
+      {:ok, id} = SQLite.write(pid, %{"kind" => "note", "scope" => "g", "content" => "status test"})
+
+      # Initial status is pending.
+      [{^id, _, _, _, _, "pending", _, _}] = read_rows(pid, id)
+
+      assert :ok = SQLite.store_embedding(pid, id, {:ok, unit_vec(0)})
+
+      [{^id, _, _, _, _, "ready", _, _}] = read_rows(pid, id)
+    end
+
+    test "transitions entry to 'failed' on {:error, :transient, reason}", %{pid: pid} do
+      {:ok, id} =
+        SQLite.write(pid, %{"kind" => "note", "scope" => "g", "content" => "fail transient"})
+
+      assert :ok = SQLite.store_embedding(pid, id, {:error, :transient, :network_timeout})
+
+      [{^id, _, _, _, metadata_json, "failed", _, _}] = read_rows(pid, id)
+      assert Jason.decode!(metadata_json)["embedding_error_kind"] == "transient"
+    end
+
+    test "transitions entry to 'failed' on {:error, :terminal, reason}", %{pid: pid} do
+      {:ok, id} =
+        SQLite.write(pid, %{"kind" => "note", "scope" => "g", "content" => "fail terminal"})
+
+      assert :ok = SQLite.store_embedding(pid, id, {:error, :terminal, :content_too_long})
+
+      [{^id, _, _, _, metadata_json, "failed", _, _}] = read_rows(pid, id)
+      assert Jason.decode!(metadata_json)["embedding_error_kind"] == "terminal"
+    end
+
+    test "store_embedding is idempotent: second :ok call updates the vector", %{pid: pid} do
+      {:ok, id} = SQLite.write(pid, %{"kind" => "note", "scope" => "g", "content" => "idem"})
+
+      assert :ok = SQLite.store_embedding(pid, id, {:ok, unit_vec(0)})
+      assert :ok = SQLite.store_embedding(pid, id, {:ok, unit_vec(1)})
+
+      # Should still be 'ready' and the second vec should be findable
+      {:ok, results} = sem_search(pid, unit_vec(1), limit: 1)
+      assert hd(results)["id"] == id
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Properties — semantic_search/2 (D-046)
+  # ---------------------------------------------------------------------------
+
+  describe "semantic_search/2 properties (D-046)" do
+    @tag :property
+    property "only ready rows appear in semantic search results", %{pid: pid} do
+      check all(
+              kind <- string(:alphanumeric, min_length: 1),
+              scope <- string(:alphanumeric, min_length: 1),
+              token <- string(:alphanumeric, min_length: 6),
+              ready? <- boolean()
+            ) do
+        content = "semvec_#{token}"
+        {:ok, id} = SQLite.write(pid, %{"kind" => kind, "scope" => scope, "content" => content})
+
+        if ready? do
+          :ok = SQLite.store_embedding(pid, id, {:ok, unit_vec(0)})
+        end
+
+        {:ok, results} = sem_search(pid, unit_vec(0))
+        ids = Enum.map(results, & &1["id"])
+
+        if ready? do
+          assert id in ids
+        else
+          # pending rows MUST NOT appear in semantic search (D-046)
+          refute id in ids
+        end
+      end
+    end
+
+    @tag :property
+    property "all semantic search results have embedding_status = ready (D-046)", %{pid: pid} do
+      check all(
+              kind <- string(:alphanumeric, min_length: 1),
+              scope <- string(:alphanumeric, min_length: 1),
+              token <- string(:alphanumeric, min_length: 6)
+            ) do
+        content = "semvec2_#{token}"
+        {:ok, id} = SQLite.write(pid, %{"kind" => kind, "scope" => scope, "content" => content})
+        :ok = SQLite.store_embedding(pid, id, {:ok, unit_vec(0)})
+
+        {:ok, results} = sem_search(pid, unit_vec(0))
+        Enum.each(results, fn r -> assert r["embedding_status"] == "ready" end)
+      end
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # Private helpers
   # ---------------------------------------------------------------------------
 
