@@ -48,7 +48,7 @@ operations.
 | # | Component | Role |
 |---|-----------|------|
 | C1 | `Tau.CircuitBreaker.State` | Pure state-machine module. `%State{}` struct + `record_failure/2`, `record_success/2`, `check/2`. No process, no ETS. |
-| C2 | `Tau.CircuitBreaker.Store` | GenServer lifecycle anchor. Owns the ETS table `:tau_circuit_breakers`. Exposes `transition/2` (atomically CAS a full row) and `probe_admitted?/1` (atomic half-open single-probe gate). |
+| C2 | `Tau.CircuitBreaker.Store` | GenServer lifecycle anchor. Owns the ETS table `:tau_circuit_breakers`. Exposes `transition/3` (atomically CAS a full row, guarded on current state) and `probe_admitted?/1` (atomic half-open single-probe gate). |
 | C3 | `Tau.CircuitBreaker` | Public façade. `call/3 :: (provider, opts, thunk) → result`. Checks state, admits or short-circuits, records outcome, drives transitions. |
 
 Boundaries between layers:
@@ -73,11 +73,14 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
   MUST use `:ets.select_replace/2` with a guard so no two processes race a
   non-atomic multi-field write.
 - **★ [C57-B1]** The half-open probe slot is a single counter field
-  `probe_slot` (position in the ETS row). Admission is an `:ets.update_counter/3`
-  bump with a threshold guard: the call that increments `probe_slot` from 0 to 1
-  is the admitted probe; any call that finds `probe_slot >= 1` MUST be rejected
-  as `:circuit_open`. This is the only correct way to admit exactly one probe
-  under concurrent access — no lock, no GenServer serialisation.
+  `probe_slot` (position in the ETS row). Admission uses `:ets.select_replace/2`
+  with a match spec that matches the row when `probe_slot == 0` and replaces it
+  with the same row with `probe_slot = 1`. The call that receives match count `1`
+  is the admitted probe; any call that receives `0` MUST be rejected as
+  `:circuit_open`. This is the only correct way to admit exactly one probe under
+  concurrent access — `update_counter` cannot distinguish the first caller from
+  the nth (see §4 B1 probe-admission contract for the rebuttal). No lock, no
+  GenServer serialisation.
 - **[C58-B2]** The `Store` GenServer creates the table in `init/1` and is the
   only process that calls `:ets.new/2` or `:ets.delete/1` on it. Any process
   may read or update counters directly via ETS.
@@ -135,13 +138,22 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
 - Post: returns `:closed` if no row exists for `provider`.
 - Invariant: `:half_open` is returned only if `now_ms >= opened_at_ms + cooldown_ms`.
 
-**Write contract** (`transition/2` — full-row CAS):
+**Write contract** (`transition/3` — state-column CAS):
 
-- Input: `provider :: module()`, `new_state :: %State{}`
+- Input: `provider :: module()`, `current_state :: :closed | :open | :half_open`, `new_state :: %State{}`
 - Operation: `:ets.select_replace/2` with a guard on the current row's state
   field. Returns `0` (no match — concurrent transition won) or `1` (replaced).
 - Invariant: the caller that returns `1` is the sole writer of the new row;
   callers that return `0` treat it as a no-op (their transition lost the race).
+- **Counter preservation invariant ([C56-B1]):** `transition/3` MUST NOT
+  overwrite `failure_count` (position 3) or `success_count` (position 4). These
+  columns are owned exclusively by `bump_failure_count/1` and
+  `bump_success_count/1` (`:ets.update_counter/3`). The match spec body MUST
+  bind counter fields as `:"$N"` variables and write them back unchanged. A
+  `select_replace` that overwrites counter columns loses concurrent increments
+  that land between the `Store.get` read and the `select_replace` write — the
+  exact lost-update class `update_counter` was introduced to prevent. Only
+  `state`, `opened_at_ms`, and `probe_slot` are mutated by a transition write.
 
 **Probe-admission contract** (`probe_admitted?/1`):
 

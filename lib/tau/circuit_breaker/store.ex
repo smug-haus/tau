@@ -103,7 +103,39 @@ defmodule Tau.CircuitBreaker.Store do
   end
 
   @doc """
-  Performs a full-row CAS state transition via `:ets.select_replace/2`.
+  Atomically increments `failure_count` (position 3) for `provider` and returns
+  the new value.
+
+  Uses `:ets.update_counter/3` — the SPEC-pinned primitive for counter fields
+  ([C56-B1] / [C60-B1]). Executes directly in the CALLER'S process; no GenServer
+  mailbox hop.
+
+  Assumes a row already exists (call `ensure_row/1` first).
+  """
+  @spec bump_failure_count(module()) :: non_neg_integer()
+  def bump_failure_count(provider) do
+    # Position 3 is failure_count; increment by 1.
+    :ets.update_counter(@table, provider, {3, 1})
+  end
+
+  @doc """
+  Atomically increments `success_count` (position 4) for `provider` and returns
+  the new value.
+
+  Uses `:ets.update_counter/3` — the SPEC-pinned primitive for counter fields
+  ([C56-B1] / [C60-B1]). Executes directly in the CALLER'S process; no GenServer
+  mailbox hop.
+
+  Assumes a row already exists (call `ensure_row/1` first).
+  """
+  @spec bump_success_count(module()) :: non_neg_integer()
+  def bump_success_count(provider) do
+    # Position 4 is success_count; increment by 1.
+    :ets.update_counter(@table, provider, {4, 1})
+  end
+
+  @doc """
+  Performs a state-column CAS transition via `:ets.select_replace/2`.
 
   Executes directly in the CALLER'S process against the `:public` ETS table
   — no GenServer mailbox hop (§3 [C57-B1]).
@@ -113,7 +145,16 @@ defmodule Tau.CircuitBreaker.Store do
   `1` if the transition succeeded (this caller wins), `0` if a concurrent
   process already transitioned (treat as no-op).
 
-  The new row is built from `new_state :: Tau.CircuitBreaker.State.t()`.
+  **Counter columns (`failure_count`, `success_count`) are NOT overwritten.**
+  They are owned exclusively by the atomic `bump_failure_count/1` and
+  `bump_success_count/1` primitives (`update_counter`). The match spec body
+  binds these columns as `:"$N"` variables and writes them back unchanged,
+  so a concurrent `bump_*` that races with this transition is never clobbered
+  ([C56-B1] / SPEC-CIRCUIT-BREAKER §4 B1/B2).
+
+  Only the columns that actually change at a state transition are mutated:
+  `state`, `opened_at_ms`, and `probe_slot`. The `new_state` argument
+  supplies those values; its counter fields are ignored.
   """
   @spec transition(module(), :closed | :open | :half_open, Tau.CircuitBreaker.State.t()) ::
           0 | 1
@@ -164,7 +205,7 @@ defmodule Tau.CircuitBreaker.Store do
   # Private helpers
   # ---------------------------------------------------------------------------
 
-  # Builds a select_replace match spec for a full-row CAS state transition.
+  # Builds a select_replace match spec for a state-column CAS transition.
   #
   # ETS match spec body language (from :ets.fun2ms output):
   #   - The body list contains ONE element for select_replace.
@@ -178,21 +219,27 @@ defmodule Tau.CircuitBreaker.Store do
   # The guard `{:==, :"$1", {:const, provider}}` pins the match to the exact
   # provider key, so `:_` and other special atoms generated in tests match only
   # their literal row.
+  #
+  # Counter columns ($3 = failure_count, $4 = success_count) are captured as
+  # bound variables and written back unchanged. This is the critical invariant
+  # ([C56-B1]): only `update_counter` bumps may mutate counter fields. A
+  # `select_replace` that overwrites them would lose concurrent increments.
   defp do_transition(provider, current_state_atom, new_state) do
     # Head: capture key as $1; match current_state_atom literally in pos 2;
-    # capture remaining fields for passthrough (not needed in body, but :_ is fine).
-    match_head = {:"$1", current_state_atom, :_, :_, :_, :_}
+    # capture failure_count as $3 and success_count as $4 so they are preserved;
+    # remaining fields ($5, $6) are not needed.
+    match_head = {:"$1", current_state_atom, :"$3", :"$4", :_, :_}
 
     # Guard: pin to the exact provider key.
     guards = [{:==, :"$1", {:const, provider}}]
 
-    # Body: replacement tuple wrapped in outer tuple (ETS match spec convention).
+    # Body: write back $3/$4 (counters) unchanged; update only state columns.
     body = [
       {{
          :"$1",
          new_state.state,
-         new_state.failure_count,
-         new_state.success_count,
+         :"$3",
+         :"$4",
          new_state.opened_at_ms,
          new_state.probe_slot
        }}
