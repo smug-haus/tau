@@ -44,7 +44,7 @@ defmodule Tau.Compactor.SummarizeTail do
 
       _ ->
         cutoff = max(div(length(conv) * 6, 10), 1)
-        {old, recent} = Enum.split(conv, cutoff)
+        {old, recent} = conv |> Enum.split(cutoff) |> realign_split_at_tool_boundary()
 
         case summarise(old, ctx) do
           {:ok, summary_text} ->
@@ -60,6 +60,16 @@ defmodule Tau.Compactor.SummarizeTail do
             err
         end
     end
+  end
+
+  # D-062 / #310: After the initial length-based split, any leading
+  # %ToolResult{} messages in `recent` must be moved into `old`.  The
+  # Anthropic API rejects a conversation whose first message after the
+  # compaction summary is a ToolResult with no preceding Assistant message
+  # that carries a matching tool_use block.
+  defp realign_split_at_tool_boundary({old, recent}) do
+    {leading_results, rest} = Enum.split_while(recent, &match?(%Message.ToolResult{}, &1))
+    {old ++ leading_results, rest}
   end
 
   # Pinned messages are preserved verbatim across compaction.
