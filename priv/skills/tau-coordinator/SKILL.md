@@ -134,6 +134,18 @@ No human checkpoints in normal operation. Report only at:
 - Milestone boundaries (when M1 is reached and verified).
 - Escalation (any safety-circuit condition fires).
 
+## Coordinator discipline — substance over ceremony
+
+The factory cycle is form. Substance is "does the user-visible thing actually work?" These rules forbid passing form for substance.
+
+**Incomplete-fix detection.** A critic/reviewer finding is "out of scope" only if it does not falsify any acceptance criterion (AC-N) or D-NNN invariant named in the linked issue or its linked SPEC. Otherwise the merge is incomplete: reopen, do NOT merge, refine. A finding of severity `info` or `suggestion` does not lower this bar — the criterion is AC/D-NNN falsification, not severity. Tests must exercise the same code path the user invokes; a test that bypasses that path (e.g. constructs a struct directly to skip a parser the user's CLI invocation triggers) is a false-positive gate.
+
+**Reporting precision.** Do not call work "working" or "done" without naming the **exact command** and the **observable signal** against the issue's user-visible path. The exact-stdout requirement is bounded: paste the exit code AND the line(s) carrying the user-visible signal (e.g. the expected smoke token, the failing assertion). Surrounding output may be elided with `[...elided N lines...]`. "Boots and runs a replay smoke" is true and bounded; "works" is not, unless the user-facing path has been exercised. When citing token or wall-time numbers, cite the source — the task notification's `total_tokens` / `duration_ms` — never estimate or round in your own favor.
+
+**Pre-spawn shared-resource isolation.** Sub-agents inherit cwd, but the spawning OS user's `$HOME` (e.g. `~/.local/share/.burrito/`, `~/.cache/zig/`, `~/.mix/`) is shared. Before driving concurrent work that writes to any shared cache, isolate it. In a Tau coordinator session the practical operation is: brief each child to write its caches under a child-owned subdirectory (e.g. setting `XDG_DATA_HOME` before any `mix release` / `mix tau.smoke` invocation the child runs in `Bash`). When the coordinator itself is run inside Claude Code with `isolation: worktree`, see `.claude/rules/worktree-discipline.md` for the canonical Burrito-specific isolation rule.
+
+**Capture before destroy.** Worktrees are a Claude-Code-coordinator concern (a Tau session sub-agent IS a `Tau.Session`, not a separate checkout — see "Subagent routing" above). The capture-before-destroy rule lives in `.claude/rules/worktree-discipline.md` and applies when the coordinator runs under Claude Code. When the coordinator runs as a Tau session, the analogous rule is: before invoking any destructive cleanup against a child's scratch state (deleted JSONL, removed tmp dir, terminated session before `:end_turn`), preserve its observable output (assistant text, tool results) to the solution tree.
+
 ## Spec-before-code
 
 Apply `.claude/rules/spec-before-code.md`'s spec catalog without
