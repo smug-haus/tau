@@ -395,27 +395,40 @@ defmodule Tau.Tools.Builtin.Agent do
     end
   end
 
-  # --- Awaiting the child's :end_turn --------------------------------------
+  # --- Awaiting the child's :end_turn / :stop ------------------------------
+  #
+  # #315: provider adapters (Anthropic, OpenAI, Bedrock, Gemini, etc.) normalise
+  # the model's `"end_turn"` to `:stop` via their `normalise_stop/1`. Children
+  # driven by a real provider therefore end with `stop_reason: :stop`, not the
+  # literal `:end_turn` atom. We accept both — plus `:length` (max_tokens) and
+  # `:stop_sequence` which are also natural-end terminals where the model is
+  # done producing output. Failure stop_reasons are enumerated explicitly so
+  # the union shrinks predictably: any unknown stop_reason continues waiting
+  # for the next MessageEnd (matches Tau.CLI.drain_run_loop's D-058 / #252 f-1
+  # inversion: enumerate failures, treat everything else as natural end).
+
+  @subagent_natural_end [:stop, :end_turn, :length, :stop_sequence]
+  @subagent_failure_end [:error, :aborted, :tool_loop_aborted, :compaction_failed]
 
   defp await_child(child_id, ctx, parent_ref, started) do
     receive do
       %SE.MessageEnd{session_id: ^child_id, message: %Assistant{} = msg} ->
         cond do
-          msg.stop_reason == :end_turn ->
+          msg.stop_reason in @subagent_natural_end ->
             content = extract_text(msg)
 
             Result.text(content,
               details: %{
                 kind: :subagent_result,
                 child_session_id: child_id,
-                stop_reason: :end_turn,
+                stop_reason: msg.stop_reason,
                 duration_ms: System.monotonic_time(:millisecond) - started
               }
             )
 
-          msg.stop_reason in [:error, :aborted] ->
+          msg.stop_reason in @subagent_failure_end ->
             Result.error(
-              "Sub-agent ended without :end_turn (stop_reason: #{inspect(msg.stop_reason)}). " <>
+              "Sub-agent failed (stop_reason: #{inspect(msg.stop_reason)}). " <>
                 (msg.error_message || ""),
               details: %{
                 kind: :subagent_failed,
