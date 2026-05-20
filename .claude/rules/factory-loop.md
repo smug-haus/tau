@@ -162,21 +162,30 @@ The factory cycle is form. Substance is "does the user-visible thing actually wo
 
 ### Incomplete-fix detection (don't move to follow-up)
 
-When the **critic** or **reviewer** surfaces a finding whose substance overlaps with the headline of the linked issue, treat the merge as **incomplete**, not as "ship + follow-up." Concretely:
+A critic/reviewer finding is "out of scope" only if it does NOT falsify any **acceptance criterion (AC-N) or D-NNN invariant** named in the linked issue or its linked SPEC. Otherwise the merge is **incomplete**: reopen the issue, do NOT merge, refine.
 
-- If the linked issue says "the headless path must honour the persona's allowed-tools" and the critic flags "the headless path drops the frontmatter (will file a follow-up)" — that is the headline of the issue. Reopen the issue, do NOT merge until the headline path actually works.
-- The test pattern for the issue's user-visible contract MUST exercise the same code path the user invokes (e.g. `Tau.CLI.main(...)` with realistic argv), not a hand-built struct that bypasses the contract. A gate that passes a test which short-circuits the user-facing code path is a false positive; the merge should not happen.
-- "Follow-up issue" is reserved for findings that are **outside the linked issue's scope**, not for findings that gut the linked issue itself.
+The test is mechanical, not editorial:
 
-A critic finding of severity `info` or `suggestion` does NOT lower this bar. Substance is the criterion, not severity.
+- List the AC-N entries the issue claims to advance (from the issue body and from the SPEC entries it links).
+- For each, ask: does the finding describe a state that falsifies this AC? If yes for any AC, the finding is in scope of the issue's headline and the merge is incomplete.
+- Only if every named AC remains true after the finding is the finding a follow-up.
+
+Concrete example: an issue says "AC: `tau run --system-prompt-file <persona>` honours the persona's `allowed-tools:` whitelist." The critic flags "the headless path drops the frontmatter, so all builtins are exposed regardless of the file." That finding **falsifies the AC**. The fix is incomplete; reopen.
+
+Tests must exercise the same code path the user invokes (e.g. `Tau.CLI.main(["run", ...])` with realistic argv), not a hand-built struct that bypasses the parser the CLI invocation triggers. A gate that passes a test which short-circuits the user-facing path is a false positive.
+
+"Follow-up issue" is reserved for findings that are **outside every named AC's scope**, not for findings that falsify one.
+
+A critic finding of severity `info` or `suggestion` does NOT lower this bar. AC falsification is the criterion, not severity.
 
 ### Reporting precision
 
 When reporting work to the user:
 
 - **Cite the source for numbers.** Token counts come from the task notification's `total_tokens` field (or `usage.total_tokens` on the agent's result). Wall times from the notification's `duration_ms`. Do not estimate; do not round in your own favor.
-- **Do not call anything "working" without naming the exact command and the exact stdout you observed.** "Boots and runs a replay smoke" is a true and bounded statement; "works" is not, when the user-visible path the issue was about hasn't been exercised. Use the bounded statement.
-- **Distinguish "the form ran clean" from "the substance landed."** "Gate green, merged" is the form. "User can run `<exact command>` and observe `<exact output>`" is the substance.
+- **Do not call anything "working" without naming the exact command and the observable signal.** "Boots and runs a replay smoke" is a true and bounded statement; "works" is not, when the user-visible path the issue was about hasn't been exercised. Use the bounded statement.
+- **Bounded "exact stdout."** Verbatim: the exit code AND the line(s) carrying the user-visible signal (e.g. the expected smoke token, the failing assertion, the line containing the asserted-on string). Elision is permitted for surrounding output, marked with `[...elided N lines...]`. The point is to prove the signal was observed, not to paste thousand-line transcripts.
+- **Distinguish "the form ran clean" from "the substance landed."** "Gate green, merged" is the form. "User can run `<exact command>` and observe `<exact signal>`" is the substance.
 
 ### Pre-spawn shared-resource isolation
 
@@ -279,10 +288,10 @@ listed in the repo's `.gitignore` so it can never be accidentally committed.
   otherwise relax `worktree-discipline.md`.
 - MUST NOT proceed when `.claude/STOP-FACTORY` is present.
 - MUST NOT treat a critic/reviewer finding that names the linked issue's headline as a "follow-up." Reopen the issue, fix the headline, re-gate. "Follow-up" is for out-of-scope findings only.
-- MUST NOT report work as "working" or "done" without naming the exact command run and the exact stdout observed against the user-visible path the issue named.
+- MUST NOT report work as "working" or "done" without naming the exact command run and the observable signal (exit code + signal line, with surrounding output optionally elided as `[...elided N lines...]`) against the user-visible path the issue named.
 - MUST NOT cite token or wall-time numbers without sourcing them from the task notification's `total_tokens` / `duration_ms` (or equivalent). No estimating, no rounding in the coordinator's favor.
 - MUST NOT spawn concurrent agents that touch the same $HOME-namespace cache (Burrito unpack, etc.) without per-agent isolation in their brief. See `worktree-discipline.md`.
-- MUST NOT `git worktree remove -f -f` an agent's worktree without first running the capture sequence (`git -C <worktree> diff > /tmp/wip-<agentId>.patch`). See `worktree-discipline.md`.
+- MUST NOT `git worktree remove -f -f` an agent's worktree without first running the full capture sequence — staged+unstaged (`git diff HEAD`), untracked (`ls-files --others --exclude-standard | tar`), and status. The canonical recipe is in `worktree-discipline.md`. Naïve `git diff` (no `HEAD`) silently omits staged changes; omitting the untracked tarball silently omits new files.
 
 ## When to update this rule
 

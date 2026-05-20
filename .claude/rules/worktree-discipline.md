@@ -18,15 +18,34 @@ Parallel agents driving Elixir builds, gh CLI operations, and git checkouts shar
 
 **After every agent completion: remove its worktree in the same turn.** `git worktree remove -f -f <path>` for the finished agent's worktree, then `git branch -D <its-spawn-branch>` if no longer referenced. Locked-finished worktrees accumulating is the symptom that hides every other failure mode in this rule.
 
-**Capture-before-destroy.** Before removing a worktree that may hold uncommitted work — in particular before removing the worktree of an agent that was killed mid-run — capture its diff and status to a stable location, so the work can be inspected or replayed. The minimum sequence:
+**Capture-before-destroy.** Before removing a worktree that may hold uncommitted work — in particular before removing the worktree of an agent killed mid-run — capture the full uncommitted state. A killed agent typically has three kinds of dirty work, and the capture MUST cover **all three**:
+
+- **Staged** (`git add`-ed but not yet committed) — caught by `git diff HEAD`.
+- **Unstaged** modifications to tracked files — also caught by `git diff HEAD`.
+- **Untracked** new files — NOT caught by any `git diff`; need a separate copy.
+
+The canonical sequence:
 
 ```sh
 git -C <worktree> status --short > /tmp/wip-<agentId>.status
-git -C <worktree> diff > /tmp/wip-<agentId>.patch
+git -C <worktree> diff HEAD > /tmp/wip-<agentId>.patch
+UNTRACKED="$(git -C <worktree> ls-files --others --exclude-standard)"
+[ -n "$UNTRACKED" ] && \
+  echo "$UNTRACKED" | tar -C <worktree> -czf /tmp/wip-<agentId>-untracked.tgz -T -
 git worktree remove -f -f <worktree>
 ```
 
-`git worktree remove -f -f` destroys uncommitted changes silently. A killed agent has often done substantial work (reads, decisions, in-progress edits) that lives only in the worktree's working tree; destroying it without capture is irrecoverable token spend. The capture is unconditional whenever the worktree may have changes — it is cheap and benign if the worktree is clean.
+A naïve `git diff` (without `HEAD`) silently omits staged work; omitting the untracked-tar step silently omits new files. Both are common end-states for a mid-task kill. (Empirically verified 2026-05-20: a killed implementer for #273 had an untracked new test file that the naïve sequence would have lost.) The capture is unconditional whenever the worktree may have changes — it is cheap and benign if the worktree is clean.
+
+Replaying captured state into a fresh worktree:
+
+```sh
+git -C <new-worktree> apply /tmp/wip-<agentId>.patch
+[ -f /tmp/wip-<agentId>-untracked.tgz ] && \
+  tar -C <new-worktree> -xzf /tmp/wip-<agentId>-untracked.tgz
+```
+
+If `git apply` fails because `origin/main` has advanced beyond the patch's base, use the patch as a reference and re-implement, rather than fighting the rebase.
 
 **Shared $HOME-namespace caches MUST be isolated per concurrent agent.** Several build/runtime caches live in the spawning user's `$HOME`, NOT inside the worktree. They survive worktree isolation. Concurrent agents that touch the same cache will race. The canonical offender today is **Burrito's unpack cache at `~/.local/share/.burrito/<tau_erts-version>/`** — two concurrent `mix tau.smoke` invocations from different worktrees collide there and produce intermittent `XZ/LZMA Decode Failed` errors at binary startup.
 
