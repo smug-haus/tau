@@ -46,6 +46,15 @@ defmodule Tau.CLI do
   prepends a system-level persona to the session. The content is injected
   as an `active_skill` with `:persona_lifetime :session` so it survives
   multi-turn iteration inside a single `tau run` invocation.
+
+  `--system-prompt-file <path>` parses the file via
+  `Tau.Skills.Loader.parse/1`, honoring its YAML frontmatter (notably
+  `allowed-tools:`). Under PR #272's `active_skill_tool_specs/1` (D-059)
+  an `allowed_tools: []` skill exposes every registered builtin to the
+  model; the file's `allowed-tools:` whitelist constrains that exposure
+  to the declared subset (#273). `--system-prompt <text>` is raw text
+  input and has no frontmatter, so its skill keeps `allowed_tools: []`
+  and the full builtin surface remains visible.
   """
 
   alias Tau.Session.Events
@@ -300,7 +309,7 @@ defmodule Tau.CLI do
         IO.puts(:stderr, "system-prompt error: #{reason}")
         1
 
-      {:ok, system_prompt_text} ->
+      {:ok, system_prompt_source} ->
         session_id = Tau.Session.generate_id()
 
         # D-004: subscribe BEFORE start_session so SessionStart is not missed.
@@ -309,8 +318,8 @@ defmodule Tau.CLI do
         start_opts =
           [session_id: session_id, provider: provider]
           |> put_if_not_nil(:model, model)
-          |> put_if_not_nil(:active_skill, build_headless_skill(system_prompt_text))
-          |> put_if_not_nil(:persona_lifetime, system_prompt_text && :session)
+          |> put_if_not_nil(:active_skill, build_headless_skill(system_prompt_source))
+          |> put_if_not_nil(:persona_lifetime, system_prompt_source && :session)
 
         case Tau.start_session(start_opts) do
           {:ok, ^session_id} ->
@@ -453,37 +462,89 @@ defmodule Tau.CLI do
   # Fallback: no dedicated error_message field — synthesise from text blocks.
   def extract_error_text(message), do: extract_assistant_text(message)
 
-  # Resolve --system-prompt / --system-prompt-file to {:ok, text | nil}.
+  # Resolve --system-prompt / --system-prompt-file to a tagged source.
+  #
+  # Returns `{:ok, nil}` when neither option is set,
+  # `{:ok, {:text, text}}` for `--system-prompt <text>` (raw text input,
+  # no frontmatter parse), or `{:ok, {:file, path}}` for
+  # `--system-prompt-file <path>` (file input — `build_headless_skill/1`
+  # must parse YAML frontmatter from the file body so `allowed-tools:`
+  # is honored under PR #272's D-059 `active_skill_tool_specs/1`
+  # semantics; otherwise an empty `allowed_tools` exposes every builtin
+  # instead of the declared whitelist — #273).
   @doc false
   def resolve_system_prompt(%{system_prompt: text})
       when is_binary(text) and text != "",
-      do: {:ok, text}
+      do: {:ok, {:text, text}}
 
   def resolve_system_prompt(%{system_prompt_file: path})
       when is_binary(path) and path != "" do
-    case File.read(path) do
-      {:ok, text} -> {:ok, text}
+    case File.stat(path) do
+      {:ok, _} -> {:ok, {:file, path}}
       {:error, reason} -> {:error, "could not read #{path}: #{:file.format_error(reason)}"}
     end
   end
 
   def resolve_system_prompt(_), do: {:ok, nil}
 
-  # Build a transient %Tau.Skill{} from inline system-prompt text so the
-  # session FSM injects it as a system-role message via prepend_skill_messages/2
-  # (the same mechanism used by on-disk skills loaded from CLAUDE.md / .claude/
-  # skills). :persona_lifetime :session is set by run_cmd/1 so the persona
+  # Build a transient %Tau.Skill{} from a resolved system-prompt source so
+  # the session FSM injects it as a system-role message via
+  # `prepend_skill_messages/2` (the same mechanism used by on-disk skills
+  # loaded from `~/.tau/skills` / `<cwd>/.tau/skills` / `priv/skills`).
+  #
+  # Two shapes:
+  #
+  #   * `{:text, text}` — `--system-prompt <text>`: raw text body, no
+  #     frontmatter parse. `allowed_tools: []` → every registered
+  #     builtin is exposed to the model (D-059 unrestricted semantics).
+  #
+  #   * `{:file, path}` — `--system-prompt-file <path>`: parse the file
+  #     via `Tau.Skills.Loader.parse/1`, which honors any YAML
+  #     frontmatter (`allowed-tools:`, `description:`, …). This is the
+  #     #273 fix: without it the frontmatter is dropped and the
+  #     persona's declared tool whitelist is silently widened to every
+  #     builtin under D-059. On parse failure, fall back to using the
+  #     raw file body as the skill body (preserve the existing behaviour
+  #     of unrestricted tool exposure rather than failing the run).
+  #
+  # `:persona_lifetime :session` is set by `run_cmd/1` so the persona
   # survives multi-turn tool iteration within a single `tau run` invocation.
   @doc false
   def build_headless_skill(nil), do: nil
 
-  def build_headless_skill(text) when is_binary(text) do
+  def build_headless_skill({:text, text}) when is_binary(text) do
     %Tau.Skill{
       name: "headless-system-prompt",
       body: text,
       path: "<cli:--system-prompt>",
-      description: "System prompt injected via --system-prompt / --system-prompt-file"
+      description: "System prompt injected via --system-prompt"
     }
+  end
+
+  def build_headless_skill({:file, path}) when is_binary(path) do
+    case Tau.Skills.Loader.parse(path) do
+      {:ok, %Tau.Skill{} = skill} ->
+        # Force a stable name+description so the session FSM and
+        # tests can identify the headless injection. The frontmatter
+        # values for `allowed-tools:`, `disable-model-invocation:`,
+        # `paths:`, and `body` are preserved as-is.
+        %Tau.Skill{
+          skill
+          | name: "headless-system-prompt",
+            description:
+              if(skill.description in [nil, ""],
+                do: "System prompt injected via --system-prompt-file",
+                else: skill.description
+              )
+        }
+
+      {:error, _reason} ->
+        # Loader.parse/1 only errors when File.read/1 fails; resolve_system_prompt/1
+        # already verified the path exists, so this is an unlikely race
+        # (concurrent unlink). Fall back to nil so the session starts without
+        # the persona — clearer than silently swapping in an empty skill.
+        nil
+    end
   end
 
   defp put_if_not_nil(opts, _key, nil), do: opts
