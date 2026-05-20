@@ -54,7 +54,7 @@ defmodule Tau.Message.Assembler do
   end
 
   def step(state, %Event.TextStart{block_id: id}) do
-    block = %{type: :text, text: "", id: id}
+    block = %{type: :text, text: "", id: id, _complete?: false}
     %{state | blocks: Map.put(state.blocks, id, block), order: state.order ++ [id]}
   end
 
@@ -65,7 +65,7 @@ defmodule Tau.Message.Assembler do
   def step(state, %Event.TextEnd{block_id: id}), do: finalize_block(state, id)
 
   def step(state, %Event.ThinkingStart{block_id: id}) do
-    block = %{type: :thinking, text: "", signature: nil, id: id}
+    block = %{type: :thinking, text: "", signature: nil, id: id, _complete?: false}
     %{state | blocks: Map.put(state.blocks, id, block), order: state.order ++ [id]}
   end
 
@@ -79,7 +79,15 @@ defmodule Tau.Message.Assembler do
   end
 
   def step(state, %Event.ToolCallStart{tool_call_id: id, name: name}) do
-    block = %{type: :tool_call, id: id, name: name, arguments: %{}, _args_buf: ""}
+    block = %{
+      type: :tool_call,
+      id: id,
+      name: name,
+      arguments: %{},
+      _args_buf: "",
+      _complete?: false
+    }
+
     %{state | blocks: Map.put(state.blocks, id, block), order: state.order ++ [id]}
   end
 
@@ -98,6 +106,8 @@ defmodule Tau.Message.Assembler do
   end
 
   def step(state, %Event.Error{reason: r, retryable?: _}) do
+    state = drop_incomplete_tool_calls(state)
+
     msg = %{
       state.message
       | stop_reason: :error,
@@ -126,10 +136,25 @@ defmodule Tau.Message.Assembler do
     end
   end
 
-  defp finalize_block(state, _id), do: state
+  defp finalize_block(state, id) do
+    update_block(state, id, fn b -> Map.put(b, :_complete?, true) end)
+  end
 
-  defp strip_internals(%{type: :tool_call} = b), do: Map.drop(b, [:_args_buf])
-  defp strip_internals(b), do: Map.drop(b, [:id])
+  defp drop_incomplete_tool_calls(state) do
+    incomplete_ids =
+      state.blocks
+      |> Enum.filter(fn {_id, b} -> b[:type] == :tool_call and not b[:_complete?] end)
+      |> Enum.map(fn {id, _b} -> id end)
+
+    %{
+      state
+      | blocks: Map.drop(state.blocks, incomplete_ids),
+        order: Enum.reject(state.order, &(&1 in incomplete_ids))
+    }
+  end
+
+  defp strip_internals(%{type: :tool_call} = b), do: Map.drop(b, [:_args_buf, :_complete?])
+  defp strip_internals(b), do: Map.drop(b, [:id, :_complete?])
 
   defp format_reason({:http_status, n, %{type: type, message: msg}}) when is_binary(type),
     do: "HTTP #{n} (#{type}): #{msg}"
