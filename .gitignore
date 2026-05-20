@@ -7,6 +7,7 @@
 erl_crash.dump
 *.ez
 *.beam
+.anthropic_api_key
 
 # Releases & escripts
 /tau
