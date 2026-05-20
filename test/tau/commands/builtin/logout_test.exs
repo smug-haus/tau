@@ -89,14 +89,19 @@ defmodule Tau.Commands.Builtin.LogoutTest do
   describe "[C48] single-writer — does not touch ~/.claude/.credentials.json" do
     test "credentials.json is not modified by /logout anthropic" do
       claude_creds = Path.join(System.user_home!(), ".claude/.credentials.json")
-      before_mtime = File.stat(claude_creds, time: :posix) |> elem(1) |> Map.get(:mtime, nil)
 
-      # Run /logout — it should not touch Claude Code's credentials file
+      mtime = fn ->
+        case File.stat(claude_creds, time: :posix) do
+          {:ok, %File.Stat{mtime: m}} -> m
+          {:error, _} -> :absent
+        end
+      end
+
+      before_state = mtime.()
       _result = Logout.run("anthropic", %{})
+      after_state = mtime.()
 
-      after_mtime = File.stat(claude_creds, time: :posix) |> elem(1) |> Map.get(:mtime, nil)
-
-      assert before_mtime == after_mtime,
+      assert before_state == after_state,
              "~/.claude/.credentials.json was modified by /logout (C48 violation)"
     end
   end
