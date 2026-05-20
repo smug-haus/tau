@@ -149,6 +149,29 @@ defmodule Tau.Memory.Store.SQLiteTest do
   end
 
   # ---------------------------------------------------------------------------
+  # Issue #304 regression: vec_so_missing diagnostic error
+  # ---------------------------------------------------------------------------
+
+  describe "load_vec_extension — missing .so diagnostic (issue #304)" do
+    test "start returns {:error, {:db_open_failed, {:vec_so_missing, _, _}}} when path does not exist" do
+      Application.put_env(:tau, :sqlite_vec_path_override, "/nonexistent/path/to/vec0")
+
+      on_exit(fn -> Application.delete_env(:tau, :sqlite_vec_path_override) end)
+
+      db_path = Briefly.create!(extname: ".db")
+      name = :"test_vec_missing_#{System.unique_integer([:positive])}"
+
+      # Use GenServer.start (unlinked) so the init-failure exit does not
+      # propagate to the test process; start_link would crash the test.
+      assert {:error, {:db_open_failed, {:vec_so_missing, so_path, _posix_err}}} =
+               GenServer.start(SQLite, [db_path: db_path, name: name], name: name)
+
+      # The reported path should include the platform extension suffix.
+      assert String.starts_with?(so_path, "/nonexistent/path/to/vec0")
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # D-047: migration hard-fail / D-045: connection escape
   # ---------------------------------------------------------------------------
 
