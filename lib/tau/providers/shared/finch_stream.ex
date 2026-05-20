@@ -64,12 +64,26 @@ defmodule Tau.Providers.Shared.FinchStream do
 
     task =
       Task.async(fn ->
-        Finch.stream(request, Tau.Providers.Finch, nil, fn
-          {:status, n}, _ -> Process.send(parent, {ref, {:status, n}}, [])
-          {:headers, h}, _ -> Process.send(parent, {ref, {:headers, h}}, [])
-          {:data, c}, _ -> Process.send(parent, {ref, {:data, c}}, [])
-          {:done}, _ -> Process.send(parent, {ref, :done}, [])
-        end)
+        # Finch's default `receive_timeout` is 15s — far too short for
+        # LLM streaming where opus on deep deliberation can pause 60-180s
+        # between chunks. The consumer loop below uses a 300s budget;
+        # match it at the Finch layer so the inner timer is the one that
+        # gets to fire on a stuck stream, not Mint's. Transport-level
+        # failures (RST, conn close, Mint connect errors) still surface
+        # fast via `{:error, e}` from `Finch.stream/5`.
+        Finch.stream(
+          request,
+          Tau.Providers.Finch,
+          nil,
+          fn
+            {:status, n}, _ -> Process.send(parent, {ref, {:status, n}}, [])
+            {:headers, h}, _ -> Process.send(parent, {ref, {:headers, h}}, [])
+            {:data, c}, _ -> Process.send(parent, {ref, {:data, c}}, [])
+            {:done}, _ -> Process.send(parent, {ref, :done}, [])
+          end,
+          receive_timeout: 300_000,
+          request_timeout: :infinity
+        )
         |> case do
           {:ok, _} ->
             Process.send(parent, {ref, :end}, [])
