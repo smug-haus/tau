@@ -197,7 +197,8 @@ defmodule Tau.MixProject do
           patch: [
             post: [
               Tau.BurritoSteps.RelinkTermbox,
-              Tau.BurritoSteps.RelinkSqliteNif
+              Tau.BurritoSteps.RelinkSqliteNif,
+              Tau.BurritoSteps.RelinkVec0Nif
             ]
           ]
         ]
