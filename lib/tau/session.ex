@@ -318,7 +318,9 @@ defmodule Tau.Session do
           max_tool_iterations: pos_integer(),
           tool_loop_state: map(),
           tool_loop_brake_threshold: pos_integer(),
-          tool_loop_call_lookups: map()
+          tool_loop_call_lookups: map(),
+          provider_retry_state: %{count: non_neg_integer()},
+          provider_retry_max: pos_integer()
         }
 
   @doc """
@@ -352,7 +354,9 @@ defmodule Tau.Session do
          max_tool_iterations: Map.get(data, :max_tool_iterations, 20),
          tool_loop_state: Map.get(data, :tool_loop_state, %{}),
          tool_loop_brake_threshold: Map.get(data, :tool_loop_brake_threshold, 3),
-         tool_loop_call_lookups: Map.get(data, :tool_loop_call_lookups, %{})
+         tool_loop_call_lookups: Map.get(data, :tool_loop_call_lookups, %{}),
+         provider_retry_state: Map.get(data, :provider_retry_state, %{count: 0}),
+         provider_retry_max: Map.get(data, :provider_retry_max, 3)
        }}
     end
   end
@@ -631,6 +635,26 @@ defmodule Tau.Session do
           # Populated in `dispatch_tools/2`; entry removed in
           # `handle_event(:info, {:tool_done, ...}, :tool_executing, _)`.
           tool_loop_call_lookups: %{},
+          # D-061 / #303: per-turn provider-retry counter for the
+          # single-provider case (no fallback chain remaining). When a
+          # mid-stream `%PEvent.Error{retryable?: true}` arrives and
+          # `fallback_chain_remaining == []`, the FSM retries the SAME
+          # provider with exponential backoff up to
+          # `provider_retry_max` (default 3) before surfacing a
+          # terminal error. ADR-0012 fallback still takes precedence
+          # when a chain is present — this is the fallback-of-last-
+          # resort for sessions configured against a single provider.
+          # Reset to `%{count: 0}` on every clean return to
+          # `:awaiting_user` and on every successful Done.
+          provider_retry_state: %{count: 0},
+          provider_retry_max:
+            opts[:provider_retry_max] ||
+              get_in(SettingsCache.get(), [:session, :provider_retry_max]) ||
+              3,
+          provider_retry_base_delay_ms:
+            opts[:provider_retry_base_delay_ms] ||
+              get_in(SettingsCache.get(), [:session, :provider_retry_base_delay_ms]) ||
+              1000,
           # SPEC-CODING-AGENT (#191):
           #
           # `coding_agent` — adapter module or nil. When set, user
@@ -1100,6 +1124,113 @@ defmodule Tau.Session do
     {:keep_state, data}
   end
 
+  # D-061 / #303: retryable mid-stream error with NO fallback chain
+  # remaining and an unspent retry budget. Re-issues `:start_provider`
+  # on the SAME provider after exponential backoff. The non-blocking
+  # backoff is implemented via `Process.send_after/3` posting a
+  # `{:provider_retry, ref, count+1}` to the FSM; the receiving clause
+  # below brutally kills the prior task (mirroring the ADR-0012
+  # fallback path) and re-enters `:start_provider`.
+  #
+  # CLAUSE ORDERING IS LOAD-BEARING: this clause MUST precede the
+  # ADR-0012 fallback clause that follows. Both head-match the same
+  # `%PEvent.Error{retryable?: true}` shape; only source order plus
+  # the `fallback_chain_remaining: []` guard keeps each clause winning
+  # in its own regime. A non-empty chain falls through to ADR-0012
+  # (the next clause); an empty chain with unspent retries enters
+  # here; an empty chain with exhausted retries falls through to the
+  # generic clause below and finalises as a terminal error.
+  def handle_event(
+        :info,
+        {:provider_event, ref, %PEvent.Error{retryable?: true} = ev},
+        :provider_streaming,
+        %{
+          fallback_chain_remaining: [],
+          stream_ref: ref,
+          provider_retry_state: %{count: c}
+        } = data
+      )
+      when c < data.provider_retry_max do
+    next_count = c + 1
+    delay = data.provider_retry_base_delay_ms * Integer.pow(2, c)
+
+    :telemetry.execute(
+      [:tau, :session, :provider_retry],
+      %{count: next_count, delay_ms: delay},
+      %{
+        session_id: data.id,
+        provider: data.provider,
+        reason: ev.reason,
+        max: data.provider_retry_max
+      }
+    )
+
+    notice =
+      "provider #{inspect(data.provider)} errored (#{inspect(ev.reason)}); " <>
+        "retrying #{next_count}/#{data.provider_retry_max} after #{delay}ms"
+
+    broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: notice})
+
+    data =
+      persist_event(data, "provider_retry", %{
+        provider: inspect(data.provider),
+        reason: inspect(ev.reason),
+        count: next_count,
+        max: data.provider_retry_max,
+        delay_ms: delay
+      })
+
+    # D-057 (SPEC-OTEL-REPORTER): close the *.start span opened for the
+    # now-aborted attempt BEFORE killing the task, mirroring the ADR-
+    # 0012 fallback path. A brutal_kill event is appropriate because
+    # we are force-terminating a running stream rather than
+    # cooperatively cancelling it.
+    emit_provider_request_terminal(:brutal_kill, data)
+
+    # Shut down the still-running provider task. Stragglers in the
+    # mailbox are tagged with the previous stream_ref and get dropped
+    # by the catch-all clause once :start_provider re-allocates a
+    # fresh ref.
+    if data.provider_task && Process.alive?(data.provider_task.pid) do
+      Task.shutdown(data.provider_task, :brutal_kill)
+    end
+
+    # Bump the counter NOW so a flurry of retryable errors in flight
+    # cannot push the count past `max` (each retry only schedules one
+    # send_after; the FSM is single-threaded so the bump is atomic
+    # w.r.t. the next message).
+    data = %{
+      data
+      | provider_retry_state: %{count: next_count},
+        provider_task: nil,
+        assembler: nil,
+        stream_ref: nil,
+        provider_span_ref: nil
+    }
+
+    Process.send_after(self(), {:provider_retry, next_count}, delay)
+    {:keep_state, data}
+  end
+
+  # D-061 / #303: deferred retry trigger. Posted by the clause above
+  # after the backoff delay elapses. Re-enters `:start_provider` on
+  # the same provider. Stale messages (where `provider_retry_state`
+  # has advanced past the count we were scheduled with — e.g. the
+  # user cancelled, or a new turn started) are silently dropped.
+  def handle_event(
+        :info,
+        {:provider_retry, count},
+        :provider_streaming,
+        %{provider_retry_state: %{count: c}} = data
+      )
+      when count == c do
+    handle_event(:internal, :start_provider, :provider_streaming, data)
+  end
+
+  def handle_event(:info, {:provider_retry, _count}, _state, data) do
+    {:keep_state, data}
+  end
+
   # ADR-0012: retryable mid-stream errors fall back to the next provider
   # in `data.fallback_chain_remaining`. Inserted *before* the generic
   # :provider_event clause so a non-empty chain takes over before the
@@ -1112,6 +1243,12 @@ defmodule Tau.Session do
   # fallback clause winning. If reordered, retryable mid-stream errors
   # would silently skip the ADR-0012 fallback and finalize as terminal
   # errors. This fallback clause MUST stay first.
+  #
+  # D-061 / #303: the same-provider retry clause precedes this one so
+  # a session with NO chain remaining and an unspent retry budget
+  # retries before this clause is consulted (its `[next | rest]`
+  # guard fails on `[]` anyway, but the explicit ordering matters
+  # for the all-empty case).
   def handle_event(
         :info,
         {:provider_event, ref, %PEvent.Error{retryable?: true} = ev},
@@ -1355,6 +1492,8 @@ defmodule Tau.Session do
          # D-060 / #293: tool-loop brake state is per-turn; reset on cancel.
          tool_loop_state: %{},
          tool_loop_call_lookups: %{},
+         # D-061 / #303: provider-retry counter is per-turn; reset on cancel.
+         provider_retry_state: %{count: 0},
          # SPEC-CODING-AGENT: dispatcher state is per-turn; reset on
          # cancel. Workspace is per-session — preserved.
          coding_agent_dispatcher: nil,
@@ -1825,7 +1964,9 @@ defmodule Tau.Session do
              provider_span_ref: nil,
              tool_iterations: 0,
              tool_loop_state: %{},
-             tool_loop_call_lookups: %{}
+             tool_loop_call_lookups: %{},
+             # D-061 / #303: provider-retry counter is per-turn; reset.
+             provider_retry_state: %{count: 0}
          }}
 
       compact_result ->
@@ -1873,6 +2014,8 @@ defmodule Tau.Session do
             # return to :awaiting_user.
             # D-060 / #293: tool-loop brake state cleared alongside the
             # iteration counter — a fresh turn starts with no history.
+            # D-061 / #303: provider-retry counter reset on successful
+            # Done — a fresh turn starts with the full retry budget.
             {:next_state, :awaiting_user,
              %{
                data
@@ -1883,7 +2026,8 @@ defmodule Tau.Session do
                  provider_span_ref: nil,
                  tool_iterations: 0,
                  tool_loop_state: %{},
-                 tool_loop_call_lookups: %{}
+                 tool_loop_call_lookups: %{},
+                 provider_retry_state: %{count: 0}
              }}
 
           true ->
@@ -1931,7 +2075,10 @@ defmodule Tau.Session do
                    provider_span_ref: nil,
                    tool_iterations: 0,
                    tool_loop_state: %{},
-                   tool_loop_call_lookups: %{}
+                   tool_loop_call_lookups: %{},
+                   # D-061 / #303: provider-retry counter is per-turn; reset
+                   # on iteration-cap abort alongside the brake state.
+                   provider_retry_state: %{count: 0}
                }}
             else
               dispatch_tools(tool_calls, %{data | tool_iterations: data.tool_iterations + 1})
@@ -2378,7 +2525,10 @@ defmodule Tau.Session do
          tool_dispatcher: nil,
          tool_iterations: 0,
          tool_loop_state: %{},
-         tool_loop_call_lookups: %{}
+         tool_loop_call_lookups: %{},
+         # D-061 / #303: provider-retry counter is per-turn; reset on
+         # brake-abort alongside the brake state.
+         provider_retry_state: %{count: 0}
      }}
   end
 

@@ -100,11 +100,20 @@ defmodule Tau.Session.ProviderFallbackExhaustionTest do
     sid = "exh-#{System.unique_integer([:positive])}"
     Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{sid}")
 
+    # D-061 / #303: the new single-provider retry clause fires once
+    # the ADR-0012 chain is exhausted (the last hop's error matches
+    # `fallback_chain_remaining: []` with an unspent retry budget).
+    # This test predates D-061 and asserts the *immediate* terminal
+    # error path. Opt out of D-061 here by setting the retry budget
+    # to 0 — the new clause's `when c < max` guard then never fires
+    # and the secondary's error falls through to the terminal-error
+    # path exactly as before.
     {:ok, ^sid} =
       start_session_for_test(
         provider: @primary,
         model: "a",
-        session_id: sid
+        session_id: sid,
+        provider_retry_max: 0
       )
 
     Tau.send(sid, "hello?")
