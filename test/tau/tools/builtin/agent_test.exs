@@ -53,6 +53,18 @@ defmodule Tau.Tools.Builtin.AgentTest do
     ]
   end
 
+  # Child success events with `:stop` instead of `:end_turn` — mirrors the
+  # normalised form emitted by every real provider adapter (#315 regression).
+  defp child_text_fixture_normalized(text) do
+    [
+      %Event.Start{request_id: "child-r1", model: "multi-fixture"},
+      %Event.TextStart{block_id: "b0"},
+      %Event.TextDelta{block_id: "b0", text: text},
+      %Event.TextEnd{block_id: "b0"},
+      %Event.Done{stop_reason: :stop, usage: %{}}
+    ]
+  end
+
   # Child error events (simulates a crash mid-stream).
   defp child_error_fixture do
     [
@@ -134,6 +146,50 @@ defmodule Tau.Tools.Builtin.AgentTest do
       kinds = jsonl_kinds(path)
       assert "tool_result" in kinds
       assert "assistant_message" in kinds
+    end
+
+    # #315 regression: real provider adapters normalise `"end_turn"` → `:stop`,
+    # so `await_child` must accept `:stop` as natural-end, not just the literal
+    # `:end_turn` atom. Prior to #315 every M1 verification timed out at 600s
+    # because the child's clean `:stop` was treated as continuation.
+    test "child ending with normalised :stop returns cleanly (no timeout)", %{tmp: tmp} do
+      parent_sid = Tau.Session.generate_id()
+      Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{parent_sid}")
+
+      call_id = "agent-call-stop"
+      child_text = "child completed via :stop"
+
+      provider_ctx = %{
+        parent_session_id: parent_sid,
+        parent_first_fixture: agent_tool_call_fixture(call_id, "do something"),
+        parent_second_fixture: parent_end_turn_fixture(),
+        child_fixture: child_text_fixture_normalized(child_text)
+      }
+
+      {:ok, ^parent_sid} =
+        start_session_for_test(
+          provider: MultiFixtureProvider,
+          session_id: parent_sid,
+          cwd: tmp,
+          provider_ctx: provider_ctx
+        )
+
+      Tau.send(parent_sid, "please delegate")
+
+      # The fix surfaces as: ToolEnd arrives within seconds (was 600s timeout).
+      assert_receive %SE.ToolEnd{
+                       tool_call_id: ^call_id,
+                       result: %Tau.Message.ToolResult{
+                         tool_name: "Agent",
+                         is_error: false,
+                         content: content,
+                         details: %{stop_reason: :stop}
+                       }
+                     },
+                     10_000
+
+      content_text = if is_binary(content), do: content, else: inspect(content)
+      assert content_text =~ child_text
     end
   end
 
