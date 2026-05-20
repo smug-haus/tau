@@ -351,7 +351,7 @@ defmodule Tau.Session do
          tools_whitelist: data.tools_whitelist,
          child_session_ids: data.child_session_ids,
          tool_iterations: Map.get(data, :tool_iterations, 0),
-         max_tool_iterations: Map.get(data, :max_tool_iterations, 20),
+         max_tool_iterations: Map.get(data, :max_tool_iterations, 100),
          tool_loop_state: Map.get(data, :tool_loop_state, %{}),
          tool_loop_brake_threshold: Map.get(data, :tool_loop_brake_threshold, 3),
          tool_loop_call_lookups: Map.get(data, :tool_loop_call_lookups, %{}),
@@ -611,7 +611,7 @@ defmodule Tau.Session do
           max_tool_iterations:
             opts[:max_tool_iterations] ||
               get_in(SettingsCache.get(), [:session, :max_tool_iterations]) ||
-              20,
+              100,
           # D-060 / #293: tool-loop brake — per-turn map keyed by
           # `{tool_name, args_hash}` to a `%{count, error}` cell. When
           # `count` reaches `tool_loop_brake_threshold` (default 3) the
