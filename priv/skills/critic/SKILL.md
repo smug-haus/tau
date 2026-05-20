@@ -65,6 +65,13 @@ demonstrates this? What would failure look like?"
   a `Process.whereis/1` lookup; any `try/rescue` across process boundaries;
   any HTTP client besides Finch/Mint; any `IO.puts` for logging.
 
+## Scope — design review only
+
+Do NOT build the Burrito binary, do NOT run `mix tau.smoke`, do NOT run
+`mix test` for empirical re-verification. Those are the reviewer's job.
+The critic reads the diff, reasons about design correctness and adversarial
+cases, and emits structured findings.
+
 ## When the coordinator calls you via Agent for the gate
 
 Read the PR diff with `git diff origin/main...HEAD` from the inherited cwd.
