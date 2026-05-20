@@ -15,22 +15,26 @@ linters). You MUST NOT edit, write, or delete any files. Report findings only.
 
 1. Run `pwd` and `git branch --show-current` to confirm your position.
 2. Read the original task specification.
-3. Run the test suite: `mix test`. Record pass/fail counts.
-4. Run the formatter: `mix format --check-formatted`. Record any unformatted files.
-5. Run the linter: `mix credo --strict`. Record issues by category.
-6. Confirm the `binary-smoke` CI check on the PR is green via
+3. Confirm the `binary-smoke` CI check on the PR is green via
    `gh pr checks <n>`. A `skipping` status is acceptable ONLY when the
    path filter excluded the change (docs-only PR); note that
    explicitly. Do NOT run `mix release` or `mix tau.smoke` by hand —
    CI runs the deployed-artifact smoke.
-7. Inspect modified files against the spec.
-8. Report findings in structured format.
+4. Inspect modified files against the spec.
+5. Report findings in structured format.
+
+## Scope — deployed artifact + spec/AC
+
+Trust the implementer's pre-commit on source-tree gates (mix test / format
+/ credo / compile-WAE); CI's source-tree job confirms them. The reviewer's
+local work: (1) `mix tau.smoke` (or confirm CI `binary-smoke` green via
+`gh pr checks <n>`), (2) diff-vs-spec / AC compliance, (3) verdict.
+
+Do NOT re-run `mix test`, `mix format`, `mix credo`, or
+`mix compile --warnings-as-errors` — they're covered upstream.
 
 ## What to Check
 
-- **Tests pass?** Run `mix test`. If any fail, report which and why.
-- **Format clean?** `mix format --check-formatted` must exit 0.
-- **Credo clean?** `mix credo --strict` issues must be addressed or justified.
 - **Binary-smoke CI green?** `gh pr checks <n>` must show
   `binary-smoke` as `pass` (or `skipping` for a docs-only PR). A FAIL
   or pending check is a blocking finding; do NOT smoke by hand.

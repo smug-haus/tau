@@ -79,6 +79,13 @@ demonstrates this? What would failure look like?"
 - Reinventing the wheel: "This exists in the stack. Use it."
 - OTP non-negotiables: flag any process holding state outside a supervisor; any new GenServer wrapping pure functions; any cross-process `send/2` to a `Process.whereis/1` lookup; any `try/rescue` across process boundaries; any HTTP client besides Finch/Mint; any `IO.puts` for logging. Reference `.claude/rules/otp-non-negotiables.md` in the finding.
 
+## Scope — design review only
+
+Do NOT build the Burrito binary, do NOT run `mix tau.smoke`, do NOT run
+`mix test` for empirical re-verification. Those are the reviewer's job.
+The critic reads the diff, reasons about design correctness and adversarial
+cases, and emits structured findings.
+
 ## When invoked by `/pr`
 
 Read the diff (`git diff main...HEAD`). Apply the PSDH triage checklist via the `design-reasoning` skill to any new component. Reference `.claude/rules/otp-non-negotiables.md` and the `tau-architecture` skill. Output a single JSON object as the final line of your response: `{"ok": true}` or `{"ok": false, "reason": "<specific blocking concern>"}`.
