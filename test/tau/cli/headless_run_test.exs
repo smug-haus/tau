@@ -438,7 +438,7 @@ defmodule Tau.CLI.HeadlessRunTest do
       # model-visible message list (prepended by prepend_skill_messages/2
       # during session.ex init/1).
       system_text = "You are a test assistant. Reply only with 'ok'."
-      skill = Tau.CLI.build_headless_skill(system_text)
+      skill = Tau.CLI.build_headless_skill({:text, system_text})
 
       session_id = Tau.Session.generate_id()
       Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{session_id}")
@@ -526,29 +526,71 @@ defmodule Tau.CLI.HeadlessRunTest do
       assert Tau.CLI.build_headless_skill(nil) == nil
     end
 
-    test "text produces a %Tau.Skill{} with correct fields" do
-      skill = Tau.CLI.build_headless_skill("be helpful")
+    test "{:text, text} produces a %Tau.Skill{} with correct fields" do
+      skill = Tau.CLI.build_headless_skill({:text, "be helpful"})
 
       assert %Tau.Skill{} = skill
       assert skill.name == "headless-system-prompt"
       assert skill.body == "be helpful"
       assert skill.path == "<cli:--system-prompt>"
+      # --system-prompt text has no frontmatter; default to no whitelist
+      # (D-059 unrestricted semantics → all builtins exposed).
+      assert skill.allowed_tools == []
+    end
+
+    test "{:file, path} with allowed-tools frontmatter populates allowed_tools (#273)" do
+      path =
+        Path.join(System.tmp_dir!(), "tau-bhs-fm-#{System.unique_integer([:positive])}.md")
+
+      File.write!(path, """
+      ---
+      name: persona-fixture
+      description: ignored (overridden by build_headless_skill/1)
+      allowed-tools: Bash Read
+      ---
+
+      Persona body.
+      """)
+
+      on_exit(fn -> File.rm(path) end)
+
+      skill = Tau.CLI.build_headless_skill({:file, path})
+
+      assert %Tau.Skill{} = skill
+      assert skill.name == "headless-system-prompt"
+      assert skill.allowed_tools == ["Bash", "Read"]
+      assert skill.body =~ "Persona body."
+      assert skill.path == path
+    end
+
+    test "{:file, path} without frontmatter falls back to empty allowed_tools" do
+      path =
+        Path.join(System.tmp_dir!(), "tau-bhs-nofm-#{System.unique_integer([:positive])}.md")
+
+      File.write!(path, "Just a body, no frontmatter.\n")
+      on_exit(fn -> File.rm(path) end)
+
+      skill = Tau.CLI.build_headless_skill({:file, path})
+
+      assert %Tau.Skill{} = skill
+      assert skill.allowed_tools == []
+      assert skill.body =~ "Just a body"
     end
   end
 
   describe "resolve_system_prompt/1" do
-    test "--system-prompt text is returned as {:ok, text}" do
+    test "--system-prompt text is returned as {:ok, {:text, text}}" do
       opts = %{system_prompt: "inline text", system_prompt_file: nil}
-      assert {:ok, "inline text"} = Tau.CLI.resolve_system_prompt(opts)
+      assert {:ok, {:text, "inline text"}} = Tau.CLI.resolve_system_prompt(opts)
     end
 
-    test "--system-prompt-file reads file contents" do
+    test "--system-prompt-file returns {:ok, {:file, path}} when readable" do
       path = Path.join(System.tmp_dir!(), "tau-sp-#{System.unique_integer([:positive])}.txt")
       File.write!(path, "file system prompt")
       on_exit(fn -> File.rm(path) end)
 
       opts = %{system_prompt: nil, system_prompt_file: path}
-      assert {:ok, "file system prompt"} = Tau.CLI.resolve_system_prompt(opts)
+      assert {:ok, {:file, ^path}} = Tau.CLI.resolve_system_prompt(opts)
     end
 
     test "missing --system-prompt-file returns {:error, reason}" do

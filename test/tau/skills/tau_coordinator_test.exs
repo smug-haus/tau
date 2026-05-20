@@ -166,7 +166,7 @@ defmodule Tau.Skills.TauCoordinatorTest do
       path = Path.join([@priv_dir, "skills", "tau-coordinator", "SKILL.md"])
       {:ok, skill} = Tau.Skills.Loader.parse(path)
 
-      headless = Tau.CLI.build_headless_skill(skill.body)
+      headless = Tau.CLI.build_headless_skill({:text, skill.body})
 
       assert %Tau.Skill{} = headless
       assert headless.name == "headless-system-prompt"
@@ -177,7 +177,7 @@ defmodule Tau.Skills.TauCoordinatorTest do
     test "coordinator body contains required factory-cycle markers" do
       path = Path.join([@priv_dir, "skills", "tau-coordinator", "SKILL.md"])
       {:ok, skill} = Tau.Skills.Loader.parse(path)
-      headless = Tau.CLI.build_headless_skill(skill.body)
+      headless = Tau.CLI.build_headless_skill({:text, skill.body})
 
       for marker <- ["Agent", "Factory cycle", "critic", "reviewer", "STOP-FACTORY"] do
         assert String.contains?(headless.body, marker),
