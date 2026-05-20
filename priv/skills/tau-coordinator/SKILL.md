@@ -20,6 +20,31 @@ escalate). The child runs to its first `:end_turn` and returns its assistant
 text as the tool result. Crashes surface as `is_error: true`; treat them as
 `killed` outcomes.
 
+### Agent call shape (literal example)
+
+```json
+{
+  "description": "Implement #291: add worked Agent-call example to coordinator persona",
+  "subagent_type": "implementer",
+  "permissions_mode": "default",
+  "system_prompt": "..."
+}
+```
+
+REQUIRED fields: `description` (string). All other fields are optional.
+
+- `subagent_type` — one of `"implementer"`, `"critic"`, `"reviewer"`,
+  `"general-purpose"`. Omit for a general-purpose sub-agent with no persona.
+- `permissions_mode` — one of `"default"`, `"accept_edits"`, `"plan"`,
+  `"auto"`, `"dont_ask"`, `"bypass"`. Clamped against the parent; the child
+  can never escalate.
+- `system_prompt` — optional string prepended to the brief.
+
+A call missing `description` is rejected synchronously by the session with
+`"Invalid arguments for tool Agent: #: Required property description was not
+present."` — do NOT retry the same shape; supply the missing field and
+reissue.
+
 ## Kill switch
 
 Check `.claude/STOP-FACTORY` before every factory step. If the file exists:
