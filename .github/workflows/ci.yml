@@ -286,6 +286,83 @@ jobs:
         if: steps.dialyzer_step.outcome == 'failure'
         run: exit 1
 
+  binary-smoke:
+    name: binary-smoke (mix tau.smoke · linux_amd64)
+    # Deployed-artifact gate — issue #262. Builds the Burrito binary and
+    # exercises a replay round-trip end-to-end. The unit suite cannot
+    # catch a non-functional binary; this job can. Path-filtered so
+    # docs-only PRs are not blocked on a 4-minute release build.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect non-docs changes
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          # `build: true` when at least one changed path is NOT in the
+          # docs/markdown-only set. The negation prefix `!` excludes a
+          # path from the match. Conservative: anything that could
+          # change build output (lib/, test/, mix.exs, mix.lock, .github/,
+          # scripts/, priv/, config/) flips `build` to true.
+          filters: |
+            build:
+              - '!docs/**'
+              - '!**/*.md'
+              - '!**/*.org'
+              - '!LICENSE'
+              - '!CHANGELOG.md'
+              - '!.gitignore'
+
+      - name: Setup Python (3.10 for ex_termbox waf)
+        if: steps.changes.outputs.build == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Setup BEAM
+        if: steps.changes.outputs.build == 'true'
+        uses: erlef/setup-beam@v1
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
+      - name: Setup Zig (Burrito launcher cross-compiler)
+        if: steps.changes.outputs.build == 'true'
+        uses: mlugg/setup-zig@v1
+        with:
+          version: "0.15.2"
+
+      - name: Setup xz (Burrito tarball compressor)
+        if: steps.changes.outputs.build == 'true'
+        run: sudo apt-get update && sudo apt-get install -y xz-utils
+
+      - name: Cache deps
+        if: steps.changes.outputs.build == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-binary-smoke-${{ hashFiles('**/mix.lock', 'mix.exs') }}
+
+      - name: Fetch deps
+        if: steps.changes.outputs.build == 'true'
+        run: mix deps.get
+        env:
+          MIX_ENV: prod
+
+      - name: mix tau.smoke
+        if: steps.changes.outputs.build == 'true'
+        run: mix tau.smoke
+        env:
+          BURRITO_TARGET: linux_amd64
+
+      - name: Note skip on docs-only PR
+        if: steps.changes.outputs.build != 'true'
+        run: |
+          echo "binary-smoke skipped: docs-only diff"
+
   escript:
     name: escript build
     runs-on: ubuntu-24.04
