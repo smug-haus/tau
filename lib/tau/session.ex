@@ -315,7 +315,10 @@ defmodule Tau.Session do
           tools_whitelist: [String.t()] | :all,
           child_session_ids: MapSet.t(String.t()),
           tool_iterations: non_neg_integer(),
-          max_tool_iterations: pos_integer()
+          max_tool_iterations: pos_integer(),
+          tool_loop_state: map(),
+          tool_loop_brake_threshold: pos_integer(),
+          tool_loop_call_lookups: map()
         }
 
   @doc """
@@ -346,7 +349,10 @@ defmodule Tau.Session do
          tools_whitelist: data.tools_whitelist,
          child_session_ids: data.child_session_ids,
          tool_iterations: Map.get(data, :tool_iterations, 0),
-         max_tool_iterations: Map.get(data, :max_tool_iterations, 20)
+         max_tool_iterations: Map.get(data, :max_tool_iterations, 20),
+         tool_loop_state: Map.get(data, :tool_loop_state, %{}),
+         tool_loop_brake_threshold: Map.get(data, :tool_loop_brake_threshold, 3),
+         tool_loop_call_lookups: Map.get(data, :tool_loop_call_lookups, %{})
        }}
     end
   end
@@ -602,6 +608,29 @@ defmodule Tau.Session do
             opts[:max_tool_iterations] ||
               get_in(SettingsCache.get(), [:session, :max_tool_iterations]) ||
               20,
+          # D-060 / #293: tool-loop brake — per-turn map keyed by
+          # `{tool_name, args_hash}` to a `%{count, error}` cell. When
+          # `count` reaches `tool_loop_brake_threshold` (default 3) the
+          # FSM aborts the turn with `stop_reason: :tool_loop_aborted`
+          # — a sibling circuit-breaker to the D-027 iteration cap that
+          # catches the narrow "model wedged repeating the SAME failing
+          # call" failure mode (real-world example: identical
+          # `Agent({})` schema rejection 5x in a row). Reset to %{} on
+          # every return to `:awaiting_user`. The cell records the
+          # error message so a transient error swapping mid-loop
+          # (network -> schema) restarts the counter instead of
+          # compounding two unrelated failure modes.
+          tool_loop_state: %{},
+          tool_loop_brake_threshold:
+            opts[:tool_loop_brake_threshold] ||
+              get_in(SettingsCache.get(), [:session, :tool_loop_brake_threshold]) ||
+              3,
+          # D-060 / #293: side-table mapping in-flight tool_call_id ->
+          # `{tool_name, args_hash}` so the `{:tool_done, ...}` handler
+          # can build the brake key without rescanning message history.
+          # Populated in `dispatch_tools/2`; entry removed in
+          # `handle_event(:info, {:tool_done, ...}, :tool_executing, _)`.
+          tool_loop_call_lookups: %{},
           # SPEC-CODING-AGENT (#191):
           #
           # `coding_agent` — adapter module or nil. When set, user
@@ -1323,6 +1352,9 @@ defmodule Tau.Session do
          # D-027: reset per-turn tool-iteration counter on every
          # return to :awaiting_user, including cancellation.
          tool_iterations: 0,
+         # D-060 / #293: tool-loop brake state is per-turn; reset on cancel.
+         tool_loop_state: %{},
+         tool_loop_call_lookups: %{},
          # SPEC-CODING-AGENT: dispatcher state is per-turn; reset on
          # cancel. Workspace is per-session — preserved.
          coding_agent_dispatcher: nil,
@@ -1384,10 +1416,13 @@ defmodule Tau.Session do
   def handle_event(:info, {:tool_done, call_id, result_msg}, :tool_executing, data) do
     tools = Map.delete(data.tools_in_flight, call_id)
 
+    {lookup, call_lookups_rest} = Map.pop(data.tool_loop_call_lookups, call_id)
+
     data =
       data
       |> append_message(result_msg)
       |> persist_event("tool_result", tool_result_to_data(result_msg))
+      |> Map.put(:tool_loop_call_lookups, call_lookups_rest)
 
     broadcast(data.id, %Events.ToolEnd{
       session_id: data.id,
@@ -1395,15 +1430,28 @@ defmodule Tau.Session do
       result: result_msg
     })
 
-    if map_size(tools) == 0 do
-      handle_event(
-        :internal,
-        :start_provider,
-        :provider_streaming,
-        %{data | tools_in_flight: tools, tool_dispatcher: nil}
-      )
-    else
-      {:keep_state, %{data | tools_in_flight: tools}}
+    # D-060 / #293: tool-loop brake. When the SAME `(tool_name,
+    # args_hash, error_message)` triple is rejected
+    # `tool_loop_brake_threshold` consecutive times within one turn,
+    # abort the turn with `stop_reason: :tool_loop_aborted` and emit
+    # a `%SystemNotice{}` naming the wedged call. Errors with
+    # different args OR a different error message reset the counter
+    # for that key — only IDENTICAL re-attempts count.
+    case maybe_apply_tool_loop_brake(data, lookup, result_msg) do
+      {:brake, data} ->
+        emit_tool_loop_brake_abort(data, tools)
+
+      {:continue, data} ->
+        if map_size(tools) == 0 do
+          handle_event(
+            :internal,
+            :start_provider,
+            :provider_streaming,
+            %{data | tools_in_flight: tools, tool_dispatcher: nil}
+          )
+        else
+          {:keep_state, %{data | tools_in_flight: tools}}
+        end
     end
   end
 
@@ -1775,7 +1823,9 @@ defmodule Tau.Session do
              cancel_flag: nil,
              stream_ref: nil,
              provider_span_ref: nil,
-             tool_iterations: 0
+             tool_iterations: 0,
+             tool_loop_state: %{},
+             tool_loop_call_lookups: %{}
          }}
 
       compact_result ->
@@ -1821,6 +1871,8 @@ defmodule Tau.Session do
             # allocates a fresh one. Same applies to ADR-0012's stream_ref.
             # D-005: reset the per-turn tool-iteration counter on clean
             # return to :awaiting_user.
+            # D-060 / #293: tool-loop brake state cleared alongside the
+            # iteration counter — a fresh turn starts with no history.
             {:next_state, :awaiting_user,
              %{
                data
@@ -1829,7 +1881,9 @@ defmodule Tau.Session do
                  cancel_flag: nil,
                  stream_ref: nil,
                  provider_span_ref: nil,
-                 tool_iterations: 0
+                 tool_iterations: 0,
+                 tool_loop_state: %{},
+                 tool_loop_call_lookups: %{}
              }}
 
           true ->
@@ -1875,7 +1929,9 @@ defmodule Tau.Session do
                    cancel_flag: nil,
                    stream_ref: nil,
                    provider_span_ref: nil,
-                   tool_iterations: 0
+                   tool_iterations: 0,
+                   tool_loop_state: %{},
+                   tool_loop_call_lookups: %{}
                }}
             else
               dispatch_tools(tool_calls, %{data | tool_iterations: data.tool_iterations + 1})
@@ -1954,6 +2010,18 @@ defmodule Tau.Session do
   defp dispatch_tools(tool_calls, data) do
     transition(data.id, data, :tool_executing)
     parent = self()
+
+    # D-060 / #293: build per-turn lookup table mapping call_id ->
+    # `{tool_name, args_hash}` for every dispatched call. The
+    # `{:tool_done, ...}` handler consults this to key the brake
+    # counter on `(tool_name, args_hash)` without re-scanning the
+    # original assistant message content. Hook-rewritten args overwrite
+    # the original entry below so the recorded hash reflects what the
+    # tool actually saw.
+    call_lookups =
+      Enum.into(tool_calls, %{}, fn %{id: id, name: name, arguments: args} ->
+        {id, {name, tool_args_hash(args)}}
+      end)
 
     # #17: intercept synthetic `__activate_skill__` tool calls *before*
     # permissions / hooks. Activation is FSM-internal — it never reaches
@@ -2068,6 +2136,13 @@ defmodule Tau.Session do
 
     parallel_calls = Enum.reverse(parallel_calls)
 
+    # D-060 / #293: refresh lookups for hook-rewritten args so the
+    # recorded hash matches what the tool executed against.
+    call_lookups =
+      Enum.reduce(parallel_calls, call_lookups, fn {id, name, args}, acc ->
+        Map.put(acc, id, {name, tool_args_hash(args)})
+      end)
+
     dispatcher_pid =
       case parallel_calls do
         [] -> nil
@@ -2093,7 +2168,11 @@ defmodule Tau.Session do
          # C76 (SPEC-OTEL-REPORTER): the provider.request span was closed in
          # finalize_assistant/2 before dispatch_tools/2 is called. Clear the
          # ref so it doesn't linger stale across the tool-execution phase.
-         provider_span_ref: nil
+         provider_span_ref: nil,
+         # D-060 / #293: merge this round's lookups with any carried from
+         # earlier rounds in the same turn. The `:tool_done` handler
+         # removes its own entry after consuming it.
+         tool_loop_call_lookups: Map.merge(data.tool_loop_call_lookups, call_lookups)
      }}
   end
 
@@ -2184,6 +2263,125 @@ defmodule Tau.Session do
   # permissions :deny. When an active skill is in effect AND the tool is
   # not on its allowed_tools list, the denial is attributed to the skill;
   # otherwise the failure originated from a rule-set deny rule.
+  # D-060 / #293: tool-loop brake helpers. Co-located with dispatch
+  # logic so the brake's mechanics live next to the iteration cap.
+  defp tool_args_hash(args) do
+    # Canonical-form hash: encode the argument map with `Jason.encode!`
+    # after sorting keys recursively so semantically-equal maps with
+    # different key insertion order produce the same hash. Falls back
+    # to `inspect/1` if Jason can't encode (unusual; tool args are
+    # already constrained to JSON-shaped values by validation).
+    canonical =
+      try do
+        Jason.encode!(canonicalize_for_hash(args || %{}))
+      rescue
+        _ -> inspect(args, limit: :infinity, printable_limit: :infinity)
+      end
+
+    :crypto.hash(:sha256, canonical) |> Base.encode16(case: :lower)
+  end
+
+  defp canonicalize_for_hash(%{} = m) do
+    m
+    |> Enum.map(fn {k, v} -> {to_string(k), canonicalize_for_hash(v)} end)
+    |> Enum.sort_by(fn {k, _} -> k end)
+    |> Enum.into(%{})
+  end
+
+  defp canonicalize_for_hash(list) when is_list(list),
+    do: Enum.map(list, &canonicalize_for_hash/1)
+
+  defp canonicalize_for_hash(other), do: other
+
+  # Returns {:continue, data} for normal flow, {:brake, data} when the
+  # threshold is reached and the FSM MUST abort the turn.
+  defp maybe_apply_tool_loop_brake(data, nil, _result_msg), do: {:continue, data}
+
+  defp maybe_apply_tool_loop_brake(data, _lookup, %ToolResult{is_error: false}),
+    do: {:continue, reset_tool_loop_state(data)}
+
+  defp maybe_apply_tool_loop_brake(data, {name, args_hash}, %ToolResult{
+         is_error: true,
+         content: error_text
+       }) do
+    key = {name, args_hash}
+    error_str = to_string(error_text || "")
+    prev = Map.get(data.tool_loop_state, key)
+
+    cell =
+      case prev do
+        %{count: c, error: ^error_str} -> %{count: c + 1, error: error_str}
+        _ -> %{count: 1, error: error_str}
+      end
+
+    state2 = Map.put(data.tool_loop_state, key, cell)
+    data2 = %{data | tool_loop_state: state2}
+
+    if cell.count >= data2.tool_loop_brake_threshold do
+      {:brake, data2}
+    else
+      {:continue, data2}
+    end
+  end
+
+  # Successful tool result clears the WHOLE brake table for the turn —
+  # a clean dispatch is evidence the model has un-wedged.
+  defp reset_tool_loop_state(data), do: %{data | tool_loop_state: %{}}
+
+  # Synthesise the escalation notice + MessageEnd{stop_reason:
+  # :tool_loop_aborted}, then return to :awaiting_user. Mirrors the
+  # D-027 abort shape so the CLI's drain loop (`Tau.CLI.drain_run_loop`)
+  # exits cleanly on either brake.
+  defp emit_tool_loop_brake_abort(data, tools) do
+    {{name, args_hash}, %{count: count, error: error_str}} =
+      Enum.max_by(data.tool_loop_state, fn {_k, %{count: c}} -> c end)
+
+    notice_text =
+      "Tool '#{name}' has been called with identical arguments #{count}x in a row, " <>
+        "each time rejected with: '#{error_str}'. Halting this turn."
+
+    :telemetry.execute(
+      [:tau, :session, :tool_loop_brake],
+      %{count: count},
+      %{
+        session_id: data.id,
+        tool_name: name,
+        args_hash: args_hash,
+        error: error_str
+      }
+    )
+
+    broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: notice_text})
+
+    abort_msg =
+      Assistant.new(
+        stop_reason: :tool_loop_aborted,
+        content: [%{type: :text, text: notice_text}]
+      )
+
+    data =
+      data
+      |> append_message(abort_msg)
+      |> persist_event("assistant_message", message_to_data(abort_msg))
+
+    broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: abort_msg})
+
+    {:next_state, :awaiting_user,
+     %{
+       data
+       | provider_task: nil,
+         assembler: nil,
+         cancel_flag: nil,
+         stream_ref: nil,
+         provider_span_ref: nil,
+         tools_in_flight: tools,
+         tool_dispatcher: nil,
+         tool_iterations: 0,
+         tool_loop_state: %{},
+         tool_loop_call_lookups: %{}
+     }}
+  end
+
   defp deny_reason(name, %Tau.Skill{name: skill_name, allowed_tools: list})
        when is_list(list) and list != [] do
     if name in list do
