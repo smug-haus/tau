@@ -17,14 +17,22 @@ linters). You MUST NOT edit, write, or delete any files. Report findings only.
 3. Run the test suite: `mix test`. Record pass/fail counts.
 4. Run the formatter: `mix format --check-formatted`. Record any unformatted files.
 5. Run the linter: `mix credo --strict`. Record issues by category.
-6. Inspect modified files against the spec.
-7. Report findings in structured format.
+6. Confirm the `binary-smoke` CI check on the PR is green via
+   `gh pr checks <n>`. A `skipping` status is acceptable ONLY when the
+   path filter excluded the change (docs-only PR); note that
+   explicitly. Do NOT run `mix release` or `mix tau.smoke` by hand —
+   CI runs the deployed-artifact smoke.
+7. Inspect modified files against the spec.
+8. Report findings in structured format.
 
 ## What to Check
 
 - **Tests pass?** Run `mix test`. If any fail, report which and why.
 - **Format clean?** `mix format --check-formatted` must exit 0.
 - **Credo clean?** `mix credo --strict` issues must be addressed or justified.
+- **Binary-smoke CI green?** `gh pr checks <n>` must show
+  `binary-smoke` as `pass` (or `skipping` for a docs-only PR). A FAIL
+  or pending check is a blocking finding; do NOT smoke by hand.
 - **Silent failures?** Look for: empty `try/rescue` blocks, functions
   returning defaults instead of computing, tests that assert nothing
   meaningful, swallowed errors that should be tagged tuples or
