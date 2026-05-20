@@ -55,10 +55,14 @@ jobs:
           install-hex: true
           install-rebar: true
 
-      - name: Setup Zig (Burrito needs it for cross-compilation of the launcher)
-        uses: mlugg/setup-zig@v1
-        with:
-          version: "0.15.2"
+      - name: Setup Zig 0.15.2 (direct from ziglang.org)
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -sSLfo zig.tar.xz "https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz"
+          tar -xf zig.tar.xz
+          echo "$RUNNER_TEMP/zig-x86_64-linux-0.15.2" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/zig-x86_64-linux-0.15.2/zig" version
 
       - name: Setup 7zip (Windows)
         if: runner.os == 'Windows'

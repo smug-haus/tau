@@ -197,10 +197,14 @@ jobs:
       # informative-only rather than failing the entire test job. The
       # release workflow is the authoritative gate for the prod binary
       # actually building.
-      - name: Setup zig (Burrito)
-        uses: mlugg/setup-zig@v1
-        with:
-          version: "0.15.2"
+      - name: Setup Zig 0.15.2 (direct from ziglang.org)
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -sSLfo zig.tar.xz "https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz"
+          tar -xf zig.tar.xz
+          echo "$RUNNER_TEMP/zig-x86_64-linux-0.15.2" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/zig-x86_64-linux-0.15.2/zig" version
         continue-on-error: true
 
       - name: Setup xz (Burrito)
@@ -340,11 +344,15 @@ jobs:
           version-file: .tool-versions
           version-type: strict
 
-      - name: Setup Zig (Burrito launcher cross-compiler)
+      - name: Setup Zig 0.15.2 (direct from ziglang.org)
         if: steps.changes.outputs.build == 'true'
-        uses: mlugg/setup-zig@v1
-        with:
-          version: "0.15.2"
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -sSLfo zig.tar.xz "https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz"
+          tar -xf zig.tar.xz
+          echo "$RUNNER_TEMP/zig-x86_64-linux-0.15.2" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/zig-x86_64-linux-0.15.2/zig" version
 
       - name: Setup xz (Burrito tarball compressor)
         if: steps.changes.outputs.build == 'true'
