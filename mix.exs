@@ -194,7 +194,12 @@ defmodule Tau.MixProject do
         targets: target_atoms_to_keyword(target_atom),
         debug: false,
         extra_steps: [
-          patch: [post: [Tau.BurritoSteps.RelinkTermbox]]
+          patch: [
+            post: [
+              Tau.BurritoSteps.RelinkTermbox,
+              Tau.BurritoSteps.RelinkSqliteNif
+            ]
+          ]
         ]
       ]
 
