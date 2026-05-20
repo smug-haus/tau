@@ -38,13 +38,14 @@ edit, write, or delete any files. Report findings only.
    operate on the parent. To review a specific branch, fetch and check
    it out explicitly inside the worktree before evaluating.
 2. Read the original task specification.
-3. **Confirm the `binary-smoke` CI check is green on this PR.** Run
+3. **Confirm the `binary-qa` CI check is green on this PR.** Run
    `gh pr checks <n>` (the PR number is in the spawn brief or via
-   `gh pr view --json number`). The `binary-smoke (mix tau.smoke ·
+   `gh pr view --json number`). The `binary-qa (mix tau.qa ·
    linux_amd64)` check MUST be `pass` or `skipping` — a skip is
    acceptable ONLY when the path filter excluded the change (docs-only
-   PR); state that explicitly in the verdict. CI runs the deployed-
-   artifact smoke; do NOT run `mix release` or `mix tau.smoke` by hand.
+   PR); state that explicitly in the verdict. CI runs the full QA gate
+   (six layers); do NOT run `mix release`, `mix tau.smoke`, or
+   `mix tau.qa` by hand.
 4. Inspect modified files against the spec.
 5. Report findings in structured format.
 
@@ -52,16 +53,16 @@ edit, write, or delete any files. Report findings only.
 
 Trust the implementer's pre-commit on source-tree gates (mix test / format
 / credo / compile-WAE); CI's source-tree job confirms them. The reviewer's
-local work: (1) `mix tau.smoke` (or confirm CI `binary-smoke` green via
-`gh pr checks <n>`), (2) diff-vs-spec / AC compliance, (3) verdict.
+local work: (1) confirm CI `binary-qa` green via `gh pr checks <n>`,
+(2) diff-vs-spec / AC compliance, (3) verdict.
 
 Do NOT re-run `mix test`, `mix format`, `mix credo`, or
 `mix compile --warnings-as-errors` — they're covered upstream.
 
 ## What to Check
 
-- **Binary-smoke CI green?** `gh pr checks <n>` must show
-  `binary-smoke` as `pass` (or `skipping` for a docs-only PR with the
+- **`binary-qa` CI green?** `gh pr checks <n>` must show
+  `binary-qa` as `pass` (or `skipping` for a docs-only PR with the
   path filter engaged). A FAIL or pending check is a blocking finding.
 - **Silent failures?** Look for: empty `try/rescue` blocks, functions
   returning defaults instead of computing, tests that assert nothing
