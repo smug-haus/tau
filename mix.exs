@@ -163,7 +163,14 @@ defmodule Tau.MixProject do
               _ -> false
             end
 
-          suffix = if dirty?, do: ".dirty", else: ""
+          suffix =
+            if dirty? do
+              epoch = System.os_time(:second)
+              ".dirty.#{epoch}"
+            else
+              ""
+            end
+
           "+" <> String.trim(sha) <> suffix
 
         _ ->
