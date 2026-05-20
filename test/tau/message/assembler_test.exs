@@ -75,6 +75,41 @@ defmodule Tau.Message.AssemblerTest do
       assert msg.error_message =~ "503"
       assert [%{type: :text, text: "partial"}] = msg.content
     end
+
+    test "Event.Error drops in-progress tool_call blocks" do
+      state = Assembler.new()
+      state = Assembler.step(state, %Event.TextStart{block_id: "t1"})
+      state = Assembler.step(state, %Event.TextDelta{block_id: "t1", text: "hello"})
+      state = Assembler.step(state, %Event.TextEnd{block_id: "t1"})
+      state = Assembler.step(state, %Event.ToolCallStart{tool_call_id: "tc1", name: "Agent"})
+      # NO ToolCallEnd — stream errors mid-tool-use
+      state =
+        Assembler.step(state, %Event.Error{reason: {"overloaded_error", "..."}, retryable?: true})
+
+      msg = state.message
+      assert msg.stop_reason == :error
+      assert Enum.any?(msg.content, &match?(%{type: :text, text: "hello"}, &1))
+      refute Enum.any?(msg.content, &match?(%{type: :tool_call}, &1))
+    end
+
+    test "Event.Error keeps completed tool_call blocks" do
+      events = [
+        %Event.Start{request_id: "r1", model: "m"},
+        %Event.ToolCallStart{tool_call_id: "tc1", name: "Read"},
+        %Event.ToolCallDelta{tool_call_id: "tc1", json_fragment: "{\"path\":\"a.txt\"}"},
+        %Event.ToolCallEnd{tool_call_id: "tc1", params: %{"path" => "a.txt"}},
+        %Event.ToolCallStart{tool_call_id: "tc2", name: "Agent"},
+        # tc2 never gets ToolCallEnd — stream errors
+        %Event.Error{reason: {"overloaded_error", "..."}, retryable?: true}
+      ]
+
+      msg = run(events) |> Assembler.assistant()
+      assert msg.stop_reason == :error
+      # completed tool_call tc1 must survive
+      assert Enum.any?(msg.content, fn b -> b[:type] == :tool_call and b[:id] == "tc1" end)
+      # incomplete tool_call tc2 must be dropped
+      refute Enum.any?(msg.content, fn b -> b[:type] == :tool_call and b[:id] == "tc2" end)
+    end
   end
 
   describe "finalize/3 — source-agnostic terminal fold (D-009)" do
