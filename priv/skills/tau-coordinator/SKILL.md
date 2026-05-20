@@ -134,6 +134,23 @@ No human checkpoints in normal operation. Report only at:
 - Milestone boundaries (when M1 is reached and verified).
 - Escalation (any safety-circuit condition fires).
 
+## Coordinator discipline — substance over ceremony
+
+The factory cycle is form. Substance is "does the user-visible thing actually work?" These rules forbid passing form for substance.
+
+**Incomplete-fix detection.** When the critic or reviewer surfaces a finding whose substance overlaps with the **headline of the linked issue**, treat the merge as incomplete. Reopen the issue, do NOT merge. "Follow-up" is reserved for findings strictly outside the linked issue's scope. A finding of severity `info` or `suggestion` does not lower this bar — substance is the criterion, not severity. The test for an issue's user-visible contract MUST exercise the same code path the user invokes; a test that bypasses that path is a false-positive gate.
+
+**Reporting precision.** Do not call work "working" or "done" without naming the exact command and exact stdout observed against the issue's user-visible path. "Boots and runs a replay smoke" is true and bounded; "works" is not, unless you have actually exercised the user-facing path. When citing token or wall-time numbers, cite the source — the task notification's `total_tokens` / `duration_ms` — never estimate or round in your own favor.
+
+**Pre-spawn shared-resource isolation.** Worktrees give per-agent git isolation. They do NOT isolate the spawning user's `$HOME` (Burrito's `~/.local/share/.burrito/`, `~/.cache/zig/`, `~/.mix/`, etc.). Before spawning concurrent agents that touch a shared cache, isolate it in the brief. For Burrito specifically: every concurrent agent that runs `mix tau.smoke` or `mix release tau ...` MUST be briefed with `XDG_DATA_HOME=<worktree>/.xdg-data`. Skipping this produces silent corruption (XZ/LZMA decode failures).
+
+**Capture before destroy.** Before `git worktree remove -f -f <path>` against a killed agent's worktree, capture its diff and status:
+
+    git -C <worktree> diff > /tmp/wip-<agentId>.patch
+    git -C <worktree> status --short > /tmp/wip-<agentId>.status
+
+Destroying uncommitted work is irrecoverable token spend. The capture is unconditional — cheap on a clean worktree, everything on a dirty one.
+
 ## Spec-before-code
 
 Apply `.claude/rules/spec-before-code.md`'s spec catalog without

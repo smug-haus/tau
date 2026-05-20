@@ -18,6 +18,22 @@ Parallel agents driving Elixir builds, gh CLI operations, and git checkouts shar
 
 **After every agent completion: remove its worktree in the same turn.** `git worktree remove -f -f <path>` for the finished agent's worktree, then `git branch -D <its-spawn-branch>` if no longer referenced. Locked-finished worktrees accumulating is the symptom that hides every other failure mode in this rule.
 
+**Capture-before-destroy.** Before removing a worktree that may hold uncommitted work — in particular before removing the worktree of an agent that was killed mid-run — capture its diff and status to a stable location, so the work can be inspected or replayed. The minimum sequence:
+
+```sh
+git -C <worktree> status --short > /tmp/wip-<agentId>.status
+git -C <worktree> diff > /tmp/wip-<agentId>.patch
+git worktree remove -f -f <worktree>
+```
+
+`git worktree remove -f -f` destroys uncommitted changes silently. A killed agent has often done substantial work (reads, decisions, in-progress edits) that lives only in the worktree's working tree; destroying it without capture is irrecoverable token spend. The capture is unconditional whenever the worktree may have changes — it is cheap and benign if the worktree is clean.
+
+**Shared $HOME-namespace caches MUST be isolated per concurrent agent.** Several build/runtime caches live in the spawning user's `$HOME`, NOT inside the worktree. They survive worktree isolation. Concurrent agents that touch the same cache will race. The canonical offender today is **Burrito's unpack cache at `~/.local/share/.burrito/<tau_erts-version>/`** — two concurrent `mix tau.smoke` invocations from different worktrees collide there and produce intermittent `XZ/LZMA Decode Failed` errors at binary startup.
+
+The fix is to isolate per agent. For Burrito specifically, set `XDG_DATA_HOME=<worktree>/.xdg-data` for every `mix release` and `mix tau.smoke` invocation in the agent's brief. Apply the same pattern to any other cache that lives outside the worktree (zig's `~/.cache/zig/` is content-addressable and benign; if a new cache surfaces and is not content-addressable, add it to the per-agent isolation list).
+
+When briefing concurrent agents that will both build the Burrito binary, this isolation is MANDATORY, not optional.
+
 ## Pre-spawn checklist
 
 Before every Agent invocation with `isolation: worktree`, mentally run:
@@ -36,6 +52,8 @@ If any answer is wrong, fix it before spawning. Cost of fixing is bounded; cost 
 - MUST NOT use `git update-ref refs/heads/main origin/main` as a routine sync mechanism. That is a recovery move, not a sync move; if you need it, a stale-main bug already happened.
 - MUST NOT leave finished agent worktrees registered. Remove them in the same turn the agent reports completion.
 - MUST NOT spawn parallel reviewers before the implementers they review have committed and the merge state is stable. Reviewers running while implementers are mid-write is the failure mode this rule exists to prevent.
+- MUST NOT remove a worktree with `git worktree remove -f -f` without first capturing `git diff` and `git status` to a stable path. Destroying an in-progress agent's uncommitted work without capture is irrecoverable token spend.
+- MUST NOT spawn concurrent agents that will both invoke `mix tau.smoke` or `mix release tau ...` without giving each agent a per-worktree `XDG_DATA_HOME` override in its brief. Shared `~/.local/share/.burrito/` cache races silently corrupt the smoke.
 
 ## Recovering from a stale parent
 

@@ -156,6 +156,44 @@ Precedence and interaction:
   briefing the meta-restart would have produced is folded into the escalation
   report instead of seeding a fresh attempt.
 
+## Coordinator discipline — substance over ceremony
+
+The factory cycle is form. Substance is "does the user-visible thing actually work?" These rules exist because the cycle has been completed multiple times in this project on PRs whose user-visible outcome was still broken. The pattern: each fix follows the form (file issue → spawn agent → gate → merge), then the coordinator moves to the next without verifying the substance, and a "follow-up" issue is filed when substance fails to surface. That displaces the gate's responsibility onto the user. These rules forbid that pattern.
+
+### Incomplete-fix detection (don't move to follow-up)
+
+When the **critic** or **reviewer** surfaces a finding whose substance overlaps with the headline of the linked issue, treat the merge as **incomplete**, not as "ship + follow-up." Concretely:
+
+- If the linked issue says "the headless path must honour the persona's allowed-tools" and the critic flags "the headless path drops the frontmatter (will file a follow-up)" — that is the headline of the issue. Reopen the issue, do NOT merge until the headline path actually works.
+- The test pattern for the issue's user-visible contract MUST exercise the same code path the user invokes (e.g. `Tau.CLI.main(...)` with realistic argv), not a hand-built struct that bypasses the contract. A gate that passes a test which short-circuits the user-facing code path is a false positive; the merge should not happen.
+- "Follow-up issue" is reserved for findings that are **outside the linked issue's scope**, not for findings that gut the linked issue itself.
+
+A critic finding of severity `info` or `suggestion` does NOT lower this bar. Substance is the criterion, not severity.
+
+### Reporting precision
+
+When reporting work to the user:
+
+- **Cite the source for numbers.** Token counts come from the task notification's `total_tokens` field (or `usage.total_tokens` on the agent's result). Wall times from the notification's `duration_ms`. Do not estimate; do not round in your own favor.
+- **Do not call anything "working" without naming the exact command and the exact stdout you observed.** "Boots and runs a replay smoke" is a true and bounded statement; "works" is not, when the user-visible path the issue was about hasn't been exercised. Use the bounded statement.
+- **Distinguish "the form ran clean" from "the substance landed."** "Gate green, merged" is the form. "User can run `<exact command>` and observe `<exact output>`" is the substance.
+
+### Pre-spawn shared-resource isolation
+
+Before spawning a concurrent agent, identify every shared mutable resource it will touch outside its worktree — and isolate it in the agent's brief. Worktrees give per-agent **git** isolation. They do NOT isolate:
+
+- the spawning user's `$HOME` (and everything under it: `~/.local/share/.burrito/`, `~/.cache/zig/`, `~/.mix/`, `~/.tau/`, `~/.config/...`);
+- system-wide processes (long-running daemons, lockfiles);
+- third-party caches accessed through the network (Hex mirror, GitHub release downloads).
+
+For `mix tau.smoke` / `mix release tau ...`: set `XDG_DATA_HOME=<worktree>/.xdg-data` in every brief that may run concurrently with another agent doing the same. See `worktree-discipline.md` for the canonical list and the rule that forbids skipping this isolation when concurrent.
+
+If a new shared-resource collision pattern surfaces, add it to `worktree-discipline.md` before continuing.
+
+### Capture before destroy
+
+When killing an agent (via TaskStop), the worktree's working tree may contain uncommitted work that represents non-trivial token spend. Before `git worktree remove -f -f` against the killed agent's worktree, run the capture sequence from `worktree-discipline.md`. This is unconditional: the cost of capturing on a clean worktree is zero; the cost of destroying a dirty one is everything the agent had done.
+
 ## Stop / escalate conditions — the safety circuit
 
 The loop MUST halt and surface to the user — it does not silently continue or
@@ -240,6 +278,11 @@ listed in the repo's `.gitignore` so it can never be accidentally committed.
 - MUST NOT branch off stale `main`, skip same-turn worktree cleanup, or
   otherwise relax `worktree-discipline.md`.
 - MUST NOT proceed when `.claude/STOP-FACTORY` is present.
+- MUST NOT treat a critic/reviewer finding that names the linked issue's headline as a "follow-up." Reopen the issue, fix the headline, re-gate. "Follow-up" is for out-of-scope findings only.
+- MUST NOT report work as "working" or "done" without naming the exact command run and the exact stdout observed against the user-visible path the issue named.
+- MUST NOT cite token or wall-time numbers without sourcing them from the task notification's `total_tokens` / `duration_ms` (or equivalent). No estimating, no rounding in the coordinator's favor.
+- MUST NOT spawn concurrent agents that touch the same $HOME-namespace cache (Burrito unpack, etc.) without per-agent isolation in their brief. See `worktree-discipline.md`.
+- MUST NOT `git worktree remove -f -f` an agent's worktree without first running the capture sequence (`git -C <worktree> diff > /tmp/wip-<agentId>.patch`). See `worktree-discipline.md`.
 
 ## When to update this rule
 
