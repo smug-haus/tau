@@ -21,6 +21,7 @@ defmodule Tau.CLI.HeadlessRunTest do
 
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureIO
   import Tau.Test.SessionHelper, only: [start_session_for_test: 1]
 
   alias Tau.Provider.Event
@@ -806,6 +807,98 @@ defmodule Tau.CLI.HeadlessRunTest do
 
       assert exit_code == 1,
              "expected exit 1 when --system-prompt-file path does not exist; got #{exit_code}"
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # #299 regression: drain_run_loop marker uses Tau.Message.ToolResult, not
+  # Tau.Tool.Result. Prior bug: is_struct check always false → marker always ✓.
+  # ---------------------------------------------------------------------------
+
+  describe "ToolEnd marker ✗/✓ (issue #299 regression)" do
+    test "marker is ✗ when ToolEnd carries Tau.Message.ToolResult with is_error: true" do
+      session_id = Tau.Session.generate_id()
+      call_id = "call-#{System.unique_integer([:positive])}"
+
+      result = %Tau.Message.ToolResult{
+        tool_call_id: call_id,
+        tool_name: "probe_tool",
+        content: "error text",
+        timestamp: DateTime.utc_now(),
+        is_error: true
+      }
+
+      # Inject: ToolStart (to register the name), ToolEnd with error result, then
+      # a terminal MessageEnd + SessionEnd so the loop exits cleanly.
+      terminal_msg = %Tau.Message.Assistant{
+        timestamp: DateTime.utc_now(),
+        content: [%{type: :text, text: "done"}],
+        stop_reason: :stop
+      }
+
+      send(self(), %Tau.Session.Events.ToolStart{
+        session_id: session_id,
+        tool_call_id: call_id,
+        name: "probe_tool",
+        arguments: %{}
+      })
+
+      send(self(), %Tau.Session.Events.ToolEnd{
+        session_id: session_id,
+        tool_call_id: call_id,
+        result: result
+      })
+
+      send(self(), %Tau.Session.Events.MessageEnd{session_id: session_id, message: terminal_msg})
+      send(self(), %Tau.Session.Events.SessionEnd{session_id: session_id, reason: :normal})
+
+      stderr_output = capture_io(:stderr, fn -> Tau.CLI.drain_run_loop(session_id) end)
+
+      assert stderr_output =~ "✗",
+             "expected ✗ marker for is_error: true ToolEnd; got stderr: #{inspect(stderr_output)}"
+
+      refute stderr_output =~ "← probe_tool ✓",
+             "must not emit ✓ for an error result; got stderr: #{inspect(stderr_output)}"
+    end
+
+    test "marker is ✓ when ToolEnd carries Tau.Message.ToolResult with is_error: false" do
+      session_id = Tau.Session.generate_id()
+      call_id = "call-#{System.unique_integer([:positive])}"
+
+      result = %Tau.Message.ToolResult{
+        tool_call_id: call_id,
+        tool_name: "probe_tool",
+        content: "ok",
+        timestamp: DateTime.utc_now(),
+        is_error: false
+      }
+
+      terminal_msg = %Tau.Message.Assistant{
+        timestamp: DateTime.utc_now(),
+        content: [%{type: :text, text: "done"}],
+        stop_reason: :stop
+      }
+
+      send(self(), %Tau.Session.Events.ToolStart{
+        session_id: session_id,
+        tool_call_id: call_id,
+        name: "probe_tool",
+        arguments: %{}
+      })
+
+      send(self(), %Tau.Session.Events.ToolEnd{
+        session_id: session_id,
+        tool_call_id: call_id,
+        result: result
+      })
+
+      send(self(), %Tau.Session.Events.MessageEnd{session_id: session_id, message: terminal_msg})
+      send(self(), %Tau.Session.Events.SessionEnd{session_id: session_id, reason: :normal})
+
+      stderr_output = capture_io(:stderr, fn -> Tau.CLI.drain_run_loop(session_id) end)
+
+      assert stderr_output =~ "✓",
+             "expected ✓ marker for is_error: false ToolEnd; got stderr: #{inspect(stderr_output)}"
     end
   end
 end

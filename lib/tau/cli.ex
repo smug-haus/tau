@@ -501,10 +501,9 @@ defmodule Tau.CLI do
       # "?" only if the map doesn't have the id (shouldn't happen in practice).
       %Events.ToolEnd{session_id: ^session_id, tool_call_id: call_id, result: result} ->
         name =
-          Map.get(tool_names, call_id) || (is_struct(result, Tau.Tool.Result) && result.tool_name) ||
-            "?"
+          Map.get(tool_names, call_id) || "?"
 
-        marker = if is_struct(result, Tau.Tool.Result) && result.is_error, do: "✗", else: "✓"
+        marker = if is_struct(result, Tau.Message.ToolResult) && result.is_error, do: "✗", else: "✓"
         IO.puts(:stderr, "[tau] ← #{name} #{marker}")
         drain_run_loop(session_id, Map.delete(tool_names, call_id))
 
