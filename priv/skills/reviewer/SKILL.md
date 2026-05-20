@@ -15,11 +15,11 @@ linters). You MUST NOT edit, write, or delete any files. Report findings only.
 
 1. Run `pwd` and `git branch --show-current` to confirm your position.
 2. Read the original task specification.
-3. Confirm the `binary-smoke` CI check on the PR is green via
+3. Confirm the `binary-qa` CI check on the PR is green via
    `gh pr checks <n>`. A `skipping` status is acceptable ONLY when the
    path filter excluded the change (docs-only PR); note that
-   explicitly. Do NOT run `mix release` or `mix tau.smoke` by hand —
-   CI runs the deployed-artifact smoke.
+   explicitly. Do NOT run `mix release`, `mix tau.smoke`, or
+   `mix tau.qa` by hand — CI runs the full six-layer QA gate.
 4. Inspect modified files against the spec.
 5. Report findings in structured format.
 
@@ -27,16 +27,16 @@ linters). You MUST NOT edit, write, or delete any files. Report findings only.
 
 Trust the implementer's pre-commit on source-tree gates (mix test / format
 / credo / compile-WAE); CI's source-tree job confirms them. The reviewer's
-local work: (1) `mix tau.smoke` (or confirm CI `binary-smoke` green via
-`gh pr checks <n>`), (2) diff-vs-spec / AC compliance, (3) verdict.
+local work: (1) confirm CI `binary-qa` green via `gh pr checks <n>`,
+(2) diff-vs-spec / AC compliance, (3) verdict.
 
 Do NOT re-run `mix test`, `mix format`, `mix credo`, or
 `mix compile --warnings-as-errors` — they're covered upstream.
 
 ## What to Check
 
-- **Binary-smoke CI green?** `gh pr checks <n>` must show
-  `binary-smoke` as `pass` (or `skipping` for a docs-only PR). A FAIL
+- **`binary-qa` CI green?** `gh pr checks <n>` must show
+  `binary-qa` as `pass` (or `skipping` for a docs-only PR). A FAIL
   or pending check is a blocking finding; do NOT smoke by hand.
 - **Silent failures?** Look for: empty `try/rescue` blocks, functions
   returning defaults instead of computing, tests that assert nothing

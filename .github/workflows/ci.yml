@@ -286,12 +286,15 @@ jobs:
         if: steps.dialyzer_step.outcome == 'failure'
         run: exit 1
 
-  binary-smoke:
-    name: binary-smoke (mix tau.smoke · linux_amd64)
-    # Deployed-artifact gate — issue #262. Builds the Burrito binary and
-    # exercises a replay round-trip end-to-end. The unit suite cannot
-    # catch a non-functional binary; this job can. Path-filtered so
-    # docs-only PRs are not blocked on a 4-minute release build.
+  binary-qa:
+    name: binary-qa (mix tau.qa · linux_amd64)
+    # Closing-move QA gate — issue #268. Supersedes the prior
+    # `binary-smoke` job (#262): runs all six layers (source quality,
+    # artifact build, artifact boot, replay smoke, tool-exposure smoke,
+    # coordinator round-trip) in `mix tau.qa`. The unit suite cannot
+    # catch a non-functional binary nor a broken in-memory tool surface;
+    # this job can. Path-filtered so docs-only PRs are not blocked on a
+    # multi-minute release build. (#269 will tighten the filter.)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -354,24 +357,22 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-binary-smoke-${{ hashFiles('**/mix.lock', 'mix.exs') }}
+          key: ${{ runner.os }}-mix-binary-qa-${{ hashFiles('**/mix.lock', 'mix.exs') }}
 
       - name: Fetch deps
         if: steps.changes.outputs.build == 'true'
         run: mix deps.get
-        env:
-          MIX_ENV: prod
 
-      - name: mix tau.smoke
+      - name: mix tau.qa
         if: steps.changes.outputs.build == 'true'
-        run: mix tau.smoke
+        run: mix tau.qa
         env:
           BURRITO_TARGET: linux_amd64
 
       - name: Note skip on docs-only PR
         if: steps.changes.outputs.build != 'true'
         run: |
-          echo "binary-smoke skipped: docs-only diff"
+          echo "binary-qa skipped: docs-only diff"
 
   escript:
     name: escript build
