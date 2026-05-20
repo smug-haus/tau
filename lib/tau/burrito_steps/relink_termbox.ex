@@ -7,15 +7,27 @@ defmodule Tau.BurritoSteps.RelinkTermbox do
   phase for Linux targets only. `RecompileNIFs` uses `elixir_make` / `make`
   which links against the host glibc (introducing `__snprintf_chk` and other
   fortified symbols). The resulting `.so` cannot load in the musl-based Burrito
-  runtime and produces:
+  runtime and produces, at startup of the packaged binary:
 
       Error relocating .../termbox_bindings.so: __snprintf_chk: symbol not found
 
+  Which surfaces in `./tau tui` as:
+
+      [error] TUI failed to start: {:undef, [{ExTermbox.Bindings, :init, [], []}, ...]}
+
   This step bypasses `make` entirely and calls `zig cc` directly, compiling
-  `termbox_bindings.c` and linking it against the pre-built static
-  `libtermbox.a` (which is already present in the `ex_termbox` source tree
-  after `RecompileNIFs` has run). The result is a fully musl-linked shared
-  object that loads cleanly in the Burrito wrapper.
+  `termbox_bindings.c` together with the vendored termbox library sources
+  (`termbox/src/termbox.c` and `termbox/src/utf8.c`) into a single shared
+  object. The earlier shape of this step linked against the pre-built static
+  `libtermbox.a` produced by `RecompileNIFs`, but that archive itself was
+  compiled by host gcc/clang with `-D_FORTIFY_SOURCE=2`, so its object files
+  carried undefined references to `__snprintf_chk`, `__fdelt_chk`, and
+  friends — the static-archive form propagated those references into the
+  final .so even though `termbox_bindings.c` itself was compiled cleanly
+  against musl headers. Compiling the termbox sources directly with
+  `zig cc -target ...-linux-musl` produces a fully musl-linked NIF with no
+  fortified symbols. Mirrors the structure of
+  `Tau.BurritoSteps.RelinkSqliteNif`.
   """
 
   alias Burrito.Builder.Context
@@ -45,8 +57,9 @@ defmodule Tau.BurritoSteps.RelinkTermbox do
     zig_target = "#{cpu_triplet}-linux-musl"
 
     ex_termbox_src = ex_termbox_src_path()
-    libtermbox_a = Path.join(ex_termbox_src, "c_src/termbox/build/src/libtermbox.a")
     termbox_bindings_c = Path.join(ex_termbox_src, "c_src/termbox_bindings.c")
+    termbox_c = Path.join(ex_termbox_src, "c_src/termbox/src/termbox.c")
+    utf8_c = Path.join(ex_termbox_src, "c_src/termbox/src/utf8.c")
     termbox_include = Path.join(ex_termbox_src, "c_src/termbox/src")
 
     erts_include = resolve_erts_include(context.target.erts_source)
@@ -75,12 +88,14 @@ defmodule Tau.BurritoSteps.RelinkTermbox do
       "-O2",
       "-fPIC",
       "-shared",
+      "-fvisibility=hidden",
       "-I#{erts_include}",
       "-I#{termbox_include}",
       "-o",
       so_output,
       termbox_bindings_c,
-      libtermbox_a
+      termbox_c,
+      utf8_c
     ]
 
     Log.info(:step, "[RelinkTermbox] Relinking termbox_bindings.so for #{zig_target}")
