@@ -1,6 +1,7 @@
 ---
 name: tau-coordinator
 description: "Coordinator persona for a Tau session. Injects the factory-loop operating procedure so a `tau run` session can execute the M1 self-hosting factory cycle end-to-end via the Agent builtin tool, with no external harness in the loop."
+allowed-tools: Read Write Edit Bash Agent
 ---
 
 # Tau Coordinator

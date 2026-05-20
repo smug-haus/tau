@@ -839,9 +839,18 @@ defmodule Tau.Session do
       }
     )
 
+    # D-059 (SPEC-USER-TURN §6, AC-10): when `data.active_skill` is set
+    # (e.g. headless `tau run --system-prompt-file` or a sub-agent persona
+    # pinned via `Agent`), the model-visible tool list MUST include the
+    # active skill's `allowed_tools` as discrete tools the provider can
+    # call — not just the synthetic `__activate_skill__` tool. Empty
+    # `allowed_tools` means "no whitelist declared" (matches
+    # `whitelist_from/1` in `Tau.Tools.Builtin.Agent`), so the model sees
+    # every registered built-in. The activate-skill tool is still
+    # included when other model-invokable skills are discoverable.
     stream_opts =
       %{model: data.model}
-      |> maybe_put_tools(skill_activation_tool_spec(data.skills))
+      |> maybe_put_tools(model_visible_tool_specs(data))
 
     # AC-7 (SPEC-CIRCUIT-BREAKER): wrap the provider call with the circuit
     # breaker façade. The thunk returns `{:ok, stream}` or `{:error, reason}`;
@@ -3116,7 +3125,78 @@ defmodule Tau.Session do
   end
 
   defp maybe_put_tools(opts, nil), do: opts
-  defp maybe_put_tools(opts, tool_spec), do: Map.put(opts, :tools, [tool_spec])
+  defp maybe_put_tools(opts, []), do: opts
+
+  defp maybe_put_tools(opts, tool_specs) when is_list(tool_specs),
+    do: Map.put(opts, :tools, tool_specs)
+
+  defp maybe_put_tools(opts, tool_spec) when is_map(tool_spec),
+    do: Map.put(opts, :tools, [tool_spec])
+
+  # D-059: assemble the list of tool specs exposed to the provider for
+  # the current turn. The list is the union of:
+  #
+  #   1. The synthetic `__activate_skill__` tool, when there are other
+  #      model-invokable skills the model might want to swap to. This
+  #      preserves the skill-activation UX for sessions whose skill
+  #      catalog is non-trivial.
+  #
+  #   2. The active skill's allowed tools, when `data.active_skill` is
+  #      set. Semantics mirror `Tau.Tools.Builtin.Agent.whitelist_from/1`:
+  #        * `allowed_tools == []` (the default for `build_headless_skill/1`)
+  #          ⇒ expose every registered built-in tool (`Tau.Tool.list/0`);
+  #        * `allowed_tools == [names]` ⇒ expose only those tools by name.
+  #
+  # The active-skill entry itself is never re-exposed via
+  # `__activate_skill__` (the model is already inside it).
+  #
+  # Returns `nil` when the resulting list is empty so `maybe_put_tools/2`
+  # leaves `:tools` unset (some providers reject an empty `:tools` array).
+  defp model_visible_tool_specs(data) do
+    activation = skill_activation_tool_spec(data.skills)
+    skill_specs = active_skill_tool_specs(data.active_skill)
+
+    case {activation, skill_specs} do
+      {nil, []} -> nil
+      {nil, list} -> list
+      {spec, []} -> [spec]
+      {spec, list} -> [spec | list]
+    end
+  end
+
+  # D-059: tool specs derived from the active skill's `allowed_tools`.
+  # `nil` active_skill ⇒ no extra specs (the activate-skill tool, if
+  # any, is the only model-visible tool). Empty `allowed_tools` ⇒ every
+  # registered built-in tool. Otherwise: only the listed names that
+  # actually resolve in `Tau.Tool` (unknown names are silently skipped
+  # rather than crashing the turn — the same posture
+  # `Tau.Permissions.Evaluator` takes for unknown names).
+  defp active_skill_tool_specs(nil), do: []
+
+  defp active_skill_tool_specs(%Tau.Skill{allowed_tools: []}) do
+    Tau.Tool.list()
+    |> Enum.sort()
+    |> Enum.flat_map(&tool_spec_for/1)
+  end
+
+  defp active_skill_tool_specs(%Tau.Skill{allowed_tools: names}) when is_list(names) do
+    names
+    |> Enum.uniq()
+    |> Enum.flat_map(&tool_spec_for/1)
+  end
+
+  # Build the Anthropic-shape `%{name, description, parameters}` map from
+  # a registered tool module. Returns `[]` (not `[nil]`) when the name
+  # is not registered so the caller can `flat_map` cleanly.
+  defp tool_spec_for(name) when is_binary(name) do
+    case Tau.Tool.lookup(name) do
+      {:ok, mod} ->
+        [%{name: mod.name(), description: mod.description(), parameters: mod.parameters()}]
+
+      :error ->
+        []
+    end
+  end
 
   # Process every `__activate_skill__` call inline. Returns the new
   # `data` (with `active_skill` set on success) and the partial
