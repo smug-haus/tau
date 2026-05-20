@@ -34,7 +34,15 @@ defmodule Tau.CLI do
   The run loop subscribes to the session's PubSub topic BEFORE calling
   `Tau.start_session/1` (D-004 compliance), sends the prompt, and consumes
   the event stream until `%Tau.Session.Events.SessionEnd{}` is received.
-  Text output is written to stdout; tool events are silently consumed.
+  Final assistant text is written to stdout. Progress indicators
+  (`[tau] session … starting`, `[tau] <provider> requesting…`,
+  `[tau] → <tool>(…)`, `[tau] ← <tool> ✓|✗`,
+  `[tau] <provider> done (stop_reason=…)`) are written to stderr — so
+  programs piping `tau run | …` still see only the assistant's answer,
+  while humans see continuous activity. The idle timeout is 30 min and
+  resets on any mailbox event; raised from 2 min after coordinator runs
+  with sub-agent calls (each potentially exceeding 5 min) hit the
+  shorter limit during Anthropic's first-byte-latency window.
   Exit code: 0 for any terminal stop_reason that is not in the failure set
   (`[:error, :tool_loop_aborted, :aborted, :compaction_failed]`); 1 for
   failure stop_reasons or abnormal `SessionEnd` reason. Tool-call content
@@ -323,13 +331,32 @@ defmodule Tau.CLI do
 
         case Tau.start_session(start_opts) do
           {:ok, ^session_id} ->
-            case Tau.send(session_id, prompt) do
-              :ok ->
-                drain_run_loop(session_id)
+            # Attach progress-output telemetry so the user can SEE that
+            # something is happening during long-running provider calls
+            # (Anthropic first-byte-latency on a coordinator prompt can
+            # exceed minutes; without these prints the user sees a black
+            # hole until eventual timeout).
+            handler_id = "tau-run-progress-#{session_id}"
+            attach_progress_handlers(handler_id, session_id, provider, model)
 
-              {:error, reason} ->
-                IO.puts(:stderr, "send error: #{inspect(reason)}")
-                1
+            short = String.slice(session_id, 0, 8)
+
+            IO.puts(
+              :stderr,
+              "[tau] session #{short} starting (provider=#{inspect(provider)}, model=#{model || "<default>"})"
+            )
+
+            try do
+              case Tau.send(session_id, prompt) do
+                :ok ->
+                  drain_run_loop(session_id)
+
+                {:error, reason} ->
+                  IO.puts(:stderr, "send error: #{inspect(reason)}")
+                  1
+              end
+            after
+              :telemetry.detach(handler_id)
             end
 
           {:error, reason} ->
@@ -337,6 +364,56 @@ defmodule Tau.CLI do
             1
         end
     end
+  end
+
+  # One-line summary of a tool-call's arguments for the progress indicator.
+  # Best-effort: prefer common single-key shapes (`command:`, `description:`,
+  # `path:`, etc.) and truncate to 80 chars.
+  defp summarise_args(args) when is_map(args) do
+    primary =
+      cond do
+        is_binary(args["command"]) -> args["command"]
+        is_binary(args["description"]) -> args["description"]
+        is_binary(args["path"]) -> args["path"]
+        is_binary(args["file_path"]) -> args["file_path"]
+        true -> inspect(args, limit: 5)
+      end
+
+    primary
+    |> to_string()
+    |> String.replace(~r/\s+/, " ")
+    |> String.slice(0, 80)
+  end
+
+  defp summarise_args(other), do: inspect(other, limit: 5)
+
+  # Attach telemetry handlers that emit one-line status updates to
+  # stderr for provider-request lifecycle. Lets the user see "[provider
+  # anthropic] requesting..." instead of silent staring during the
+  # 0-to-2-minute first-byte-latency window before MessageStart fires.
+  defp attach_progress_handlers(handler_id, session_id, provider, _model) do
+    events = [
+      [:tau, :provider, :request, :start],
+      [:tau, :provider, :request, :stop]
+    ]
+
+    :telemetry.attach_many(
+      handler_id,
+      events,
+      fn event, _measurements, metadata, _config ->
+        if Map.get(metadata, :session_id) == session_id do
+          case event do
+            [:tau, :provider, :request, :start] ->
+              IO.puts(:stderr, "[tau] #{inspect(provider)} requesting…")
+
+            [:tau, :provider, :request, :stop] ->
+              stop = Map.get(metadata, :stop_reason, "?")
+              IO.puts(:stderr, "[tau] #{inspect(provider)} done (stop_reason=#{inspect(stop)})")
+          end
+        end
+      end,
+      nil
+    )
   end
 
   # Consume PubSub events for the headless run until SessionEnd.
@@ -413,12 +490,35 @@ defmodule Tau.CLI do
           _ -> 1
         end
 
-      # Ignore other events (ToolStart, ToolEnd, MessageStart, MessageUpdate,
-      # SessionStart, SystemNotice, SkillActivated, Cancelled).
+      # Tool dispatched by the FSM. Print a one-line indicator so the user
+      # sees activity during multi-turn tool iteration (coordinator runs
+      # spawn sub-agents that take minutes each).
+      %Events.ToolStart{session_id: ^session_id, name: name, arguments: args} ->
+        IO.puts(:stderr, "[tau] → #{name}(#{summarise_args(args)})")
+        drain_run_loop(session_id)
+
+      # Tool completed. Print success/error one-liner.
+      %Events.ToolEnd{session_id: ^session_id, tool_call_id: _, result: result} ->
+        marker = if is_struct(result, Tau.Tool.Result) && result.is_error, do: "✗", else: "✓"
+        name = (is_struct(result, Tau.Tool.Result) && result.tool_name) || "?"
+        IO.puts(:stderr, "[tau] ← #{name} #{marker}")
+        drain_run_loop(session_id)
+
+      # Ignore other events (MessageStart, MessageUpdate, SessionStart,
+      # SystemNotice, SkillActivated, Cancelled, ToolUpdate). These don't
+      # warrant a stderr line but DO reset the after-timeout below (any
+      # mailbox activity resets the idle timer).
       _ ->
         drain_run_loop(session_id)
     after
-      120_000 ->
+      # Idle timeout — only fires after this many ms of NO mailbox activity
+      # at all (every received event resets it via recursion above). 30 min
+      # is the upper bound for "session genuinely stuck"; a coordinator run
+      # with sub-agents that each take 5-10 min stays well under this if any
+      # event is firing. Raised from 120_000 (which fired on Anthropic's
+      # first-byte-latency for long coordinator prompts before any session
+      # event ever fired).
+      1_800_000 ->
         # B3 fix (D-058): timeout MUST also flush JSONL before returning.
         # Tau.stop/1 is async; drain_session_end/2 blocks until SessionEnd
         # (bounded by 10 s) so the flush completes before we exit.
