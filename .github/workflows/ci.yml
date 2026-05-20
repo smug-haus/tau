@@ -300,19 +300,29 @@ jobs:
         id: changes
         uses: dorny/paths-filter@v3
         with:
-          # `build: true` when at least one changed path is NOT in the
-          # docs/markdown-only set. The negation prefix `!` excludes a
-          # path from the match. Conservative: anything that could
-          # change build output (lib/, test/, mix.exs, mix.lock, .github/,
-          # scripts/, priv/, config/) flips `build` to true.
+          # Positive-trigger filter: `build: true` when at least one changed
+          # path matches a pattern below. Pure-docs paths (docs/**, *.md,
+          # *.org, LICENSE, CHANGELOG.md, .gitignore) are simply not listed,
+          # so they never flip `build` to true.
+          #
+          # Four-case verification (issue #269):
+          #   1. Edit only docs/m1-verification/README.md   → no match → SKIP ✓
+          #   2. Edit only priv/skills/tau-coordinator/SKILL.md
+          #                                                 → priv/** matches → RUN ✓
+          #      (This was the silent-skip bug fixed by this PR.)
+          #   3. Edit lib/tau/cli.ex + test/tau/cli/foo_test.exs
+          #                                                 → lib/** and test/** match → RUN ✓
+          #   4. Edit only README.md                        → no match → SKIP ✓
           filters: |
             build:
-              - '!docs/**'
-              - '!**/*.md'
-              - '!**/*.org'
-              - '!LICENSE'
-              - '!CHANGELOG.md'
-              - '!.gitignore'
+              - 'lib/**'
+              - 'mix.exs'
+              - 'mix.lock'
+              - 'priv/**'
+              - '.github/workflows/**'
+              - 'scripts/**'
+              - 'test/**'
+              - 'config/**'
 
       - name: Setup Python (3.10 for ex_termbox waf)
         if: steps.changes.outputs.build == 'true'
