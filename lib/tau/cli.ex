@@ -39,10 +39,9 @@ defmodule Tau.CLI do
   `[tau] → <tool>(…)`, `[tau] ← <tool> ✓|✗`,
   `[tau] <provider> done (stop_reason=…)`) are written to stderr — so
   programs piping `tau run | …` still see only the assistant's answer,
-  while humans see continuous activity. The idle timeout is 30 min and
-  resets on any mailbox event; raised from 2 min after coordinator runs
-  with sub-agent calls (each potentially exceeding 5 min) hit the
-  shorter limit during Anthropic's first-byte-latency window.
+  while humans see continuous activity. The session can be terminated by
+  SIGINT (Ctrl+C), `Tau.cancel(session_id)` from another process, or
+  `%SessionEnd{}` from the FSM.
   Exit code: 0 for any terminal stop_reason that is not in the failure set
   (`[:error, :tool_loop_aborted, :aborted, :compaction_failed]`); 1 for
   failure stop_reasons or abnormal `SessionEnd` reason. Tool-call content
@@ -454,7 +453,7 @@ defmodule Tau.CLI do
   #   provider exists in the codebase. We therefore do NOT add an explicit
   #   :tool_use guard; step 1 (content check) subsumes it entirely.
   @doc false
-  def drain_run_loop(session_id) do
+  def drain_run_loop(session_id, tool_names \\ %{}) do
     receive do
       %Events.MessageEnd{session_id: ^session_id, message: msg} ->
         tool_calls =
@@ -464,7 +463,7 @@ defmodule Tau.CLI do
           tool_calls ->
             # Tool-call content present: the FSM will dispatch the tool(s).
             # MUST continue regardless of stop_reason — Gemini emits :stop here.
-            drain_run_loop(session_id)
+            drain_run_loop(session_id, tool_names)
 
           msg.stop_reason in [:error, :tool_loop_aborted, :aborted, :compaction_failed] ->
             error_text = extract_error_text(msg)
@@ -490,41 +489,29 @@ defmodule Tau.CLI do
           _ -> 1
         end
 
-      # Tool dispatched by the FSM. Print a one-line indicator so the user
-      # sees activity during multi-turn tool iteration (coordinator runs
-      # spawn sub-agents that take minutes each).
-      %Events.ToolStart{session_id: ^session_id, name: name, arguments: args} ->
+      # Tool dispatched by the FSM. Record tool_call_id → name for ToolEnd
+      # lookup, then print a one-line indicator so the user sees activity
+      # during multi-turn tool iteration (coordinator runs spawn sub-agents
+      # that take minutes each).
+      %Events.ToolStart{session_id: ^session_id, tool_call_id: call_id, name: name, arguments: args} ->
         IO.puts(:stderr, "[tau] → #{name}(#{summarise_args(args)})")
-        drain_run_loop(session_id)
+        drain_run_loop(session_id, Map.put(tool_names, call_id, name))
 
-      # Tool completed. Print success/error one-liner.
-      %Events.ToolEnd{session_id: ^session_id, tool_call_id: _, result: result} ->
+      # Tool completed. Look up the name recorded at ToolStart; fall back to
+      # "?" only if the map doesn't have the id (shouldn't happen in practice).
+      %Events.ToolEnd{session_id: ^session_id, tool_call_id: call_id, result: result} ->
+        name =
+          Map.get(tool_names, call_id) || (is_struct(result, Tau.Tool.Result) && result.tool_name) ||
+            "?"
+
         marker = if is_struct(result, Tau.Tool.Result) && result.is_error, do: "✗", else: "✓"
-        name = (is_struct(result, Tau.Tool.Result) && result.tool_name) || "?"
         IO.puts(:stderr, "[tau] ← #{name} #{marker}")
-        drain_run_loop(session_id)
+        drain_run_loop(session_id, Map.delete(tool_names, call_id))
 
       # Ignore other events (MessageStart, MessageUpdate, SessionStart,
-      # SystemNotice, SkillActivated, Cancelled, ToolUpdate). These don't
-      # warrant a stderr line but DO reset the after-timeout below (any
-      # mailbox activity resets the idle timer).
+      # SystemNotice, SkillActivated, Cancelled, ToolUpdate).
       _ ->
-        drain_run_loop(session_id)
-    after
-      # Idle timeout — only fires after this many ms of NO mailbox activity
-      # at all (every received event resets it via recursion above). 30 min
-      # is the upper bound for "session genuinely stuck"; a coordinator run
-      # with sub-agents that each take 5-10 min stays well under this if any
-      # event is firing. Raised from 120_000 (which fired on Anthropic's
-      # first-byte-latency for long coordinator prompts before any session
-      # event ever fired).
-      1_800_000 ->
-        # B3 fix (D-058): timeout MUST also flush JSONL before returning.
-        # Tau.stop/1 is async; drain_session_end/2 blocks until SessionEnd
-        # (bounded by 10 s) so the flush completes before we exit.
-        IO.puts(:stderr, "run timed out waiting for session response")
-        Tau.stop(session_id)
-        drain_session_end(session_id, 1)
+        drain_run_loop(session_id, tool_names)
     end
   end
 
