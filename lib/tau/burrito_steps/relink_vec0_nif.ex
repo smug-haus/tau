@@ -34,6 +34,20 @@ defmodule Tau.BurritoSteps.RelinkVec0Nif do
      release work tree at `lib/sqlite_vec-*/priv/<version>/vec0.so`.
 
   Mirrors the structure of `Tau.BurritoSteps.RelinkSqliteNif`.
+
+  ## Why no -fvisibility=hidden
+
+  `RelinkSqliteNif` uses `-fvisibility=hidden` to prevent internal SQLite
+  symbols from polluting the global symbol namespace. That is appropriate
+  for an Erlang NIF because its internal symbols are not part of its API.
+
+  `vec0.so` is a SQLite *loadable extension*, not a NIF. SQLite's
+  `load_extension()` locates the extension's entry point via `dlsym()`.
+  With `-fvisibility=hidden` the entry point symbol (`sqlite3_vec_init` /
+  `sqlite3_extension_init`) is hidden from `dlsym`, so the lookup returns
+  NULL, SQLite fails to initialise the extension, and every subsequent
+  `CREATE VIRTUAL TABLE ... USING vec0` returns "no such module: vec0" —
+  even though `load_extension` returned success (issue #304).
   """
 
   alias Burrito.Builder.Context
@@ -98,7 +112,14 @@ defmodule Tau.BurritoSteps.RelinkVec0Nif do
       "-O2",
       "-fPIC",
       "-shared",
-      "-fvisibility=hidden",
+      # Do NOT pass -fvisibility=hidden for SQLite loadable extensions.
+      # Unlike ERLang NIFs (where hiding internal symbols prevents pollution),
+      # SQLite extension .so files MUST export their entry-point symbol so that
+      # SQLite's dlsym() call in load_extension() can find it. With
+      # -fvisibility=hidden every symbol (including sqlite3_vec_init /
+      # sqlite3_extension_init) becomes hidden, dlsym returns NULL, and SQLite
+      # reports "no such module: vec0" — even though the .so was loaded
+      # successfully. See issue #304.
       "-I#{wrapper_dir}",
       "-I#{sqlite_include}",
       "-o",

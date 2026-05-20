@@ -343,14 +343,42 @@ defmodule Tau.Memory.Store.SQLite do
   end
 
   defp load_vec_extension(db) do
-    with :ok <- Exqlite.Sqlite3.enable_load_extension(db, true),
-         {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, "SELECT load_extension(?1)"),
-         :ok <- Exqlite.Sqlite3.bind(stmt, [SqliteVec.path()]),
-         _result <- Exqlite.Sqlite3.step(db, stmt),
-         :ok <- Exqlite.Sqlite3.release(db, stmt) do
-      # Disable general extension loading after the vec extension is loaded.
-      # This closes the extension-loading channel while keeping vec0 active.
-      Exqlite.Sqlite3.enable_load_extension(db, false)
+    # Allow tests to override the SqliteVec path via application config so they
+    # can exercise the missing-so error branch without modifying the filesystem.
+    path = Application.get_env(:tau, :sqlite_vec_path_override, SqliteVec.path())
+
+    # Verify the shared library file exists before attempting to load it.
+    # SQLite's load_extension() gives an opaque "no such module" error when the
+    # file is absent; this check surfaces the real cause (missing .so) so the
+    # boot log is actionable. The path returned by SqliteVec.path/0 has no
+    # extension — SQLite appends the platform suffix (.so/.dylib/.dll).
+    so_path = path <> native_lib_extension()
+
+    case File.stat(so_path) do
+      {:error, posix_err} ->
+        {:error, {:vec_so_missing, so_path, posix_err}}
+
+      {:ok, _} ->
+        with :ok <- Exqlite.Sqlite3.enable_load_extension(db, true),
+             {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, "SELECT load_extension(?1)"),
+             :ok <- Exqlite.Sqlite3.bind(stmt, [path]),
+             step_result <- Exqlite.Sqlite3.step(db, stmt),
+             :ok <- Exqlite.Sqlite3.release(db, stmt) do
+          # step/2 returns :done or {:row, _} on success; {:error, reason} on failure.
+          # Ignoring the result here silently swallowed load failures (issue #304).
+          case step_result do
+            :done ->
+              # Disable general extension loading after the vec extension is loaded.
+              # This closes the extension-loading channel while keeping vec0 active.
+              Exqlite.Sqlite3.enable_load_extension(db, false)
+
+            {:row, _} ->
+              Exqlite.Sqlite3.enable_load_extension(db, false)
+
+            {:error, reason} ->
+              {:error, {:vec_load_failed, reason, path}}
+          end
+        end
     end
   end
 
@@ -657,6 +685,16 @@ defmodule Tau.Memory.Store.SQLite do
       "created_at" => created_at,
       "updated_at" => updated_at
     }
+  end
+
+  # Returns the platform-specific shared library extension that SQLite's
+  # load_extension() would append to the path returned by SqliteVec.path/0.
+  defp native_lib_extension do
+    case :os.type() do
+      {:unix, :darwin} -> ".dylib"
+      {:win32, _} -> ".dll"
+      _ -> ".so"
+    end
   end
 
   defp required_string(map, key) do
