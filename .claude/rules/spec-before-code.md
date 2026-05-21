@@ -53,6 +53,19 @@ The current spec catalog:
   `Tau.OtelReporter` entry in `lib/tau/application.ex`. Triage score 4/5;
   D-050..D-055 live here.
 
+- `docs/spec/SPEC-PROMPT-CACHING.md` — provider prompt caching: the
+  `Tau.Provider` behaviour extension (`cache_regions/2`, optional
+  `prepare_cache/3`, `parse_cache_usage/1`) and per-adapter wire-format
+  translation that maps a Tau-side "stable regions" policy onto each
+  provider's caching mechanism (six families across nine providers).
+  Mandatory for any PR touching `lib/tau/provider.ex` (the new callbacks),
+  `lib/tau/providers/anthropic.ex` (`build_body/3` cache-marker injection),
+  `lib/tau/providers/bedrock.ex` (Family A — `cachePoint`/`cache_control`),
+  `lib/tau/providers/gemini.ex` (Family D — `cachedContent` resource
+  lifecycle, deferred), `lib/tau/providers/mistral.ex` (Family E —
+  `prompt_cache_key`), or any new adapter that needs to declare caching
+  behaviour. Triage score 3/5; D-063..D-065 live here.
+
 Future SPECs land here as new components reach triage threshold.
 
 ## What this rule requires
