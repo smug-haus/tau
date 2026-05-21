@@ -527,6 +527,12 @@ defmodule Tau.Session do
           provider_ctx: provider_ctx,
           messages: messages,
           skills: skills,
+          # #183 / [C94-B4] / D-076: prompt templates discovered once at
+          # init time, stored on FSM data exactly like `data.skills`.
+          # Consulted in `classify_slash_command/2` after skill lookup;
+          # the last branch before verbatim fall-through (precedence:
+          # builtin > extension > file-command > skill > template).
+          prompt_templates: Tau.PromptTemplates.discover(cwd),
           persistence: persistence,
           persist_handle: persist_handle,
           provider_task: nil,
@@ -791,7 +797,7 @@ defmodule Tau.Session do
   def handle_event(:cast, {:user_message, msg}, :awaiting_user, %{command_task: nil} = data) do
     emit_user_message_telemetry(:delivered, data, :awaiting_user)
 
-    case classify_slash_command(msg, data.skills) do
+    case classify_slash_command(msg, data.skills, data.prompt_templates, data.cwd) do
       {:builtin, mod, args, msg} ->
         handle_builtin_command(mod, args, msg, data)
 
@@ -3974,12 +3980,21 @@ defmodule Tau.Session do
   # extension can't deadlock the session. File-commands stay
   # synchronous; they're bounded File.read/1s with no user code.
   #
-  # classify_slash_command/1 is a pure parser: it returns
+  # classify_slash_command/4 is a pure parser: it returns
   # `{:async, mod, args, msg}` (caller spawns the task) or
   # `{:sync, msg}` (caller proceeds directly with the rewritten
   # message).
+  #
+  # Precedence (outermost wins):
+  #   builtin > extension > file-command > skill > template > verbatim
+  #
+  # [C94-B4] / D-076 / #183: prompt-template branch sits last before the
+  # verbatim fall-through, so skills and built-ins can shadow same-named
+  # templates.  On a template match the body is rendered (variable
+  # substitution) and the result is returned as {:sync, rewritten_msg} —
+  # identical to the file-command path; no new FSM state or cast handler.
 
-  defp classify_slash_command(%Tau.Message.User{content: c} = msg, skills)
+  defp classify_slash_command(%Tau.Message.User{content: c} = msg, skills, templates, cwd)
        when is_binary(c) do
     case Tau.Commands.Parser.parse(c) do
       {:command, "/model", args} ->
@@ -4011,10 +4026,23 @@ defmodule Tau.Session do
                     {:skill_activation, skill, rewritten}
 
                   :error ->
-                    # Unknown slash command; pass through verbatim — the
-                    # model can handle it as a stylistic preface or report
-                    # that it's unknown.
-                    {:sync, msg}
+                    # Not a skill — check prompt templates.
+                    # [C94-B4] / D-076: template match rewrites the user
+                    # message with the rendered body and returns {:sync, msg}
+                    # — the same path as invoke_file_command/3.
+                    case List.keyfind(templates, bare_name, 0) do
+                      {_name, template} ->
+                        context = build_template_context(cwd)
+                        {:ok, rendered} = Tau.PromptTemplates.render(template, args, context)
+                        rewritten = %Tau.Message.User{msg | content: rendered}
+                        {:sync, rewritten}
+
+                      nil ->
+                        # Unknown slash command; pass through verbatim — the
+                        # model can handle it as a stylistic preface or report
+                        # that it's unknown.
+                        {:sync, msg}
+                    end
                 end
             end
         end
@@ -4024,7 +4052,22 @@ defmodule Tau.Session do
     end
   end
 
-  defp classify_slash_command(msg, _skills), do: {:sync, msg}
+  defp classify_slash_command(msg, _skills, _templates, _cwd), do: {:sync, msg}
+
+  defp build_template_context(cwd) do
+    user =
+      case System.user_home() do
+        nil -> ""
+        home -> Path.basename(home)
+      end
+
+    %{
+      "cwd" => cwd,
+      "date" => DateTime.utc_now() |> DateTime.to_date() |> Date.to_iso8601(),
+      "user" => user,
+      "cursor" => ""
+    }
+  end
 
   defp spawn_command_task(mod, args, msg, data) do
     parent = self()

@@ -9,9 +9,16 @@ defmodule Tau.Command do
   Commands can be defined in three ways:
 
     1. Programmatically via `use Tau.Extension` + `command "/foo", FooMod`
-    2. Markdown files at `~/.tau/commands/*.md` or `<cwd>/.tau/commands/*.md`
-       (loaded by `Tau.Commands.Files`).
+    2. Markdown files registered into `Tau.Commands.Registry` by an extension
+       (the former `Tau.Commands.Files` module does not exist; file commands
+       reach the session via `invoke_file_command/3` in `Tau.Session` when an
+       extension registers a file path).
     3. Skills (with frontmatter) — see `Tau.Skill`.
+
+  Prompt templates (`~/.tau/prompts/*.md`, `<cwd>/.tau/prompts/*.md`) are a
+  fourth mechanism added in #183: they are discovered by `Tau.PromptTemplates`
+  and invoked as slash commands with named-variable substitution.  See
+  `Tau.PromptTemplates` for details.
 
   ## Argument specs (#15)
 

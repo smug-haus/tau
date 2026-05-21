@@ -26,8 +26,9 @@ defmodule Tau.Commands.Builtin.ReloadTest do
       assert String.contains?(notice, "Reload")
     end
 
-    test "notice text is 'Reloaded settings and skills.'" do
-      assert {:mutate, _fun, "Reloaded settings and skills."} = Reload.run("", %{cwd: "."})
+    test "notice text is 'Reloaded settings, skills, and prompt templates.'" do
+      assert {:mutate, _fun, "Reloaded settings, skills, and prompt templates."} =
+               Reload.run("", %{cwd: "."})
     end
 
     test "args are ignored" do
@@ -41,7 +42,8 @@ defmodule Tau.Commands.Builtin.ReloadTest do
 
       data = %{
         cwd: tmp,
-        skills: [{"old_skill", %Tau.Skill{name: "old_skill", body: "", path: "/tmp/old_skill.md"}}]
+        skills: [{"old_skill", %Tau.Skill{name: "old_skill", body: "", path: "/tmp/old_skill.md"}}],
+        prompt_templates: []
       }
 
       {:mutate, fun, _} = Reload.run("", data)
@@ -49,11 +51,13 @@ defmodule Tau.Commands.Builtin.ReloadTest do
       # skills key replaced; no crash
       assert Map.has_key?(result, :skills)
       assert is_list(result.skills)
+      assert Map.has_key?(result, :prompt_templates)
+      assert is_list(result.prompt_templates)
     end
 
     test "other data fields are preserved" do
       tmp = System.tmp_dir!()
-      data = %{cwd: tmp, skills: [], id: "test-id", messages: [42]}
+      data = %{cwd: tmp, skills: [], prompt_templates: [], id: "test-id", messages: [42]}
       {:mutate, fun, _} = Reload.run("", data)
       result = fun.(data)
       assert result.id == "test-id"
@@ -62,11 +66,42 @@ defmodule Tau.Commands.Builtin.ReloadTest do
 
     test "skills are sorted by name after reload" do
       tmp = System.tmp_dir!()
-      data = %{cwd: tmp, skills: []}
+      data = %{cwd: tmp, skills: [], prompt_templates: []}
       {:mutate, fun, _} = Reload.run("", data)
       result = fun.(data)
       names = Enum.map(result.skills, fn {name, _} -> name end)
       assert names == Enum.sort(names)
+    end
+
+    test "prompt_templates are re-discovered after reload (AC-7)" do
+      tmp = System.tmp_dir!()
+
+      data = %{
+        cwd: tmp,
+        skills: [],
+        prompt_templates: [
+          {"old-template",
+           %Tau.PromptTemplate{name: "old-template", body: "x", path: "/tmp/old.md", variables: []}}
+        ]
+      }
+
+      {:mutate, fun, _} = Reload.run("", data)
+      result = fun.(data)
+      # Result is a freshly-discovered list (not the old stale one)
+      assert is_list(result.prompt_templates)
+
+      # Verify a freshly-added template would be picked up
+      prompts_dir = Path.join(tmp, ".tau/prompts")
+      File.mkdir_p!(prompts_dir)
+      new_template_path = Path.join(prompts_dir, "new-ac7.md")
+      File.write!(new_template_path, "Fresh template {{x}}")
+
+      on_exit(fn -> File.rm(new_template_path) end)
+
+      {:mutate, fun2, _} = Reload.run("", result)
+      result2 = fun2.(result)
+      names = Enum.map(result2.prompt_templates, fn {name, _} -> name end)
+      assert "new-ac7" in names
     end
   end
 

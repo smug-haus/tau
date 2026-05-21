@@ -209,14 +209,20 @@ defmodule Tau.Session.LifecycleBuiltinDispatchTest do
     Tau.send(sid, "/reload")
 
     # The reload notice MUST NOT arrive before the MessageEnd.
-    refute_receive %SE.SystemNotice{session_id: ^sid, text: "Reloaded settings and skills."},
+    refute_receive %SE.SystemNotice{
+                     session_id: ^sid,
+                     text: "Reloaded settings, skills, and prompt templates."
+                   },
                    100
 
     # Wait for the turn to complete.
     assert_receive %SE.MessageEnd{session_id: ^sid}, 5_000
 
     # Now the postponed /reload should fire.
-    assert_receive %SE.SystemNotice{session_id: ^sid, text: "Reloaded settings and skills."},
+    assert_receive %SE.SystemNotice{
+                     session_id: ^sid,
+                     text: "Reloaded settings, skills, and prompt templates."
+                   },
                    2_000
 
     # FSM still alive.

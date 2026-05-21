@@ -78,9 +78,13 @@ Specifics:
   ordering.
 - Follow-up commands typed by the user while the previous one
   runs are postponed (and processed in order), not dropped.
-- File-commands (`Tau.Commands.Files`) stay synchronous — they're
-  bounded `File.read/1`s with no user code involved. Promoting
-  them to async would buy nothing.
+- File-commands (historically called `Tau.Commands.Files`, a module that
+  was never implemented; file commands today are invoked via
+  `invoke_file_command/3` in `Tau.Session` when an extension registers a
+  path into `Tau.Commands.Registry`) stay synchronous — they're bounded
+  `File.read/1`s with no user code involved. Promoting them to async would
+  buy nothing. Prompt templates (`Tau.PromptTemplates`, #183) are the same
+  class of bounded-IO synchronous operation.
 
 ## Alternatives considered
 
