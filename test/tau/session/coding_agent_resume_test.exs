@@ -43,12 +43,16 @@ defmodule Tau.Session.CodingAgentResumeTest do
     @name __MODULE__
 
     def ensure! do
-      case Process.whereis(@name) do
-        nil -> {:ok, _} = Agent.start_link(fn -> %{} end, name: @name)
-        _ -> :ok
-      end
+      case Agent.start_link(fn -> %{} end, name: @name) do
+        {:ok, _pid} ->
+          :ok
 
-      :ok
+        {:error, {:already_started, _pid}} ->
+          :ok
+
+        {:error, reason} ->
+          raise "RecordingStore failed to start: #{inspect(reason)}"
+      end
     end
 
     def record(session_id, task) do
@@ -168,7 +172,9 @@ defmodule Tau.Session.CodingAgentResumeTest do
       # Reconfigure the ctx so the second turn ships a different
       # fixture (without the Start we'd otherwise emit twice).
       # The session reuses its captured coding_agent_state regardless.
-      Process.sleep(50)
+      # No sleep needed: RecordingStore.record/2 uses Agent.update (a
+      # synchronous GenServer.call), so the task is persisted before
+      # RecordingReplay.start/2 returns — well before MessageEnd fires.
 
       :ok =
         Tau.update_provider(sid,
@@ -178,11 +184,10 @@ defmodule Tau.Session.CodingAgentResumeTest do
       Tau.send(sid, "turn 2")
       assert_receive %SE.MessageEnd{}, 2_000
 
-      # Belt-and-braces against drainer-vs-FSM message-ordering jitter:
-      # MessageEnd implies the dispatcher's start/2 (which writes the
-      # task recording inside the drainer process) has already run,
-      # but the ETS insert lives on a different scheduler.
-      Process.sleep(50)
+      # RecordingStore.record/2 calls Agent.update (synchronous GenServer.call),
+      # which completes inside RecordingReplay.start/2 before the stream is
+      # consumed. MessageEnd fires only after the full stream is drained, so
+      # both tasks are guaranteed to be recorded by the time we read here.
 
       tasks = RecordingReplay.tasks(sid)
       assert length(tasks) == 2, "expected exactly 2 task recordings, got: #{inspect(tasks)}"
@@ -277,13 +282,8 @@ defmodule Tau.Session.CodingAgentResumeTest do
       Tau.send(sid, "turn 1")
       assert_receive %SE.MessageEnd{}, 2_000
 
-      # Flush JSONL: persistence.append is synchronous in
-      # Tau.Persistence.Jsonl (the only impl on this branch), so
-      # MessageEnd implies the writes have hit disk. The Process.sleep
-      # below mirrors the timing-tolerance pattern used by the
-      # existing tests in this file, in case a future async
-      # persistence backend lands.
-      Process.sleep(50)
+      # Persistence.Jsonl.append/2 is synchronous (IO.binwrite + :file.datasync
+      # both block), so MessageEnd arriving means all JSONL writes are on disk.
       Tau.stop(sid)
 
       # Wait for the registry entry to clear so Tau.resume/1 doesn't
@@ -366,7 +366,8 @@ defmodule Tau.Session.CodingAgentResumeTest do
 
       Tau.send(sid, "turn 2 after resume")
       assert_receive %SE.MessageEnd{}, 2_000
-      Process.sleep(50)
+
+      # No sleep needed: see comment above — Agent.update is synchronous.
 
       # The RecordingStore agent is module-global and persists
       # across the stop/resume boundary, so it retains BOTH the
@@ -458,7 +459,10 @@ defmodule Tau.Session.CodingAgentResumeTest do
       Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{sid}")
       Tau.send(sid, "turn 1")
       assert_receive %SE.MessageEnd{}, 2_000
-      Process.sleep(50)
+
+      # No sleep: Persistence.Jsonl.append/2 is synchronous (IO.binwrite +
+      # :file.datasync both block). MessageEnd fires after persist_event, so
+      # the JSONL is fully written by the time we reach here.
 
       events = Tau.Persistence.impl().stream(sid) |> Enum.to_list()
 
@@ -489,7 +493,8 @@ defmodule Tau.Session.CodingAgentResumeTest do
       Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{sid}")
       Tau.send(sid, "turn 1")
       assert_receive %SE.MessageEnd{}, 2_000
-      Process.sleep(50)
+
+      # No sleep: same reasoning as the test above.
 
       events = Tau.Persistence.impl().stream(sid) |> Enum.to_list()
       assert Enum.filter(events, &match?(%{"kind" => "coding_agent_session"}, &1)) == []

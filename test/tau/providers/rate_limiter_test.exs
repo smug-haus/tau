@@ -15,10 +15,6 @@ defmodule Tau.Providers.RateLimiterTest do
     @moduledoc false
   end
 
-  defmodule FakeProvider2 do
-    @moduledoc false
-  end
-
   setup do
     on_exit(fn ->
       RateLimiter
@@ -26,13 +22,6 @@ defmodule Tau.Providers.RateLimiterTest do
       |> case do
         :no_limiter -> :ok
         _ -> Tau.Providers.RateLimiter.Supervisor.stop(FakeProvider)
-      end
-
-      RateLimiter
-      |> apply(:state, [FakeProvider2])
-      |> case do
-        :no_limiter -> :ok
-        _ -> Tau.Providers.RateLimiter.Supervisor.stop(FakeProvider2)
       end
     end)
 
@@ -88,30 +77,41 @@ defmodule Tau.Providers.RateLimiterTest do
 
   describe "record_response/2" do
     test "halves bucket on 429" do
-      {:ok, _} =
-        Tau.Providers.RateLimiter.Supervisor.ensure_started(FakeProvider2, rpm: 100, tpm: 1_000)
+      # Use a unique provider atom so on_exit cleanup from a sibling test
+      # cannot race-stop this limiter (ExUnit runs on_exit in a separate
+      # cleanup process; a loaded runner can schedule it concurrently).
+      provider = String.to_atom("FakeProvider429_#{System.unique_integer([:positive])}")
+      on_exit(fn -> Tau.Providers.RateLimiter.Supervisor.stop(provider) end)
 
-      before_state = RateLimiter.state(FakeProvider2)
+      {:ok, _} =
+        Tau.Providers.RateLimiter.Supervisor.ensure_started(provider, rpm: 100, tpm: 1_000)
+
+      before_state = RateLimiter.state(provider)
       assert before_state.rpm_bucket.size == 100
 
-      RateLimiter.record_response(FakeProvider2, %{status: 429})
-      # Cast — give it a moment to land.
-      Process.sleep(20)
+      RateLimiter.record_response(provider, %{status: 429})
 
-      after_state = RateLimiter.state(FakeProvider2)
+      # record_response/2 sends a GenServer.cast. Flush by issuing a
+      # subsequent GenServer.call (:state) — calls queue behind casts
+      # for the same process, so state/1 returns only after the cast lands.
+      after_state = RateLimiter.state(provider)
       assert after_state.rpm_bucket.size == 50
       assert after_state.tpm_bucket.size == 500
       assert after_state.half_until > 0
     end
 
     test "non-429 status is a no-op" do
+      # Unique atom — see comment in "halves bucket on 429".
+      provider = String.to_atom("FakeProviderNoop_#{System.unique_integer([:positive])}")
+      on_exit(fn -> Tau.Providers.RateLimiter.Supervisor.stop(provider) end)
+
       {:ok, _} =
-        Tau.Providers.RateLimiter.Supervisor.ensure_started(FakeProvider2, rpm: 100, tpm: 1_000)
+        Tau.Providers.RateLimiter.Supervisor.ensure_started(provider, rpm: 100, tpm: 1_000)
 
-      RateLimiter.record_response(FakeProvider2, %{status: 200})
-      Process.sleep(20)
+      RateLimiter.record_response(provider, %{status: 200})
 
-      after_state = RateLimiter.state(FakeProvider2)
+      # Flush the cast via a subsequent call — same ordering guarantee.
+      after_state = RateLimiter.state(provider)
       assert after_state.rpm_bucket.size == 100
     end
   end
