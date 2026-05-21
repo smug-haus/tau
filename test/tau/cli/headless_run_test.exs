@@ -96,7 +96,7 @@ defmodule Tau.CLI.HeadlessRunTest do
       assert length(matching) == 1, "expected session to appear in Tau.list_sessions/0"
 
       events = PJsonl.stream(session_id) |> Enum.to_list()
-      assert length(events) > 0, "expected non-empty JSONL for session #{session_id}"
+      assert events != [], "expected non-empty JSONL for session #{session_id}"
 
       kinds = Enum.map(events, & &1["kind"])
       assert "user_message" in kinds, "expected user_message event; got: #{inspect(kinds)}"
@@ -474,7 +474,7 @@ defmodule Tau.CLI.HeadlessRunTest do
           _ -> false
         end)
 
-      assert length(system_messages) >= 1,
+      assert system_messages != [],
              "expected at least one system-role skill message in data.messages; " <>
                "got: #{inspect(system_messages)}"
 
@@ -510,7 +510,7 @@ defmodule Tau.CLI.HeadlessRunTest do
             false
         end)
 
-      assert length(headless_messages) == 0,
+      assert headless_messages == [],
              "expected no headless-system-prompt skill message when --system-prompt is not given; " <>
                "got: #{inspect(headless_messages)}"
 
