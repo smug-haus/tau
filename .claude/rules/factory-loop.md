@@ -8,21 +8,24 @@ coordinator chose whether and when to run each gate half and routinely completed
 only the reviewer half before handing work back. Under continuous operation the
 gate is not optional and not partial.
 
-## The sole objective — self-hosting (M1)
+## The current objective — M1.1 (Minimum viable UX)
 
-**The factory loop exists for exactly one purpose: to reach self-hosting — milestone
-M1.** Self-hosting means a Tau session can take a roadmap issue from open to a
-gate-passed, merged PR with no external harness (Claude Code) in the loop — the
-coordinator workflow running end-to-end through `Tau.Tools.Builtin.Agent`.
+**M1 (self-hosting) is complete.** Self-hosting — a Tau session taking a roadmap
+issue from open to a gate-passed, merged PR with no external harness (Claude Code)
+in the loop — has been achieved via `Tau.Tools.Builtin.Agent`.
 
-This is a standing user directive and overrides the milestone-walk ordering: the
-loop does NOT work milestones M2→M8 for their own sake. **Every factory step must
-be justified by how it advances self-hosting.** Work that does not move M1 closer
-is out of scope unless it is a hard prerequisite for M1 (e.g. a bug that blocks
-the coding-agent substrate, or M4 sub-agent dispatch that the coordinator loop
-depends on). When selecting work, the only question is: *does this unblock or
-advance self-hosting?* If not, do not spawn it. The loop stops being run once M1
-is met and verified.
+**The factory loop's current objective is M1.1 — Minimum viable UX.** M1.1 means
+`tau tui` is a credible, competitive TUI that meets or exceeds Pi's feature set
+for the table-stakes UX surface (see `docs/spec/SPEC-TUI-HEADLESS.md` §6 for the
+full acceptance bar). The M1.1 issue set is #333, #334, #335, #337, #338, #339,
+#340, #341, #342, #343, #344, #345, #346 (priority-ordered in issue #336 comment).
+
+**M1's self-hosting capability MUST be regression-guarded throughout M1.1.** Every
+M1.1 PR that touches the session FSM, the provider layer, or the CLI dispatch path
+MUST run the existing `tau run --provider replay` smoke and the `mix test` suite;
+a red M1 path is a FAIL verdict regardless of M1.1 scope. When selecting work, the
+question is: *does this advance the M1.1 UX surface?* Work that neither advances
+M1.1 nor guards M1 regression is out of scope.
 
 This rule **inherits and does not override**:
 
@@ -42,14 +45,15 @@ wins; this rule only sequences and gates work, it does not relax any other rule.
 One **factory step** delivers one roadmap item end-to-end. Execute the steps in
 order; do not reorder, skip, or batch.
 
-1. **Select the next roadmap item — by what advances self-hosting (M1).** The
-   sole objective is M1 (see "The sole objective" above). Select the open issue
-   whose completion most directly unblocks or advances self-hosting — the
-   coding-agent substrate (`SPEC-CODING-AGENT`, `Tau.CodingAgent`), M4 sub-agent
-   dispatch (`Tau.Tools.Builtin.Agent`), and the coordinator orchestration
-   runnable from inside a Tau session. Prefer the smallest shippable unit and
-   issues that unblock others. Do NOT pick an issue merely because it is the
-   next in milestone order; if it does not serve M1, skip it. If a clear M1
+1. **Select the next roadmap item — by what advances M1.1 (Minimum viable UX).**
+   The current objective is M1.1 (see "The current objective" above). Select the
+   open M1.1 issue whose completion most directly advances the UX surface —
+   priority order from issue #336 comment: #337 (transcript rendering), #341
+   (permissions), #339 (cancellation/steering), #335 (sub-agent visibility),
+   #338 (input editor), #333+#344 (completion surface), #340 (status surfaces),
+   #342 (diff), #345 (themes/keybindings), #183, #180, #343, #186. Prefer the
+   smallest shippable unit and issues that unblock others. Confirm M1's
+   self-hosting path remains green before merging any M1.1 PR. If a clear M1.1
    prerequisite has no issue, file one first per `tau-github-workflow`.
 2. **Ensure a GitHub issue exists.** Every factory step is anchored to exactly
    one issue. If you filed it in step 1, it already exists; otherwise confirm

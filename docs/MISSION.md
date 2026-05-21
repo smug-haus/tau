@@ -80,21 +80,10 @@ been merged to main. The OAuth branch's commits cite SPEC identifiers
 SPEC document. Whoever authored those commits read the SPEC from
 elsewhere.
 
-## D-NNN namespace — claimed range
+## D-NNN namespace — current state and M1.1 allocation
 
-The runtime-invariant namespace is defined in `SPEC-USER-TURN.md` §6:
-
-```
-D-001 … D-019  taken (SPEC-USER-TURN.md)
-D-020 … D-025  taken (SPEC-TUI-HEADLESS.md)
-D-026           free
-D-027           taken (SPEC-USER-TURN.md — tool-iteration cap, AC-6)
-D-028 +        free
-```
-
-References to D-NNN appear across `lib/tau/`, `test/tau/`, commit messages,
-and code comments. **Do not reuse a taken identifier.** Before authoring
-a new D-NNN, run:
+The runtime-invariant namespace is defined in `SPEC-USER-TURN.md` §6.
+**D-001–D-065 are taken.** Verify before authoring a new D-NNN:
 
 ```sh
 git log --all --grep="D-NNN" --oneline
@@ -102,6 +91,46 @@ grep -rn "D-NNN" lib test docs .claude
 ```
 
 Both must return empty for a number to be considered free.
+
+### Taken ranges (as of 2026-05-21)
+
+```
+D-001 … D-019  taken (SPEC-USER-TURN.md — core session FSM invariants)
+D-020 … D-025  retired (original SPEC-TUI-HEADLESS.md — superseded by D-066..D-071)
+D-026           free
+D-027           taken (SPEC-USER-TURN.md — tool-iteration cap, AC-6)
+D-028 … D-028  free
+D-029 … D-030  taken (SPEC-CIRCUIT-BREAKER.md)
+D-031 … D-039  taken (SPEC-CODING-AGENT.md)
+D-040 … D-042  taken (SPEC-USER-TURN.md — TAU_CLI_ARGV, model-swap, slash-cmd registry)
+D-043 … D-044  taken (SPEC-CIRCUIT-BREAKER.md)
+D-045 … D-047  taken (SPEC-MEMORY-STORE.md)
+D-048 … D-049  taken (SPEC-USER-TURN.md — /compact async)
+D-050 … D-055  taken (SPEC-OTEL-REPORTER.md)
+D-056           taken (SPEC-USER-TURN.md — Copilot OAuth)
+D-057           taken (SPEC-OTEL-REPORTER.md — span-leak paths)
+D-058 … D-062  taken (SPEC-USER-TURN.md — headless run, tool-brake, retry, compactor)
+D-063 … D-065  taken (SPEC-PROMPT-CACHING.md)
+```
+
+### M1.1 D-NNN allocation registry
+
+Each M1.1 SPEC/amendment draws **only** from its allocated block. The
+allocation resolves the 5-way D-066 collision that occurred when all M1.1
+elaboration briefs independently claimed D-066.
+
+| Block | Owner SPEC / Amendment |
+|---|---|
+| D-066–D-075 | SPEC-TUI-HEADLESS revision (#336) |
+| D-076–D-089 | SPEC-USER-TURN amendments (#183, #186, #339) |
+| D-090–D-099 | SPEC-PERMISSION-PROMPTS (new, #341) |
+| D-100–D-109 | SPEC-TUI-COMPLETION (new, #333 + #344) |
+| D-110–D-119 | SPEC-SESSION-MANAGEMENT (new, #343) |
+| D-120–D-129 | SPEC-EXTENSIONS (new, #180) |
+| D-130–D-139 | reserved — SPEC-CLUSTER (M9, future) |
+
+A SPEC author who needs a D-NNN outside their block MUST update this
+registry and SPEC-TUI-HEADLESS §5 note before using the new identifier.
 
 ## Open issues blocking the mission
 
