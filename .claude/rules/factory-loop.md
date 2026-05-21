@@ -8,24 +8,32 @@ coordinator chose whether and when to run each gate half and routinely completed
 only the reviewer half before handing work back. Under continuous operation the
 gate is not optional and not partial.
 
-## The current objective — M1.1 (Minimum viable UX)
+## The objective — complete the assigned milestone
 
-**M1 (self-hosting) is complete.** Self-hosting — a Tau session taking a roadmap
-issue from open to a gate-passed, merged PR with no external harness (Claude Code)
-in the loop — has been achieved via `Tau.Tools.Builtin.Agent`.
+The factory loop has no hardcoded objective. Its job is to drive the
+**currently assigned milestone** to completion: take each open issue in that
+milestone from open to a gate-passed, merged PR, and continue — with no
+per-step human checkpoints — until the milestone has zero open issues. Unless
+the user directs otherwise, a running loop is a loop completing its assigned
+milestone.
 
-**The factory loop's current objective is M1.1 — Minimum viable UX.** M1.1 means
-`tau tui` is a credible, competitive TUI that meets or exceeds Pi's feature set
-for the table-stakes UX surface (see `docs/spec/SPEC-TUI-HEADLESS.md` §6 for the
-full acceptance bar). The M1.1 issue set is #333, #334, #335, #337, #338, #339,
-#340, #341, #342, #343, #344, #345, #346 (priority-ordered in issue #336 comment).
+**The assigned milestone** is whichever milestone the user named for the
+current run. If no milestone has been assigned, the loop does not guess — it
+asks the user which milestone to work, then proceeds.
 
-**M1's self-hosting capability MUST be regression-guarded throughout M1.1.** Every
-M1.1 PR that touches the session FSM, the provider layer, or the CLI dispatch path
-MUST run the existing `tau run --provider replay` smoke and the `mix test` suite;
-a red M1 path is a FAIL verdict regardless of M1.1 scope. When selecting work, the
-question is: *does this advance the M1.1 UX surface?* Work that neither advances
-M1.1 nor guards M1 regression is out of scope.
+**Finding the work.** Milestones and their issues live in GitHub, which is the
+source of truth:
+
+- `gh api repos/<owner>/<repo>/milestones --jq '.[] | "\(.number) \(.title) — open:\(.open_issues) closed:\(.closed_issues)"'`
+  — list milestones with their open/closed issue counts.
+- `gh issue list --milestone "<title>" --state open` — the assigned milestone's
+  remaining open issues.
+
+**Tracking progress.** `.claude/logs/solution-tree.json` records every factory
+step and its outcome for the current run. The assigned milestone's **open-issue
+count** is the completion signal — the milestone is done when it reaches zero
+open issues. Reconcile the solution tree against `gh issue list --milestone` so
+no step is lost or double-counted.
 
 This rule **inherits and does not override**:
 
@@ -45,15 +53,11 @@ wins; this rule only sequences and gates work, it does not relax any other rule.
 One **factory step** delivers one roadmap item end-to-end. Execute the steps in
 order; do not reorder, skip, or batch.
 
-1. **Select the next roadmap item — by what advances M1.1 (Minimum viable UX).**
-   The current objective is M1.1 (see "The current objective" above). Select the
-   open M1.1 issue whose completion most directly advances the UX surface —
-   priority order from issue #336 comment: #337 (transcript rendering core — in-Ratatouille fix; subsumes #334, #190), #341
-   (permissions), #339 (cancellation/steering), #335 (sub-agent visibility),
-   #338 (input editor), #333+#344 (completion surface), #340 (status surfaces),
-   #342 (diff), #345 (themes/keybindings), #183, #180, #343, #186. Prefer the
-   smallest shippable unit and issues that unblock others. Confirm M1's
-   self-hosting path remains green before merging any M1.1 PR. If a clear M1.1
+1. **Select the next item from the assigned milestone.** From the assigned
+   milestone's open issues (`gh issue list --milestone "<title>" --state open`),
+   select the one whose completion most advances the milestone — prefer the
+   smallest shippable unit and issues that unblock others. When the milestone
+   has a stated priority order (e.g. in a tracking issue), follow it. If a clear
    prerequisite has no issue, file one first per `tau-github-workflow`.
 2. **Ensure a GitHub issue exists.** Every factory step is anchored to exactly
    one issue. If you filed it in step 1, it already exists; otherwise confirm
@@ -240,8 +244,9 @@ failure.
 In normal operation there are **no human checkpoints**. The coordinator does not
 ask for approval between factory steps. It reports to the user only:
 
-- at **milestone boundaries** — when a milestone's issues are all closed and the
-  loop advances to the next milestone; and
+- at **milestone boundaries** — when the assigned milestone's issues are all
+  closed; the loop reports completion and awaits the next milestone assignment
+  (it does not auto-advance to another milestone unless told to); and
 - on **escalation** — whenever a safety-circuit condition fires.
 
 ## Continuity and the kill switch
