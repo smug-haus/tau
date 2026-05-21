@@ -62,7 +62,9 @@ jobs:
         id: compile_step
         continue-on-error: true
       - name: Credo diff (blocking — new findings only)
-        run: mix credo diff --strict --from-git-merge-base origin/main
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          mix credo diff --strict --from-git-merge-base origin/main
       - run: mix credo --strict 2>&1 | tee /tmp/credo.log
         id: credo_step
         continue-on-error: true
@@ -376,6 +378,10 @@ jobs:
       - name: Fetch deps
         if: steps.changes.outputs.build == 'true'
         run: mix deps.get
+
+      - name: Fetch origin/main (for tau.qa credo-diff layer)
+        if: steps.changes.outputs.build == 'true'
+        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
 
       - name: mix tau.qa
         if: steps.changes.outputs.build == 'true'
