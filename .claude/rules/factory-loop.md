@@ -8,6 +8,14 @@ coordinator chose whether and when to run each gate half and routinely completed
 only the reviewer half before handing work back. Under continuous operation the
 gate is not optional and not partial.
 
+## Using this document
+
+Read this document once at the start of a factory run; it then lives in the
+coordinator's context. Do **not** reread it mid-run. The urge to reread is a
+signal of context pollution — and pollution is itself the cue to **compact or
+clear**, after which this document is read fresh as part of the reset. Reread
+only on a deliberate reset, never as a mid-run reflex.
+
 ## The objective — complete the assigned milestone
 
 The factory loop has no hardcoded objective. Its job is to drive the
@@ -50,56 +58,94 @@ wins; this rule only sequences and gates work, it does not relax any other rule.
 
 ## The factory cycle
 
-One **factory step** runs the 8-step lifecycle below for a single issue,
-end-to-end. Execute those 8 steps in order *for that issue* — but the loop is
-not single-track: multiple factory steps SHOULD run **concurrently** whenever a
-conflict check clears them as independent (see "Parallel execution" below).
-Never skip an issue, and never merge an ungated or stale diff — concurrency
-changes how many lifecycles are in flight, never the gate.
+**The PR is the atomic unit of the factory.** One factory step opens, drives,
+and merges exactly one PR. The gate, the N = 3 refine bound, incomplete-fix
+detection, and revert all operate on **the PR**.
 
-1. **Select the next item from the assigned milestone.** From the assigned
-   milestone's open issues (`gh issue list --milestone "<title>" --state open`),
-   select the one whose completion most advances the milestone — prefer the
-   smallest shippable unit and issues that unblock others. When the milestone
-   has a stated priority order (e.g. in a tracking issue), follow it. If a clear
-   prerequisite has no issue, file one first per `tau-github-workflow`.
-2. **Ensure a GitHub issue exists.** Every factory step is anchored to exactly
-   one issue. If you filed it in step 1, it already exists; otherwise confirm
-   the chosen issue is open and correctly milestoned.
-3. **Branch off fresh `main`.** Run `git fetch origin`, confirm the parent repo
-   is on `main` at `origin/main` (per `worktree-discipline.md`), then derive the
-   feature branch from that fresh `main`. Never branch off stale state.
-4. **Spawn the implementer team.** Spawn one or more `implementer` agents, each
-   with `isolation: worktree`, briefed per the spawn-brief-integrity additions.
-   The work targets the issue's scope only; if a `docs/spec/SPEC-*.md` is in
-   scope, `spec-before-code.md` applies and is satisfied within the same PR set.
-5. **Run the FULL gate.** When implementer work is committed and the merge state
-   is stable, run BOTH gate halves on the **actual PR diff** — see "The gate"
-   below. This is a single mandatory action, not two discretionary ones.
-6. **Outcome.** Green (both halves PASS) → merge. Red (either half FAIL) →
-   refine/pivot/escalate per "Outcomes" below.
-7. **On green: re-check freshness, merge, then verify `main` health.**
-   a. **Pre-merge freshness re-check.** Immediately before merging, re-fetch
-      `origin/main` (`git fetch origin`). The gate ran against a diff anchored
-      at some `origin/main` commit; if `origin/main` has advanced since then,
-      the gate-green verdict no longer covers what would actually land. In that
-      case the branch MUST be rebased onto current `origin/main` and the FULL
-      gate — BOTH `critic` and `reviewer` — MUST be re-run on the rebased diff
-      (see "The gate"). Only a gate-green diff that is current with
-      `origin/main` may merge. If `origin/main` is unchanged since the gate
-      ran, proceed directly to (b).
-   b. **Merge.** Merge the PR with the explicit command
-      `gh pr merge <n> --merge --delete-branch`.
-   c. **Sync local `main`.** Immediately in the same turn, sync local `main`
-      (`git fetch origin && git checkout main && git pull --ff-only origin
-      main`) and remove finished agent worktrees per `worktree-discipline.md`.
-   d. **Post-merge `main` health check.** Run a full health check on the
-      synced `main`: `mix compile --warnings-as-errors` and `mix test`. The
-      per-PR gate is stateless and cannot catch a subtly-wrong-but-gate-passing
-      change accumulating across many cycles; this check is the standing
-      backstop. If `main` is red (failing compile or tests), the loop HALTS and
-      surfaces to the user — see "Stop / escalate conditions".
-8. **Next item.** Return to step 1. Do not pause for human input between steps.
+A PR closes one or more GitHub issues and is sized as **one coherent shippable
+increment** — the coordinator groups issues that cohere (same area / SPEC /
+feature; ship-and-revert as one unit). There is no lower bound: one issue per
+PR is fine and common. Take issues as filed — by humans or agents, at whatever
+granularity — and never reshape, split, or defer them; the only issue-management
+action is to *file* a missing prerequisite issue (`tau-github-workflow`).
+
+Two guards bound PR scope — against opportunistic scope-growth, not toward
+forced coupling:
+
+- **Declared, frozen scope.** The draft-PR body (cycle step 4) fixes the issue
+  set and plan before any implementer is spawned; that set is frozen for the
+  PR's life. Mid-flight scope growth becomes a separate PR or a deliberate,
+  logged re-plan of the draft-PR body — never a silent add. The `critic` gate
+  flags diff content outside the declared issue set as scope creep.
+- **Gateability ceiling.** A PR MUST stay reviewable by `critic` and `reviewer`
+  in a single pass. If grouping makes it too large to gate thoroughly, split.
+  This is the upper bound — a practical cap, not a coupling test.
+
+A factory step runs the lifecycle below for one PR, end-to-end. Execute the
+steps in order *for that PR* — but the loop is not single-track: multiple
+factory steps SHOULD run **concurrently** whenever the conflict check clears
+them (see "Parallel execution"). Never merge an ungated or stale diff.
+
+1. **Select the work.** From the assigned milestone's open issues
+   (`gh issue list --milestone "<title>" --state open`), select the next PR's
+   issue — or the smallest inseparable issue set. Prefer the smallest coherent
+   shippable increment and work that unblocks others; follow any stated priority
+   order (e.g. from a tracking issue). If a prerequisite has no issue, file one
+   first per `tau-github-workflow`.
+2. **Confirm the issue(s).** Every issue the PR will close is open and correctly
+   milestoned.
+3. **Branch off fresh `main`.** `git fetch origin`, confirm the parent repo is
+   on `main` at `origin/main` (per `worktree-discipline.md`), derive the feature
+   branch from that fresh `main`. Never branch off stale state.
+4. **Open the draft PR — before any implementer is spawned.** Seed the branch
+   with one empty commit (`git commit --allow-empty`), push it, and
+   `gh pr create --draft` with the body set to the full work plan (see "The
+   draft-PR body" below). The draft PR is the durable, visible plan-of-record
+   and the single source of the implementer brief.
+5. **Spawn the implementer team.** One or more `implementer` agents, each with
+   `isolation: worktree`, each briefed to check out the existing feature branch
+   and work from the draft PR body. Briefs obey spawn-brief integrity and
+   shared-resource isolation. If a `docs/spec/SPEC-*.md` is in scope,
+   `spec-before-code.md` applies and is satisfied within this PR.
+6. **Run the FULL gate.** When implementer work is committed and the branch is
+   stable, run BOTH gate halves — `critic` and `reviewer` — on the draft PR's
+   actual diff. See "The gate". One mandatory action, not two discretionary ones.
+7. **Outcome.** Green (both PASS) → step 8. Red (either FAIL) →
+   refine/pivot/escalate per "Outcomes".
+8. **On green: freshness re-check, mark ready, merge, verify `main`.**
+   a. **Pre-merge freshness re-check.** Re-fetch `origin/main`. If it has
+      advanced since the gate ran, the gate-green verdict no longer covers what
+      would land: rebase the branch onto current `origin/main` and re-run the
+      FULL gate on the rebased diff. Only a gate-green diff current with
+      `origin/main` may merge.
+   b. **Mark ready and merge.** `gh pr ready <n>` to take the PR out of draft,
+      then `gh pr merge <n> --merge --delete-branch`.
+   c. **Sync local `main`.** In the same turn: `git fetch origin && git checkout
+      main && git pull --ff-only origin main`; remove finished worktrees per
+      `worktree-discipline.md`.
+   d. **Post-merge `main` health check.** `mix compile --warnings-as-errors`
+      and `mix test` on the synced `main`. The per-PR gate is stateless and
+      cannot catch a subtly-wrong-but-gate-passing change accumulating across
+      cycles; this is the standing backstop. A red `main` HALTS the loop — see
+      "Stop / escalate conditions".
+9. **Next PR.** Return to step 1. Do not pause for human input between steps.
+
+### The draft-PR body
+
+The draft PR body is the plan-of-record and the implementer brief — one source,
+no brief/PR drift. It MUST state:
+
+- **Closes** — the issue(s) this PR closes, in the order the work addresses
+  them (`Closes #N`).
+- **Scope & order** — the ordered breakdown of the work: the sub-steps / commits
+  planned and their sequence.
+- **Dependencies** — issues or PRs this is blocked-by or blocks.
+- **SPECs** — every `docs/spec/SPEC-*.md` in scope, and whether this PR authors,
+  amends, or merely conforms to each; the `AC-N` / `D-NNN` it advances.
+- **Gate verdicts** — a section filled in at gate time (`critic`, `reviewer`).
+
+A **refine** stays on the same draft PR. A **pivot** (materially different
+approach) closes the draft PR and opens a fresh one.
 
 ## Parallel execution
 
@@ -176,10 +222,12 @@ BOTH `critic` and `reviewer` on the actual PR diff before it is merged.
   the verdict is void: the branch is rebased onto current `origin/main` and the
   FULL gate is re-run on the rebased diff before merge (cycle step 7a).
 
-`/pr` runs the gate and opens the PR; the factory cycle adds the
-freshness-recheck, merge-on-green, and post-merge health-check steps (step 7).
-Both verdicts are recorded in the solution tree, and a re-run gate replaces the
-prior verdicts for that PR.
+`/pr` runs the gate against the step's **existing draft PR** (the draft is
+opened at cycle step 4, before the implementer is spawned — `/pr` does not
+create it). On green the factory cycle marks the PR ready and adds the
+freshness-recheck, merge, and post-merge health-check steps (step 8). Both
+verdicts are recorded in the solution tree and in the PR body's gate-verdicts
+section; a re-run gate replaces the prior verdicts for that PR.
 
 ## Outcomes
 
@@ -231,7 +279,7 @@ The factory cycle is form. Substance is "does the user-visible thing actually wo
 
 ### Incomplete-fix detection (don't move to follow-up)
 
-A critic/reviewer finding is "out of scope" only if it does NOT falsify any **acceptance criterion (AC-N) or D-NNN invariant** named in the linked issue or its linked SPEC. Otherwise the merge is **incomplete**: reopen the issue, do NOT merge, refine.
+A critic/reviewer finding is "out of scope" only if it does NOT falsify any **acceptance criterion (AC-N) or D-NNN invariant** named in any issue the PR closes, or their linked SPECs. Otherwise the merge is **incomplete**: reopen the affected issue, do NOT merge, refine.
 
 The test is mechanical, not editorial:
 
@@ -362,6 +410,10 @@ listed in the repo's `.gitignore` so it can never be accidentally committed.
 - MUST NOT merge two PRs concurrently — merges are serialized, each followed by
   a freshness re-check (and rebase + full re-gate where needed) of every other
   in-flight branch.
+- MUST NOT spawn an implementer before the step's draft PR is open — the draft
+  PR body is the implementer brief and the plan-of-record.
+- MUST NOT open a PR that closes multiple issues unless they are genuinely
+  inseparable; one issue per PR is the default.
 - MUST NOT proceed when `.claude/STOP-FACTORY` is present.
 - MUST NOT treat a critic/reviewer finding that names the linked issue's headline as a "follow-up." Reopen the issue, fix the headline, re-gate. "Follow-up" is for out-of-scope findings only.
 - MUST NOT report work as "working" or "done" without naming the exact command run and the observable signal (exit code + signal line, with surrounding output optionally elided as `[...elided N lines...]`) against the user-visible path the issue named.

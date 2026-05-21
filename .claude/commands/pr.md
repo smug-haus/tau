@@ -1,15 +1,18 @@
 ---
 description: >
-  Run the blocking critic+reviewer gate, then open a PR. Aborts if either
-  gate fails. Both verdicts are recorded in the solution tree.
-allowed-tools: Read, Bash(git diff *), Bash(git log *), Bash(git status), Bash(git branch *), Bash(gh pr view *), Bash(gh pr create *), Bash(gh issue view *), Bash(jq *), Bash(cat *), Bash(mkdir *), Bash(echo *), Bash(date *), Edit, Write, Task
+  Run the blocking critic+reviewer gate against the step's existing draft
+  PR. Aborts if either gate fails. Verdicts are recorded in the solution
+  tree and the PR body. Does not create or merge the PR.
+allowed-tools: Read, Bash(git diff *), Bash(git log *), Bash(git status), Bash(git branch *), Bash(gh pr view *), Bash(gh pr edit *), Bash(gh pr diff *), Bash(gh issue view *), Bash(jq *), Bash(cat *), Bash(mkdir *), Bash(echo *), Bash(date *), Edit, Write, Task
 ---
 
-Run the blocking PR gate. Both `critic` and `reviewer` MUST return
-`{"ok": true}` before `gh pr create` is invoked. Either gate failing
-appends a `failed_evaluation` attempt to the solution tree and aborts —
-the coordinator then chooses **refine** or **pivot** per the standard
-task lifecycle.
+Run the blocking PR gate against the step's **existing draft PR** — opened
+at factory-cycle step 4, before the implementer was spawned. `/pr` does
+**not** create the PR and does **not** merge it. Both `critic` and
+`reviewer` MUST return `{"ok": true}` before the PR may be marked ready and
+merged by the factory cycle. Either gate failing appends a
+`failed_evaluation` attempt to the solution tree and aborts — the
+coordinator then chooses **refine** or **pivot**.
 
 Steps in order — **do not skip**.
 
@@ -40,12 +43,14 @@ git log main..HEAD --oneline
 
 Fail loudly if `HEAD` has no commits ahead of `main`.
 
-## Step 3 — Identify the linked issue
+## Step 3 — Read the draft PR and its linked issue(s)
 
-Scan commit messages for `Closes #N` / `Refs #N`. Read the issue body via
-`gh issue view <N>` to recover the original spec. If no issue is linked,
-**abort** — the `tau-github-workflow` rule requires every non-trivial
-change to be issue-driven.
+The branch has an open **draft PR** (factory-cycle step 4). Read it:
+`gh pr view <n> --json number,body,isDraft`. The PR body's **Closes** line
+names the issue(s) it closes; read each issue body via `gh issue view <N>`
+to recover the spec. If the branch has no draft PR, or the PR body names
+no issue, **abort** — the factory cycle requires the draft PR to exist,
+with its plan-of-record body, before the gate runs.
 
 ## Step 4 — Spawn `critic` (design veto)
 
@@ -88,7 +93,7 @@ If `critic` returned `{"ok": false, ...}`:
    ```
    Initialise the file with `{"task_id": "<branch-name>", "attempts": []}` if it does not exist.
 2. Print the full reason to the user.
-3. **Abort.** Do not proceed to step 6; do not run `gh pr create`.
+3. **Abort.** Do not proceed to step 6; do not mark the draft PR ready.
 
 ## Step 6 — Spawn `reviewer` (quality veto)
 
@@ -123,25 +128,20 @@ Same as step 5, but with `kill_reason: "reviewer_blocked: <reason>"`.
 ## Step 8 — Both passed
 
 Append to the solution tree with `outcome: "pr_gates_passed"` and the
-two verdicts. Compose the PR body:
+two verdicts. Then update the **existing draft PR body's Gate-verdicts
+section** in place — read the current body (`gh pr view <n> --json body`),
+fill the section, and write it back with `gh pr edit <n> --body-file <tmpfile>`:
 
 ```
-## Summary
-<derived from commits>
-
-## Linked issues
-Closes #N
-
 ## Gate verdicts
-- critic: PASS (`ok: true`) — <one-line summary from critic's structured findings, if any>
-- reviewer: PASS (`verdict: PASS`) — <one-line summary from reviewer's structured verdict, if any>
-
-## Test plan
-<derived from the implementer's reported smoke test, if any>
+- critic: PASS (`ok: true`) — <one-line summary from critic's findings, if any>
+- reviewer: PASS (`verdict: PASS`) — <one-line summary from reviewer's verdict, if any>
 ```
 
-Run `gh pr create --title "<title>" --body-file <tmpfile>` (use a
-heredoc-equivalent). Append the resulting PR URL to the solution tree.
+`/pr` stops here, gate green. It does **not** mark the PR ready and does
+**not** merge — the factory cycle step 8 does that (pre-merge freshness
+re-check → `gh pr ready` → `gh pr merge` → post-merge `main` health check).
+Report the green verdict to the coordinator.
 
 ## Recovery
 
