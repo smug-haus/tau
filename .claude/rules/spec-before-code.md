@@ -14,11 +14,29 @@ spec.
 
 The current spec catalog:
 
+- `docs/spec/SPEC-TUI-HEADLESS.md` — M1.1 TUI behaviour + UX testing protocol.
+  Re-chartered from a test-harness spec (2026-05-04) to the full M1.1 UX surface
+  (2026-05-21). Mandatory for any PR touching `lib/tau/tui/` (all files),
+  `lib/tau/tui/app.ex`, `lib/tau/tui/input_editor.ex`,
+  `lib/tau/tui/sub_agent_panel.ex`, `lib/tau/tui/status_bar.ex`,
+  `lib/tau/tui/theme.ex`, `lib/tau/tui/keybindings.ex`,
+  `lib/tau/provider.ex` (the `context_window/1` callback),
+  `test/support/tui_pty_helper.ex`, or `test/tau/cli/tui_smoke_test.exs` /
+  `test/tau/cli/tui_ux_test.exs`. Triage score 5/5; D-066..D-075 live here.
+  Spec home for M1.1 child issues #335, #338, #340, #345.
+
 - `docs/spec/SPEC-USER-TURN.md` — the binary launch → TUI → session FSM →
   provider stream → render loop. Mandatory for any PR touching `lib/tau/cli.ex`,
   `lib/tau/tui/`, `lib/tau/session.ex`, `lib/tau/application.ex`,
   `lib/tau/providers/*` (in their `stream/3` callback), or
   `lib/tau/settings/cache.ex`.
+
+  **Dual-gating note (`lib/tau/tui/`):** both SPEC-TUI-HEADLESS and
+  SPEC-USER-TURN list `lib/tau/tui/` as mandatory scope. Ownership is
+  divided by contract layer: SPEC-USER-TURN owns the session-FSM and
+  turn-loop contracts that surface in `lib/tau/tui/`; SPEC-TUI-HEADLESS
+  owns the UX, render, and input-behaviour contracts. A TUI PR cites the
+  AC/D-NNN of whichever SPEC owns the contract it changes.
 
 - `docs/spec/SPEC-CODING-AGENT.md` — the coding-agent adapter substrate
   (subprocess sub-agents driven by `Tau.CodingAgent` + dispatcher).
