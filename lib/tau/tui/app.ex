@@ -12,11 +12,13 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
     import Ratatouille.View
     alias Ratatouille.Runtime.Subscription
+    alias Tau.TUI.Render.{Wrap, Markdown}
 
-    # Reduced from 250 ms to ~16 ms (≈ 60 fps) so that Session.Events
-    # buffered in EventBridge are drained within one frame of arrival.
-    # This makes streaming appear progressive rather than choppy.
-    @tick_interval 16
+    # Adaptive tick: 16 ms while a turn is streaming (last_assistant non-nil);
+    # 250 ms while idle. Ratatouille re-reads subscribe/1 each cycle, so the
+    # interval tracks model state without any process changes.
+    @tick_interval_streaming 16
+    @tick_interval_idle 250
 
     # Bounded transcript: keep at most this many lines in the model list.
     # Older lines are dropped from the head (ring-buffer semantics). The
@@ -38,7 +40,8 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       # PubSub broadcasts would queue in the runtime's mailbox forever,
       # the transcript pane stays empty, and the user never sees an
       # assistant response. The bridge holds a queue per session;
-      # `update/2`'s `:tick` clause drains it at ~16 ms cadence.
+      # `update/2`'s `:tick` clause drains it. The drain interval is
+      # adaptive: 16 ms while streaming, 250 ms while idle.
       session_id = Tau.Session.generate_id()
       {:ok, _bridge_pid} = Tau.TUI.EventBridge.start_link(session_id)
 
@@ -155,7 +158,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
           on_session_end(model, e)
 
         %Tau.Session.Events.SystemNotice{text: t} ->
-          %{model | transcript: bounded_append(model.transcript, t)}
+          %{model | transcript: bounded_append(model.transcript, {t, []})}
 
         _ ->
           model
@@ -178,20 +181,18 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         row do
           column(size: 12) do
             panel title: "transcript", height: :fill do
-              # Show the bounded transcript list
-              for line <- model.transcript,
-                  sub <- Tau.TUI.Render.Wrap.wrap(line, model.wrap_width) do
-                label(content: sub)
+              # Show the bounded transcript list. Each entry is {text, attrs};
+              # wrap the text and apply attrs to every wrapped sub-line so that
+              # styling (bold, colour) reaches the terminal (AC-6 / D-028).
+              for {text, attrs} <- model.transcript,
+                  sub <- Wrap.wrap(text, model.wrap_width) do
+                label([{:content, sub} | attrs])
               end
 
               # Progressive streaming: also render last_assistant mid-turn
               # so partial assistant text is visible before MessageEnd.
               if model.last_assistant && model.last_assistant != "" do
-                for sub <-
-                      Tau.TUI.Render.Wrap.wrap(
-                        "[streaming] " <> model.last_assistant,
-                        model.wrap_width
-                      ) do
+                for sub <- Wrap.wrap("[streaming] " <> model.last_assistant, model.wrap_width) do
                   label(content: sub)
                 end
               end
@@ -202,7 +203,11 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     end
 
     @impl true
-    def subscribe(_model), do: Subscription.interval(@tick_interval, :tick)
+    def subscribe(%{last_assistant: la}) when is_binary(la) and la != "" do
+      Subscription.interval(@tick_interval_streaming, :tick)
+    end
+
+    def subscribe(_model), do: Subscription.interval(@tick_interval_idle, :tick)
 
     @doc "Run the TUI loop (blocking until the user quits)."
     def run do
@@ -242,7 +247,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     defp start_runtime_supervisor do
       opts = [
         app: __MODULE__,
-        interval: @tick_interval,
+        interval: @tick_interval_idle,
         # D-003 ([C7] / AC-4): bare `{:ch, ?q}` is intentionally absent.
         # The `q` key is forwarded to `update/2` where it is handled
         # context-sensitively: quit on empty prompt, append on non-empty.
@@ -332,7 +337,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       %{
         model
         | input: "",
-          transcript: bounded_append(model.transcript, "> " <> model.input),
+          transcript: bounded_append(model.transcript, {"> " <> model.input, []}),
           status: :sending
       }
     end
@@ -359,22 +364,21 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         |> Enum.flat_map(fn block ->
           case block do
             %{type: :text, text: t} ->
-              # D-028 / [C52-B5]: render markdown (CommonMark + GFM
-              # tables) in the TUI pane. Render.Markdown emits
-              # {content, attrs} tuples; extract the content string
-              # for the transcript list. Styling attrs are applied at
-              # render/1 time via label attributes.
-              styled_lines = Tau.TUI.Render.Markdown.render(t)
-              ["[assistant]" | Enum.map(styled_lines, fn {text, _attrs} -> text end)]
+              # D-028 / [C52-B5]: render markdown (CommonMark + GFM tables)
+              # in the TUI pane. Render.Markdown emits {content, attrs} tuples;
+              # carry both through model.transcript so render/1 can apply attrs
+              # to each label (AC-6: bold/colour/underline reach the terminal).
+              styled_lines = Markdown.render(t)
+              [{"[assistant]", []} | styled_lines]
 
             # Thinking models (Qwen3, DeepSeek-R1) emit chain-of-thought
             # via Thinking* events. Surface them so a long think doesn't
             # look like the TUI is hung.
             %{type: :thinking, text: t} when is_binary(t) and t != "" ->
-              ["[thinking] " <> t]
+              [{"[thinking] " <> t, []}]
 
             %{type: :tool_call, name: n} ->
-              ["[tool_call] " <> n <> "(...)"]
+              [{"[tool_call] " <> n <> "(...)", []}]
 
             _ ->
               []
@@ -410,7 +414,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       %{
         model
         | status: "cancelled: " <> reason_str,
-          transcript: bounded_append(model.transcript, "[cancelled: " <> reason_str <> "]"),
+          transcript: bounded_append(model.transcript, {"[cancelled: " <> reason_str <> "]", []}),
           last_assistant: nil
       }
     end
@@ -421,15 +425,17 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       %{
         model
         | status: "ended: " <> reason_str,
-          transcript: bounded_append(model.transcript, "[session ended: " <> reason_str <> "]"),
+          transcript:
+            bounded_append(model.transcript, {"[session ended: " <> reason_str <> "]", []}),
           last_assistant: nil
       }
     end
 
-    # Bounded ring-buffer helpers: keep at most @transcript_cap lines.
-    # Drop oldest entries from the head when the cap is exceeded.
-    # The display shows recent content; older content is gone from the model
-    # (not just clipped at render time, preventing unbounded memory growth).
+    # Bounded ring-buffer helpers: keep at most @transcript_cap entries.
+    # Each entry is a {text, attrs} tuple. Drop oldest entries from the head
+    # when the cap is exceeded. The display shows recent content; older content
+    # is gone from the model (not just clipped at render time, preventing
+    # unbounded memory growth).
     defp bounded_append(list, item) do
       new_list = list ++ [item]
 

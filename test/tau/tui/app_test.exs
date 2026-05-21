@@ -65,7 +65,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         next = App.update(model(), event)
 
         assert next.status == "cancelled: :user_request"
-        assert List.last(next.transcript) == "[cancelled: :user_request]"
+        assert List.last(next.transcript) == {"[cancelled: :user_request]", []}
         assert next.last_assistant == nil
       end
     end
@@ -77,7 +77,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         next = App.update(model(), event)
 
         assert next.status == "ended: :normal"
-        assert List.last(next.transcript) == "[session ended: :normal]"
+        assert List.last(next.transcript) == {"[session ended: :normal]", []}
         assert next.last_assistant == nil
       end
     end
@@ -106,13 +106,16 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         assert next.status == :idle
         assert next.last_assistant == nil
 
-        last_line = List.last(next.transcript)
+        # transcript entries are {text, attrs} tuples
+        last_entry = List.last(next.transcript)
 
-        assert is_binary(last_line) and last_line != "",
-               "transcript MUST gain a non-empty line; got #{inspect(last_line)}"
+        assert match?({text, _attrs} when is_binary(text) and text != "", last_entry),
+               "transcript MUST gain a non-empty {text, attrs} entry; got #{inspect(last_entry)}"
 
-        assert String.contains?(last_line, "Error"),
-               "transcript line MUST surface the error keyword for AC-3; got #{inspect(last_line)}"
+        {last_text, _} = last_entry
+
+        assert String.contains?(last_text, "Error"),
+               "transcript line MUST surface the error keyword for AC-3; got #{inspect(last_text)}"
       end
 
       test "Replay-style success MessageEnd produces an assistant transcript line" do
@@ -133,11 +136,14 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         # D-028: markdown render splits a paragraph into header + body lines.
         # The transcript MUST contain both the "[assistant]" header marker
         # and the rendered text body somewhere in the list.
-        assert "[assistant]" in next.transcript,
+        # transcript entries are {text, attrs} tuples.
+        assert {"[assistant]", []} in next.transcript,
                "transcript MUST contain the [assistant] header for AC-2 render path; " <>
                  "got #{inspect(next.transcript)}"
 
-        assert Enum.any?(next.transcript, &String.contains?(&1, "(replay) hello")),
+        assert Enum.any?(next.transcript, fn {text, _attrs} ->
+                 String.contains?(text, "(replay) hello")
+               end),
                "transcript MUST contain the rendered assistant body for AC-2; " <>
                  "got #{inspect(next.transcript)}"
       end
@@ -170,6 +176,37 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
     # App.wrap/2 was removed in #337. Wrapping is now done by
     # Tau.TUI.Render.Wrap (tested in test/tau/tui/render/wrap_test.exs).
+
+    describe "update/2 — attrs survive MessageEnd render path (FIX-2 / AC-6)" do
+      # Verify that {text, attrs} tuples (not bare strings) are stored in
+      # model.transcript after MessageEnd, and that attrs from Render.Markdown
+      # (e.g. bold for headings) are present and non-empty for styled content.
+      test "heading in MessageEnd produces a {text, attrs} tuple with bold attrs" do
+        msg = %Tau.Message.Assistant{
+          content: [%{type: :text, text: "# My Heading"}],
+          timestamp: DateTime.utc_now(),
+          stop_reason: :stop
+        }
+
+        next = App.update(model(), %Events.MessageEnd{session_id: "sess-test", message: msg})
+
+        # All entries in transcript must be {text, attrs} tuples
+        assert Enum.all?(next.transcript, fn entry -> match?({_, _}, entry) end),
+               "all transcript entries must be {text, attrs} tuples; got #{inspect(next.transcript)}"
+
+        # At least one entry must have non-empty attrs (bold from heading)
+        styled = Enum.find(next.transcript, fn {_text, attrs} -> attrs != [] end)
+
+        assert styled != nil,
+               "expected at least one styled (non-empty attrs) entry for a heading; " <>
+                 "got #{inspect(next.transcript)}"
+
+        {_heading_text, heading_attrs} = styled
+
+        assert Keyword.get(heading_attrs, :attributes) == [:bold],
+               "heading entry must have bold attrs; got #{inspect(heading_attrs)}"
+      end
+    end
 
     describe "run/0 — supervised Ratatouille subtree" do
       test "emits [:tau, :tui, :start] with Ratatouille.Runtime.Supervisor metadata" do
