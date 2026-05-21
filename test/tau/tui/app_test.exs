@@ -21,7 +21,9 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         transcript: [],
         tool_output: [],
         status: :streaming,
-        last_assistant: "partial"
+        last_assistant: "partial",
+        wrap_width: 80,
+        coding_agent: nil
       }
     end
 
@@ -166,32 +168,8 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       end
     end
 
-    describe "wrap/2" do
-      test "short line is one chunk" do
-        assert App.wrap("hello world", 100) == ["hello world"]
-      end
-
-      test "wraps at word boundary, width preserved" do
-        line = String.duplicate("ab ", 50) |> String.trim_trailing()
-        chunks = App.wrap(line, 20)
-        assert Enum.all?(chunks, fn c -> String.length(c) <= 20 end)
-        assert Enum.join(chunks, " ") == line
-      end
-
-      test "hard-breaks a word longer than the wrap width" do
-        chunks = App.wrap(String.duplicate("x", 30), 10)
-        assert chunks == ["xxxxxxxxxx", "xxxxxxxxxx", "xxxxxxxxxx"]
-      end
-
-      test "empty string yields a single empty chunk" do
-        assert App.wrap("", 10) == [""]
-      end
-
-      test "preserves all words across wrap boundaries" do
-        chunks = App.wrap("aaaa bbbb cccc dddd", 9)
-        assert Enum.join(chunks, " ") == "aaaa bbbb cccc dddd"
-      end
-    end
+    # App.wrap/2 was removed in #337. Wrapping is now done by
+    # Tau.TUI.Render.Wrap (tested in test/tau/tui/render/wrap_test.exs).
 
     describe "run/0 — supervised Ratatouille subtree" do
       test "emits [:tau, :tui, :start] with Ratatouille.Runtime.Supervisor metadata" do

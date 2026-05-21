@@ -13,10 +13,19 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     import Ratatouille.View
     alias Ratatouille.Runtime.Subscription
 
-    @tick_interval 250
+    # Reduced from 250 ms to ~16 ms (≈ 60 fps) so that Session.Events
+    # buffered in EventBridge are drained within one frame of arrival.
+    # This makes streaming appear progressive rather than choppy.
+    @tick_interval 16
+
+    # Bounded transcript: keep at most this many lines in the model list.
+    # Older lines are dropped from the head (ring-buffer semantics). The
+    # Ratatouille `panel` already clips to the visible height; the cap
+    # prevents unbounded memory growth across long sessions.
+    @transcript_cap 500
 
     @impl true
-    def init(_context) do
+    def init(context) do
       # D-004 (SPEC-USER-TURN [C6]): the bridge MUST subscribe to PubSub
       # BEFORE `Tau.start_session/1` returns. `Session.init/1`
       # synchronously broadcasts `%Events.SessionStart{}`; subscribing
@@ -29,7 +38,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       # PubSub broadcasts would queue in the runtime's mailbox forever,
       # the transcript pane stays empty, and the user never sees an
       # assistant response. The bridge holds a queue per session;
-      # `update/2`'s `:tick` clause drains it.
+      # `update/2`'s `:tick` clause drains it at ~16 ms cadence.
       session_id = Tau.Session.generate_id()
       {:ok, _bridge_pid} = Tau.TUI.EventBridge.start_link(session_id)
 
@@ -52,6 +61,10 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
       {:ok, ^session_id} = Tau.start_session(start_opts)
 
+      # Derive initial wrap width from the Ratatouille context (window
+      # dimensions). Falls back to 80 if context is unavailable (unit tests).
+      initial_width = get_in(context, [:window, :width]) || 80
+
       %{
         session_id: session_id,
         input: "",
@@ -59,43 +72,93 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         tool_output: [],
         status: :idle,
         last_assistant: nil,
-        coding_agent: Map.get(runtime_opts, :coding_agent)
+        coding_agent: Map.get(runtime_opts, :coding_agent),
+        wrap_width: transcript_pane_width(initial_width)
       }
     end
 
     defp put_if(opts, _key, nil), do: opts
     defp put_if(opts, key, value), do: Keyword.put(opts, key, value)
 
+    # Derive the transcript pane's usable wrap width from the terminal
+    # width. Ratatouille's `column(size: 12)` uses a 12/12 grid so the
+    # transcript panel fills the full width. Subtract 2 for panel borders.
+    defp transcript_pane_width(terminal_width) when terminal_width >= 4 do
+      terminal_width - 2
+    end
+
+    defp transcript_pane_width(_terminal_width), do: 1
+
     @impl true
     def update(model, msg) do
       case msg do
-        {:event, %{key: 13}} -> submit(model)
-        {:event, %{key: 27}} -> cancel(model)
+        {:event, %{key: 13}} ->
+          submit(model)
+
+        {:event, %{key: 27}} ->
+          cancel(model)
+
         # Termbox / Ratatouille deliver Space as `key: 32` (the SPC special
         # key), NOT as `ch: 32`. The `ch != 0` clause below therefore
         # never fires for spaces, and they were silently dropped. Map
         # the special key to a literal space here.
-        {:event, %{key: 32}} -> append_input(model, " ")
+        {:event, %{key: 32}} ->
+          append_input(model, " ")
+
         # D-003 ([C7] / AC-4): `q` is context-aware. On an empty prompt it
         # quits (matching the old quit_events behaviour); on a non-empty
         # prompt it appends `q` like any other character. The bare
         # `{:ch, ?q}` entry has been removed from `quit_events` so that
         # Ratatouille forwards the event here instead of consuming it
         # unconditionally at the runtime layer.
-        {:event, %{ch: ?q}} -> quit_or_append(model)
-        {:event, %{ch: ch}} when ch != 0 -> append_input(model, <<ch::utf8>>)
-        {:event, %{key: 127}} -> backspace(model)
-        {:event, %{key: 8}} -> backspace(model)
-        :tick -> drain_bridge(model)
-        %Tau.Session.Events.MessageStart{} = e -> on_message_start(model, e)
-        %Tau.Session.Events.MessageUpdate{} = e -> on_message_update(model, e)
-        %Tau.Session.Events.MessageEnd{} = e -> on_message_end(model, e)
-        %Tau.Session.Events.ToolStart{} = e -> on_tool_start(model, e)
-        %Tau.Session.Events.ToolEnd{} = e -> on_tool_end(model, e)
-        %Tau.Session.Events.Cancelled{} = e -> on_cancelled(model, e)
-        %Tau.Session.Events.SessionEnd{} = e -> on_session_end(model, e)
-        %Tau.Session.Events.SystemNotice{text: t} -> %{model | transcript: model.transcript ++ [t]}
-        _ -> model
+        {:event, %{ch: ?q}} ->
+          quit_or_append(model)
+
+        {:event, %{ch: ch}} when ch != 0 ->
+          append_input(model, <<ch::utf8>>)
+
+        {:event, %{key: 127}} ->
+          backspace(model)
+
+        {:event, %{key: 8}} ->
+          backspace(model)
+
+        # Resize: update wrap_width so subsequent wraps use the new terminal width
+        {:resize, %{w: w}} ->
+          %{model | wrap_width: transcript_pane_width(w)}
+
+        {:resize, _} ->
+          model
+
+        :tick ->
+          drain_bridge(model)
+
+        %Tau.Session.Events.MessageStart{} = e ->
+          on_message_start(model, e)
+
+        %Tau.Session.Events.MessageUpdate{} = e ->
+          on_message_update(model, e)
+
+        %Tau.Session.Events.MessageEnd{} = e ->
+          on_message_end(model, e)
+
+        %Tau.Session.Events.ToolStart{} = e ->
+          on_tool_start(model, e)
+
+        %Tau.Session.Events.ToolEnd{} = e ->
+          on_tool_end(model, e)
+
+        %Tau.Session.Events.Cancelled{} = e ->
+          on_cancelled(model, e)
+
+        %Tau.Session.Events.SessionEnd{} = e ->
+          on_session_end(model, e)
+
+        %Tau.Session.Events.SystemNotice{text: t} ->
+          %{model | transcript: bounded_append(model.transcript, t)}
+
+        _ ->
+          model
       end
     end
 
@@ -108,13 +171,6 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       |> Enum.reduce(model, fn event, acc -> update(acc, event) end)
     end
 
-    # Hardcoded panel width for word-wrap. Ratatouille's `label` is
-    # single-line and clips at the panel edge; we pre-wrap long
-    # transcript entries into multiple sublines so nothing is lost.
-    # TODO: derive from `Ratatouille` window width via the resize
-    # event so wrapping adapts to terminal size.
-    @wrap_width 100
-
     @impl true
     def render(model) do
       view top_bar: status_bar(model),
@@ -122,72 +178,26 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         row do
           column(size: 12) do
             panel title: "transcript", height: :fill do
-              for line <- Enum.take(model.transcript, -200),
-                  sub <- wrap(line, @wrap_width) do
+              # Show the bounded transcript list
+              for line <- model.transcript,
+                  sub <- Tau.TUI.Render.Wrap.wrap(line, model.wrap_width) do
                 label(content: sub)
+              end
+
+              # Progressive streaming: also render last_assistant mid-turn
+              # so partial assistant text is visible before MessageEnd.
+              if model.last_assistant && model.last_assistant != "" do
+                for sub <-
+                      Tau.TUI.Render.Wrap.wrap(
+                        "[streaming] " <> model.last_assistant,
+                        model.wrap_width
+                      ) do
+                  label(content: sub)
+                end
               end
             end
           end
         end
-      end
-    end
-
-    @doc false
-    @spec wrap(String.t(), pos_integer()) :: [String.t()]
-    def wrap("", _width), do: [""]
-
-    def wrap(line, width) when is_binary(line) and is_integer(width) and width > 0 do
-      line
-      |> String.split(~r/\s+/, trim: false)
-      |> Enum.reduce({[], ""}, fn word, {lines, current} ->
-        cond do
-          # Word longer than the wrap width on its own — hard-break
-          # mid-word (rare; long URLs, hashes).
-          String.length(word) > width ->
-            chunks = chunk_string(word, width)
-            new_current = List.last(chunks) || ""
-
-            new_lines =
-              cond do
-                current == "" and length(chunks) > 1 ->
-                  Enum.reverse(Enum.drop(chunks, -1)) ++ lines
-
-                current == "" ->
-                  lines
-
-                length(chunks) == 1 ->
-                  [current | lines]
-
-                true ->
-                  Enum.reverse(Enum.drop(chunks, -1)) ++ [current | lines]
-              end
-
-            {new_lines, new_current}
-
-          current == "" ->
-            {lines, word}
-
-          String.length(current) + 1 + String.length(word) <= width ->
-            {lines, current <> " " <> word}
-
-          true ->
-            {[current | lines], word}
-        end
-      end)
-      |> finalize_wrap()
-    end
-
-    defp finalize_wrap({lines, ""}), do: Enum.reverse(lines)
-    defp finalize_wrap({lines, last}), do: Enum.reverse([last | lines])
-
-    defp chunk_string(s, n) do
-      chunks = for <<chunk::binary-size(n) <- s>>, do: chunk
-      rest_len = byte_size(s) - length(chunks) * n
-
-      if rest_len > 0 do
-        chunks ++ [binary_part(s, byte_size(s) - rest_len, rest_len)]
-      else
-        chunks
       end
     end
 
@@ -322,7 +332,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       %{
         model
         | input: "",
-          transcript: model.transcript ++ ["> " <> model.input],
+          transcript: bounded_append(model.transcript, "> " <> model.input),
           status: :sending
       }
     end
@@ -350,8 +360,12 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
           case block do
             %{type: :text, text: t} ->
               # D-028 / [C52-B5]: render markdown (CommonMark + GFM
-              # tables) rather than echo raw source.
-              ["[assistant]" | Tau.Markdown.render(t)]
+              # tables) in the TUI pane. Render.Markdown emits
+              # {content, attrs} tuples; extract the content string
+              # for the transcript list. Styling attrs are applied at
+              # render/1 time via label attributes.
+              styled_lines = Tau.TUI.Render.Markdown.render(t)
+              ["[assistant]" | Enum.map(styled_lines, fn {text, _attrs} -> text end)]
 
             # Thinking models (Qwen3, DeepSeek-R1) emit chain-of-thought
             # via Thinking* events. Surface them so a long think doesn't
@@ -370,7 +384,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       %{
         model
         | status: :idle,
-          transcript: model.transcript ++ transcript_lines,
+          transcript: bounded_append_many(model.transcript, transcript_lines),
           last_assistant: nil
       }
     end
@@ -396,7 +410,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       %{
         model
         | status: "cancelled: " <> reason_str,
-          transcript: model.transcript ++ ["[cancelled: " <> reason_str <> "]"],
+          transcript: bounded_append(model.transcript, "[cancelled: " <> reason_str <> "]"),
           last_assistant: nil
       }
     end
@@ -407,9 +421,27 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       %{
         model
         | status: "ended: " <> reason_str,
-          transcript: model.transcript ++ ["[session ended: " <> reason_str <> "]"],
+          transcript: bounded_append(model.transcript, "[session ended: " <> reason_str <> "]"),
           last_assistant: nil
       }
+    end
+
+    # Bounded ring-buffer helpers: keep at most @transcript_cap lines.
+    # Drop oldest entries from the head when the cap is exceeded.
+    # The display shows recent content; older content is gone from the model
+    # (not just clipped at render time, preventing unbounded memory growth).
+    defp bounded_append(list, item) do
+      new_list = list ++ [item]
+
+      if length(new_list) > @transcript_cap do
+        Enum.drop(new_list, length(new_list) - @transcript_cap)
+      else
+        new_list
+      end
+    end
+
+    defp bounded_append_many(list, items) do
+      Enum.reduce(items, list, &bounded_append(&2, &1))
     end
   end
 end

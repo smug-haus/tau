@@ -83,7 +83,19 @@ defmodule Tau.MixProject do
 
       # TUI — optional, only fetched for dev. Prod builds the stub branch
       # of Tau.TUI; tests run without it. Add to your env to use the TUI.
-      {:ratatouille, "~> 0.5"},
+      # Fork: smug-haus/ratatouille fix/grapheme-aware-cells — patches
+      # Renderer.Cells byte-iterator to be grapheme-aware (fixes #334, #190)
+      # and adds CSI ?2026h/l synchronized output (item 7). Upstream PR open
+      # at ndreynolds/ratatouille.
+      {:ratatouille,
+       git: "https://github.com/smug-haus/ratatouille.git",
+       ref: "004493c90663085466f73c3ce69ce23e86880ed8"},
+
+      # Syntax highlighting for fenced code blocks in the TUI transcript pane.
+      # Pure Elixir, no native dep. Unknown languages fall back to plain text.
+      {:makeup, "~> 1.0"},
+      {:makeup_elixir, "~> 1.0"},
+      {:makeup_erlang, "~> 1.0"},
 
       # CLI argv parser
       {:optimus, "~> 0.5"},
