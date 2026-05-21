@@ -1,12 +1,12 @@
 defmodule Tau.Skills.TauCoordinatorTest do
   @moduledoc """
   Loadability and discoverability tests for the `tau-coordinator` skill and
-  its required sub-personas (`implementer`, `critic`, `reviewer`).
+  its required sub-personas (`tau-implementer`, `tau-critic`, `tau-reviewer`).
 
   Asserts:
     1. `Tau.Skills.Loader.discover/1` (the runtime resolver path) discovers
-       `tau-coordinator`, `implementer`, `critic`, and `reviewer` from
-       `priv/skills/` — the only path scanned that ships with the binary.
+       `tau-coordinator`, `tau-implementer`, `tau-critic`, and `tau-reviewer`
+       from `priv/skills/` — the only path scanned that ships with the binary.
     2. Each discovered skill resolves to a `%Tau.Skill{}` with the correct
        `name` and a non-empty `description`.
     3. Sub-persona resolution via the same logic as `Tau.Tools.Builtin.Agent`
@@ -18,7 +18,7 @@ defmodule Tau.Skills.TauCoordinatorTest do
   The discover-based tests in group 1-3 would have FAILED before f-1's move:
   `Loader.discover/1` does NOT scan `.claude/skills/`, so the coordinator
   and sub-personas were unreachable at runtime, causing every
-  `subagent_type: "implementer"` (etc.) call to fast-fail with
+  `subagent_type: "tau-implementer"` (etc.) call to fast-fail with
   `{:error, {:unknown_subagent_type, name}}` inside `Agent.execute/2`.
 
   After f-1's move to `priv/skills/`, `discover/1` finds them all.
@@ -47,31 +47,31 @@ defmodule Tau.Skills.TauCoordinatorTest do
              "tau-coordinator not found in discovered skills: #{inspect(Enum.map(skills, &elem(&1, 0)))}"
     end
 
-    test "discovers implementer", %{cwd: cwd} do
+    test "discovers tau-implementer", %{cwd: cwd} do
       skills = Tau.Skills.Loader.discover(cwd)
 
-      assert List.keyfind(skills, "implementer", 0) != nil,
-             "implementer not found in discovered skills: #{inspect(Enum.map(skills, &elem(&1, 0)))}"
+      assert List.keyfind(skills, "tau-implementer", 0) != nil,
+             "tau-implementer not found in discovered skills: #{inspect(Enum.map(skills, &elem(&1, 0)))}"
     end
 
-    test "discovers critic", %{cwd: cwd} do
+    test "discovers tau-critic", %{cwd: cwd} do
       skills = Tau.Skills.Loader.discover(cwd)
 
-      assert List.keyfind(skills, "critic", 0) != nil,
-             "critic not found in discovered skills: #{inspect(Enum.map(skills, &elem(&1, 0)))}"
+      assert List.keyfind(skills, "tau-critic", 0) != nil,
+             "tau-critic not found in discovered skills: #{inspect(Enum.map(skills, &elem(&1, 0)))}"
     end
 
-    test "discovers reviewer", %{cwd: cwd} do
+    test "discovers tau-reviewer", %{cwd: cwd} do
       skills = Tau.Skills.Loader.discover(cwd)
 
-      assert List.keyfind(skills, "reviewer", 0) != nil,
-             "reviewer not found in discovered skills: #{inspect(Enum.map(skills, &elem(&1, 0)))}"
+      assert List.keyfind(skills, "tau-reviewer", 0) != nil,
+             "tau-reviewer not found in discovered skills: #{inspect(Enum.map(skills, &elem(&1, 0)))}"
     end
 
     test "all discovered coordinator skills are %Tau.Skill{} structs", %{cwd: cwd} do
       skills = Tau.Skills.Loader.discover(cwd)
 
-      for name <- ["tau-coordinator", "implementer", "critic", "reviewer"] do
+      for name <- ["tau-coordinator", "tau-implementer", "tau-critic", "tau-reviewer"] do
         case List.keyfind(skills, name, 0) do
           {^name, %Tau.Skill{} = skill} ->
             assert skill.name == name,
@@ -108,7 +108,7 @@ defmodule Tau.Skills.TauCoordinatorTest do
     #     _ -> {:error, {:unknown_subagent_type, name}}
     #   end
 
-    for sub <- ["implementer", "critic", "reviewer"] do
+    for sub <- ["tau-implementer", "tau-critic", "tau-reviewer"] do
       test "resolves subagent_type: #{inspect(sub)}", %{skills: skills} do
         name = unquote(sub)
 
@@ -143,9 +143,9 @@ defmodule Tau.Skills.TauCoordinatorTest do
   describe "Tau.Skills.Loader.parse/1 parses each persona directly" do
     for {skill_name, subdir} <- [
           {"tau-coordinator", "tau-coordinator"},
-          {"implementer", "implementer"},
-          {"critic", "critic"},
-          {"reviewer", "reviewer"}
+          {"tau-implementer", "tau-implementer"},
+          {"tau-critic", "tau-critic"},
+          {"tau-reviewer", "tau-reviewer"}
         ] do
       test "parses #{skill_name}" do
         path =
@@ -179,7 +179,7 @@ defmodule Tau.Skills.TauCoordinatorTest do
       {:ok, skill} = Tau.Skills.Loader.parse(path)
       headless = Tau.CLI.build_headless_skill({:text, skill.body})
 
-      for marker <- ["Agent", "Factory cycle", "critic", "reviewer", "STOP-FACTORY"] do
+      for marker <- ["Agent", "Factory cycle", "tau-critic", "tau-reviewer", "STOP-FACTORY"] do
         assert String.contains?(headless.body, marker),
                "expected headless skill body to contain '#{marker}'"
       end

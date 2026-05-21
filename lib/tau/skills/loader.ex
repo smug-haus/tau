@@ -20,6 +20,8 @@ defmodule Tau.Skills.Loader do
   `discover/1` results.
   """
 
+  require Logger
+
   alias Tau.Skill
   alias Tau.Skills.Frontmatter
 
@@ -36,16 +38,42 @@ defmodule Tau.Skills.Loader do
   @spec discover(Path.t()) :: [{String.t(), Skill.t()}]
   def discover(cwd) do
     home = System.user_home!() || "."
-    priv = :code.priv_dir(:tau) |> to_string()
+    priv_root = :code.priv_dir(:tau) |> to_string()
+    priv_dir = Path.join(priv_root, "skills")
+    user_home_dir = Path.join(home, ".tau/skills")
+    user_cwd_dir = Path.join(cwd, ".tau/skills")
 
-    [
-      Path.join(home, ".tau/skills"),
-      Path.join(cwd, ".tau/skills"),
-      Path.join(priv, "skills")
-    ]
-    |> Enum.flat_map(&scan_dir/1)
+    candidates =
+      [user_home_dir, user_cwd_dir, priv_dir]
+      |> Enum.flat_map(&scan_dir/1)
+
+    log_bundled_shadows(candidates, priv_dir)
+
+    candidates
     |> Enum.uniq_by(fn {name, _} -> name end)
     |> Enum.sort_by(fn {name, _} -> name end)
+  end
+
+  # Emit a warning for each bundled (priv/skills) entry that is masked by a
+  # same-named user-provided skill. Silent unless a collision actually occurs.
+  defp log_bundled_shadows(candidates, priv_dir) do
+    priv_dir_abs = Path.expand(priv_dir)
+
+    {bundled, user} =
+      Enum.split_with(candidates, fn {_name, %Skill{path: path}} ->
+        String.starts_with?(Path.expand(path), priv_dir_abs <> "/") or
+          Path.expand(path) == priv_dir_abs
+      end)
+
+    user_by_name = Map.new(user, fn {name, skill} -> {name, skill} end)
+
+    for {name, %Skill{path: priv_path}} <- bundled,
+        %Skill{path: user_path} <- [Map.get(user_by_name, name)],
+        not is_nil(user_path) do
+      Logger.warning("Tau skill #{name} from #{user_path} shadows bundled skill at #{priv_path}")
+    end
+
+    :ok
   end
 
   @doc """

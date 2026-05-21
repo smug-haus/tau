@@ -9,7 +9,7 @@ defmodule Tau.QA.CoordinatorRoundtripTest do
   Uses `Tau.Test.MultiFixtureProvider` scripted with:
 
     * Turn 1 (parent): an `Agent` tool_call (`subagent_type:
-      "implementer"`, a trivial brief).
+      "tau-implementer"`, a trivial brief).
     * Child session: a single `:end_turn` text turn.
     * Turn 2 (parent): a terminal text/`:end_turn` turn.
 
@@ -84,7 +84,7 @@ defmodule Tau.QA.CoordinatorRoundtripTest do
           tool_call_id: call_id,
           params: %{
             "description" => brief,
-            "subagent_type" => "implementer"
+            "subagent_type" => "tau-implementer"
           }
         },
         %Event.Done{stop_reason: :tool_use, usage: %{}}
