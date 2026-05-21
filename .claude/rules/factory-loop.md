@@ -48,7 +48,7 @@ order; do not reorder, skip, or batch.
 1. **Select the next roadmap item — by what advances M1.1 (Minimum viable UX).**
    The current objective is M1.1 (see "The current objective" above). Select the
    open M1.1 issue whose completion most directly advances the UX surface —
-   priority order from issue #336 comment: #337 (transcript rendering), #341
+   priority order from issue #336 comment: #337 (transcript rendering core — in-Ratatouille fix; subsumes #334, #190), #341
    (permissions), #339 (cancellation/steering), #335 (sub-agent visibility),
    #338 (input editor), #333+#344 (completion surface), #340 (status surfaces),
    #342 (diff), #345 (themes/keybindings), #183, #180, #343, #186. Prefer the

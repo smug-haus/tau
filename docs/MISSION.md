@@ -97,9 +97,9 @@ Both must return empty for a number to be considered free.
 ```
 D-001 … D-019  taken (SPEC-USER-TURN.md — core session FSM invariants)
 D-020 … D-025  retired (original SPEC-TUI-HEADLESS.md — superseded by D-066..D-071)
-D-026           free
+D-026           taken (SPEC-USER-TURN.md — prompt-bar cursor glyph)
 D-027           taken (SPEC-USER-TURN.md — tool-iteration cap, AC-6)
-D-028 … D-028  free
+D-028           taken (SPEC-USER-TURN.md — CommonMark transcript rendering)
 D-029 … D-030  taken (SPEC-CIRCUIT-BREAKER.md)
 D-031 … D-039  taken (SPEC-CODING-AGENT.md)
 D-040 … D-042  taken (SPEC-USER-TURN.md — TAU_CLI_ARGV, model-swap, slash-cmd registry)

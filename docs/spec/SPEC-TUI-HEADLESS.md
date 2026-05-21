@@ -99,9 +99,10 @@ This SPEC is re-chartered from a test-harness spec (AC-1..AC-7 only) into the
 - **★ [HC7-H4]** Ratatouille 0.5.1 + Elixir 1.18.1: render path emits
   `Range.new/2 default step -1` warnings. The render still completes (the pane
   shows the expected layout in the spike), but stderr is noisy. This is a
-  **separate dependency-side bug** tracked independently (#337 in-Ratatouille
-  fix); the headless harness MUST tolerate it (suppress stderr or filter expected
-  warnings) but MUST NOT mask actual rendering errors.
+  **separate dependency-side bug** tracked as #337 (transcript rendering core —
+  in-Ratatouille fix; subsumes #334, #190); the headless harness MUST tolerate it
+  (suppress stderr or filter expected warnings) but MUST NOT mask actual rendering
+  errors.
 - **★ [HC8-H3]** ANSI escape sequences carry layout. Stripping ANSI for text
   assertions loses cursor positioning; `tmux capture-pane -p` flattens pane
   state to plain text already. Use `-p` for textual assertions; use raw
@@ -253,7 +254,7 @@ are taken by prior SPECs (verify with `grep -rn 'D-0[0-9][0-9]'`).
 | D-070 | `tmux send-keys` callers MUST settle (≥50ms) before the next send-keys; back-to-back sends race the renderer's input read. | medium | unit test: rapid 5-key send; assert all keys observed in next render | [HC11] |
 | D-071 | Harness MUST treat the Ratatouille 0.5.1 / Elixir 1.18.1 render warnings as expected stderr; assertions on stderr MUST filter them. | low | unit test: capture stderr; assert filtered output is empty when binary runs cleanly | [HC7] |
 | D-072 | The `context_window/1` provider callback is optional. A TUI session MUST display `–/–` in the context-window status field (not crash) when the active provider omits this callback. | medium | unit test: mock provider with no `context_window/1`; assert status bar renders `–/–` in the ctx field | [HC19] |
-| D-073 | Sub-agent progress events arriving on `Tau.PubSub` MUST NOT crash the TUI render loop, even when the sub-agent is nested or exits abnormally. | high | integration test: spawn a sub-agent that exits with `{:error, :crashed}`; assert TUI continues to accept input and render | [HC17], [HC18] |
+| D-073 | Sub-agent progress events arriving on `Tau.PubSub` MUST NOT crash the TUI render loop, even when the sub-agent is nested or exits abnormally. | high | Two assertions required: (1) [HC17] abnormal-exit: spawn a sub-agent that exits with `{:error, :crashed}`; assert TUI continues to accept input and render after the crash. (2) [HC18] nested non-deadlock: spawn a sub-agent that itself spawns a child sub-agent; assert the TUI render loop does not deadlock or crash (i.e., it accepts a new input keystroke within the tick interval after both agents complete). | [HC17], [HC18] |
 | D-074 | Theme background detection MUST fall back to the dark theme when `$COLORFGBG` is unset and OSC query returns no result. | low | unit test: unset env; assert theme selection returns `:dark` | [HC21] |
 | D-075 | An invalid or duplicate keybinding in the user config MUST be logged via `Logger.warning/2` and the default binding MUST be retained; the TUI MUST NOT crash on startup. | medium | unit test: config with duplicate binding; assert TUI starts, logs a warning, and the default action is bound | [HC22] |
 
@@ -279,6 +280,8 @@ for sub-agent features) is noted where applicable.
 
 #### AC-H2: Single turn round-trip
 
+*(protocol step deferred to the implementing child issue)*
+
 `start/2` with `--provider replay` plumbed through to TUI session start
 (requires a code change — see §9 deferred). Then `send "hello"`,
 `send :enter`, `await/3` for `\(replay\)` within 30s. Status returns
@@ -300,6 +303,8 @@ on empty prompt — TUI MUST exit. Verify `quit/1` returns exit 0.
 
 #### AC-H7: Resume render
 
+*(protocol step deferred to the implementing child issue)*
+
 After AC-H2, take the session id from status bar. `quit/1`, then
 `start/2` again with `args: ["resume", session_id]`. Pane MUST contain
 the prior turn in the transcript.
@@ -316,11 +321,15 @@ to `hello world`.
 
 #### AC-E2: History navigation
 
+*(protocol step deferred to the implementing child issue)*
+
 Submit "turn1" and "turn2" (two turns). After the second turn completes,
 `send :up` twice. Buffer shows `turn1`. `send :down`. Buffer shows
 `turn2`. Competitive bar: matches Pi and Claude Code readline behavior.
 
 #### AC-E3: Reverse history search
+
+*(protocol step deferred to the implementing child issue)*
 
 `send :ctrl_r`. Pane shows reverse-search indicator. `send "turn"`. Pane
 shows the most recent matching entry. `send :enter`. The matched entry
@@ -329,12 +338,16 @@ Pi does not (Tau matches Claude Code here).
 
 #### AC-E4: External editor (headless fallback)
 
+*(protocol step deferred to the implementing child issue)*
+
 In headless/tmux mode, send the external-editor chord (configurable;
 default `Ctrl-X Ctrl-E`). TUI MUST NOT crash. Pane returns to the
 input prompt with the buffer unchanged. Log MUST contain a warning that
 the editor launch failed (no tty).
 
 #### AC-E5: Multi-line paste handling
+
+*(protocol step deferred to the implementing child issue)*
 
 `send "line1\nline2\nline3"` (literal newlines in send, simulating a
 multi-line paste). Pane shows all three lines in the input buffer.
@@ -354,11 +367,15 @@ dismissed; buffer cleared.
 
 #### AC-S2: `/help` dispatch
 
+*(protocol step deferred to the implementing child issue)*
+
 `send "/help"`, `send :enter`. Pane shows command list or help content
 (not a crash, not blank). Competitive bar: Claude Code shows 80+
 commands; Tau must show at least the built-in set.
 
 #### AC-S3: Unknown slash command
+
+*(protocol step deferred to the implementing child issue)*
 
 `send "/nonexistent"`, `send :enter`. Pane shows an error message (e.g.
 `Unknown command: /nonexistent`) rather than crashing or silently failing.
@@ -367,12 +384,16 @@ commands; Tau must show at least the built-in set.
 
 #### AC-A1: Sub-agent progress shown
 
+*(protocol step deferred to the implementing child issue)*
+
 Initiate a turn that causes the session to spawn a sub-agent (requires
 a system prompt that uses the `Agent` tool). Within `T_max` after
 submit, the transcript pane contains a progress indicator line (e.g.
 `[agent] spawned` or a spinner). D-073 applies.
 
 #### AC-A2: Sub-agent completion shown
+
+*(protocol step deferred to the implementing child issue)*
 
 After the sub-agent completes, the transcript pane shows the sub-agent's
 final result inline (not lost, not duplicated). The TUI remains
@@ -395,6 +416,8 @@ assistant response as complete.
 
 #### AC-C2: Cancel clears the stream
 
+*(protocol step deferred to the implementing child issue)*
+
 After AC-C1 completes, immediately submit a new turn. The TUI MUST
 process the new turn independently (no state leak from the cancelled
 turn). Competitive bar: Pi ships mid-turn cancel; Claude Code ships it.
@@ -403,11 +426,15 @@ turn). Competitive bar: Pi ships mid-turn cancel; Claude Code ships it.
 
 #### AC-T1: Model indicator
 
+*(protocol step deferred to the implementing child issue)*
+
 Status bar shows the active model name. After a `/model <new-model>`
 command (AC-8 in SPEC-USER-TURN), status bar updates to the new model
 name.
 
 #### AC-T2: Token and cost counters
+
+*(protocol step deferred to the implementing child issue)*
 
 After one completed turn, status bar shows non-zero token count and
 a cost figure (may be `$0.00` for the replay provider). Counters
@@ -423,6 +450,8 @@ the `W` value is a non-zero integer. When it does not, the display is
 
 #### AC-K1: Default theme loads
 
+*(protocol step deferred to the implementing child issue)*
+
 TUI starts without setting `$COLORFGBG`. No crash. Pane renders
 (dark theme is default). Validates D-074.
 
@@ -436,6 +465,8 @@ key is still bound. Validates D-075.
 
 #### AC-R1: Long content scrollback
 
+*(protocol step deferred to the implementing child issue)*
+
 Submit a turn that produces a response longer than the visible pane
 height. The transcript pane MUST be scrollable (page-up / page-down or
 configurable keybindings). The user MUST be able to return to the bottom
@@ -443,17 +474,23 @@ configurable keybindings). The user MUST be able to return to the bottom
 
 #### AC-R2: Wide content wrapping
 
+*(protocol step deferred to the implementing child issue)*
+
 Submit a turn whose response contains a line longer than the pane width.
 The pane MUST wrap at word boundaries without truncation. Competitive bar:
 Pi and Claude Code both handle wide content correctly.
 
 #### AC-R3: Syntax-highlighted code blocks
 
+*(protocol step deferred to the implementing child issue)*
+
 Submit a turn whose response contains a fenced code block with a language
 tag. The code block MUST render with syntax highlighting if the terminal
 supports colours. Falls back gracefully on monochrome terminals.
 
 #### AC-R4: Streaming render
+
+*(protocol step deferred to the implementing child issue)*
 
 During a streaming provider response, the transcript pane MUST update
 progressively (not batch the full response then display). The user MUST
@@ -644,7 +681,7 @@ suite runs on every PR that touches `lib/tau/tui/`.
   override). AC-H2 needs a provider flag plumbed through. Filed as a
   separate issue. Other ACs work without it.
 - **Ratatouille 0.5.1 ↔ Elixir 1.18.1 Range warnings:** dependency-side
-  bug tracked as #337 (in-Ratatouille fix; subsumes #334, #190). Harness
+  bug tracked as #337 (transcript rendering core — in-Ratatouille fix; subsumes #334, #190). Harness
   tolerates via D-071.
 - **Visual regression:** comparing pane snapshots byte-for-byte against
   a fixture is a possible follow-on. v1 uses substring/regex matching.

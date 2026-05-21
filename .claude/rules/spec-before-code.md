@@ -31,6 +31,13 @@ The current spec catalog:
   `lib/tau/providers/*` (in their `stream/3` callback), or
   `lib/tau/settings/cache.ex`.
 
+  **Dual-gating note (`lib/tau/tui/`):** both SPEC-TUI-HEADLESS and
+  SPEC-USER-TURN list `lib/tau/tui/` as mandatory scope. Ownership is
+  divided by contract layer: SPEC-USER-TURN owns the session-FSM and
+  turn-loop contracts that surface in `lib/tau/tui/`; SPEC-TUI-HEADLESS
+  owns the UX, render, and input-behaviour contracts. A TUI PR cites the
+  AC/D-NNN of whichever SPEC owns the contract it changes.
+
 - `docs/spec/SPEC-CODING-AGENT.md` — the coding-agent adapter substrate
   (subprocess sub-agents driven by `Tau.CodingAgent` + dispatcher).
   Mandatory for any PR touching `lib/tau/coding_agent.ex`,
