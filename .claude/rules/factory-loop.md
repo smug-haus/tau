@@ -50,8 +50,12 @@ wins; this rule only sequences and gates work, it does not relax any other rule.
 
 ## The factory cycle
 
-One **factory step** delivers one roadmap item end-to-end. Execute the steps in
-order; do not reorder, skip, or batch.
+One **factory step** runs the 8-step lifecycle below for a single issue,
+end-to-end. Execute those 8 steps in order *for that issue* — but the loop is
+not single-track: multiple factory steps SHOULD run **concurrently** whenever a
+conflict check clears them as independent (see "Parallel execution" below).
+Never skip an issue, and never merge an ungated or stale diff — concurrency
+changes how many lifecycles are in flight, never the gate.
 
 1. **Select the next item from the assigned milestone.** From the assigned
    milestone's open issues (`gh issue list --milestone "<title>" --state open`),
@@ -96,6 +100,63 @@ order; do not reorder, skip, or batch.
       backstop. If `main` is red (failing compile or tests), the loop HALTS and
       surfaces to the user — see "Stop / escalate conditions".
 8. **Next item.** Return to step 1. Do not pause for human input between steps.
+
+## Parallel execution
+
+The loop SHOULD maximise parallel work. Running issues one at a time is the
+fallback for genuinely conflicting work — **not** the default. Before spawning a
+step, run a **conflict check** against every step already in flight, and spawn
+concurrently every step that clears it. Leaving safe parallelism unused is a
+throughput failure the loop is required to avoid.
+
+### The conflict check
+
+Two (or more) issues may be worked concurrently only if ALL of these hold:
+
+1. **No dependency.** Neither issue is blocked by the other. Sources: the issue
+   body, its elaboration/critique comments ("depends on #X", "blocked by #Y"),
+   and any sequencing note in the milestone's tracking issue.
+2. **Disjoint files.** Their expected changed-file sets do not overlap — derive
+   the sets from the issues' elaborations and the relevant `docs/spec/SPEC-*.md`
+   Appendix-B source-maps; grep the cited modules when unsure.
+3. **Disjoint codepoints.** They do not modify the same function. Elaboration
+   briefs cite `file:line` — use them. The same file touched at clearly
+   separate, stable regions MAY still parallelise, but the burden of proof is on
+   the check; when in doubt, serialize.
+4. **No shared SPEC or D-NNN block.** They do not both author or amend the same
+   `docs/spec/SPEC-*.md`, nor draw new invariants from the same D-NNN block. Two
+   steps authoring the same SPEC are always serialized.
+5. **Shared-resource isolation is possible.** Any non-worktree resource both
+   will touch (Burrito unpack cache, other `$HOME`-namespace caches) is
+   isolatable per "Pre-spawn shared-resource isolation". If it cannot be
+   isolated, serialize.
+
+A set of issues that clears all five is a **parallel batch**: spawn its
+implementers together, each `isolation: worktree`, each briefed per spawn-brief
+integrity and shared-resource isolation.
+
+### Gate and merge under concurrency
+
+Concurrency applies to **implementation**. The gate and merge stay strict:
+
+- Each PR's FULL gate runs against its own stable diff, after that PR's
+  implementer has committed — never against a branch still being written
+  (`worktree-discipline.md`).
+- **Merges are serialized** — one PR at a time. After each merge, every other
+  in-flight branch is behind `origin/main`: the freshness re-check (cycle step
+  7a) fires for it — rebase onto current `origin/main` and re-run the FULL gate
+  before that branch merges. Parallelism makes 7a fire more often; that is
+  expected, not a reason to skip it.
+- The post-merge `main` health check (step 7d) runs serially after every merge.
+- The N = 3 refine bound and the safety circuit remain **per issue**.
+
+### When to serialize
+
+Serialize when the conflict check fails on any clause; when a step authors a
+SPEC that a later step depends on (write → gate → merge the SPEC first, per
+`spec-before-code.md`); or when the in-flight count would exceed what the
+coordinator can gate and freshness-manage without losing track. Correctness and
+the gate always win over throughput.
 
 ## The gate
 
@@ -295,6 +356,12 @@ listed in the repo's `.gitignore` so it can never be accidentally committed.
   milestone-boundary and escalation reports.
 - MUST NOT branch off stale `main`, skip same-turn worktree cleanup, or
   otherwise relax `worktree-discipline.md`.
+- MUST NOT run two factory steps concurrently unless the conflict check clears
+  all five clauses; MUST NOT default to one-issue-at-a-time when the conflict
+  check would clear a parallel batch.
+- MUST NOT merge two PRs concurrently — merges are serialized, each followed by
+  a freshness re-check (and rebase + full re-gate where needed) of every other
+  in-flight branch.
 - MUST NOT proceed when `.claude/STOP-FACTORY` is present.
 - MUST NOT treat a critic/reviewer finding that names the linked issue's headline as a "follow-up." Reopen the issue, fix the headline, re-gate. "Follow-up" is for out-of-scope findings only.
 - MUST NOT report work as "working" or "done" without naming the exact command run and the observable signal (exit code + signal line, with surrounding output optionally elided as `[...elided N lines...]`) against the user-visible path the issue named.
@@ -308,6 +375,7 @@ When the gate composition changes (a third gate half, a different pair),
 update "The gate" and "What this rule forbids". When the roadmap structure
 changes (milestones replaced by another ordering), update "The factory cycle"
 step 1. When the driver mechanism changes (something other than `/loop`),
-update "Continuity and the kill switch". When a new escalation pattern surfaces
-that the safety circuit does not cover, add a condition rather than letting the
-loop run through it.
+update "Continuity and the kill switch". When the parallelism model changes (the
+conflict-check clauses, or how concurrent merges are sequenced), update "Parallel
+execution". When a new escalation pattern surfaces that the safety circuit does
+not cover, add a condition rather than letting the loop run through it.
