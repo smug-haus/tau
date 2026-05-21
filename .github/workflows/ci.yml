@@ -29,6 +29,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # Pin Python 3.10 so :ex_termbox's waf 2.0.14 build compiles.
       # waf uses `import imp` (removed in 3.12) and `open(..., 'rUb')`
@@ -59,6 +61,10 @@ jobs:
       - run: mix compile --warnings-as-errors 2>&1 | tee /tmp/compile.log
         id: compile_step
         continue-on-error: true
+      - name: Credo diff (blocking — new findings only)
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          mix credo diff --strict --from-git-merge-base origin/main
       - run: mix credo --strict 2>&1 | tee /tmp/credo.log
         id: credo_step
         continue-on-error: true
@@ -302,6 +308,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Detect non-docs changes
         id: changes
@@ -370,6 +378,10 @@ jobs:
       - name: Fetch deps
         if: steps.changes.outputs.build == 'true'
         run: mix deps.get
+
+      - name: Fetch origin/main (for tau.qa credo-diff layer)
+        if: steps.changes.outputs.build == 'true'
+        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
 
       - name: mix tau.qa
         if: steps.changes.outputs.build == 'true'

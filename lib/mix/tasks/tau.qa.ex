@@ -14,7 +14,7 @@ defmodule Mix.Tasks.Tau.Qa do
 
   | # | Layer | What it runs | Defect class it catches |
   |---|---|---|---|
-  | A | source quality | `mix compile --warnings-as-errors && mix test && mix format --check-formatted && mix credo --strict` | code defects |
+  | A | source quality | `mix compile --warnings-as-errors && mix test && mix format --check-formatted` then `mix credo diff --strict --from-git-merge-base origin/main` (skipped when origin/main is unavailable) | code defects |
   | B | artifact build | `BURRITO_TARGET=<host> MIX_ENV=prod mix release tau --overwrite` (with `XDG_DATA_HOME` isolation) | NIF cross-compile failures, broken Burrito post-steps |
   | C | artifact boot  | `<binary> help run`; assert exit 0; assert `--system-prompt-file` flag present | flag drift, escript/binary packaging gaps |
   | D | replay smoke   | `<binary> run "hello" --provider replay --model replay`; assert exit 0; stdout contains `(replay) hello` | NIF load failures (#264) |
@@ -73,6 +73,7 @@ defmodule Mix.Tasks.Tau.Qa do
     with :ok <- ensure_xdg_isolation(),
          {:ok, target} <- resolve_target(),
          :ok <- layer_a(),
+         :ok <- layer_a_credo_diff(),
          :ok <- bust_burrito_cache(),
          :ok <- layer_b(target),
          {:ok, binary} <- locate_binary(target),
@@ -202,6 +203,40 @@ defmodule Mix.Tasks.Tau.Qa do
           {:halt, {:error, @exit_layer_a, "LAYER_A_FAILED: `#{label}` exited #{code}"}}
       end
     end)
+  end
+
+  # --- (A) credo diff — new findings only ------------------------------------
+
+  defp layer_a_credo_diff do
+    cmd = "mix credo diff --strict --from-git-merge-base origin/main"
+    Mix.shell().info("tau.qa:   - #{cmd}")
+
+    case origin_main_available?() do
+      false ->
+        Mix.shell().info("tau.qa:   - credo diff skipped: origin/main unavailable")
+        :ok
+
+      true ->
+        case System.cmd(
+               "mix",
+               ["credo", "diff", "--strict", "--from-git-merge-base", "origin/main"],
+               stderr_to_stdout: true,
+               into: IO.stream(:stdio, :line)
+             ) do
+          {_io, 0} ->
+            :ok
+
+          {_io, code} ->
+            {:error, @exit_layer_a, "LAYER_A_FAILED: `#{cmd}` exited #{code}"}
+        end
+    end
+  end
+
+  defp origin_main_available? do
+    case System.cmd("git", ["rev-parse", "--verify", "origin/main"], stderr_to_stdout: true) do
+      {_output, 0} -> true
+      _ -> false
+    end
   end
 
   # --- (B) artifact build --------------------------------------------------
