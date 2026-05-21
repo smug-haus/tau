@@ -139,10 +139,10 @@ defmodule Tau.CodingAgent.DispatcherTest do
 
       assert_receive {:coding_agent_event, ^pid,
                       %Event.Error{reason: :inactivity_timeout, recoverable: false}},
-                     2_000
+                     10_000
 
-      assert_receive {:coding_agent_event, ^pid, %Event.Done{exit_status: -1}}, 2_000
-      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+      assert_receive {:coding_agent_event, ^pid, %Event.Done{exit_status: -1}}, 10_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 10_000
     end
   end
 

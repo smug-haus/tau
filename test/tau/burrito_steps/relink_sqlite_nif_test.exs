@@ -18,6 +18,7 @@ defmodule Tau.BurritoSteps.RelinkSqliteNifTest do
     end
 
     test "exports execute/1" do
+      Code.ensure_loaded!(RelinkSqliteNif)
       assert function_exported?(RelinkSqliteNif, :execute, 1)
     end
   end
