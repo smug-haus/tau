@@ -257,13 +257,22 @@ defmodule Tau.Session.SkillActivationTest do
 
     assert content =~ "Skill activated: deploy"
 
-    # `data.active_skill` is set after the activation.
-    assert %Tau.Skill{name: "deploy"} = active_skill(sid)
+    # Activation is confirmed by the SkillActivated broadcast and telemetry
+    # already asserted above. Checking active_skill via :sys.get_state here
+    # is inherently racy on a loaded runner: the FSM may have already advanced
+    # to the second provider turn and cleared active_skill by the time this
+    # process is scheduled. The SkillActivated + ToolEnd events are the correct
+    # synchronisation points for activation; end_turn is the correct point for
+    # the nil assertion below.
 
     # End-of-turn (no followup tool emitted) — `:end_turn` clears it.
     assert_receive %SE.MessageEnd{message: %{stop_reason: :end_turn}}, 5_000
 
-    # Per ADR-0013: :end_turn clears active_skill.
+    # Per ADR-0013: :end_turn clears active_skill. Safe to assert here:
+    # gen_statem only responds to :sys.get_state after committing the
+    # {next_state, :awaiting_user, data_with_nil} return value, which
+    # happens after finalize_assistant/2 fully executes (including the
+    # active_skill: nil assignment that follows the MessageEnd broadcast).
     assert active_skill(sid) == nil
 
     [path] = Path.wildcard(Path.join(Tau.Settings.data_dir(), "sessions/*/#{sid}.jsonl"))
