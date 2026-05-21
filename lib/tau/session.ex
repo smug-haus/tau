@@ -1925,6 +1925,13 @@ defmodule Tau.Session do
       }
     )
 
+    # SPEC-PROMPT-CACHING AC-4 / C3: surface the per-turn prompt-cache
+    # hit/write signal so a silent cache miss (a cost regression) is
+    # observable. The OTel reporter consumes this. Reads the canonical
+    # usage-map keys (B3) directly off the assistant message — no
+    # callback indirection.
+    emit_cache_usage(data, msg.usage || %{})
+
     # D-016: maybe_compact/2 delegates to do_compact/2 which can return
     # {:abort, data} when compaction_failures reaches 3 consecutive failures
     # (shared across sync and async paths — NOT path-tagged). On abort, surface
@@ -2086,6 +2093,27 @@ defmodule Tau.Session do
         end
     end
   end
+
+  # SPEC-PROMPT-CACHING AC-4 / C3: emit the per-turn prompt-cache
+  # hit/write telemetry at the `:provider_done` boundary. Measurements
+  # carry the raw token splits; metadata carries the routing context
+  # and the adapter-specific breakdown. Reads the canonical B3
+  # usage-map keys (`:cache_read` / `:cache_write` / `:cache_breakdown`)
+  # off the finalised assistant message.
+  defp emit_cache_usage(data, usage) do
+    read = nonneg_token(usage[:cache_read])
+    write = nonneg_token(usage[:cache_write])
+    breakdown = if is_map(usage[:cache_breakdown]), do: usage[:cache_breakdown], else: %{}
+
+    :telemetry.execute(
+      [:tau, :session, :cache_usage],
+      %{write_tokens: write, read_tokens: read, storage_tokens: 0},
+      %{session_id: data.id, provider: data.provider, breakdown: breakdown}
+    )
+  end
+
+  defp nonneg_token(n) when is_integer(n) and n >= 0, do: n
+  defp nonneg_token(_), do: 0
 
   # Thin sync adapter: decides whether to compact, then delegates to do_compact/2.
   # Returns data | {:abort, data} (D-016: on 3 consecutive failures, aborts the turn).

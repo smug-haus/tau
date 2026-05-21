@@ -164,6 +164,47 @@ defmodule Tau.CostTest do
     end
   end
 
+  describe "AC-6 (SPEC-PROMPT-CACHING) — canonical cache-key usage map increments columns 4/5" do
+    test "a canonical-key usage map bumps both cache_read and cache_write" do
+      # The B3 canonical-key contract: an adapter's `merge_usage/2`
+      # emits `:cache_read` / `:cache_write` (not Anthropic-wire
+      # `cache_creation_input_tokens` / `cache_read_input_tokens`).
+      # The Tracker reads exactly those keys — this fixture proves
+      # columns 4 (cache_read) and 5 (cache_write) increment without
+      # any Tracker change.
+      emit(Tau.Providers.Anthropic, "claude-opus-4-7", "ac6-sess", %{
+        input_tokens: 40,
+        output_tokens: 12,
+        cache_read: 6000,
+        cache_write: 1500,
+        cache_breakdown: %{ephemeral_5m: 1500, ephemeral_1h: 0}
+      })
+
+      counters = Tau.Cost.for_session("ac6-sess")
+      assert counters.cache_read == 6000
+      assert counters.cache_write == 1500
+      assert counters.input_tokens == 40
+      assert counters.output_tokens == 12
+    end
+
+    test "Anthropic-wire key names are NOT read — they leave the columns at zero" do
+      # Regression guard for the bug B3 fixes: the pre-#317
+      # `merge_usage/2` emitted `cache_creation_input_tokens` /
+      # `cache_read_input_tokens`, which the Tracker silently
+      # ignores. This documents that the wire names do not work.
+      emit(Tau.Providers.Anthropic, "claude-opus-4-7", "ac6-wire-sess", %{
+        input_tokens: 40,
+        output_tokens: 12,
+        cache_creation_input_tokens: 1500,
+        cache_read_input_tokens: 6000
+      })
+
+      counters = Tau.Cost.for_session("ac6-wire-sess")
+      assert counters.cache_read == 0
+      assert counters.cache_write == 0
+    end
+  end
+
   describe "reset/0" do
     test "clears the table" do
       emit(Tau.Providers.Anthropic, "claude-x", "sess-1", %{
