@@ -69,14 +69,23 @@ defmodule Tau.PromptTemplates do
   @spec discover(Path.t()) :: [{String.t(), PromptTemplate.t()}]
   def discover(cwd) do
     home = System.user_home!() || "."
+    discover(cwd, home)
+  end
+
+  @doc """
+  Discover templates with an explicit home directory (useful for testing).
+
+  Equivalent to `discover/1` but allows the home directory to be overridden
+  instead of reading `System.user_home!/0`.  This is the real implementation;
+  `discover/1` is a thin wrapper that injects the real home.
+  """
+  @spec discover(Path.t(), Path.t()) :: [{String.t(), PromptTemplate.t()}]
+  def discover(cwd, home) do
     cwd_dir = Path.join(cwd, ".tau/prompts")
     home_dir = Path.join(home, ".tau/prompts")
 
-    candidates =
-      [cwd_dir, home_dir]
-      |> Enum.flat_map(&scan_dir/1)
-
-    candidates
+    [cwd_dir, home_dir]
+    |> Enum.flat_map(&scan_dir/1)
     |> Enum.uniq_by(fn {name, _} -> name end)
     |> Enum.sort_by(fn {name, _} -> name end)
   end
@@ -99,9 +108,10 @@ defmodule Tau.PromptTemplates do
   @spec render(PromptTemplate.t(), String.t(), map()) :: {:ok, String.t()}
   def render(%PromptTemplate{} = template, raw_tail, context) when is_map(context) do
     positional_args =
-      case OptionParser.split(raw_tail) do
-        args when is_list(args) -> args
-        _ -> []
+      try do
+        OptionParser.split(raw_tail)
+      rescue
+        _ -> String.split(raw_tail, ~r/\s+/, trim: true)
       end
 
     surplus_count = max(0, length(positional_args) - length(template.variables))

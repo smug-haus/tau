@@ -21,6 +21,7 @@ defmodule Tau.PromptTemplatesTest do
   """
 
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
   @moduletag :tmp_dir
 
@@ -145,21 +146,17 @@ defmodule Tau.PromptTemplatesTest do
   # AC-3: project-local wins over home-global
   # ---------------------------------------------------------------------------
 
-  describe "discover/1 — AC-3: project wins over home" do
+  describe "discover/2 — AC-3: project wins over home" do
     test "cwd copy shadows home copy (first-seen wins)", %{tmp_dir: tmp} do
-      # Simulate two dirs: cwd and a fake home
       cwd_dir = Path.join(tmp, "project")
       home_dir = Path.join(tmp, "home")
       File.mkdir_p!(cwd_dir)
       File.mkdir_p!(home_dir)
 
-      # Write different bodies so we can identify which one won
       write_template(cwd_dir, "shared", "project version")
       write_template(home_dir, "shared", "home version")
 
-      # Patch discover to use our fake home
-      results = discover_two_dirs(cwd_dir, home_dir)
-      [{"shared", t}] = results
+      [{"shared", t}] = Tau.PromptTemplates.discover(cwd_dir, home_dir)
 
       assert t.body == "project version",
              "project-local template must shadow home-global (cwd scanned first)"
@@ -172,65 +169,22 @@ defmodule Tau.PromptTemplatesTest do
 
       write_template(home_dir, "only-home", "home only body")
 
-      results = discover_two_dirs(cwd_dir, home_dir)
-      [{"only-home", t}] = results
+      [{"only-home", t}] = Tau.PromptTemplates.discover(cwd_dir, home_dir)
       assert t.body == "home only body"
     end
-  end
 
-  # A test-only helper that directly calls the private scan logic by
-  # exploiting the public discover/1 signature with a controlled cwd.
-  # We write both dirs under tmp so they are real paths, then call
-  # discover on cwd; home dir won't contribute because the real home
-  # won't have .tau/prompts (in a typical CI environment). For the
-  # project-wins test we need both dirs: we do it by inverting the test
-  # — put the home copy in cwd and the "cwd copy" in home_dir, then
-  # assert the right one wins using discover_two_dirs/2.
-  defp discover_two_dirs(cwd_dir, home_dir) do
-    cwd_prompts = Path.join(cwd_dir, ".tau/prompts")
-    home_prompts = Path.join(home_dir, ".tau/prompts")
+    test "templates from both dirs merged and sorted by name", %{tmp_dir: tmp} do
+      cwd_dir = Path.join(tmp, "project")
+      home_dir = Path.join(tmp, "home")
+      File.mkdir_p!(cwd_dir)
+      File.mkdir_p!(home_dir)
 
-    # Replicate the scan logic from PromptTemplates with our two dirs
-    cwd_entries = scan_dir_direct(cwd_prompts)
-    home_entries = scan_dir_direct(home_prompts)
+      write_template(cwd_dir, "beta", "beta body")
+      write_template(home_dir, "alpha", "alpha body")
 
-    (cwd_entries ++ home_entries)
-    |> Enum.uniq_by(fn {name, _} -> name end)
-    |> Enum.sort_by(fn {name, _} -> name end)
-  end
-
-  defp scan_dir_direct(dir) do
-    case File.ls(dir) do
-      {:ok, entries} ->
-        entries
-        |> Enum.filter(&String.ends_with?(&1, ".md"))
-        |> Enum.flat_map(fn file ->
-          path = Path.join(dir, file)
-
-          case File.read(path) do
-            {:ok, raw} ->
-              {fm, body} = Tau.Skills.Frontmatter.parse(raw)
-              name = Path.basename(path, ".md")
-              vars = Map.get(fm, "variables", extract_vars(body))
-              t = %Tau.PromptTemplate{name: name, body: body, path: path, variables: vars}
-              [{name, t}]
-
-            _ ->
-              []
-          end
-        end)
-
-      _ ->
-        []
+      names = Tau.PromptTemplates.discover(cwd_dir, home_dir) |> Enum.map(&elem(&1, 0))
+      assert names == ["alpha", "beta"]
     end
-  end
-
-  defp extract_vars(body) do
-    ~r/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/
-    |> Regex.scan(body, capture: :all_but_first)
-    |> Enum.map(&hd/1)
-    |> Enum.reject(&(&1 in Tau.PromptTemplate.reserved()))
-    |> Enum.uniq()
   end
 
   # ---------------------------------------------------------------------------
@@ -345,6 +299,49 @@ defmodule Tau.PromptTemplatesTest do
       assert {:ok, _} = Tau.PromptTemplates.render(t, "", %{})
       assert {:ok, _} = Tau.PromptTemplates.render(t, "x y z extra surplus", %{})
       assert {:ok, _} = Tau.PromptTemplates.render(t, "", %{"a" => "1"})
+    end
+
+    @tag :property
+    property "render/3 always returns {:ok, _} and never raises (D-076)" do
+      # Adversarial raw_tail generator: mix well-formed args with unbalanced quotes,
+      # stray backslashes, mixed quotes, empty strings, and very long inputs.
+      raw_tail_gen =
+        StreamData.one_of([
+          StreamData.constant(""),
+          StreamData.constant("\"unclosed"),
+          StreamData.constant("'stray"),
+          StreamData.constant("\"a b\" c"),
+          StreamData.constant("\\"),
+          StreamData.constant("\"x \\"),
+          StreamData.constant("a \"b c\" d"),
+          StreamData.string(:printable, min_length: 0, max_length: 200)
+        ])
+
+      body_gen =
+        StreamData.one_of([
+          StreamData.constant(""),
+          StreamData.constant("{{a}} {{b}}"),
+          StreamData.constant("no placeholders"),
+          StreamData.constant("{{a}} literal {{a}}"),
+          StreamData.string(:printable, min_length: 0, max_length: 200)
+        ])
+
+      check all(
+              body <- body_gen,
+              raw_tail <- raw_tail_gen,
+              max_runs: 500
+            ) do
+        t = %Tau.PromptTemplate{
+          name: "prop-test",
+          body: body,
+          path: "/fake",
+          variables: ["a", "b"]
+        }
+
+        result = Tau.PromptTemplates.render(t, raw_tail, %{"cwd" => "/tmp", "date" => "2026-05-21"})
+        assert {:ok, rendered} = result
+        assert is_binary(rendered)
+      end
     end
   end
 
