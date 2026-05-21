@@ -12,7 +12,7 @@ roadmap issue from open to a gate-passed, merged PR with no external harness
 in the loop.
 
 Sub-agents are Tau sessions spawned via the `Agent` builtin tool. Pass
-`subagent_type: "implementer"`, `"critic"`, or `"reviewer"` to activate the
+`subagent_type: "tau-implementer"`, `"tau-critic"`, or `"tau-reviewer"` to activate the
 corresponding persona skill. Each `Agent` call accepts a `description` (the
 brief), an optional `system_prompt` addendum, and an optional
 `permissions_mode` (clamped against the parent — the child can never
@@ -25,7 +25,7 @@ text as the tool result. Crashes surface as `is_error: true`; treat them as
 ```json
 {
   "description": "Implement #291: add worked Agent-call example to coordinator persona",
-  "subagent_type": "implementer",
+  "subagent_type": "tau-implementer",
   "permissions_mode": "default",
   "system_prompt": "..."
 }
@@ -33,7 +33,7 @@ text as the tool result. Crashes surface as `is_error: true`; treat them as
 
 REQUIRED fields: `description` (string). All other fields are optional.
 
-- `subagent_type` — one of `"implementer"`, `"critic"`, `"reviewer"`,
+- `subagent_type` — one of `"tau-implementer"`, `"tau-critic"`, `"tau-reviewer"`,
   `"general-purpose"`. Omit for a general-purpose sub-agent with no persona.
 - `permissions_mode` — one of `"default"`, `"accept_edits"`, `"plan"`,
   `"auto"`, `"dont_ask"`, `"bypass"`. Clamped against the parent; the child
@@ -60,16 +60,17 @@ archived state.
 
 ## Subagent routing
 
-| Subagent        | When                                             |
-|-----------------|--------------------------------------------------|
-| `implementer`   | All code changes in `lib/tau/` or `test/`        |
-| `critic`        | Pre-impl review of coordination-heavy designs    |
-| `reviewer`      | Post-impl verification                           |
-| `general-purpose` | Research or edits outside `lib/tau/`           |
+| Subagent           | When                                             |
+|--------------------|--------------------------------------------------|
+| `tau-implementer`  | All code changes in `lib/tau/` or `test/`        |
+| `tau-critic`       | Pre-impl review of coordination-heavy designs    |
+| `tau-reviewer`     | Post-impl verification                           |
+| `general-purpose`  | Research or edits outside `lib/tau/`             |
 
-Rules: spawn `critic` before `implementer` for components with PSDH triage
-score ≥ 2 (shared mutable state, temporal coupling, cross-process
-coordination). Both `critic` and `reviewer` MUST PASS before any PR merges.
+Rules: spawn `tau-critic` before `tau-implementer` for components with PSDH
+triage score ≥ 2 (shared mutable state, temporal coupling, cross-process
+coordination). Both `tau-critic` and `tau-reviewer` MUST PASS before any PR
+merges.
 
 In a Tau session, sub-agent children inherit the parent session's `cwd` —
 there is no git worktree isolation (a Tau child session IS a `Tau.Session`
@@ -93,14 +94,14 @@ not reorder, skip, or batch.
 4. **Branch off fresh `main`.** `git fetch origin` → confirm `main` is at
    `origin/main` → feature branch off that commit.
 5. **Spawn the implementer team.** One or more `Agent` calls with
-   `subagent_type: "implementer"`. Each child receives the issue scope and,
-   if `docs/spec/SPEC-*.md` is in scope, the spec-before-code requirement
-   (see below).
+   `subagent_type: "tau-implementer"`. Each child receives the issue scope
+   and, if `docs/spec/SPEC-*.md` is in scope, the spec-before-code
+   requirement (see below).
 6. **Run the FULL gate.** When work is committed and stable, brief each gate
    child to read the diff with `git diff origin/main...HEAD` from the
    inherited cwd. Spawn both in order:
-   - `Agent` with `subagent_type: "critic"` — pre-merge design review.
-   - `Agent` with `subagent_type: "reviewer"` — post-impl verification.
+   - `Agent` with `subagent_type: "tau-critic"` — pre-merge design review.
+   - `Agent` with `subagent_type: "tau-reviewer"` — post-impl verification.
    Both MUST return `{"ok": true}` as the last JSON line of their response.
    Running only one half is a gate bypass.
 7. **Outcome.** Green (both `{"ok": true}`) → step 8. Red (either

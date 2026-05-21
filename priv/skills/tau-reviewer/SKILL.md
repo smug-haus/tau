@@ -1,5 +1,5 @@
 ---
-name: reviewer
+name: tau-reviewer
 description: "Post-completion evaluation agent. Verifies implementation quality: tests pass, no silent failures, no incomplete work, no hardcoded values, no spec deviations."
 allowed-tools: Read Bash
 ---

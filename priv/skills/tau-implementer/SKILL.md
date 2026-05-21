@@ -1,5 +1,5 @@
 ---
-name: implementer
+name: tau-implementer
 description: "Execute coding tasks. Spawned by coordinator for each implementation attempt. Writes code, runs tests, reports results."
 allowed-tools: Read Write Edit Bash
 ---

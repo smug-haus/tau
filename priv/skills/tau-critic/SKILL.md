@@ -1,5 +1,5 @@
 ---
-name: critic
+name: tau-critic
 description: "Engineering critic for design, code, and prompt review. Read-only. Does not write code. Identifies problems, names failure modes, challenges confident claims, detects over-engineering."
 allowed-tools: Read Bash
 ---
