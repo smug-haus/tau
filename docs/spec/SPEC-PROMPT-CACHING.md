@@ -1,6 +1,6 @@
 # SPEC-PROMPT-CACHING — Provider prompt caching
 
-| **Status** | Draft v3 — covers M1 scope (Anthropic only). All other adapters carry `:none` defaults. Two critic rounds; 9 BLOCKING findings closed across v1+v2+v3 (cost-tracker descoped to counters-only pending pricing SPEC, marker-verification AC strengthened to direct `build_body/3` call, OrderingCheck scoped to Anthropic-only, system-field shape change named, 1h token pricing reconciled). |
+| **Status** | Draft v4 — covers M1 scope (Anthropic only). Three critic rounds; 11 BLOCKING findings closed across v1–v4. v4 adds the §4 B3 boundary contract that traces the cache-usage data path end-to-end (Anthropic response key → canonical usage-map key → Tracker ETS column), eliminates the redundant `parse_cache_usage/1` callback (the adapter's `merge_usage/2` normalisation IS the mechanism), and corrects AC-2's harness from `Tau.Providers.Replay` to a Bypass-served Anthropic SSE response. |
 | --- | --- |
 | **Owner** | tau-coordinator (Anthropic prompt cache is the M1 unlock for self-hosting cost) |
 | **Method** | PSDH (`.claude/skills/design-reasoning`); L0 + L1 + boundary contracts. L2 deferred. |
@@ -10,7 +10,8 @@
 
 - v1 (#317 draft): initial design.
 - v2 (#317, post-critic): adopted critic-recommended path (1) — markers are derived inside `build_body/3` per request and NEVER persisted to `data.messages`, eliminating cross-provider fallback handoff concerns entirely. Simplified `cache_regions/2` return shape to `:explicit | :automatic | :none` (no payload). Deferred `prepare_cache/3` until Gemini is actually scoped. Rewrote D-063/D-064 marker-placement rules to use "stable boundary" semantics that handle the tool-loop case and the post-compaction case correctly.
-- v3 (#317, post-second-critic-round): **AC-6 descoped** from dollar pricing to ETS counter separation — `Tau.Cost` already has `cache_read` / `cache_write` counter columns; this PR records cache_creation/cache_read tokens into them. Dollar pricing per-model is a follow-up SPEC (deferred by `lib/tau/cost.ex` moduledoc). **AC-1 strengthened**: directly calls `Anthropic.build_body/3` and asserts on the returned map — substance proof, not via Replay. **AC-2 scoped down** to telemetry-firing assertion (Replay-driven; explicitly does NOT claim to verify markers). **AC-3 scoped to Anthropic-only**: `OrderingCheck.validate!/1` ships in this PR with the Anthropic body shape only; extension to OpenAI-Chat-wire / Bedrock / Gemini becomes a follow-up issue per adapter. **System-field shape change named in Appendix B**: `Anthropic.split_system/1` and `system_field/2` transition from a joined-string to a `[%{type: "text", text: ..., cache_control?: ...}]` block-array shape. **D-065 / C8 1h reconciliation**: Tau NEVER emits `ttl: "1h"`. If server-side promotion delivers 1h tokens, they are recorded in `breakdown.ephemeral_1h_input_tokens` as data; cost tracking counts them in `write_tokens` (under-billing acceptable for this PR because future pricing SPEC takes over the dollar layer). **D-064 compaction-tiebreaker**: latest-appended pinned summary wins. Settings.Cache reload ceremony removed from D-064 detection (Anthropic.build_body doesn't read Settings.Cache).
+- v3 (#317, post-second-critic-round): **AC-6 descoped** from dollar pricing to ETS counter separation. **AC-1 strengthened** to call `build_body/3` directly. **AC-3 scoped to Anthropic-only**. System-field shape change named in Appendix B. **D-065 / C8 1h reconciliation**: Tau never emits `ttl: "1h"`. D-064 compaction-tiebreaker = latest-list-position summary.
+- v4 (#317, post-third-critic-round): the third critic round closed 4 of 5 v3 findings but surfaced two new BLOCKINGs (f-6, f-7) with one root cause — **every revision described the cache-usage endpoints (response keys, ETS columns) but never the data path connecting them**. `Tau.Cost.Tracker.handle_event/4` reads `usage[:cache_read]` / `usage[:cache_write]`; `Anthropic.merge_usage/2` emits `cache_creation_input_tokens` / `cache_read_input_tokens` — a key-name mismatch that silently zeroes the counters. v4 adds **§4 B3 — the cache-usage normalisation contract** which traces the path end-to-end and fixes it at the source: the adapter's `merge_usage/2` emits the canonical `cache_read` / `cache_write` keys the Tracker already reads. This makes the separate `parse_cache_usage/1` behaviour callback **redundant — it is removed from B1**; normalisation is each adapter's own `merge_usage` responsibility. **AC-2's harness corrected** from `Tau.Providers.Replay` (a different adapter that never runs `Anthropic.decode/2`) to a `Bypass`-served Anthropic SSE response, exercising the real decode path. **OpenAI-family `cache_regions/2` gold-plating cut** (f-8): those adapters keep the C6 default of `:none` until the per-family follow-up that actually wires `OrderingCheck`.
 
 ## 0. Why this spec exists
 
@@ -92,20 +93,11 @@ Six families, derived from web research (2026-05-20). Cited sources in §10.
 ### B1 — `Tau.Provider` behaviour extension
 
 ```elixir
-# All callbacks @optional_callbacks; dispatch via function_exported?/3.
-# Default behaviour when a callback is absent: caching disabled for that adapter.
+# @optional_callbacks; dispatch via function_exported?/3.
+# Default behaviour when the callback is absent: caching disabled for that adapter.
 
 @callback cache_regions(messages :: [Tau.Message.t()], opts :: map()) ::
             :explicit | :automatic | :none
-
-@callback parse_cache_usage(provider_usage :: map()) ::
-            %{
-              write_tokens: non_neg_integer(),
-              read_tokens: non_neg_integer(),
-              storage_tokens: non_neg_integer(),  # for future Family D
-              breakdown: map()                    # optional per-adapter metadata
-                                                   # (e.g., Anthropic's 5m vs 1h split)
-            }
 ```
 
 `cache_regions/2` returns the policy *intent*:
@@ -113,7 +105,7 @@ Six families, derived from web research (2026-05-20). Cited sources in §10.
 - `:automatic` — adapter relies on provider-side automatic prefix caching (Families B and C). No body changes required, but the adapter MUST honour the C2 canonical ordering.
 - `:none` — caching disabled for this turn. Default for all adapters that don't implement the callback.
 
-`parse_cache_usage/1` normalises the per-provider response usage into a common shape. `breakdown` is optional; Anthropic populates it with `%{ephemeral_5m: n}` (and `ephemeral_1h: m` once that path opens) so telemetry can distinguish tiers.
+`cache_regions/2` is the **only** new behaviour callback in this PR. Cache-usage normalisation does NOT need a callback — it is each adapter's own responsibility inside its existing usage-merge code (see B3). Earlier drafts proposed a `parse_cache_usage/1` callback; v4 removed it as redundant.
 
 **Deferred to follow-up issues (Gemini scoping):**
 - `prepare_cache/3` for Family D's pre-flight resource creation. Lifecycle (per-request vs per-session, invalidation triggers) will be specified when Gemini caching is actually implemented. Shipping the contract empty would commit to a shape the implementer might want to change.
@@ -127,7 +119,38 @@ Every adapter's `build_body/3` MUST emit content in this order:
 3. Historical messages, oldest first (stable up to the latest stable boundary; see D-064)
 4. Fresh user/tool-result input (variable; never cached)
 
-`Tau.Providers.Shared.OrderingCheck.validate!/1` (new helper) takes the assembled body shape and raises if ordering is violated. Each adapter calls it as the last step of `build_body/3`. This converts AC-3 from a "negative audit" into a runtime invariant per the critic's f-14.
+`Tau.Providers.Shared.OrderingCheck.validate!/1` (new helper) takes the assembled body shape and raises if ordering is violated. The Anthropic adapter calls it as the last step of `build_body/3`. (Other adapters: follow-up — see §8.)
+
+### B3 — Cache-usage normalisation path (end-to-end)
+
+This contract names every hop the cache-token counts traverse, from the provider's HTTP response to the cost ledger. It exists because v1–v3 each described the two endpoints (the response field names; the `Tau.Cost` ETS columns) but never the path between them — and the path is where the data was being silently dropped.
+
+**The canonical key contract.** Every provider adapter's `usage` map — the `usage` field on `%Tau.Provider.Event.Done{}`, which flows into `%Tau.Message.Assistant{}.usage` — MUST use these integer keys:
+
+```elixir
+%{
+  input_tokens: non_neg_integer(),
+  output_tokens: non_neg_integer(),
+  cache_read: non_neg_integer(),    # canonical — tokens served from cache
+  cache_write: non_neg_integer(),   # canonical — tokens written to cache
+  cache_breakdown: map()            # optional, adapter-specific diagnostics
+                                    # (Anthropic: %{ephemeral_5m: n, ephemeral_1h: m})
+}
+```
+
+`cache_read` and `cache_write` are the keys `Tau.Cost.Tracker.handle_event/4` already reads (`tracker.ex` — `cr = nz(usage[:cache_read])`, `cw = nz(usage[:cache_write])`). No Tracker change is required or permitted by this PR.
+
+**The bug being fixed.** `Tau.Providers.Anthropic.merge_usage/2` currently emits `cache_creation_input_tokens` and `cache_read_input_tokens` — Anthropic's wire field names, not the canonical keys. The Tracker reads `cache_read`/`cache_write`, finds nothing, and `nz(nil)` zeroes the counters. **This PR fixes it in `merge_usage/2`**: map Anthropic's `cache_creation_input_tokens → cache_write`, `cache_read_input_tokens → cache_read`, and carry the 5m/1h split (when present) into `cache_breakdown`.
+
+**The full path, every hop, no change needed except hop 1:**
+
+1. `Tau.Providers.Anthropic.merge_usage/2` — **CHANGED**: emit canonical `cache_read`/`cache_write`/`cache_breakdown` keys instead of Anthropic-wire names.
+2. `Tau.Message.Assembler.step/2` (on `%Event.Done{}`) — unchanged: copies `usage` verbatim into `message.usage`.
+3. `Tau.Session.finalize_assistant/2` — unchanged: forwards `usage: msg.usage` into the `[:tau, :provider, :request, :stop]` telemetry measurements.
+4. `Tau.Cost.Tracker.handle_event/4` — unchanged: reads `usage[:cache_read]` / `usage[:cache_write]`, increments the ETS row. Once hop 1 emits the right keys, this works with zero change.
+5. The new `[:tau, :session, :cache_usage]` telemetry (AC-4) — `Tau.Session` reads `msg.usage[:cache_read]` / `[:cache_write]` / `[:cache_breakdown]` directly at the `:provider_done` boundary and emits. No callback indirection.
+
+Because normalisation happens in each adapter's own usage-merge code (hop 1), the cross-provider story needs no shared abstraction: OpenAI's adapter maps `cached_tokens → cache_read`; DeepSeek maps `prompt_cache_hit_tokens → cache_read`; etc. Each is a few lines in that adapter's existing usage code, landed in that adapter's own follow-up PR. This PR only touches Anthropic's `merge_usage/2`.
 
 ## 5. State model
 
@@ -141,15 +164,15 @@ For Families A, B, C, E, F: the only Tau-side state is the canonical request sha
 |---|---|---|---|
 | D-063 | **Cache region policy switch.** `Tau.Providers.Anthropic.cache_regions/2` MUST return `:explicit` when (a) the session has at least one message and (b) `opts[:caching]` is not explicitly disabled. Returning `:none` MUST cause `build_body/3` to skip all marker injection. Returning `:explicit` MUST cause `build_body/3` to inject markers per D-064. | high | unit test in `test/tau/providers/anthropic_cache_policy_test.exs`: `cache_regions/2` returns `:explicit` for non-empty messages, `:none` when `opts[:caching] == false` |
 | D-064 | **Marker placement — pure function, stable-boundary semantics.** Marker positions are a pure function of `(system, tools, messages, opts)`. Three markers are emitted per request when their target region is non-empty: **(A)** the LAST text block of the `system` block-array (`Anthropic.system_field/2` returns `[%{type: "text", text: ..., cache_control?: ...}]` after this PR; see Appendix B); **(B)** the LAST tool spec in `tools`; **(C)** the LAST content block of the **last-stable-boundary message** in `messages`, defined as the most recent message satisfying (in order of preference): (i) `%User{metadata: %{role: :compaction_summary}}` — the compaction summary is the strongest cache anchor when present; **if multiple compaction summaries are pinned (older + newer across multiple compaction events), the latest-list-position one wins**; (ii) the second-to-last message whose `role` is `:assistant` OR `%ToolResult{}` — the message immediately before the freshest input; (iii) skip marker C entirely if no stable boundary exists (e.g., first turn with one user message). Total markers ≤3 per request; the 4-breakpoint ceiling is preserved with one headroom slot. **Derivation MUST NOT read** `:os.system_time/0`, `Tau.Settings.Cache.get/0`, `:rand`, or the process dictionary. | high | property test in `test/tau/providers/anthropic_cache_policy_test.exs`: (1) assert byte-identical body for same input across two invocations 1.5 s apart (catches `:os.system_time/0` leaks; Settings.Cache reload is vacuous since Anthropic.build_body doesn't read it); (2) assert correct marker count for empty-system, no-tools, post-compaction, tool-loop, and multi-summary fixture scenarios; (3) two-turn stability: build body for turn N and turn N+1 with one new user message appended; assert byte-identical prefix up to and including marker C |
-| D-065 | **Usage normalization with breakdown.** `Tau.Providers.Anthropic.parse_cache_usage/1` MUST translate the response's `cache_creation_input_tokens` / `cache_read_input_tokens` fields into the canonical `%{write_tokens, read_tokens, storage_tokens: 0, breakdown: %{...}}` shape. `breakdown` carries the Anthropic-specific `ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens` split when the response includes them. **Tau NEVER opts into 1h** (per C7 — adapter never emits `ttl: "1h"`); if the server promotes a 5m request to 1h anyway, the 1h tokens are preserved in `breakdown.ephemeral_1h_input_tokens` for diagnostics and folded into `write_tokens` for counter purposes. The future SPEC-COST-PRICING will then split-bill those tokens at the correct 2× rate using the `breakdown` field; until then, the counter sum is what `Tau.Cost` records. `storage_tokens` is always 0 for Anthropic. | medium | unit test on the parse function with four sample response payloads: (a) no cache activity; (b) write-only 5m (first turn after marker emission); (c) mixed write+read with `breakdown.ephemeral_5m_input_tokens > 0`; (d) server-promoted 1h scenario with `breakdown.ephemeral_1h_input_tokens > 0` asserted to flow into `write_tokens` |
+| D-065 | **Usage normalisation at the adapter (B3 hop 1).** `Tau.Providers.Anthropic.merge_usage/2` MUST emit the canonical `usage` map keys from B3: `cache_creation_input_tokens → cache_write`, `cache_read_input_tokens → cache_read`, plus `cache_breakdown` carrying the Anthropic `ephemeral_5m_input_tokens` / `ephemeral_1h_input_tokens` split when the response includes it. **Tau NEVER opts into 1h** (C7 — adapter never emits `ttl: "1h"`); if the server promotes anyway, the 1h tokens appear in `cache_breakdown.ephemeral_1h` for diagnostics AND are summed into the canonical `cache_write` counter. The future SPEC-COST-PRICING split-bills 1h at 2× using `cache_breakdown`; until then the `cache_write` counter sum is the regression-detection signal. | medium | unit test on `merge_usage/2` with four sample Anthropic response payloads: (a) no cache activity → `cache_read: 0, cache_write: 0`; (b) write-only 5m → `cache_write > 0`, `cache_read: 0`; (c) mixed write+read → both > 0, `cache_breakdown.ephemeral_5m > 0`; (d) server-promoted 1h → `cache_breakdown.ephemeral_1h > 0` asserted summed into `cache_write` |
 
 3 D-xxx entries. Each enforceable.
 
 ## 7. Acceptance criteria
 
-- **AC-1 — Anthropic markers placed in the wire body.** Verification calls `Tau.Providers.Anthropic.build_body/3` (or whatever function the adapter exposes for body construction; currently `Anthropic.build_body/3` is private and may need to become `@doc false`-public for testability) directly with synthetic input and asserts the returned map has `cache_control` markers on the last system block, last tool spec, and the last-stable-boundary message (when each is non-empty), per D-064. This is the substance proof for marker injection — not via Replay, not via response-side telemetry. Three fixture cases at minimum: (1) full conversation with system + tools + multiple messages including a compaction summary; (2) first turn with only a user input (markers A,B only when system+tools present; marker C skipped); (3) empty system + empty tools (markers A,B skipped; marker C placed). New file: `test/tau/providers/anthropic_cache_policy_test.exs`.
+- **AC-1 — Anthropic markers placed in the wire body.** `Tau.Providers.Anthropic.build_body/3` is made `@doc false`-public in this PR (it is currently `defp`) so the test can call it directly. AC-1 calls `build_body/3` with synthetic input and asserts the returned map has `cache_control` markers on the last system block, last tool spec, and the last-stable-boundary message (when each is non-empty), per D-064. This is the substance proof for marker injection — not via Replay, not via response-side telemetry. Three fixture cases at minimum: (1) full conversation with system + tools + multiple messages including a compaction summary; (2) first turn with only a user input (markers A,B only when system+tools present; marker C skipped); (3) empty system + empty tools (markers A,B skipped; marker C placed). New file: `test/tau/providers/anthropic_cache_policy_test.exs`.
 
-- **AC-2 — Response-side telemetry round-trips.** A Replay-provider cassette test where the cassette's response usage carries `cache_creation_input_tokens > 0` on turn 1 and `cache_read_input_tokens > 0` on turn 2. Assert `[:tau, :session, :cache_usage]` telemetry fires with the correct write/read split, and that `Tau.Cost`'s per-session counters incremented `cache_write` and `cache_read` accordingly. **No real API key required.** This explicitly tests response-side plumbing only — it cannot verify markers went out on the wire (Replay discards messages). Substance for markers is AC-1.
+- **AC-2 — Response-side B3 path round-trips.** A `Bypass`-served Anthropic SSE response (the harness already used by `test/tau/providers/anthropic/http_error_stream_test.exs`) drives the real `Anthropic.decode/2` → `merge_usage/2` path. Two cases: a response whose `message_start` usage carries `cache_creation_input_tokens > 0`, and one carrying `cache_read_input_tokens > 0`. Assert (1) the resulting `%Event.Done{}.usage` map has canonical `cache_write` / `cache_read` keys per B3; (2) when driven through a `Tau.Session`, the `[:tau, :session, :cache_usage]` telemetry fires with the correct split; (3) `Tau.Cost.Tracker`'s ETS row for that session shows the `cache_read` / `cache_write` columns incremented. **No real API key required** — `Bypass` serves a recorded SSE body locally. This test exercises B3 hops 1→5 end-to-end. It does NOT verify marker emission on the request body — that is AC-1's job. New file: `test/tau/providers/anthropic_cache_cassette_test.exs`. Note: `Tau.Providers.Replay` is NOT used — it is a distinct adapter that never runs `Anthropic.decode/2` and so cannot exercise B3 hop 1.
 
 - **AC-3 — Canonical ordering enforced for Anthropic.** `Tau.Providers.Shared.OrderingCheck.validate!/1` ships in this PR with a signature `validate!(body :: %{required(:system) => list_or_nil, required(:tools) => list_or_nil, required(:messages) => list}) :: :ok | no_return()`. Called as the LAST step of `Tau.Providers.Anthropic.build_body/3`. A property test in `test/tau/providers/anthropic_cache_policy_test.exs` generates random shapes and asserts ordering-violation maps raise, ordering-compliant maps return `:ok`. **Other adapters are out of scope for this PR.** A follow-up issue covers extension to OpenAI-Chat-wire, Bedrock (whose body is `build_payload/2` not `build_body/3`), and Gemini — each needs a shape adapter or per-provider validator. The validator's signature is intentionally Anthropic-shaped in this PR; the follow-up will generalize.
 
@@ -157,20 +180,22 @@ For Families A, B, C, E, F: the only Tau-side state is the canonical request sha
 
 - **AC-5 — Regression guard against the 4-breakpoint cap.** Property test fixture: 3 system blocks + 5 tools + 8 messages including 2 compaction summaries + 4 tool turns. This shape would naively offer 5+ candidate marker positions; assertion: the Anthropic adapter emits exactly 3 markers (A on last system block, B on last tool, C on the latest compaction summary per D-064's compaction-tiebreaker). Random generation is constrained to inputs that have ≥3 distinct stable boundaries available; assertions never run on under-constrained inputs that would pass trivially.
 
-- **AC-6 — Cost tracker records cache token counters.** `Tau.Cost` already has `cache_read` and `cache_write` ETS columns (`lib/tau/cost.ex` line 17-23). This PR wires the Anthropic adapter's parsed `parse_cache_usage/1` output (`write_tokens`, `read_tokens`) into those columns per turn. The existing `Tau.Cost` test extends with a fixture that emits a usage payload with cache_creation_input_tokens > 0 and cache_read_input_tokens > 0; assert both counters increment. **Dollar-price computation is OUT OF SCOPE** per C8 — `Tau.Cost` moduledoc explicitly defers per-model pricing, and that work lands as a future SPEC. AC-6 here is "the counter columns reflect cache usage", which is sufficient to detect regressions via the token-counts dashboard.
+- **AC-6 — Cost tracker records cache token counters.** `Tau.Cost.Tracker` already reads `usage[:cache_read]` / `usage[:cache_write]` and increments ETS columns 4 and 5 (`tracker.ex` `handle_event/4`). **No Tracker change is in scope** — once B3 hop 1 (the `merge_usage/2` fix, D-065) emits the canonical keys, the existing Tracker path carries the data correctly. AC-6 is verified by AC-2 hop (3): the Bypass-driven session run shows the Tracker's ETS row for that session with non-zero `cache_read` / `cache_write` columns. The existing `test/tau/cost_test.exs` is additionally extended with one fixture passing a canonical-key usage map (`%{cache_read: N, cache_write: M, ...}`) directly to the telemetry handler, asserting both columns increment — a focused unit test of the Tracker independent of the adapter. **Dollar-price computation is OUT OF SCOPE** per C8 (deferred to a future SPEC-COST-PRICING).
 
 ## 8. Scope of the first PR (#317) vs. follow-ups
 
 **In scope for #317:**
-- The two new behaviour callbacks (`cache_regions/2`, `parse_cache_usage/1`) declared as `@optional_callbacks` on `Tau.Provider`.
+- The single new behaviour callback `cache_regions/2` declared as an `@optional_callback` on `Tau.Provider`.
 - `Tau.Providers.Shared.OrderingCheck.validate!/1` shared helper — Anthropic body-shape signature only.
-- Anthropic adapter implementation: `cache_regions/2` returns `:explicit` for non-empty sessions; `system_field/2` transitions from string → block-array shape (named in Appendix B); `build_body/3` injects ≤3 markers per D-064 and calls `OrderingCheck.validate!/1`; `parse_cache_usage/1` translates the response with `breakdown`.
+- Anthropic adapter implementation: `cache_regions/2` returns `:explicit` for non-empty sessions; `split_system/1` / `system_field/2` transition from joined-string to block-array shape (named in Appendix B); `build_body/3` injects ≤3 markers per D-064 and calls `OrderingCheck.validate!/1`; `merge_usage/2` emits canonical `cache_read`/`cache_write`/`cache_breakdown` keys per B3 + D-065.
 - Removal of `extended-cache-ttl-2025-04-11` from `@beta_headers` in `lib/tau/providers/anthropic.ex` (C7). The base `prompt-caching-2024-07-31` header stays (GA-equivalent; harmless).
-- OpenAI-family `cache_regions/2` returns `:automatic` (zero body change). Each adapter does NOT call `OrderingCheck.validate!/1` in this PR — extension is per-adapter follow-up issues.
-- Telemetry event `[:tau, :session, :cache_usage]` wired in `Tau.Session` at the `:provider_done` boundary.
-- `Tau.Cost` ETS-counter wiring (AC-6): per-turn writes to existing `cache_read` / `cache_write` columns from `parse_cache_usage/1` output.
+- Telemetry event `[:tau, :session, :cache_usage]` wired in `Tau.Session` at the `:provider_done` boundary, reading the canonical usage-map keys.
 - Tests for D-063, D-064, D-065, AC-1 through AC-6.
 - SPEC-PROMPT-CACHING.md (this file) registered in `.claude/rules/spec-before-code.md`.
+
+**NOT in scope (deliberately cut to avoid behaviour-free churn):**
+- OpenAI-family `cache_regions/2` definitions. Per C6 a missing callback defaults to `:none`. Nothing in this PR couples behaviour to an `:automatic` return (no `OrderingCheck` call for those adapters, no telemetry branch). Adding six one-line `:automatic` callbacks would change zero observable behaviour. The OpenAI family stays at the `:none` default and adopts `:automatic` in the per-family follow-up that actually wires `OrderingCheck` for it.
+- Any `Tau.Cost.Tracker` change — the Tracker already reads the canonical keys (AC-6).
 
 **Deferred to follow-up issues (file at PR-merge time):**
 - **OrderingCheck extension to remaining adapters** — OpenAI-Chat-wire (6 adapters share `Tau.Providers.Shared.OpenAIChatWire.build_body/4`), Bedrock (uses `build_payload/2` not `build_body/3`), Gemini (own body shape). Each needs a shape adapter or per-provider validator; the spec-time decision deferred is whether to canonicalize at a Tau pre-shape layer or keep validators per-adapter.
@@ -209,9 +234,9 @@ The user mandate is M1 cost. M1 uses Anthropic. Shipping more than Anthropic in 
 
 | Constraint | Files |
 |---|---|
-| D-063, D-064 | `lib/tau/provider.ex` (new `@optional_callbacks` declarations with `@callback` specs); `lib/tau/providers/anthropic.ex` — (a) `cache_regions/2` new, (b) `split_system/1` / `system_field/2` transition from joined-string to block-array shape `[%{type: "text", text: ..., cache_control?: %{type: "ephemeral"}}]`, (c) `build_body/3` injects ≤3 markers per D-064 and calls `OrderingCheck.validate!/1`, (d) removal of `extended-cache-ttl-2025-04-11` from `@beta_headers`; `test/tau/providers/anthropic_cache_policy_test.exs` (new file) |
-| D-065 | `lib/tau/providers/anthropic.ex` (`parse_cache_usage/1`); `test/tau/providers/anthropic_cache_policy_test.exs` (parse unit tests with `breakdown` field including 1h-promotion case) |
+| D-063, D-064 | `lib/tau/provider.ex` (new `@optional_callback cache_regions/2` `@callback` spec); `lib/tau/providers/anthropic.ex` — (a) `cache_regions/2` new, (b) `split_system/1` / `system_field/2` transition from joined-string to block-array shape `[%{type: "text", text: ..., cache_control?: %{type: "ephemeral"}}]`, (c) `build_body/3` injects ≤3 markers per D-064 and calls `OrderingCheck.validate!/1` — `build_body/3` becomes `@doc false`-public so AC-1 can call it directly, (d) removal of `extended-cache-ttl-2025-04-11` from `@beta_headers`; `test/tau/providers/anthropic_cache_policy_test.exs` (new file) |
+| B3, D-065 | `lib/tau/providers/anthropic.ex` (`merge_usage/2` — emit canonical `cache_read`/`cache_write`/`cache_breakdown` keys, B3 hop 1); `test/tau/providers/anthropic_cache_policy_test.exs` (`merge_usage/2` unit tests with the four payloads incl. 1h-promotion). NO change to `assembler.ex`, `session.ex` finalize path, or `cost/tracker.ex` — B3 hops 2–4 already carry canonical keys unchanged. |
 | C2, AC-3 | `lib/tau/providers/shared/ordering_check.ex` (new shared helper, `validate!/1` with Anthropic body-shape signature); `lib/tau/providers/anthropic.ex` (call-site addition in `build_body/3`); Anthropic-only property tests in `test/tau/providers/anthropic_cache_policy_test.exs`. Extension to other adapters: follow-up issues. |
-| AC-2 | `test/tau/providers/anthropic_cache_cassette_test.exs` (new file; Replay-driven; asserts response-side telemetry/counters only — does NOT claim to verify markers, which is AC-1) |
-| AC-4 | `lib/tau/session.ex` (emit `[:tau, :session, :cache_usage]` telemetry on each `:provider_done` event using `parse_cache_usage/1` output); `test/tau/session/cache_telemetry_test.exs` (new file) |
-| AC-6, C8 | `lib/tau/cost.ex` (wire the per-turn `cache_write` / `cache_read` ETS counter updates from `parse_cache_usage/1` output — schema already exists, no per-model pricing table change in this PR); `test/tau/cost_test.exs` (extend fixtures with a cache-bearing usage map; assert both counters increment) |
+| AC-2 | `test/tau/providers/anthropic_cache_cassette_test.exs` (new file; `Bypass`-served Anthropic SSE — NOT `Tau.Providers.Replay`; exercises B3 hops 1→5 end-to-end) |
+| AC-4 | `lib/tau/session.ex` (emit `[:tau, :session, :cache_usage]` telemetry on each `:provider_done` event, reading `msg.usage[:cache_read]` / `[:cache_write]` / `[:cache_breakdown]` directly — no callback indirection); `test/tau/session/cache_telemetry_test.exs` (new file) |
+| AC-6, C8 | NO production-code change — `Tau.Cost.Tracker.handle_event/4` already reads the canonical `cache_read`/`cache_write` keys (verified `tracker.ex`). `test/tau/cost_test.exs` extended with one fixture passing a canonical-key usage map to the telemetry handler, asserting columns 4/5 increment. End-to-end coverage is AC-2 hop (3). |
