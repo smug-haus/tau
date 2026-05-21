@@ -394,6 +394,11 @@ jobs:
         # tau.qa already built the binary; tau.tui_ux locates it via the
         # pre-built path and skips the build. tmux was installed above.
         # Blocking (no continue-on-error): a TUI protocol failure is CI-blocking.
+        #
+        # Note: tau.tui_ux runs `mix test` under MIX_ENV=test (the default).
+        # tau.qa ran under MIX_ENV=prod; switching env forces a full test-env
+        # recompile here (~30s on a cold cache). This is expected and unavoidable
+        # given ExUnit requires MIX_ENV=test.
         if: steps.changes.outputs.build == 'true'
         run: mix tau.tui_ux
         env:

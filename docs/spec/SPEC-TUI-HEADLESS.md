@@ -289,9 +289,12 @@ to `idle`.
 
 #### AC-H3: Provider error visibility
 
-`start/2` with empty `~/.tau` and unset auth. `send "hi"`, `send
-:enter`, `await/3` for `Error|auth|expired` within 5s. Pane MUST NOT be
-empty after submit.
+`start/2` with `HOME` pointed at `tmpdir` (so `~/.claude/.credentials.json`
+does not exist) and `ANTHROPIC_API_KEY` set to `""` (overrides any ambient
+host value). Auth resolves locally to `{:error, :no_auth}` — no network
+round-trip. `send "hi"`, `send :enter`, `await/3` for
+`Error|auth|expired|missing|key` within 5s. Pane MUST NOT be empty after
+submit. Test MUST pass deterministically offline.
 
 #### AC-H4: Quit ergonomics
 
@@ -501,7 +504,9 @@ Code render streaming tokens progressively.
 
 #### AC-Z1: Resize handled without crash
 
-While the TUI is idle, change the tmux pane geometry (`tmux resize-pane`).
+While the TUI is idle, change the tmux window geometry (`tmux resize-window`).
+`resize-window` is used (not `resize-pane`) because the session is detached;
+`resize-window` resizes the pseudoterminal that the binary's tty is attached to.
 The TUI MUST re-render within one tick interval. Pane MUST show no
 corrupted layout.
 
@@ -549,12 +554,26 @@ Tag: `@tag :tui_smoke`
 
 ### Protocol step 3 — Provider error surface (AC-H3)
 
+Offline no-auth approach: configure the binary so auth resolves locally
+to nothing — no `ANTHROPIC_API_KEY` in env (`""` overrides any ambient
+host value), and `HOME` pointed at `tmpdir` so the OAuth path
+(`~/.claude/.credentials.json`) resolves to `<tmpdir>/.claude/...`
+which does not exist. The binary's `Auth.resolve/1` returns
+`{:error, :no_auth}` locally without any network round-trip. The
+session FSM maps that to `:missing_api_key` and routes the error to the
+transcript via `MessageEnd` ([C12]/[C19]). Timeout is 5s (local error,
+no network latency).
+
 ```
-start(binary_path, env: [TAU_DATA_DIR: tmpdir, TAU_ANTHROPIC_API_KEY: "invalid"])
+start(binary_path, env: [
+  {"TAU_DATA_DIR", tmpdir},
+  {"HOME", tmpdir},
+  {"ANTHROPIC_API_KEY", ""}
+])
 await(session, "> ")
 send(session, "hi")
 send(session, :enter)
-await(session, ~r/Error|auth|expired/, timeout_ms: 5_000)
+await(session, ~r/Error|auth|expired|missing|key/i, timeout_ms: 5_000)
 ```
 
 Tag: `@tag :tui_smoke`
@@ -619,11 +638,15 @@ Tag: `@tag :tui_ux`
 
 ### Protocol step 8 — Terminal resize (AC-Z1)
 
+`tmux_resize/2` issues `tmux resize-window` (not `resize-pane`) because
+the session is detached; `resize-window` resizes the pseudoterminal the
+binary's tty is attached to.
+
 ```
 start(binary_path, ..., geometry: {200, 50})
 await(session, "> ")
-tmux_resize(session, {120, 30})
-Process.sleep(500)              # wait ≥ 2 ticks
+tmux_resize(session, {120, 30})   # resize-window under the hood
+Process.sleep(500)                # wait ≥ 2 ticks
 {:ok, pane} = capture(session)
 assert String.length(pane) > 0
 refute pane =~ ~r/corrupt|error/i
