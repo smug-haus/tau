@@ -113,7 +113,7 @@ defmodule Tau.TUI.Render.Highlight do
           tokens = lexer_mod.lex(code, [])
           tokens_to_lines(tokens)
         rescue
-          ArgumentError -> plain_lines(code)
+          _ -> plain_lines(code)
         end
     end
   end

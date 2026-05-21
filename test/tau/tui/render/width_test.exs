@@ -119,13 +119,11 @@ defmodule Tau.TUI.Render.WidthTest do
       assert Width.grapheme("中") == 2
     end
 
-    test "emoji flag sequence (two regional indicators) — base char is 1" do
-      # Regional indicators are in 0x1F1E0..0x1F1FF which is NOT in the wide table;
-      # the combined flag emoji is typically 2 wide at display, but we measure
-      # the base grapheme's first codepoint.
-      # Just verify it doesn't crash.
-      result = Width.grapheme("🇦")
-      assert result in [0, 1, 2]
+    test "single regional indicator is width 1" do
+      # U+1F1E6 (REGIONAL INDICATOR SYMBOL LETTER A) is in 0x1F1E0..0x1F1FF,
+      # which is NOT in the wide table (wide table's emoji range starts at 0x1F300).
+      # The base-grapheme rule therefore returns 1, not 2.
+      assert Width.grapheme("🇦") == 1
     end
   end
 end

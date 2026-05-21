@@ -49,10 +49,23 @@ defmodule Tau.TUI.Render.Markdown do
     end
   end
 
+  # Block-level tags that deserve a blank-line spacer between them.
+  @block_tags ~w[p h1 h2 h3 h4 h5 h6 ul ol pre blockquote hr table div]
+
   @spec render_ast(list()) :: [styled_line()]
   defp render_ast(ast) do
-    Enum.flat_map(ast, &render_node/1)
+    ast
+    |> Enum.reduce({[], false}, fn node, {acc, needs_spacer} ->
+      is_block = block_node?(node)
+      spacer = if needs_spacer and is_block, do: [{"", []}], else: []
+      lines = render_node(node)
+      {acc ++ spacer ++ lines, is_block and lines != []}
+    end)
+    |> elem(0)
   end
+
+  defp block_node?({tag, _attrs, _children, _meta}), do: tag in @block_tags
+  defp block_node?(_), do: false
 
   # Headings
   defp render_node({"h1", _attrs, children, _meta}) do
