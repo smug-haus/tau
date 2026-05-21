@@ -19,12 +19,14 @@ defmodule Tau.Test.TuiPtyHelper do
 
   D-NNN invariants enforced (see `docs/spec/SPEC-TUI-HEADLESS.md` §5):
 
-  - **D-020**: `start/2` waits for alt-screen activation before returning.
-  - **D-021**: `await/3` polls `capture-pane` at `:poll_ms` intervals.
-  - **D-022**: each `start/2` gets a unique tmux session name; callers
+  - **D-066**: `start/2` waits for alt-screen activation before returning.
+  - **D-067**: `await/3` polls `capture-pane` at `:poll_ms` intervals.
+  - **D-068**: each `start/2` gets a unique tmux session name; callers
     MUST set a per-run `TAU_DATA_DIR` to isolate session JSONL writes.
-  - **D-023**: `capture/1` snapshots pane state; safe before quit.
-  - **D-024**: `send/2` sleeps `:settle_ms` after the keystroke.
+  - **D-069**: `capture/1` snapshots pane state; safe before quit.
+  - **D-070**: `send/2` sleeps `:settle_ms` after the keystroke.
+  - **D-071**: Ratatouille render warnings are expected stderr; harness
+    tolerates them without masking actual rendering errors.
   """
 
   import Bitwise, only: [&&&: 2]
@@ -106,6 +108,17 @@ defmodule Tau.Test.TuiPtyHelper do
       :ctrl_c          → C-c
       :tab             → Tab
       :backspace       → BSpace
+      :up              → Up arrow
+      :down            → Down arrow
+      :left            → Left arrow
+      :right           → Right arrow
+      :ctrl_k          → C-k (kill to end of line)
+      :ctrl_y          → C-y (yank kill-ring)
+      :ctrl_a          → C-a (move to start of line)
+      :ctrl_e          → C-e (move to end of line)
+      :ctrl_u          → C-u (kill to start of line)
+      :ctrl_l          → C-l (clear screen)
+      :ctrl_r          → C-r (reverse history search)
   """
   @spec send(session(), iodata() | atom()) :: :ok
   def send(%{tmux_name: name} = sess, input) do
@@ -162,6 +175,26 @@ defmodule Tau.Test.TuiPtyHelper do
     end
   end
 
+  @doc """
+  Resize the tmux pane to `{cols, rows}`. Used by protocol step 8 (AC-Z1).
+  Returns `:ok` or raises on tmux error.
+  """
+  @spec tmux_resize(session(), {pos_integer(), pos_integer()}) :: :ok
+  def tmux_resize(%{tmux_name: name}, {cols, rows}) do
+    case System.cmd("tmux", [
+           "resize-window",
+           "-t",
+           name,
+           "-x",
+           "#{cols}",
+           "-y",
+           "#{rows}"
+         ]) do
+      {_, 0} -> :ok
+      {out, code} -> raise "tmux resize-window failed (code #{code}): #{out}"
+    end
+  end
+
   # --- internals -----------------------------------------------------------
 
   defp ensure_tmux do
@@ -201,7 +234,7 @@ defmodule Tau.Test.TuiPtyHelper do
     else
       case capture_raw(sess) do
         {:ok, raw} ->
-          # D-020: alt-screen sequence indicates the runtime is up.
+          # D-066: alt-screen sequence indicates the runtime is up.
           # Status-bar text is a stronger signal once present.
           if String.contains?(raw, "session:") or String.contains?(raw, "transcript") do
             :ok
@@ -249,6 +282,17 @@ defmodule Tau.Test.TuiPtyHelper do
   defp key_for(:ctrl_c), do: ["C-c"]
   defp key_for(:tab), do: ["Tab"]
   defp key_for(:backspace), do: ["BSpace"]
+  defp key_for(:up), do: ["Up"]
+  defp key_for(:down), do: ["Down"]
+  defp key_for(:left), do: ["Left"]
+  defp key_for(:right), do: ["Right"]
+  defp key_for(:ctrl_k), do: ["C-k"]
+  defp key_for(:ctrl_y), do: ["C-y"]
+  defp key_for(:ctrl_a), do: ["C-a"]
+  defp key_for(:ctrl_e), do: ["C-e"]
+  defp key_for(:ctrl_u), do: ["C-u"]
+  defp key_for(:ctrl_l), do: ["C-l"]
+  defp key_for(:ctrl_r), do: ["C-r"]
   defp key_for(s) when is_binary(s), do: [s]
   defp key_for(s) when is_list(s), do: [IO.iodata_to_binary(s)]
 end
