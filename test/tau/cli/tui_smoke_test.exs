@@ -94,21 +94,21 @@ defmodule Tau.CLI.TuiSmokeTest do
   end
 
   describe "AC-H3: provider error visibility (mirrors SPEC-USER-TURN AC-3)" do
-    @tag :pending
-    test "submitting with no auth surfaces an error in transcript", %{
+    test "submitting with invalid auth surfaces an error in transcript", %{
       binary: binary,
       tmpdir: tmpdir
     } do
-      # Pending: requires the SPEC-USER-TURN AC-3 fix to land first.
-      # Currently the TUI reaches `:sending` and the transcript pane
-      # stays empty — the error_message field on the synthetic
-      # Assistant message isn't routed to render. Tracked in #149/#153
-      # and addressed by D-009 / [C12]/[C19] (already partially fixed
-      # on feat/anthropic-oauth — verify when this branch merges).
-
+      # SPEC-TUI-HEADLESS §7 protocol step 3 (D-066..D-071 enforced by harness).
+      # Supply an invalid API key so the provider attempt produces a 401
+      # auth error. The session FSM must route the error to the transcript
+      # via MessageEnd (D-009 / [C12]/[C19] fix). The match covers the
+      # [assistant] line that wraps the "Error: ..." notice.
       {:ok, sess} =
         TuiPtyHelper.start(binary,
-          env: [{"TAU_DATA_DIR", tmpdir}, {"ANTHROPIC_API_KEY", ""}]
+          env: [
+            {"TAU_DATA_DIR", tmpdir},
+            {"ANTHROPIC_API_KEY", "invalid-key-tui-ux-test"}
+          ]
         )
 
       on_exit(fn -> TuiPtyHelper.quit(sess) end)
@@ -116,14 +116,15 @@ defmodule Tau.CLI.TuiSmokeTest do
       :ok = TuiPtyHelper.send(sess, "hi")
       :ok = TuiPtyHelper.send(sess, :enter)
 
-      case TuiPtyHelper.await(sess, ~r/Error|auth|expired/i, timeout_ms: 5_000) do
+      case TuiPtyHelper.await(sess, ~r/Error|auth|expired|invalid|unauthorized/i,
+             timeout_ms: 15_000
+           ) do
         {:ok, _pane} ->
           :ok
 
         {:error, :timeout, last_pane} ->
           flunk(
-            "AC-H3 violation: TUI did not surface an error within 5s. " <>
-              "This is the [C12]/[C19] error-message-lost-in-render bug. " <>
+            "AC-H3 violation: TUI did not surface an error within 15s. " <>
               "Pane:\n#{last_pane}"
           )
       end
@@ -165,17 +166,25 @@ defmodule Tau.CLI.TuiSmokeTest do
   # --- helpers --------------------------------------------------------
 
   defp binary_for_host do
-    candidates = [
-      "burrito_out/tau_linux_#{host_arch()}",
-      "burrito_out/tau_linux_amd64",
-      "burrito_out/tau_linux_arm64",
-      "_build/prod/rel/tau/bin/tau"
-    ]
+    # TAU_TUI_BINARY is set by `mix tau.tui_ux` to point at the binary it
+    # has already located or built. When set, skip candidate detection.
+    case System.get_env("TAU_TUI_BINARY") do
+      path when is_binary(path) and path != "" ->
+        if File.regular?(path), do: path, else: nil
 
-    Enum.find(candidates, fn path ->
-      full = Path.join(File.cwd!(), path)
-      File.regular?(full)
-    end)
+      _ ->
+        candidates = [
+          "burrito_out/tau_linux_#{host_arch()}",
+          "burrito_out/tau_linux_amd64",
+          "burrito_out/tau_linux_arm64",
+          "_build/prod/rel/tau/bin/tau"
+        ]
+
+        Enum.find(candidates, fn path ->
+          full = Path.join(File.cwd!(), path)
+          File.regular?(full)
+        end)
+    end
   end
 
   defp host_arch do
