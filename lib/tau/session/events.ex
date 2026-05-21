@@ -86,4 +86,22 @@ defmodule Tau.Session.Events do
     defstruct [:session_id, :reason]
     @type t :: %__MODULE__{}
   end
+
+  defmodule PermissionRequest do
+    @moduledoc """
+    Broadcast when a tool call receives an `:ask` verdict from
+    `Tau.Permissions.Evaluator` and the session is interactive (D-092,
+    SPEC-PERMISSION-PROMPTS §4 B2).
+
+    The TUI (or any subscriber) casts `{:permission_decision, tool_call_id,
+    verdict}` back to the session to resolve the request. The session FSM
+    waits in `:awaiting_permission` until all pending requests are resolved.
+
+    Non-interactive sessions (e.g. `tau run`) never broadcast this event —
+    they resolve `:ask` immediately to fail-closed `:deny` (D-093).
+    """
+    @enforce_keys [:session_id, :tool_call_id, :name, :arguments, :decision_reason]
+    defstruct [:session_id, :tool_call_id, :name, :arguments, :decision_reason]
+    @type t :: %__MODULE__{}
+  end
 end

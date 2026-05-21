@@ -322,8 +322,12 @@ defmodule Tau.CLI do
         # D-004: subscribe BEFORE start_session so SessionStart is not missed.
         Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{session_id}")
 
+        # SPEC-PERMISSION-PROMPTS §4 B4 (D-093): headless `tau run` is
+        # non-interactive. An `:ask` verdict from the permissions evaluator
+        # must resolve immediately to fail-closed `:deny` — never deadlock
+        # waiting for TUI consent that will never come.
         start_opts =
-          [session_id: session_id, provider: provider]
+          [session_id: session_id, provider: provider, interactive: false]
           |> put_if_not_nil(:model, model)
           |> put_if_not_nil(:active_skill, build_headless_skill(system_prompt_source))
           |> put_if_not_nil(:persona_lifetime, system_prompt_source && :session)

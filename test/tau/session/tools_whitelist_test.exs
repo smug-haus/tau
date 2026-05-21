@@ -142,6 +142,9 @@ defmodule Tau.Session.ToolsWhitelistTest do
         provider: SingleToolCallProvider,
         model: "p91",
         session_id: sid,
+        # SPEC-PERMISSION-PROMPTS: bypass permissions so the whitelist
+        # filter is the only gate being tested.
+        metadata: %{permissions_mode: :bypass},
         provider_ctx: %{tool_name: "wl_blocked_tool", call_id: "call-default"}
       )
 
