@@ -82,7 +82,32 @@ defmodule Tau.Provider do
   @callback chat(messages(), stream_opts(), ctx()) ::
               {:ok, Tau.Message.Assistant.t()} | {:error, term()}
 
-  @optional_callbacks [configure: 1, chat: 3]
+  @doc """
+  Declares the prompt-caching policy *intent* for a turn (SPEC-PROMPT-CACHING B1).
+
+  Optional callback. Dispatch is via `function_exported?/3` at the call site;
+  an adapter that does not implement it is treated as `:none` (caching
+  disabled for that adapter).
+
+  Return values:
+
+    * `:explicit`  — the adapter SHOULD emit cache markers inside its own
+      `build_body/3` (Family A: Anthropic, Bedrock-Claude). The adapter owns
+      marker placement; this callback is only the policy switch.
+    * `:automatic` — the adapter relies on provider-side automatic prefix
+      caching (Families B and C). No body changes, but the adapter MUST honour
+      the canonical request ordering (C2).
+    * `:none`      — caching disabled for this turn. Default when the callback
+      is absent.
+
+  This is the only new behaviour callback in the prompt-caching PR (#317).
+  Cache-usage normalisation is NOT a callback — it is each adapter's own
+  `merge_usage`-side responsibility (SPEC-PROMPT-CACHING B3).
+  """
+  @callback cache_regions(messages :: [Tau.Message.t()], opts :: map()) ::
+              :explicit | :automatic | :none
+
+  @optional_callbacks [configure: 1, chat: 3, cache_regions: 2]
 
   @doc "Look up the configured default provider."
   @spec default() :: module()

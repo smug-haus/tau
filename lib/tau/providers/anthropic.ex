@@ -44,11 +44,20 @@ defmodule Tau.Providers.Anthropic do
   alias Tau.Providers.Anthropic.Auth
   alias Tau.Providers.Shared.{FinchStream, ToolSpec}
 
+  alias Tau.Providers.Shared.OrderingCheck
+
   @api_url "https://api.anthropic.com"
   @api_version "2023-06-01"
-  @beta_headers "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+  # SPEC-PROMPT-CACHING C7: 5-min ephemeral TTL only in this PR. The
+  # `extended-cache-ttl-2025-04-11` beta header is removed (it enabled
+  # the 1h tier, which costs 2x write and offers no benefit for active
+  # coordinator sessions). The base `prompt-caching-2024-07-31` header
+  # stays — it is GA-equivalent and harmless.
+  @beta_headers "prompt-caching-2024-07-31"
   @default_model "claude-opus-4-7"
   @default_max_tokens 8192
+  # SPEC-PROMPT-CACHING D-064: an ephemeral cache_control marker.
+  @cache_control %{type: "ephemeral"}
 
   @impl Tau.Provider
   def default_model, do: @default_model
@@ -62,6 +71,27 @@ defmodule Tau.Providers.Anthropic do
       prompt_caching: true,
       parallel_tools: true
     }
+  end
+
+  @doc """
+  Prompt-caching policy switch for a turn (SPEC-PROMPT-CACHING B1 / D-063).
+
+  Anthropic is a Family A (explicit-marker) provider. This returns:
+
+    * `:explicit` — when the session has at least one message AND
+      `opts[:caching]` is not explicitly disabled. `build_body/3` then
+      injects markers per D-064.
+    * `:none`     — when `opts[:caching] == false`, or the session is
+      empty. `build_body/3` skips all marker injection.
+  """
+  @impl Tau.Provider
+  @spec cache_regions([Tau.Message.t()], map()) :: :explicit | :none
+  def cache_regions(messages, opts \\ %{}) do
+    cond do
+      opts[:caching] == false -> :none
+      is_list(messages) and messages != [] -> :explicit
+      true -> :none
+    end
   end
 
   @impl Tau.Provider
@@ -238,17 +268,67 @@ defmodule Tau.Providers.Anthropic do
   defp normalise_stop(nil), do: :stop
   defp normalise_stop(_), do: :stop
 
-  defp merge_usage(start_u, delta_u) do
+  # Normalises Anthropic's `usage` payloads into the canonical Tau
+  # usage-map keys (SPEC-PROMPT-CACHING §4 B3 hop 1 / D-065).
+  #
+  # `merge_usage/2` folds the `usage` block from `message_start` (the
+  # cumulative input / cache counters) with the `usage` block from
+  # `message_delta` (the output count) into the canonical map the cost
+  # ledger reads:
+  #
+  #   * `cache_creation_input_tokens` -> `:cache_write`
+  #   * `cache_read_input_tokens`     -> `:cache_read`
+  #   * `cache_breakdown` carries the Anthropic 5m / 1h ephemeral split
+  #     (`ephemeral_5m_input_tokens` / `ephemeral_1h_input_tokens`)
+  #     under `:ephemeral_5m` / `:ephemeral_1h`, when the response
+  #     includes the `cache_creation` sub-object.
+  #
+  # Tau never opts into the 1h tier (C7 — the adapter never emits
+  # `ttl: "1h"`). If the server promotes anyway, the 1h tokens still
+  # appear in `cache_breakdown.ephemeral_1h` for diagnostics AND are
+  # already summed into `cache_write` because `cache_creation_input_tokens`
+  # is Anthropic's total of both tiers.
+  @doc false
+  @spec merge_usage(map(), map()) :: map()
+  def merge_usage(start_u, delta_u) do
+    start_u = start_u || %{}
+    delta_u = delta_u || %{}
+
+    cache_write = nonneg(get_in(start_u, ["cache_creation_input_tokens"]))
+    cache_read = nonneg(get_in(start_u, ["cache_read_input_tokens"]))
+
     %{
-      input_tokens: get_in(start_u, ["input_tokens"]) || 0,
-      output_tokens: get_in(delta_u, ["output_tokens"]) || 0,
-      cache_creation_input_tokens: get_in(start_u, ["cache_creation_input_tokens"]) || 0,
-      cache_read_input_tokens: get_in(start_u, ["cache_read_input_tokens"]) || 0
+      input_tokens: nonneg(get_in(start_u, ["input_tokens"])),
+      output_tokens: nonneg(get_in(delta_u, ["output_tokens"])),
+      cache_read: cache_read,
+      cache_write: cache_write,
+      cache_breakdown: cache_breakdown(start_u)
     }
   end
 
+  defp nonneg(n) when is_integer(n) and n >= 0, do: n
+  defp nonneg(_), do: 0
+
+  # Anthropic reports the 5m / 1h split under `usage.cache_creation`
+  # when prompt caching is active. Absent that sub-object, the
+  # breakdown is empty.
+  defp cache_breakdown(%{"cache_creation" => %{} = cc}) do
+    %{
+      ephemeral_5m: nonneg(cc["ephemeral_5m_input_tokens"]),
+      ephemeral_1h: nonneg(cc["ephemeral_1h_input_tokens"])
+    }
+  end
+
+  defp cache_breakdown(_), do: %{}
+
   # --- Request body construction --------------------------------------------
 
+  # SPEC-PROMPT-CACHING D-064 / Appendix B: `split_system/1` now
+  # returns the system content as a **block-array** —
+  # `[%{type: "text", text: ...}]`, one block per non-empty system
+  # message — rather than a single joined string. The block-array
+  # shape is what marker A annotates: `cache_control` is placed on
+  # the LAST text block.
   defp split_system(messages) do
     {sys, rest} =
       Enum.split_with(messages, fn
@@ -256,44 +336,187 @@ defmodule Tau.Providers.Anthropic do
         _ -> false
       end)
 
-    system_text =
+    blocks =
       sys
       |> Enum.map(fn %User{content: c} -> if is_binary(c), do: c, else: "" end)
-      |> Enum.join("\n\n")
-      |> case do
-        "" -> nil
-        s -> s
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.map(&%{type: "text", text: &1})
+
+    case blocks do
+      [] -> {nil, rest}
+      list -> {list, rest}
+    end
+  end
+
+  # Builds the Anthropic Messages API request body for a turn.
+  #
+  # Made `@doc false`-public (SPEC-PROMPT-CACHING AC-1) so the
+  # cache-policy test can assert marker placement directly on the wire
+  # body without driving a full stream.
+  #
+  # `system` is the block-array (or `nil`) from `split_system/1`;
+  # `messages` is the non-system conversation list; `opts` is the
+  # `t:Tau.Provider.stream_opts/0` map.
+  #
+  # When `cache_regions/2` returns `:explicit`, up to three ephemeral
+  # `cache_control` markers are injected per D-064. The body is
+  # validated by `Tau.Providers.Shared.OrderingCheck.validate!/1` as
+  # the last step (C2 / AC-3). Marker derivation is a pure function of
+  # `(system, tools, messages, opts)` — it reads no ambient state
+  # (C4 / D-064).
+  @doc false
+  @spec build_body(nil | [map()], [Tau.Message.t()], map()) :: map()
+  def build_body(system, messages, opts) do
+    policy = cache_regions(messages, opts)
+    tools = ToolSpec.adapt(opts[:tools], __MODULE__)
+    wire_messages = Enum.map(messages, &to_anthropic/1)
+    system_blocks = system_field(system, opts)
+
+    {system_blocks, tools, wire_messages} =
+      case policy do
+        :explicit ->
+          {mark_system(system_blocks), mark_tools(tools), mark_messages(messages, wire_messages)}
+
+        :none ->
+          {system_blocks, tools, wire_messages}
       end
 
-    {system_text, rest}
-  end
+    body =
+      %{
+        model: opts[:model] || @default_model,
+        max_tokens: opts[:max_tokens] || @default_max_tokens,
+        stream: true,
+        messages: wire_messages
+      }
+      |> maybe_put(:system, system_blocks)
+      |> maybe_put(:temperature, opts[:temperature])
+      |> maybe_put(:tools, tools)
+      |> maybe_put(:tool_choice, tool_choice(opts[:tool_choice]))
+      |> maybe_put(:thinking, thinking(opts))
+      |> maybe_put(:stop_sequences, opts[:stop_sequences])
 
-  defp build_body(system, messages, opts) do
-    body = %{
-      model: opts[:model] || @default_model,
-      max_tokens: opts[:max_tokens] || @default_max_tokens,
-      stream: true,
-      messages: Enum.map(messages, &to_anthropic/1)
-    }
+    # C2 / AC-3: canonical-ordering guard, last step.
+    OrderingCheck.validate!(%{
+      system: body[:system],
+      tools: body[:tools],
+      messages: body.messages
+    })
 
     body
-    |> maybe_put(:system, system_field(system, opts))
-    |> maybe_put(:temperature, opts[:temperature])
-    |> maybe_put(:tools, ToolSpec.adapt(opts[:tools], __MODULE__))
-    |> maybe_put(:tool_choice, tool_choice(opts[:tool_choice]))
-    |> maybe_put(:thinking, thinking(opts))
-    |> maybe_put(:stop_sequences, opts[:stop_sequences])
   end
+
+  # `system_field/2` normalises the system content to the block-array
+  # wire shape. A `split_system/1` block-array passes through; an
+  # explicit `opts[:system]` string/list is adapted; absent system
+  # content is `nil`.
+  defp system_field(blocks, _opts) when is_list(blocks), do: blocks
 
   defp system_field(nil, opts) do
     case opts[:system] do
       nil -> nil
-      bin when is_binary(bin) -> bin
+      bin when is_binary(bin) -> [%{type: "text", text: bin}]
+      "" -> nil
       blocks when is_list(blocks) -> blocks
     end
   end
 
-  defp system_field(string, _opts), do: string
+  # --- D-064 cache-marker injection (pure function) -------------------------
+
+  # Marker A — last text block of the system block-array.
+  defp mark_system(nil), do: nil
+  defp mark_system([]), do: []
+
+  defp mark_system(blocks) when is_list(blocks) do
+    mark_last(blocks, &put_cache_control/1)
+  end
+
+  # Marker B — last tool spec in the tools array.
+  defp mark_tools(nil), do: nil
+  defp mark_tools([]), do: []
+
+  defp mark_tools(tools) when is_list(tools) do
+    mark_last(tools, &put_cache_control/1)
+  end
+
+  # Marker C — last content block of the last-stable-boundary
+  # message (D-064). `domain_messages` is the pre-wire
+  # `[Tau.Message.t()]`; `wire_messages` is the encoded list, index-aligned.
+  defp mark_messages(domain_messages, wire_messages) do
+    case stable_boundary_index(domain_messages) do
+      nil ->
+        wire_messages
+
+      idx ->
+        List.update_at(wire_messages, idx, &mark_message_last_block/1)
+    end
+  end
+
+  # D-064 stable-boundary selection, in order of preference:
+  #   (i)   the latest-list-position compaction-summary message —
+  #         the strongest cache anchor when present;
+  #   (ii)  the message immediately before the freshest input (the
+  #         second-to-last message overall) IF its role is :assistant
+  #         or it is a %ToolResult{};
+  #   (iii) nil — skip marker C (no stable boundary, e.g. a first turn
+  #         with a single user message, or a second-to-last message
+  #         that is a plain user message).
+  defp stable_boundary_index(messages) do
+    indexed = Enum.with_index(messages)
+
+    compaction_idx =
+      indexed
+      |> Enum.filter(fn {m, _i} -> compaction_summary?(m) end)
+      |> List.last()
+      |> case do
+        {_m, i} -> i
+        nil -> nil
+      end
+
+    cond do
+      not is_nil(compaction_idx) ->
+        compaction_idx
+
+      length(messages) >= 2 ->
+        # (ii) the message immediately before the freshest input.
+        penultimate_idx = length(messages) - 2
+        penultimate = Enum.at(messages, penultimate_idx)
+        if assistant_or_tool_result?(penultimate), do: penultimate_idx, else: nil
+
+      true ->
+        nil
+    end
+  end
+
+  defp compaction_summary?(%User{metadata: %{role: :compaction_summary}}), do: true
+  defp compaction_summary?(_), do: false
+
+  defp assistant_or_tool_result?(%Assistant{}), do: true
+  defp assistant_or_tool_result?(%ToolResult{}), do: true
+  defp assistant_or_tool_result?(_), do: false
+
+  # --- marker placement primitives ------------------------------------------
+
+  defp mark_last([], _fun), do: []
+
+  defp mark_last(list, fun) when is_list(list) do
+    last = length(list) - 1
+    List.update_at(list, last, fun)
+  end
+
+  defp put_cache_control(%{} = block), do: Map.put(block, :cache_control, @cache_control)
+
+  # Marker C on a wire message: annotate the LAST content block.
+  # A string-content message is promoted to a one-block array so the
+  # marker has a block to land on.
+  defp mark_message_last_block(%{content: content} = msg) when is_binary(content) do
+    %{msg | content: [%{type: "text", text: content, cache_control: @cache_control}]}
+  end
+
+  defp mark_message_last_block(%{content: blocks} = msg) when is_list(blocks) and blocks != [] do
+    %{msg | content: mark_last(blocks, &put_cache_control/1)}
+  end
+
+  defp mark_message_last_block(msg), do: msg
 
   defp tool_choice(nil), do: nil
   defp tool_choice(:auto), do: %{type: "auto"}
