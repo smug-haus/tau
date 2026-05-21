@@ -412,8 +412,11 @@ listed in the repo's `.gitignore` so it can never be accidentally committed.
   in-flight branch.
 - MUST NOT spawn an implementer before the step's draft PR is open — the draft
   PR body is the implementer brief and the plan-of-record.
-- MUST NOT open a PR that closes multiple issues unless they are genuinely
-  inseparable; one issue per PR is the default.
+- MUST NOT grow a PR beyond the issue set declared in its draft-PR body —
+  mid-flight scope growth is a separate PR or a logged re-plan, never a silent
+  add.
+- MUST NOT reshape, split, or defer a filed issue to fit PR sizing; take issues
+  as filed and decide grouping at PR-selection time.
 - MUST NOT proceed when `.claude/STOP-FACTORY` is present.
 - MUST NOT treat a critic/reviewer finding that names the linked issue's headline as a "follow-up." Reopen the issue, fix the headline, re-gate. "Follow-up" is for out-of-scope findings only.
 - MUST NOT report work as "working" or "done" without naming the exact command run and the observable signal (exit code + signal line, with surrounding output optionally elided as `[...elided N lines...]`) against the user-visible path the issue named.
