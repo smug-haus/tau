@@ -4033,6 +4033,24 @@ defmodule Tau.Session do
 
         broadcast(data.id, %Events.MessageStart{session_id: data.id, message: pending})
 
+        # B1 / D-150 (SPEC-TUI-HEADLESS §5c): emit SubagentStart on the parent
+        # topic so the TUI can surface the coding agent as a named sub-agent
+        # node rather than flattened parent [tool_call] lines. The subagent_id
+        # is derived from the parent session id and is stable for this turn.
+        # The coding-agent dispatcher is a single-run process; at most one is
+        # active at a time, so the derived id is unique per session per turn.
+        ca_subagent_id = "#{data.id}:ca"
+        label = agent_to_string(data.coding_agent) || "coding-agent"
+
+        broadcast(data.id, %Events.SubagentStart{
+          session_id: data.id,
+          subagent_id: ca_subagent_id,
+          kind: :coding_agent,
+          label: label,
+          parent_tool_call_id: nil,
+          child_session_id: nil
+        })
+
         {:next_state, :coding_agent_streaming,
          %{
            data
@@ -4134,6 +4152,19 @@ defmodule Tau.Session do
       arguments: input || %{}
     })
 
+    # B1 / D-151 (SPEC-TUI-HEADLESS §5c): ADDITIONALLY emit SubagentProgress
+    # on the parent topic. The child_tool_call_id enables the render layer to
+    # de-dup: a ToolStart/ToolEnd whose tool_call_id is owned by a known
+    # sub-agent is NOT rendered as an inline tool call (B1 rule).
+    ca_subagent_id = "#{data.id}:ca"
+
+    broadcast(data.id, %Events.SubagentProgress{
+      session_id: data.id,
+      subagent_id: ca_subagent_id,
+      activity: {:tool_call, name},
+      child_tool_call_id: id
+    })
+
     {:keep_state, %{data | coding_agent_blocks: blocks, coding_agent_pending: pending}}
   end
 
@@ -4208,6 +4239,19 @@ defmodule Tau.Session do
       },
       %{session_id: data.id, agent: data.coding_agent, tokens: cost.tokens}
     )
+
+    # D-153 (SPEC-TUI-HEADLESS §5c): emit SubagentCost on the parent topic so
+    # the TUI can display cost in the sub-agent end marker without folding it
+    # into the parent's own cost (no double-counting, R4).
+    ca_subagent_id = "#{data.id}:ca"
+
+    broadcast(data.id, %Events.SubagentCost{
+      session_id: data.id,
+      subagent_id: ca_subagent_id,
+      tokens: cost.tokens,
+      usd: cost.usd,
+      duration_ms: cost.duration_ms
+    })
 
     {:keep_state, maybe_apply_cost_hook(data, cost)}
   end
@@ -4322,6 +4366,31 @@ defmodule Tau.Session do
         stop_reason: stop_reason
       }
     )
+
+    # D-154 (SPEC-TUI-HEADLESS §5c): emit SubagentEnd on the parent topic.
+    # The end state maps from the coding-agent stop_reason.
+    ca_subagent_id = "#{data.id}:ca"
+
+    end_state =
+      cond do
+        status == -2 -> :cancelled
+        stop_reason == :end_turn -> :done
+        true -> :failed
+      end
+
+    end_summary =
+      case end_state do
+        :done -> "completed"
+        :cancelled -> "cancelled"
+        :failed -> "failed (exit #{status})"
+      end
+
+    broadcast(data.id, %Events.SubagentEnd{
+      session_id: data.id,
+      subagent_id: ca_subagent_id,
+      state: end_state,
+      summary: end_summary
+    })
 
     {:next_state, :awaiting_user,
      %{
