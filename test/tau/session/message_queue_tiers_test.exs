@@ -23,6 +23,7 @@ defmodule Tau.Session.MessageQueueTiersTest do
   import Tau.Test.SessionHelper, only: [start_session_for_test: 1]
   alias Tau.Provider.Event
   alias Tau.Session.Events, as: SE
+  alias Tau.Test.BlockingTool
 
   @queue_cap 32
 
@@ -40,82 +41,10 @@ defmodule Tau.Session.MessageQueueTiersTest do
   end
 
   # ---------------------------------------------------------------------------
-  # AC-8 property provider and tool modules (defined at module compile time)
+  # Module-level provider and tool definitions
   # ---------------------------------------------------------------------------
 
-  # Provider for the AC-8 tool_call/tool_result pairing property test.
-  # Emits one tool call on the first round, then plain text on the second round.
-  defmodule PairingTool do
-    @moduledoc false
-    @behaviour Tau.Tool
-
-    @impl true
-    def name, do: "pairing_check_tool"
-
-    @impl true
-    def description, do: "Returns the input for pairing test"
-
-    @impl true
-    def parameters, do: %{"type" => "object", "properties" => %{}, "required" => []}
-
-    @impl true
-    def execute(_args, _ctx), do: {:ok, "pairing-result"}
-
-    @impl true
-    def execution_mode, do: :sequential
-
-    @impl true
-    def streams_updates?, do: false
-  end
-
-  defmodule PairingProvider do
-    @moduledoc false
-    @behaviour Tau.Provider
-    alias Tau.Provider.Event
-
-    @impl true
-    def default_model, do: "pairing-model"
-
-    @impl true
-    def capabilities,
-      do: %{
-        thinking: false,
-        tools: true,
-        vision: false,
-        prompt_caching: false,
-        parallel_tools: false
-      }
-
-    @impl true
-    def configure(opts), do: {:ok, opts}
-
-    @impl true
-    def stream(messages, _opts, _ctx) do
-      has_tool_result? = Enum.any?(messages, &match?(%Tau.Message.ToolResult{}, &1))
-
-      events =
-        if has_tool_result? do
-          [
-            %Event.Start{request_id: "r2", model: "pairing-model"},
-            %Event.TextStart{block_id: "t2"},
-            %Event.TextDelta{block_id: "t2", text: "done"},
-            %Event.TextEnd{block_id: "t2"},
-            %Event.Done{stop_reason: :stop, usage: %{}}
-          ]
-        else
-          [
-            %Event.Start{request_id: "r1", model: "pairing-model"},
-            %Event.ToolCallStart{tool_call_id: "pairing-tc1", name: "pairing_check_tool"},
-            %Event.ToolCallEnd{tool_call_id: "pairing-tc1", params: %{}},
-            %Event.Done{stop_reason: :tool_use, usage: %{}}
-          ]
-        end
-
-      {:ok, events}
-    end
-  end
-
-  # Provider and tool for the AC-10 :awaiting_permission cancel test.
+  # Provider for the AC-10 :awaiting_permission cancel test.
   defmodule PermTool do
     @moduledoc false
     @behaviour Tau.Tool
@@ -173,12 +102,125 @@ defmodule Tau.Session.MessageQueueTiersTest do
     end
   end
 
+  # Provider for the AC-8 / D-079 tests: emits one blocking_test_tool call per
+  # round, then plain text once all tool rounds are done.
+  #
+  # Round detection: counts the number of tool_result messages in the history
+  # to determine which round we are in.
+  defmodule BlockingToolProvider do
+    @moduledoc false
+    @behaviour Tau.Provider
+    alias Tau.Provider.Event
+
+    @impl true
+    def default_model, do: "blocking-tool-model"
+
+    @impl true
+    def capabilities,
+      do: %{
+        thinking: false,
+        tools: true,
+        vision: false,
+        prompt_caching: false,
+        parallel_tools: false
+      }
+
+    @impl true
+    def configure(opts), do: {:ok, opts}
+
+    @impl true
+    def stream(messages, _opts, _ctx) do
+      # Count how many tool_result messages exist to know which round we're on.
+      tool_result_count =
+        Enum.count(messages, &match?(%Tau.Message.ToolResult{}, &1))
+
+      # This provider is configured per-test with :max_rounds.
+      # We read the round cap from process dictionary set by the test.
+      max_rounds = Process.get(:blocking_provider_max_rounds, 1)
+
+      events =
+        if tool_result_count < max_rounds do
+          call_id = "blocking-tc-#{tool_result_count + 1}"
+
+          [
+            %Event.Start{request_id: "br-#{tool_result_count + 1}", model: "blocking-tool-model"},
+            %Event.ToolCallStart{tool_call_id: call_id, name: "blocking_test_tool"},
+            %Event.ToolCallEnd{tool_call_id: call_id, params: %{}},
+            %Event.Done{stop_reason: :tool_use, usage: %{}}
+          ]
+        else
+          [
+            %Event.Start{request_id: "br-final", model: "blocking-tool-model"},
+            %Event.TextStart{block_id: "bt-final"},
+            %Event.TextDelta{block_id: "bt-final", text: "all-rounds-done"},
+            %Event.TextEnd{block_id: "bt-final"},
+            %Event.Done{stop_reason: :stop, usage: %{}}
+          ]
+        end
+
+      {:ok, events}
+    end
+  end
+
+  # Two-round provider for multi-round deterministic example tests.
+  # Uses BlockingTool (2 calls) — rounds 1 and 2 — then emits final text.
+  # Same logic as BlockingToolProvider with max_rounds hard-coded to 2.
+  defmodule TwoRoundBlockingProvider do
+    @moduledoc false
+    @behaviour Tau.Provider
+    alias Tau.Provider.Event
+
+    @impl true
+    def default_model, do: "two-round-model"
+
+    @impl true
+    def capabilities,
+      do: %{
+        thinking: false,
+        tools: true,
+        vision: false,
+        prompt_caching: false,
+        parallel_tools: false
+      }
+
+    @impl true
+    def configure(opts), do: {:ok, opts}
+
+    @impl true
+    def stream(messages, _opts, _ctx) do
+      tool_result_count = Enum.count(messages, &match?(%Tau.Message.ToolResult{}, &1))
+
+      events =
+        if tool_result_count < 2 do
+          call_id = "two-tc-#{tool_result_count + 1}"
+
+          [
+            %Event.Start{
+              request_id: "two-br-#{tool_result_count + 1}",
+              model: "two-round-model"
+            },
+            %Event.ToolCallStart{tool_call_id: call_id, name: "blocking_test_tool"},
+            %Event.ToolCallEnd{tool_call_id: call_id, params: %{}},
+            %Event.Done{stop_reason: :tool_use, usage: %{}}
+          ]
+        else
+          [
+            %Event.Start{request_id: "two-final", model: "two-round-model"},
+            %Event.TextStart{block_id: "two-final-t"},
+            %Event.TextDelta{block_id: "two-final-t", text: "two-rounds-done"},
+            %Event.TextEnd{block_id: "two-final-t"},
+            %Event.Done{stop_reason: :stop, usage: %{}}
+          ]
+        end
+
+      {:ok, events}
+    end
+  end
+
   # ---------------------------------------------------------------------------
-  # Shared providers
+  # Shared helpers
   # ---------------------------------------------------------------------------
 
-  # A slow provider: introduces replay_delay_ms so the test can land casts
-  # while the session is in :provider_streaming.
   defp slow_fixture(text \\ "ack") do
     [
       %Event.Start{request_id: "r", model: "replay"},
@@ -198,6 +240,56 @@ defmodule Tau.Session.MessageQueueTiersTest do
       session_id: sid,
       provider_ctx: ctx
     )
+  end
+
+  # Register BlockingTool as a builtin and self() under the notify name.
+  # Returns {prior_builtins} so the on_exit can restore.
+  defp setup_blocking_tool do
+    prior_builtins = Application.get_env(:tau, :builtin_tools, [])
+    Application.put_env(:tau, :builtin_tools, [BlockingTool | prior_builtins])
+
+    # Unregister any stale registration from a previous (crashed) test.
+    try do
+      Process.unregister(BlockingTool.notify_name())
+    rescue
+      ArgumentError -> :ok
+    end
+
+    Process.register(self(), BlockingTool.notify_name())
+
+    prior_builtins
+  end
+
+  defp teardown_blocking_tool(prior_builtins) do
+    Application.put_env(:tau, :builtin_tools, prior_builtins)
+
+    try do
+      Process.unregister(BlockingTool.notify_name())
+    rescue
+      ArgumentError -> :ok
+    end
+  end
+
+  # Read user_message records from the session's JSONL file.
+  defp jsonl_user_messages(sid) do
+    [path] = Path.wildcard(Path.join(Tau.Settings.data_dir(), "sessions/*/#{sid}.jsonl"))
+
+    path
+    |> File.read!()
+    |> String.split("\n", trim: true)
+    |> Enum.map(&Jason.decode!/1)
+    |> Enum.filter(&(&1["kind"] == "user_message"))
+    |> Enum.map(&get_in(&1, ["data", "content"]))
+  end
+
+  # Read all JSONL records and return their kinds in order.
+  defp jsonl_record_sequence(sid) do
+    [path] = Path.wildcard(Path.join(Tau.Settings.data_dir(), "sessions/*/#{sid}.jsonl"))
+
+    path
+    |> File.read!()
+    |> String.split("\n", trim: true)
+    |> Enum.map(&Jason.decode!/1)
   end
 
   # ---------------------------------------------------------------------------
@@ -490,285 +582,483 @@ defmodule Tau.Session.MessageQueueTiersTest do
            "followup_queue MUST also be empty; no orphaned messages"
 
     # JSONL should contain the steer message as a user_message.
-    [path] = Path.wildcard(Path.join(Tau.Settings.data_dir(), "sessions/*/#{sid}.jsonl"))
-
-    user_contents =
-      path
-      |> File.read!()
-      |> String.split("\n", trim: true)
-      |> Enum.map(&Jason.decode!/1)
-      |> Enum.filter(&(&1["kind"] == "user_message"))
-      |> Enum.map(&get_in(&1, ["data", "content"]))
-
-    assert "steer-must-run" in user_contents,
-           "steer message must appear in JSONL as user_message; got #{inspect(user_contents)}"
+    assert "steer-must-run" in jsonl_user_messages(sid),
+           "steer message must appear in JSONL as user_message; got #{inspect(jsonl_user_messages(sid))}"
   end
 
-  test "D-079/AC-8: steering at tool-round boundary — message prepended before next provider call" do
-    # Full D-079 test with a real tool round. Uses a module-level provider
-    # that signals the tool round to the test process.
-    sid = "queue-steer-tool-#{System.unique_integer([:positive])}"
+  # ---------------------------------------------------------------------------
+  # D-079/AC-8: race-free steering-at-tool-round-boundary tests
+  #
+  # These tests use BlockingTool to guarantee the steering message is in the
+  # queue BEFORE the tool round completes. Mechanism:
+  #
+  #   1. BlockingTool.execute/2 sends {:blocking_tool_executing, executor_pid}
+  #      to the test process (registered as BlockingTool.notify_name/0).
+  #   2. Test receives that message — tool is blocked, tool_done NOT yet sent.
+  #   3. Test calls Tau.steer/2 and confirms via Tau.snapshot/1 the steer is
+  #      in the queue.
+  #   4. Test calls BlockingTool.release(executor_pid) — tool proceeds.
+  #   5. Tool sends {:tool_done, ...} to FSM; FSM drains steering queue (D-079).
+  #
+  # This eliminates the race: the steer is provably queued before the FSM
+  # processes tool_done. The test FAILS if:
+  #   - the steer user_message appears BEFORE the tool_result in the JSONL
+  #     (orphaned tool_call)
+  #   - the steer user_message appears AFTER the final assistant_message
+  #     (drain missed the boundary)
+  #   - any tool_call lacks a paired tool_result
+  # ---------------------------------------------------------------------------
+
+  test "D-079/AC-8: steering at tool-round boundary — strictly ordered in JSONL (1 round)" do
+    # Single tool round, steer enqueued during round 1.
+    # Verifies D-079: steer appears in JSONL AFTER tool_result and BEFORE the
+    # final assistant text. Fails if ordering is wrong in either direction.
+    sid = "queue-steer-1round-#{System.unique_integer([:positive])}"
     Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{sid}")
 
-    defmodule EchoTool do
-      @moduledoc false
-      @behaviour Tau.Tool
+    prior_builtins = setup_blocking_tool()
 
-      @impl true
-      def name, do: "echo_for_steer_test"
-
-      @impl true
-      def description, do: "Returns the input"
-
-      @impl true
-      def parameters,
-        do: %{"type" => "object", "properties" => %{}, "required" => []}
-
-      @impl true
-      def execute(_args, _ctx), do: {:ok, "echo-result"}
-
-      @impl true
-      def execution_mode, do: :sequential
-
-      @impl true
-      def streams_updates?, do: false
-    end
-
-    defmodule EchoToolProvider do
-      @moduledoc false
-      @behaviour Tau.Provider
-
-      @impl true
-      def default_model, do: "echo-tool-model"
-
-      @impl true
-      def capabilities,
-        do: %{
-          thinking: false,
-          tools: true,
-          vision: false,
-          prompt_caching: false,
-          parallel_tools: false
-        }
-
-      @impl true
-      def configure(opts), do: {:ok, opts}
-
-      @impl true
-      def stream(messages, _opts, _ctx) do
-        has_tool_result? = Enum.any?(messages, &match?(%Tau.Message.ToolResult{}, &1))
-
-        events =
-          if has_tool_result? do
-            [
-              %Event.Start{request_id: "r2", model: "echo-tool-model"},
-              %Event.TextStart{block_id: "t1"},
-              %Event.TextDelta{block_id: "t1", text: "done"},
-              %Event.TextEnd{block_id: "t1"},
-              %Event.Done{stop_reason: :stop, usage: %{}}
-            ]
-          else
-            [
-              %Event.Start{request_id: "r1", model: "echo-tool-model"},
-              %Event.ToolCallStart{tool_call_id: "steer-tc1", name: "echo_for_steer_test"},
-              %Event.ToolCallEnd{tool_call_id: "steer-tc1", params: %{}},
-              %Event.Done{stop_reason: :tool_use, usage: %{}}
-            ]
-          end
-
-        {:ok, events}
-      end
-    end
-
-    # Register EchoTool as a builtin so the session picks it up.
-    prior_builtins = Application.get_env(:tau, :builtin_tools, [])
-    Application.put_env(:tau, :builtin_tools, [EchoTool | prior_builtins])
-
-    on_exit(fn -> Application.put_env(:tau, :builtin_tools, prior_builtins) end)
+    on_exit(fn -> teardown_blocking_tool(prior_builtins) end)
 
     {:ok, ^sid} =
       start_session_for_test(
-        provider: EchoToolProvider,
+        provider: Tau.Session.MessageQueueTiersTest.BlockingToolProvider,
+        session_id: sid,
+        metadata: %{permissions_mode: :bypass}
+      )
+
+    # Set the round count for BlockingToolProvider (1 tool round).
+    Process.put(:blocking_provider_max_rounds, 1)
+
+    Tau.send(sid, "go")
+
+    # Wait for tool to start and block.
+    assert_receive {:blocking_tool_executing, executor_pid}, 3_000
+
+    # Tool is blocked: steer is provably enqueued BEFORE tool_done.
+    Tau.steer(sid, "steer-at-boundary")
+
+    {:ok, snap} = Tau.snapshot(sid)
+
+    assert snap.state == :tool_executing,
+           "FSM must be in :tool_executing while tool is blocked"
+
+    steer_contents = Enum.map(snap.queues.steering, & &1.content)
+
+    assert "steer-at-boundary" in steer_contents,
+           "steer MUST be in steering_queue before tool release; got #{inspect(snap.queues)}"
+
+    # Unblock the tool — tool_done fires, D-079 drain runs.
+    BlockingTool.release(executor_pid)
+
+    assert_receive %SE.ToolEnd{session_id: ^sid}, 3_000
+
+    # Two MessageEnd events total for a 1-round tool turn:
+    #   1. tool-round assistant (broadcast by finalize_assistant before dispatch_tools —
+    #      already in mailbox when ToolEnd arrives)
+    #   2. final text turn (after D-079 steer drain + :start_provider → stop)
+    assert_receive %SE.MessageEnd{session_id: ^sid}, 5_000
+    assert_receive %SE.MessageEnd{session_id: ^sid}, 5_000
+
+    {:ok, snap2} = Tau.snapshot(sid)
+    assert snap2.state == :awaiting_user
+    assert snap2.queues.steering == []
+
+    # Verify strict JSONL ordering invariant (AC-8 / D-079):
+    #   user_message("go")
+    #   assistant_message (tool_call for blocking-tc-1)
+    #   tool_result (blocking-tc-1)
+    #   user_message ("steer-at-boundary")   ← MUST be here
+    #   assistant_message ("all-rounds-done")
+    records = jsonl_record_sequence(sid)
+    kinds = Enum.map(records, & &1["kind"])
+
+    tool_result_idx = Enum.find_index(kinds, &(&1 == "tool_result"))
+
+    assert tool_result_idx != nil,
+           "AC-8: JSONL must contain a tool_result; got kinds: #{inspect(kinds)}"
+
+    steer_idx =
+      kinds
+      |> Enum.with_index()
+      |> Enum.find(fn {kind, idx} ->
+        kind == "user_message" and idx > tool_result_idx
+      end)
+      |> then(fn
+        nil -> nil
+        {_, idx} -> idx
+      end)
+
+    assert steer_idx != nil,
+           "AC-8: steer user_message must appear in JSONL after tool_result; " <>
+             "got kinds: #{inspect(kinds)}"
+
+    final_assistant_idx =
+      kinds
+      |> Enum.with_index()
+      |> Enum.find(fn {kind, idx} ->
+        kind == "assistant_message" and idx > steer_idx
+      end)
+      |> then(fn
+        nil -> nil
+        {_, idx} -> idx
+      end)
+
+    assert final_assistant_idx != nil,
+           "AC-8: final assistant_message must appear after steer user_message; " <>
+             "got kinds: #{inspect(kinds)}"
+
+    steer_record = Enum.at(records, steer_idx)
+
+    assert get_in(steer_record, ["data", "content"]) == "steer-at-boundary",
+           "AC-8: steer record content must be 'steer-at-boundary'"
+
+    # Verify no orphaned tool_calls: every assistant tool_call must have a tool_result.
+    tool_call_ids =
+      records
+      |> Enum.filter(&(&1["kind"] == "assistant_message"))
+      |> Enum.flat_map(&(get_in(&1, ["data", "content"]) || []))
+      |> Enum.filter(&(&1["type"] == "tool_call"))
+      |> Enum.map(& &1["id"])
+
+    tool_result_ids =
+      records
+      |> Enum.filter(&(&1["kind"] == "tool_result"))
+      |> Enum.map(&get_in(&1, ["data", "tool_call_id"]))
+
+    assert MapSet.new(tool_call_ids) == MapSet.new(tool_result_ids),
+           "AC-8: every tool_call must be paired with a tool_result; " <>
+             "calls: #{inspect(tool_call_ids)}, results: #{inspect(tool_result_ids)}"
+  end
+
+  test "D-079/AC-8: steering at round-1 of 2-round turn — steer between rounds 1 and 2" do
+    # Two-round turn; steer enqueued during round 1 (before round 1 completes).
+    # The steer must drain at the round-1 boundary, so the JSONL is:
+    #   user ("go"), assistant (tool_call round-1), tool_result (round-1),
+    #   user ("steer-round-1"), assistant (tool_call round-2), tool_result (round-2),
+    #   assistant ("two-rounds-done")
+    sid = "queue-steer-round1of2-#{System.unique_integer([:positive])}"
+    Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{sid}")
+
+    prior_builtins = setup_blocking_tool()
+    on_exit(fn -> teardown_blocking_tool(prior_builtins) end)
+
+    {:ok, ^sid} =
+      start_session_for_test(
+        provider: Tau.Session.MessageQueueTiersTest.TwoRoundBlockingProvider,
         session_id: sid,
         metadata: %{permissions_mode: :bypass}
       )
 
     Tau.send(sid, "go")
 
-    # Wait for the tool to execute.
-    assert_receive %SE.ToolStart{session_id: ^sid, name: "echo_for_steer_test"}, 3_000
-
-    # Steer while the tool is executing.
-    Tau.steer(sid, "post-tool-steer")
-
-    assert_receive %SE.ToolEnd{session_id: ^sid}, 3_000
-
-    # The turn should complete (the steer was drained at the tool-round boundary).
-    assert_receive %SE.MessageEnd{session_id: ^sid}, 5_000
-
-    # The steer message was drained into data.messages at the tool-round boundary.
-    # After the tool round, drain_steering_queue_one prepends the steer message
-    # and calls :start_provider again, producing another turn.
-    assert_receive %SE.MessageEnd{session_id: ^sid}, 5_000
+    # Round 1: block and steer.
+    assert_receive {:blocking_tool_executing, exec1_pid}, 3_000
+    Tau.steer(sid, "steer-round-1")
 
     {:ok, snap} = Tau.snapshot(sid)
-    assert snap.state == :awaiting_user
-    assert snap.queues.steering == []
+    assert "steer-round-1" in Enum.map(snap.queues.steering, & &1.content)
 
-    # JSONL: verify the steer message was delivered (appears as user_message).
-    [path] = Path.wildcard(Path.join(Tau.Settings.data_dir(), "sessions/*/#{sid}.jsonl"))
+    BlockingTool.release(exec1_pid)
+    assert_receive %SE.ToolEnd{session_id: ^sid}, 3_000
 
-    user_contents =
-      path
-      |> File.read!()
-      |> String.split("\n", trim: true)
-      |> Enum.map(&Jason.decode!/1)
-      |> Enum.filter(&(&1["kind"] == "user_message"))
-      |> Enum.map(&get_in(&1, ["data", "content"]))
+    # D-079 drains steer at round-1 boundary. Provider sees steer+tool_result,
+    # emits round-2 tool_call. Block on round 2.
+    assert_receive {:blocking_tool_executing, exec2_pid}, 3_000
 
-    assert "post-tool-steer" in user_contents,
-           "steer message should appear in JSONL; got #{inspect(user_contents)}"
+    # No steer for round 2 — release immediately.
+    BlockingTool.release(exec2_pid)
+    assert_receive %SE.ToolEnd{session_id: ^sid}, 3_000
+
+    # Drain 3 MessageEnd events total:
+    #   1. round-1 assistant (broadcast by finalize_assistant before dispatching tools)
+    #   2. round-2 assistant (same — fires before exec2 unblocks)
+    #   3. final text turn
+    # MessageEnds #1 and #2 are already in the mailbox when we reach this point.
+    assert_receive %SE.MessageEnd{session_id: ^sid}, 5_000
+    assert_receive %SE.MessageEnd{session_id: ^sid}, 5_000
+    assert_receive %SE.MessageEnd{session_id: ^sid}, 5_000
+
+    {:ok, snap2} = Tau.snapshot(sid)
+    assert snap2.state == :awaiting_user
+    assert snap2.queues.steering == []
+
+    # Strict JSONL ordering: steer appears after round-1 tool_result and before
+    # round-2 assistant_message.
+    records = jsonl_record_sequence(sid)
+    kinds = Enum.map(records, & &1["kind"])
+
+    # Find round-1 tool_result index.
+    tr1_idx = Enum.find_index(kinds, &(&1 == "tool_result"))
+    assert tr1_idx != nil, "JSONL must have a tool_result for round 1"
+
+    # Find steer user_message AFTER round-1 tool_result.
+    steer_idx =
+      kinds
+      |> Enum.with_index()
+      |> Enum.find(fn {kind, idx} ->
+        kind == "user_message" and idx > tr1_idx
+      end)
+      |> then(fn
+        nil -> nil
+        {_, idx} -> idx
+      end)
+
+    assert steer_idx != nil,
+           "AC-8: steer user_message must appear after round-1 tool_result; " <>
+             "kinds: #{inspect(kinds)}"
+
+    steer_record = Enum.at(records, steer_idx)
+
+    assert get_in(steer_record, ["data", "content"]) == "steer-round-1",
+           "steer record must contain 'steer-round-1'"
+
+    # Round-2 assistant_message must come AFTER the steer user_message.
+    round2_assistant_idx =
+      kinds
+      |> Enum.with_index()
+      |> Enum.find(fn {kind, idx} ->
+        kind == "assistant_message" and idx > steer_idx
+      end)
+      |> then(fn
+        nil -> nil
+        {_, idx} -> idx
+      end)
+
+    assert round2_assistant_idx != nil,
+           "AC-8: round-2 assistant_message must appear after steer; kinds: #{inspect(kinds)}"
+
+    # No orphaned tool_calls.
+    tool_call_ids =
+      records
+      |> Enum.filter(&(&1["kind"] == "assistant_message"))
+      |> Enum.flat_map(&(get_in(&1, ["data", "content"]) || []))
+      |> Enum.filter(&(&1["type"] == "tool_call"))
+      |> Enum.map(& &1["id"])
+
+    tool_result_ids =
+      records
+      |> Enum.filter(&(&1["kind"] == "tool_result"))
+      |> Enum.map(&get_in(&1, ["data", "tool_call_id"]))
+
+    assert MapSet.new(tool_call_ids) == MapSet.new(tool_result_ids),
+           "every tool_call must be paired with a tool_result"
+  end
+
+  test "D-079/AC-8: steering at round-2 of 2-round turn — steer enqueued after round 1 completes" do
+    # Two-round turn; steer enqueued during round 2 (while round-2 tool executes).
+    # No steer during round 1. The steer drains at the round-2 boundary.
+    sid = "queue-steer-round2of2-#{System.unique_integer([:positive])}"
+    Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{sid}")
+
+    prior_builtins = setup_blocking_tool()
+    on_exit(fn -> teardown_blocking_tool(prior_builtins) end)
+
+    {:ok, ^sid} =
+      start_session_for_test(
+        provider: Tau.Session.MessageQueueTiersTest.TwoRoundBlockingProvider,
+        session_id: sid,
+        metadata: %{permissions_mode: :bypass}
+      )
+
+    Tau.send(sid, "go")
+
+    # Round 1: release immediately (no steer for this round).
+    assert_receive {:blocking_tool_executing, exec1_pid}, 3_000
+    BlockingTool.release(exec1_pid)
+    assert_receive %SE.ToolEnd{session_id: ^sid}, 3_000
+
+    # Round 2: block and steer.
+    assert_receive {:blocking_tool_executing, exec2_pid}, 3_000
+    Tau.steer(sid, "steer-round-2")
+
+    {:ok, snap} = Tau.snapshot(sid)
+    assert "steer-round-2" in Enum.map(snap.queues.steering, & &1.content)
+
+    BlockingTool.release(exec2_pid)
+    assert_receive %SE.ToolEnd{session_id: ^sid}, 3_000
+
+    # Drain 3 MessageEnd events total:
+    #   1. round-1 assistant (already in mailbox — fires before exec1 blocks)
+    #   2. round-2 assistant (already in mailbox — fires before exec2 blocks)
+    #   3. final text turn
+    assert_receive %SE.MessageEnd{session_id: ^sid}, 5_000
+    assert_receive %SE.MessageEnd{session_id: ^sid}, 5_000
+    assert_receive %SE.MessageEnd{session_id: ^sid}, 5_000
+
+    {:ok, snap2} = Tau.snapshot(sid)
+    assert snap2.state == :awaiting_user
+    assert snap2.queues.steering == []
+
+    # Strict JSONL ordering: steer appears after round-2 tool_result.
+    records = jsonl_record_sequence(sid)
+    kinds = Enum.map(records, & &1["kind"])
+
+    # Two tool_result entries. Find the SECOND one (round 2).
+    tool_result_indices =
+      kinds
+      |> Enum.with_index()
+      |> Enum.filter(fn {k, _} -> k == "tool_result" end)
+      |> Enum.map(fn {_, i} -> i end)
+
+    assert length(tool_result_indices) == 2,
+           "two-round turn must have exactly 2 tool_results; kinds: #{inspect(kinds)}"
+
+    tr2_idx = List.last(tool_result_indices)
+
+    steer_idx =
+      kinds
+      |> Enum.with_index()
+      |> Enum.find(fn {kind, idx} ->
+        kind == "user_message" and idx > tr2_idx
+      end)
+      |> then(fn
+        nil -> nil
+        {_, idx} -> idx
+      end)
+
+    assert steer_idx != nil,
+           "AC-8: steer user_message must appear after round-2 tool_result; " <>
+             "kinds: #{inspect(kinds)}"
+
+    steer_record = Enum.at(records, steer_idx)
+
+    assert get_in(steer_record, ["data", "content"]) == "steer-round-2",
+           "steer record must contain 'steer-round-2'"
   end
 
   # ---------------------------------------------------------------------------
-  # AC-8 property: tool_call/tool_result pairing invariant under steering
+  # AC-8 property: tool_call/tool_result pairing + strict ordering invariant
+  #
+  # Property: for any steer_text, the JSONL transcript from a 1-round tool turn
+  # with a steer enqueued during tool execution (blocking, race-free) MUST have:
+  #   1. Every tool_call paired with a tool_result.
+  #   2. The steer user_message at a position strictly between the tool_result
+  #      and the next assistant_message.
+  #
+  # This property FAILS if:
+  #   - The steer drains before the tool_result (orphaned tool_call).
+  #   - The steer is absent or after the final assistant_message (drain missed).
+  #   - Tool pairing is broken in any way.
+  #
+  # The race is eliminated by BlockingTool: the steer is provably in the queue
+  # before {:tool_done} fires.
   # ---------------------------------------------------------------------------
-  #
-  # For any interleaving of tool rounds and steering enqueues the persisted
-  # JSONL transcript MUST be well-formed: every tool_call block must be paired
-  # with a tool_result, and every steering message must appear AFTER the
-  # tool_results from its round and BEFORE the next provider call's messages.
-  #
-  # The property uses a provider that produces tool calls on the first round
-  # and a plain text response on the second round (after receiving tool results).
-  # A single steering message is enqueued while the tool is executing; we then
-  # verify the JSONL ordering invariant.
-  #
-  # This test is a real StreamData property: it generates a steering message
-  # that is randomly placed before, during, or after the tool-execution phase,
-  # and asserts the invariant holds regardless of timing.
 
-  property "AC-8: tool_call/tool_result pairing preserved under steering interleavings" do
-    # Uses PairingTool and PairingProvider defined at module compile time above.
-    # The provider emits one tool call on round 1 and plain text on round 2.
-    # A steering message is enqueued while the tool executes; we verify:
-    #   1. Every tool_call has a paired tool_result in the JSONL transcript.
-    #   2. The steering message appears AFTER the tool_result and BEFORE
-    #      the final assistant message (AC-8 ordering invariant).
+  property "AC-8: tool_call/tool_result pairing preserved; steer strictly after tool_result" do
     check all(
             steer_text <- StreamData.string(:alphanumeric, min_length: 1, max_length: 32),
-            max_runs: 5
+            max_runs: 8
           ) do
-      sid = "queue-ac8-property-#{System.unique_integer([:positive])}"
+      sid = "queue-ac8-prop-#{System.unique_integer([:positive])}"
       Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{sid}")
 
-      prior_builtins = Application.get_env(:tau, :builtin_tools, [])
+      prior_builtins = setup_blocking_tool()
 
-      Application.put_env(
-        :tau,
-        :builtin_tools,
-        [Tau.Session.MessageQueueTiersTest.PairingTool | prior_builtins]
-      )
-
-      on_exit(fn -> Application.put_env(:tau, :builtin_tools, prior_builtins) end)
-
+      # on_exit is not available inside check all — clean up synchronously at
+      # the end of each iteration (see teardown below the assertions).
       {:ok, ^sid} =
         start_session_for_test(
-          provider: Tau.Session.MessageQueueTiersTest.PairingProvider,
+          provider: Tau.Session.MessageQueueTiersTest.BlockingToolProvider,
           session_id: sid,
           metadata: %{permissions_mode: :bypass}
         )
 
-      # Start the turn.
+      Process.put(:blocking_provider_max_rounds, 1)
+
       Tau.send(sid, "go")
 
-      # Wait for the tool to start and enqueue a steering message while it runs.
-      assert_receive %SE.ToolStart{session_id: ^sid, name: "pairing_check_tool"}, 3_000
-      Tau.steer(sid, steer_text)
-      assert_receive %SE.ToolEnd{session_id: ^sid}, 3_000
+      # Wait for tool to block.
+      assert_receive {:blocking_tool_executing, executor_pid}, 3_000
 
-      # Wait for the full turn to complete (tool-round + steer drain + final text turn).
+      # Steer is provably enqueued before tool_done.
+      Tau.steer(sid, steer_text)
+
+      # Confirm steer is in steering_queue BEFORE releasing the tool.
+      {:ok, snap} = Tau.snapshot(sid)
+
+      assert Enum.any?(snap.queues.steering, &(&1.content == steer_text)),
+             "steer MUST be in queue before release; snap.queues: #{inspect(snap.queues)}"
+
+      # Unblock the tool — tool_done fires, D-079 drain runs.
+      BlockingTool.release(executor_pid)
+
+      assert_receive %SE.ToolEnd{session_id: ^sid}, 3_000
+      # Two MessageEnds for 1-round tool turn:
+      #   1. tool-round assistant (already in mailbox — fires before dispatcher blocks)
+      #   2. final text (after D-079 drain + :start_provider → stop)
       assert_receive %SE.MessageEnd{session_id: ^sid}, 5_000
-      # The steer drains at the tool-round boundary, triggering another provider call.
       assert_receive %SE.MessageEnd{session_id: ^sid}, 5_000
 
       Phoenix.PubSub.unsubscribe(Tau.PubSub, "session:#{sid}")
 
-      # Verify JSONL transcript well-formedness.
-      [path] = Path.wildcard(Path.join(Tau.Settings.data_dir(), "sessions/*/#{sid}.jsonl"))
+      records = jsonl_record_sequence(sid)
+      kinds = Enum.map(records, & &1["kind"])
 
-      records =
-        path
-        |> File.read!()
-        |> String.split("\n", trim: true)
-        |> Enum.map(&Jason.decode!/1)
-
-      # Extract all tool_call and tool_result entries.
-      tool_calls =
+      # Invariant 1: every tool_call has a paired tool_result.
+      tool_call_ids =
         records
         |> Enum.filter(&(&1["kind"] == "assistant_message"))
-        |> Enum.flat_map(fn r ->
-          get_in(r, ["data", "content"]) || []
-        end)
+        |> Enum.flat_map(&(get_in(&1, ["data", "content"]) || []))
         |> Enum.filter(&(&1["type"] == "tool_call"))
         |> Enum.map(& &1["id"])
 
-      tool_results =
+      tool_result_ids =
         records
         |> Enum.filter(&(&1["kind"] == "tool_result"))
         |> Enum.map(&get_in(&1, ["data", "tool_call_id"]))
 
-      # AC-8 invariant: every tool_call has a paired tool_result.
-      assert MapSet.new(tool_calls) == MapSet.new(tool_results),
-             "AC-8 VIOLATED: tool_call IDs must be paired with tool_result IDs.\n" <>
-               "  tool_calls: #{inspect(tool_calls)}\n" <>
-               "  tool_results: #{inspect(tool_results)}"
+      assert MapSet.new(tool_call_ids) == MapSet.new(tool_result_ids),
+             "AC-8 VIOLATED: tool_call IDs must equal tool_result IDs.\n" <>
+               "  calls:   #{inspect(tool_call_ids)}\n" <>
+               "  results: #{inspect(tool_result_ids)}"
 
-      # AC-8 ordering: the steering message appears AFTER the tool_result and
-      # BEFORE the final plain-text assistant message in the JSONL sequence.
-      ordered_kinds =
-        Enum.map(records, & &1["kind"])
-
-      # The transcript must have: user_message, assistant_message (tool_call),
-      # tool_result, user_message (steer), assistant_message (final text).
-      tool_result_idx =
-        Enum.find_index(ordered_kinds, &(&1 == "tool_result"))
-
-      steer_user_idx =
-        ordered_kinds
-        |> Enum.with_index()
-        |> Enum.filter(fn {kind, idx} ->
-          kind == "user_message" and idx > (tool_result_idx || 0)
-        end)
-        |> Enum.map(fn {_, idx} -> idx end)
-        |> List.first()
-
-      final_assistant_idx =
-        ordered_kinds
-        |> Enum.with_index()
-        |> Enum.filter(fn {kind, idx} ->
-          kind == "assistant_message" and idx > (steer_user_idx || 0)
-        end)
-        |> Enum.map(fn {_, idx} -> idx end)
-        |> List.first()
+      # Invariant 2: steer user_message appears strictly AFTER tool_result.
+      tool_result_idx = Enum.find_index(kinds, &(&1 == "tool_result"))
 
       assert tool_result_idx != nil,
-             "AC-8: JSONL must contain a tool_result; got kinds: #{inspect(ordered_kinds)}"
+             "AC-8: JSONL must contain a tool_result; kinds: #{inspect(kinds)}"
 
-      assert steer_user_idx != nil,
-             "AC-8: JSONL must contain a user_message (steer) after the tool_result; " <>
-               "got kinds: #{inspect(ordered_kinds)}"
+      steer_idx =
+        kinds
+        |> Enum.with_index()
+        |> Enum.find(fn {kind, idx} ->
+          kind == "user_message" and idx > tool_result_idx
+        end)
+        |> then(fn
+          nil -> nil
+          {_, i} -> i
+        end)
+
+      assert steer_idx != nil,
+             "AC-8: steer user_message must appear after tool_result in JSONL; " <>
+               "kinds: #{inspect(kinds)}"
+
+      # Invariant 3: final assistant_message appears strictly AFTER steer.
+      final_assistant_idx =
+        kinds
+        |> Enum.with_index()
+        |> Enum.find(fn {kind, idx} ->
+          kind == "assistant_message" and idx > steer_idx
+        end)
+        |> then(fn
+          nil -> nil
+          {_, i} -> i
+        end)
 
       assert final_assistant_idx != nil,
-             "AC-8: JSONL must contain a final assistant_message after the steer; " <>
-               "got kinds: #{inspect(ordered_kinds)}"
+             "AC-8: final assistant_message must appear after steer in JSONL; " <>
+               "kinds: #{inspect(kinds)}"
 
-      # Verify the steer user_message content matches.
-      steer_record = Enum.at(records, steer_user_idx)
-      steer_content = get_in(steer_record, ["data", "content"])
+      # Invariant 4: steer content matches.
+      steer_record = Enum.at(records, steer_idx)
 
-      assert steer_content == steer_text,
-             "AC-8: steer message content must be #{inspect(steer_text)}; got #{inspect(steer_content)}"
+      assert get_in(steer_record, ["data", "content"]) == steer_text,
+             "AC-8: steer content must be #{inspect(steer_text)}; " <>
+               "got #{inspect(get_in(steer_record, ["data", "content"]))}"
+
+      # Cleanup: restore builtins for next iteration.
+      teardown_blocking_tool(prior_builtins)
     end
   end
 
@@ -814,8 +1104,6 @@ defmodule Tau.Session.MessageQueueTiersTest do
     assert_receive %SE.PermissionRequest{session_id: ^sid, tool_call_id: "perm-tc1"}, 5_000
 
     # While in :awaiting_permission, enqueue a steering message.
-    # (No followup here so the followup queue stays empty; the PermProvider always
-    # emits another tool call which would re-enter :awaiting_permission on drain.)
     Tau.steer(sid, "steer-during-perm")
 
     # Verify the steering queue is populated and the state is correct.
@@ -835,7 +1123,18 @@ defmodule Tau.Session.MessageQueueTiersTest do
     #   3. QueueRestored (steering queue non-empty)
 
     # #341: is_error ToolResult for the denied permission request.
-    assert_receive %SE.ToolEnd{session_id: ^sid, tool_call_id: "perm-tc1"}, 2_000
+    assert_receive %SE.ToolEnd{
+                     session_id: ^sid,
+                     tool_call_id: "perm-tc1",
+                     result: denied_result
+                   },
+                   2_000
+
+    # FIX-2: assert the ToolEnd result is an is_error denial, not just that
+    # a ToolEnd fired. This is the specific contract from #341.
+    assert denied_result.is_error == true,
+           "AC-10: cancelled :awaiting_permission must produce an is_error ToolResult; " <>
+             "got is_error=#{inspect(denied_result.is_error)}"
 
     # #341: Cancelled event arrives.
     assert_receive %SE.Cancelled{session_id: ^sid}, 2_000
