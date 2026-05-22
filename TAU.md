@@ -28,4 +28,5 @@ Full prose: `.claude/rules/otp-non-negotiables.md`.
 
 - `CLAUDE.md` and `.claude/skills/` — coordinator config and on-demand skills.
 - `docs/adr/README.md` — ADR conventions and index.
-- `docs/PROJECT.md` — full project overview, layout, milestone status.
+- `docs/PROJECT.md` — project overview and repo layout.
+- `docs/MISSION.md` — mission statement and pointers to systems of record for state.

@@ -4,13 +4,12 @@
 
 ## Mission
 
-A working TUI is the priority. See `docs/MISSION.md` for verified state,
-open work, and the action ladder. Source of truth for "working" is
-`docs/spec/SPEC-USER-TURN.md` (currently on branch `spec/user-turn-loop`,
-not yet merged to main).
+A working TUI is the priority. See `docs/MISSION.md` for the mission
+statement and pointers to where state and design live. The user-turn
+loop's contract is `docs/spec/SPEC-USER-TURN.md`.
 
-The runtime-invariant namespace is **D-NNN**, defined in that SPEC §6.
-**D-001…D-019 are taken.** Before authoring a new D-NNN, verify the
+The runtime-invariant namespace is **D-NNN**, partitioned across SPECs
+per `docs/MISSION.md`. Before authoring a new D-NNN, verify the
 identifier is free across the whole repo (`git log --all --grep`, plus
 `grep -rn` over `lib test docs .claude`). Single-branch negative results
 are not evidence of absence.
@@ -40,18 +39,17 @@ You receive tasks, maintain the solution tree, spawn subagents, decide on outcom
 
 Rules: `Plan` before `critic`; `implementer` over `general-purpose` inside `lib/tau/` or `test/`; both `critic` and `reviewer` MUST PASS before opening a PR.
 
-**Persona dispatch:** Do NOT use `subagent_type: "critic"` / `"reviewer"` / `"implementer"` — Claude Code does not auto-register project-local agents at `.claude/agents/`. Instead invoke the Task tool without `subagent_type` and inline the persona prompt from `.claude/agents/<name>.md`. See `tau-architecture` §Subagent Routing for details and issue #125.
+**Persona dispatch:** Do NOT use `subagent_type: "critic"` / `"reviewer"` / `"implementer"` — Claude Code does not auto-register project-local agents at `.claude/agents/`. Instead invoke the Task tool without `subagent_type` and inline the persona prompt from `.claude/agents/<name>.md`. See `tau-architecture` §Subagent Routing for details.
 
 Worktree isolation isolates git refs but **not** absolute-path writes — brief subagents to use relative paths. Detail in `tau-architecture`.
 
 ## Task Lifecycle
 
-1. Read or create `.claude/logs/solution-tree.json`.
-2. Invoke `critic` for coordination-heavy tasks (shared state, temporal coupling, cross-process boundaries).
-3. Spawn `implementer`; SubagentStart injects prior context.
-4. Outcome: `completed` → `reviewer` (pass = done, fail = `failed_evaluation`); `killed` → read `.claude/logs/kill-signal.json`, load `heuristic-analysis`; `failed_evaluation` → log reason.
-5. Load `retry-strategy`; choose **refine** or **pivot**; document rationale.
-6. Repeat to `max_attempts` (default 5).
+1. Invoke `critic` for coordination-heavy tasks (shared state, temporal coupling, cross-process boundaries).
+2. Spawn `implementer`.
+3. Outcome: `completed` → `reviewer` (pass = done, fail = refine); `killed` → read `.claude/logs/kill-signal.json`, load `heuristic-analysis`.
+4. On retry, load `retry-strategy`; choose **refine** or **pivot**; record the rationale in the PR description.
+5. Repeat to a sensible attempt cap (default 5).
 
 ## Hard Rules
 
@@ -65,7 +63,7 @@ Worktree isolation isolates git refs but **not** absolute-path writes — brief 
 
 ## Compact Instructions
 
-**Preserve:** task, solution tree path, attempt count, last kill reason, branch decision, last active subagent, GitHub issue numbers, any ADR being drafted, gate verdicts on the active PR.
+**Preserve:** task, attempt count, last kill reason, branch decision, last active subagent, GitHub issue / PR numbers, any ADR being drafted, gate verdicts on the active PR.
 **Discard:** verbose tool output, intermediate reads, exploration that didn't affect decisions, prior attempt transcripts.
 
 ## Skill Index

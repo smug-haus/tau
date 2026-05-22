@@ -5,94 +5,67 @@
 Tau is an OTP/BEAM agentic coding harness — a from-scratch reimagining of
 the Pi harness ([`badlogic/pi-mono`](https://github.com/badlogic/pi-mono),
 TypeScript) using Elixir idioms. Pi is minimal and opinionated; Tau is
-deliberately broader (full MCP, four providers, TUI + CLI + library) but
-holds the same line on transparency: no magic, no closed-box behaviour,
-the loop is small enough to read in an afternoon.
+deliberately broader (full MCP, multiple providers, TUI + CLI + library)
+but holds the same line on transparency: no magic, no closed-box
+behaviour, the loop is small enough to read in an afternoon.
 
-## Milestone status
+## Milestones and status
 
-The current pre-alpha implements **M0** — supervision tree boots clean,
-public API surface declared as `{:error, :not_implemented}` stubs. Real
-behaviour lands across **M1 — M8**. GitHub milestones are the
-plan-of-record: each milestone's description holds the milestone plan;
-issues are filed against the milestone and surface on the `Tau`
-project board.
+Milestone state lives on GitHub, not in this file. To check the current
+state:
 
-## Milestones
+```sh
+gh api 'repos/{owner}/{repo}/milestones?state=all' \
+  --jq '.[] | "\(.state) | \(.title) — open:\(.open_issues) closed:\(.closed_issues)"'
+```
 
-| ID | Title | Description |
-|----|-------|-------------|
-| M0 | Working TUI | AC-1..AC-7 pass; binary launches, completes a one-turn round-trip against a real provider, quits cleanly. |
-| M1 | Self-hosting | tau replaces vendored claude-harness; coordinator runs end-to-end through `Tau.Tools.Builtin.Agent`. |
-| M2 | Provider reliability | Multi-provider abstraction, fallback chain, per-resource circuit breakers, OpenTelemetry export. |
-| M3 | Persistence + replay | Durable JSONL persistence, session resume, hash-anchored editing, audit-trail integration. |
-| M4 | Sub-agents & coordination | Agent tool sub-session dispatch, inter-agent message passing, persona-pinned lifetime. |
-| M5 | Settings & memory | SQLite-backed semantic memory, settings hot-reload everywhere, vault parity across macOS/Linux/Windows. |
-| M6 | Skills & extensions | Skill activation paths (model + slash), MCP server orchestration, extension dynamic loading. |
-| M7 | LiveView dashboard | Read-only LiveView session viewer, telemetry dashboard, auth gate, interactive driver. |
-| M8 | Distribution & integration | Shareable session URLs, JSON-RPC transport, Gateway behaviour for Telegram/Discord/MCP-server-mode. |
+Each milestone's description holds its plan; issues are filed against
+the milestone and surface on the `Tau` project board. The mission
+across milestones is `docs/MISSION.md`.
 
 ## Layout
+
+The repo's `lib/` is the product; `web/lib/` is the optional dashboard
+poncho. Conceptual structure:
 
 ```
 lib/tau.ex                              — public API (delegates to Tau.Session)
 lib/tau/application.ex                  — supervision tree
 lib/tau/registries.ex                   — Registry container
-lib/tau/session.ex                      — :gen_statem (the loop)
-lib/tau/message/assembler.ex            — pure event-to-message folding
-lib/tau/provider.ex                     — behaviour
-lib/tau/providers/{anthropic,gemini,bedrock,openai}.ex
-lib/tau/tool.ex                         — behaviour
-lib/tau/tools/builtin/{read,write,edit,bash}.ex
-lib/tau/permissions/{rule_set,evaluator,matchers}.ex
-lib/tau/hook.ex                         — behaviour
-lib/tau/persistence.ex                  — behaviour (default: jsonl)
-lib/tau/compactor.ex                    — behaviour
-lib/tau/mcp/{server,reconciler,tool_adapter}.ex
-lib/tau/mcp/transport/{stdio,sse,http}.ex
-lib/tau/extension.ex + extension/dsl.ex — extension DSL
-lib/tau/cli.ex + tui/                   — escript + Ratatouille TUI
+lib/tau/session.ex                      — :gen_statem (the session loop)
+lib/tau/message/                        — pure event-to-message folding
+lib/tau/provider.ex                     — provider behaviour
+lib/tau/providers/                      — provider adapters (one per LLM API)
+lib/tau/tool.ex                         — tool behaviour
+lib/tau/tools/builtin/                  — built-in tools
+lib/tau/permissions/                    — permission rule sets + evaluator
+lib/tau/hook.ex                         — hook behaviour
+lib/tau/persistence.ex                  — persistence behaviour (default JSONL)
+lib/tau/compactor.ex                    — compactor behaviour
+lib/tau/mcp/                            — MCP transports + server adapter
+lib/tau/extension.ex                    — extension DSL host
+lib/tau/extensions/loader.ex            — runtime extension loader
+lib/tau/cli.ex                          — escript entry + arg parsing
+lib/tau/tui/                            — Ratatouille TUI
+lib/mix/tasks/                          — mix tasks (release, qa, gates, etc.)
+web/lib/tau_web/                        — Phoenix poncho (`:tau_web`)
 ```
+
+For exact file inventories use `find lib web/lib -name '*.ex' | sort` —
+do not maintain a list here (it rots).
 
 ## Pointers
 
-- **GitHub issues** — the live backlog (`is:open` for active work).
-- **GitHub milestones** — `M0`–`M8` plus named refactors; description
-  holds the milestone plan.
+- **GitHub issues** — the live backlog (`gh issue list`).
+- **GitHub milestones** — the plan-of-record; each milestone's description
+  holds its plan.
 - **GitHub `Tau` project board** — Todo / In Progress / In Review / Done
   across milestones.
-- **`docs/adr/`** — architectural decisions (start with
-  `docs/adr/README.md`).
-- `priv/livebooks/` — walkthroughs that double as smoke tests.
-- `/root/.claude/plans/` — host-specific path used historically for
-  milestone-scale plans. Prefer **GitHub milestones** as plan-of-record
-  going forward.
+- **`docs/adr/`** — architectural decisions (start with `docs/adr/README.md`).
+- **`docs/spec/`** — component contracts (start with `docs/adr/0023-documentation-taxonomy.md`'s catalog).
+- **`docs/MISSION.md`** — mission and where state vs design lives.
+- **`priv/livebooks/`** — walkthroughs that double as smoke tests.
 - [`badlogic/pi-mono`](https://github.com/badlogic/pi-mono) — reference
   implementation we ported from.
 - [hexdocs Erlang/Elixir stdlib](https://hexdocs.pm/elixir/) —
   `:gen_statem`, `Registry`, `Task.Supervisor`, `:persistent_term`.
-
-## Architecture & token budget
-
-The `claude-harness` template's stated baseline is **~1,150 t**: ~450 t
-in `CLAUDE.md`, ~300 t in always-loaded rules, ~400 t in skill
-description metadata across 4 vendored skills. Tau ships **~1,600 t
-total** — about 450 t over baseline.
-
-Breakdown of the overshoot:
-
-- **Four extra Tau-specific skills** (`tau-toolchain`,
-  `tau-architecture`, `tau-github-workflow`, `tau-adr`) at ~100 t of
-  description metadata each ⇒ ~+400 t.
-- **Slightly heavier OTP rules file** vs the harness's generic rules ⇒
-  ~+50 t.
-
-The overshoot is justified: Tau's domain — OTP correctness, Erlang/Elixir
-toolchain quirks, GitHub-native workflow, ADRs — is genuinely
-discriminative. Skill descriptions are short enough that the router can
-match on them without loading the body, so the metadata cost buys
-disclosure.
-
-**Audit point:** revisit after the four Tau skills have been used in
-earnest. If a skill is rarely loaded, fold it into another (or into a
-rule); if its description is over-broad, tighten the trigger language.
