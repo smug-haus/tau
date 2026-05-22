@@ -131,7 +131,10 @@ defmodule Tau.Session.ToolIterationCapPropertyTest do
             session_id: sid,
             provider: AlwaysToolCallProvider,
             model: "loopy",
-            max_tool_iterations: cap
+            max_tool_iterations: cap,
+            # SPEC-PERMISSION-PROMPTS: bypass permissions — this property test
+            # exercises the iteration cap invariant, not the permission system.
+            metadata: %{permissions_mode: :bypass}
           )
 
         :ok = Tau.send(sid, "go")

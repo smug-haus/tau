@@ -142,6 +142,9 @@ defmodule Tau.Session.ToolsWhitelistTest do
         provider: SingleToolCallProvider,
         model: "p91",
         session_id: sid,
+        # SPEC-PERMISSION-PROMPTS: bypass permissions so the whitelist
+        # filter is the only gate being tested.
+        metadata: %{permissions_mode: :bypass},
         provider_ctx: %{tool_name: "wl_blocked_tool", call_id: "call-default"}
       )
 
@@ -181,6 +184,11 @@ defmodule Tau.Session.ToolsWhitelistTest do
         model: "p91",
         session_id: sid,
         tools_whitelist: ["wl_ok_tool"],
+        # SPEC-PERMISSION-PROMPTS: bypass permissions so the whitelist filter
+        # is the only gate being tested — wl_blocked_tool is filtered by the
+        # whitelist, not by the permission evaluator. Without bypass, the
+        # permission gate would also fire and obscure the whitelist behaviour.
+        metadata: %{permissions_mode: :bypass},
         provider_ctx: %{tool_name: "wl_blocked_tool", call_id: "call-filter"}
       )
 
@@ -216,6 +224,10 @@ defmodule Tau.Session.ToolsWhitelistTest do
         model: "p91",
         session_id: sid,
         tools_whitelist: ["wl_ok_tool"],
+        # SPEC-PERMISSION-PROMPTS: bypass permissions so wl_ok_tool executes
+        # after clearing the whitelist — this test asserts on whitelist
+        # pass-through, not on the permission evaluator's verdict.
+        metadata: %{permissions_mode: :bypass},
         provider_ctx: %{tool_name: "wl_ok_tool", call_id: "call-pass"}
       )
 

@@ -7,6 +7,7 @@ defmodule Tau.Session do
       :awaiting_user
       :provider_streaming
       :tool_executing
+      :awaiting_permission
       :compacting
       :stopped
 
@@ -27,6 +28,7 @@ defmodule Tau.Session do
   @behaviour :gen_statem
 
   alias Tau.Message.{Assembler, Assistant, ToolResult, User}
+  alias Tau.Permissions.Evaluator, as: PermEvaluator
   alias Tau.Session.Events
   alias Tau.Provider.Event, as: PEvent
   alias Tau.Settings.Cache, as: SettingsCache
@@ -291,6 +293,47 @@ defmodule Tau.Session do
     end
   end
 
+  @doc """
+  Resolve a pending permission request for a tool call in an interactive
+  session (SPEC-PERMISSION-PROMPTS §4 B5, D-096).
+
+  `verdict` MUST be `:allow_once` or `:deny_once`.
+
+  - `:allow_once` — dispatch the tool call; no rule is written.
+  - `:deny_once` — synthesise an `is_error` ToolResult; no rule is written.
+
+  Returns `:ok` if the cast was dispatched (fire-and-forget; does not wait
+  for the FSM to process it). Returns `{:error, :not_found}` if the session
+  id is unknown.
+
+  A cast for an unknown or stale `tool_call_id` is a logged no-op per D-090.
+  """
+  @spec decide_permission(id(), String.t(), :allow_once | :deny_once) ::
+          :ok | {:error, :not_found}
+  def decide_permission(id, tool_call_id, verdict) when verdict in [:allow_once, :deny_once] do
+    with {:ok, pid} <- whereis(id) do
+      :gen_statem.cast(pid, {:permission_decision, tool_call_id, verdict})
+    end
+  end
+
+  @doc """
+  Update the permissions mode for a session (SPEC-PERMISSION-PROMPTS §4 B5,
+  D-096). Gated: only allowed while the FSM is in `:awaiting_user` with no
+  command task in flight.
+
+  Returns `:ok` on success. Returns `{:error, :busy}` if the session is
+  streaming, executing tools, or otherwise not idle. Returns
+  `{:error, :not_found}` if the session id is unknown.
+
+  Valid modes: `:default | :accept_edits | :plan | :auto | :dont_ask | :bypass`.
+  """
+  @spec set_permissions_mode(id(), atom()) :: :ok | {:error, :busy | :not_found}
+  def set_permissions_mode(id, mode) do
+    with {:ok, pid} <- whereis(id) do
+      :gen_statem.call(pid, {:set_permissions_mode, mode})
+    end
+  end
+
   @spec list_sessions(map()) :: [Meta.t()]
   def list_sessions(filters \\ %{}), do: Tau.Persistence.impl().list(filters)
 
@@ -320,7 +363,8 @@ defmodule Tau.Session do
           tool_loop_brake_threshold: pos_integer(),
           tool_loop_call_lookups: map(),
           provider_retry_state: %{count: non_neg_integer()},
-          provider_retry_max: pos_integer()
+          provider_retry_max: pos_integer(),
+          interactive?: boolean()
         }
 
   @doc """
@@ -333,8 +377,19 @@ defmodule Tau.Session do
   """
   @spec snapshot(id()) :: {:ok, snapshot()} | {:error, :not_found}
   def snapshot(id) do
-    with {:ok, pid} <- whereis(id) do
-      {state, data} = :sys.get_state(pid)
+    with {:ok, pid} <- whereis(id),
+         {:alive, true} <- {:alive, Process.alive?(pid)},
+         # Wrap :sys.get_state to handle the TOCTOU window between the
+         # Process.alive? guard and the synchronous sys call — the process
+         # may exit between the two. Catch the resulting :exit and return
+         # {:error, :not_found} so callers see a clean tagged error.
+         {:ok, state_and_data} <-
+           (try do
+              {:ok, :sys.get_state(pid)}
+            catch
+              :exit, _ -> {:error, :not_found}
+            end) do
+      {state, data} = state_and_data
 
       {:ok,
        %{
@@ -356,8 +411,12 @@ defmodule Tau.Session do
          tool_loop_brake_threshold: Map.get(data, :tool_loop_brake_threshold, 3),
          tool_loop_call_lookups: Map.get(data, :tool_loop_call_lookups, %{}),
          provider_retry_state: Map.get(data, :provider_retry_state, %{count: 0}),
-         provider_retry_max: Map.get(data, :provider_retry_max, 3)
+         provider_retry_max: Map.get(data, :provider_retry_max, 3),
+         interactive?: Map.get(data, :interactive?, true)
        }}
+    else
+      # :not_found from Registry, or process no longer alive (shutting down).
+      _ -> {:error, :not_found}
     end
   end
 
@@ -736,7 +795,33 @@ defmodule Tau.Session do
           # a broken compactor). Re-initialised to 0 on resume/fork (not persisted).
           compaction_task: nil,
           compaction_monitor: nil,
-          compaction_failures: 0
+          compaction_failures: 0,
+          # SPEC-PERMISSION-PROMPTS §4 B4 (D-092, D-093): whether this session
+          # has an interactive user surface (TUI) or not (headless `tau run`).
+          # When false, `:ask` verdicts from the permissions evaluator resolve
+          # immediately to fail-closed `:deny` — the FSM never enters
+          # `:awaiting_permission`. Set via `:interactive` opt at session start;
+          # defaults to true (TUI is the primary session type).
+          interactive?: opts[:interactive] != false,
+          # SPEC-PERMISSION-PROMPTS §4 B3 (D-091): per-round map of tool calls
+          # awaiting user consent. Keyed by `tool_call_id`; each value is
+          # `%{name: String.t(), arguments: map()}`. Non-nil only while in
+          # `:awaiting_permission`; cleared on exit (decision or cancel).
+          pending_permission_requests: %{},
+          # SPEC-PERMISSION-PROMPTS §4 B3 (D-091): accumulator for approved
+          # calls within one `:awaiting_permission` visit. Holds both the
+          # pre-approved `:allow`-verdict calls deferred from `dispatch_tools/2`
+          # and any user-approved `:allow_once` decisions. Dispatched as one
+          # batch in `finish_permission_round/1`.
+          permission_dispatch_batch: [],
+          # SPEC-PERMISSION-PROMPTS D-091 (whole-round deferral): instant-resolve
+          # results accumulated during `:awaiting_permission`. Holds
+          # `{call_id, %ToolResult{}}` tuples for calls resolved without user
+          # interaction (`:deny`-rule denied, whitelist-filtered, hook-denied,
+          # `:deny_once` decisions). Emitted in `finish_permission_round/1`
+          # via broadcast + history append, never via `{:tool_done}` messages
+          # while in `:awaiting_permission` state.
+          permission_pending_results: []
         }
 
         {:ok, :awaiting_user, data}
@@ -1417,6 +1502,97 @@ defmodule Tau.Session do
     {:keep_state, %{data | child_session_ids: MapSet.delete(data.child_session_ids, child_id)}}
   end
 
+  # SPEC-PERMISSION-PROMPTS §3 C9 / D-098: :cancel in :awaiting_permission →
+  # deny all pending requests → :awaiting_user. MUST precede the cross-cutting
+  # :cancel handler (which uses `_state`) so this more-specific clause fires
+  # first. Source order is LOAD-BEARING in :handle_event_function mode.
+  def handle_event(:cast, :cancel, :awaiting_permission, data) do
+    # Emit all accumulated instant-resolve results (prior :deny_once decisions
+    # stored in permission_pending_results) directly — no {:tool_done} routing.
+    # Mirrors the emit sequence in finish_permission_round/1.
+    data =
+      Enum.reduce(
+        Enum.reverse(data.permission_pending_results),
+        data,
+        fn {call_id, result_msg}, acc ->
+          {_lookup, call_lookups_rest} = Map.pop(acc.tool_loop_call_lookups, call_id)
+
+          acc =
+            acc
+            |> append_message(result_msg)
+            |> persist_event("tool_result", tool_result_to_data(result_msg))
+            |> Map.put(:tool_loop_call_lookups, call_lookups_rest)
+
+          broadcast(acc.id, %Events.ToolEnd{
+            session_id: acc.id,
+            tool_call_id: call_id,
+            result: result_msg
+          })
+
+          acc
+        end
+      )
+
+    # Synthesise and emit is_error ToolResults for all still-pending :ask calls
+    # directly into history and PubSub — no {:tool_done} self-send. The only
+    # handler for {:tool_done} in :awaiting_user is the catch-all, which would
+    # drop these messages. Emitting directly keeps history well-formed (every
+    # tool_call block has a paired tool_result) so the next provider turn succeeds.
+    data =
+      Enum.reduce(
+        data.pending_permission_requests,
+        data,
+        fn {tool_call_id, %{name: name}}, acc ->
+          result =
+            ToolResult.new(
+              tool_call_id: tool_call_id,
+              tool_name: name,
+              content: "Session cancelled while awaiting permission for #{name}.",
+              is_error: true
+            )
+
+          {_lookup, call_lookups_rest} = Map.pop(acc.tool_loop_call_lookups, tool_call_id)
+
+          acc =
+            acc
+            |> append_message(result)
+            |> persist_event("tool_result", tool_result_to_data(result))
+            |> Map.put(:tool_loop_call_lookups, call_lookups_rest)
+
+          broadcast(acc.id, %Events.ToolEnd{
+            session_id: acc.id,
+            tool_call_id: tool_call_id,
+            result: result
+          })
+
+          acc
+        end
+      )
+
+    broadcast(data.id, %Events.Cancelled{session_id: data.id, reason: :user})
+
+    data = persist_event(data, "cancellation", %{cause: "user", reason: "awaiting_permission"})
+
+    {:next_state, :awaiting_user,
+     %{
+       data
+       | pending_permission_requests: %{},
+         permission_dispatch_batch: [],
+         permission_pending_results: [],
+         tools_in_flight: %{},
+         tool_dispatcher: nil,
+         provider_task: nil,
+         assembler: nil,
+         stream_ref: nil,
+         provider_span_ref: nil,
+         active_skill: nil,
+         tool_iterations: 0,
+         tool_loop_state: %{},
+         tool_loop_call_lookups: %{},
+         provider_retry_state: %{count: 0}
+     }}
+  end
+
   def handle_event(:cast, :cancel, _state, data) do
     # ADR-0014 (#92): cascade to children first so each child's FSM gets
     # a chance to flush persistence and emit `%SessionEnd{reason: :user}`
@@ -1769,6 +1945,256 @@ defmodule Tau.Session do
   # ---------------------------------------------------------------------------
   # End of :compacting terminal clauses
   # ---------------------------------------------------------------------------
+
+  # ---------------------------------------------------------------------------
+  # :awaiting_permission state — SPEC-PERMISSION-PROMPTS §4 B3
+  #
+  # The FSM enters this state when an interactive session has at least one
+  # tool call with an `:ask` verdict from `Tau.Permissions.Evaluator`. It waits
+  # for `{:permission_decision, tool_call_id, verdict}` casts from the TUI.
+  #
+  # Source order is LOAD-BEARING. Clause ordering:
+  #   0. {:tool_done} for pre-resolved items (deny-rule, whitelist, activated)
+  #   1. :allow_once decision (known tool_call_id, in :awaiting_permission)
+  #   2. :deny_once decision (known tool_call_id, in :awaiting_permission)
+  #   3. stale/unknown tool_call_id in :awaiting_permission → logged no-op (D-090)
+  #   4. decision cast outside :awaiting_permission → logged no-op (D-090)
+  #   5. :cancel in :awaiting_permission → deny all pending → :awaiting_user (D-098)
+  # ---------------------------------------------------------------------------
+
+  # Clause 0 — {:tool_done} from pre-resolved items (deny-rule gated calls,
+  # whitelist-filtered calls, and skill-activation calls) that produced
+  # {:tool_done} messages before the FSM entered :awaiting_permission.
+  # We process them normally (append to history, broadcast ToolEnd, update
+  # tools_in_flight) but do NOT trigger the post-round transition — that
+  # only fires when pending_permission_requests is empty (via the
+  # permission_decision handlers). Applies only to known non-ask entries.
+  def handle_event(:info, {:tool_done, call_id, result_msg}, :awaiting_permission, data) do
+    # Guard: only process if this call_id is in tools_in_flight and is NOT
+    # an :awaiting_permission sentinel (those represent unresolved :ask calls).
+    case Map.get(data.tools_in_flight, call_id) do
+      :awaiting_permission ->
+        # This would be a programming error — :ask calls resolve via
+        # permission_decision, not {:tool_done}. Log and keep state.
+        require Logger
+
+        Logger.warning(
+          "Unexpected {:tool_done} for :awaiting_permission sentinel #{inspect(call_id)}; ignoring"
+        )
+
+        {:keep_state, data}
+
+      nil ->
+        # Stale/unknown call_id — drop silently (same as catch-all below).
+        {:keep_state, data}
+
+      _status ->
+        # Pre-resolved item (deny-rule, whitelist-filtered, skill-activated, etc.).
+        # Process identically to :tool_executing, but stay in :awaiting_permission.
+        tools = Map.delete(data.tools_in_flight, call_id)
+        {_lookup, call_lookups_rest} = Map.pop(data.tool_loop_call_lookups, call_id)
+
+        data =
+          data
+          |> append_message(result_msg)
+          |> persist_event("tool_result", tool_result_to_data(result_msg))
+          |> Map.put(:tool_loop_call_lookups, call_lookups_rest)
+          |> Map.put(:tools_in_flight, tools)
+
+        broadcast(data.id, %Events.ToolEnd{
+          session_id: data.id,
+          tool_call_id: call_id,
+          result: result_msg
+        })
+
+        # Do NOT check for round completion here — that is gated on
+        # pending_permission_requests being empty (resolved by the user).
+        {:keep_state, data}
+    end
+  end
+
+  # Clause 1 — :allow_once: add the call to the dispatch batch; if last pending,
+  # dispatch batch and transition to :tool_executing.
+  def handle_event(
+        :cast,
+        {:permission_decision, tool_call_id, :allow_once},
+        :awaiting_permission,
+        data
+      ) do
+    case Map.pop(data.pending_permission_requests, tool_call_id) do
+      {nil, _} ->
+        # Unknown or stale tool_call_id (D-090): logged no-op.
+        require Logger
+
+        Logger.debug(
+          "permission_decision :allow_once for unknown tool_call_id #{inspect(tool_call_id)}"
+        )
+
+        :telemetry.execute(
+          [:tau, :permissions, :stale_decision],
+          %{system_time: System.system_time()},
+          %{session_id: data.id, tool_call_id: tool_call_id, verdict: :allow_once}
+        )
+
+        {:keep_state, data}
+
+      {%{name: name, arguments: args}, remaining} ->
+        :telemetry.execute(
+          [:tau, :permissions, :decision],
+          %{system_time: System.system_time()},
+          %{
+            session_id: data.id,
+            tool_call_id: tool_call_id,
+            tool_name: name,
+            decision: :allow_once
+          }
+        )
+
+        batch = [{tool_call_id, name, args} | data.permission_dispatch_batch]
+        data = %{data | pending_permission_requests: remaining, permission_dispatch_batch: batch}
+
+        if map_size(remaining) == 0 do
+          finish_permission_round(data)
+        else
+          {:keep_state, data}
+        end
+    end
+  end
+
+  # Clause 2 — :deny_once: synthesise is_error ToolResult; if last pending,
+  # dispatch any accumulated allows and transition.
+  def handle_event(
+        :cast,
+        {:permission_decision, tool_call_id, :deny_once},
+        :awaiting_permission,
+        data
+      ) do
+    case Map.pop(data.pending_permission_requests, tool_call_id) do
+      {nil, _} ->
+        # Unknown or stale tool_call_id (D-090): logged no-op.
+        require Logger
+
+        Logger.debug(
+          "permission_decision :deny_once for unknown tool_call_id #{inspect(tool_call_id)}"
+        )
+
+        :telemetry.execute(
+          [:tau, :permissions, :stale_decision],
+          %{system_time: System.system_time()},
+          %{session_id: data.id, tool_call_id: tool_call_id, verdict: :deny_once}
+        )
+
+        {:keep_state, data}
+
+      {%{name: name}, remaining} ->
+        result =
+          ToolResult.new(
+            tool_call_id: tool_call_id,
+            tool_name: name,
+            content: "Permission denied: #{name} denied by user.",
+            is_error: true
+          )
+
+        # D-091 (whole-round deferral): accumulate the denied result in
+        # permission_pending_results instead of routing through {:tool_done}.
+        # finish_permission_round/1 emits all accumulated results (broadcast
+        # ToolEnd + append to history) when the last :ask call is resolved.
+        # This avoids {:tool_done} messages landing in :awaiting_permission
+        # for multi-:ask rounds where earlier denials precede the last allow.
+        :telemetry.execute(
+          [:tau, :permissions, :decision],
+          %{system_time: System.system_time()},
+          %{
+            session_id: data.id,
+            tool_call_id: tool_call_id,
+            tool_name: name,
+            decision: :deny_once
+          }
+        )
+
+        pending_results = [{tool_call_id, result} | data.permission_pending_results]
+
+        data = %{
+          data
+          | pending_permission_requests: remaining,
+            permission_pending_results: pending_results
+        }
+
+        if map_size(remaining) == 0 do
+          finish_permission_round(data)
+        else
+          {:keep_state, data}
+        end
+    end
+  end
+
+  # Clause 3 — stale/unknown tool_call_id arriving in :awaiting_permission
+  # for any other verdict form: logged no-op (D-090). Must precede clause 4.
+  def handle_event(
+        :cast,
+        {:permission_decision, tool_call_id, verdict},
+        :awaiting_permission,
+        data
+      ) do
+    require Logger
+
+    Logger.debug(
+      "permission_decision #{inspect(verdict)} for unknown/stale tool_call_id #{inspect(tool_call_id)}"
+    )
+
+    :telemetry.execute(
+      [:tau, :permissions, :stale_decision],
+      %{system_time: System.system_time()},
+      %{session_id: data.id, tool_call_id: tool_call_id, verdict: verdict}
+    )
+
+    {:keep_state, data}
+  end
+
+  # Clause 4 — {:permission_decision} arriving outside :awaiting_permission:
+  # logged no-op (D-090). Catches stale decisions arriving after state transition.
+  def handle_event(:cast, {:permission_decision, tool_call_id, verdict}, _state, data) do
+    require Logger
+
+    Logger.debug(
+      "permission_decision #{inspect(verdict)} for #{inspect(tool_call_id)} outside :awaiting_permission (state ignored)"
+    )
+
+    :telemetry.execute(
+      [:tau, :permissions, :stale_decision],
+      %{system_time: System.system_time()},
+      %{session_id: data.id, tool_call_id: tool_call_id, verdict: verdict}
+    )
+
+    {:keep_state, data}
+  end
+
+  # Clause 5 — :cancel in :awaiting_permission is handled by the specific
+  # handle_event(:cast, :cancel, :awaiting_permission, data) clause defined
+  # earlier (before the cross-cutting _state wildcard cancel handler).
+  # Source order is LOAD-BEARING: the specific :awaiting_permission clause
+  # fires first per :gen_statem :handle_event_function matching semantics.
+
+  # ---------------------------------------------------------------------------
+  # End of :awaiting_permission clauses
+  # ---------------------------------------------------------------------------
+
+  # SPEC-PERMISSION-PROMPTS §4 B5 (D-096): set_permissions_mode call handler.
+  # Gated to :awaiting_user only (no command task in flight). Mirrors swap_model.
+  def handle_event(
+        {:call, from},
+        {:set_permissions_mode, mode},
+        :awaiting_user,
+        %{command_task: nil} = data
+      ) do
+    data = put_in(data, [:metadata, :permissions_mode], mode)
+    {:keep_state, data, [{:reply, from, :ok}]}
+  end
+
+  # Busy: any other state, or awaiting_user with command task in flight.
+  def handle_event({:call, from}, {:set_permissions_mode, _mode}, _state, _data) do
+    {:keep_state_and_data, [{:reply, from, {:error, :busy}}]}
+  end
 
   def handle_event(_type, _event, _state, data), do: {:keep_state, data}
 
@@ -2189,7 +2615,6 @@ defmodule Tau.Session do
   end
 
   defp dispatch_tools(tool_calls, data) do
-    transition(data.id, data, :tool_executing)
     parent = self()
 
     # D-060 / #293: build per-turn lookup table mapping call_id ->
@@ -2248,12 +2673,31 @@ defmodule Tau.Session do
 
     eval_ctx = %{cwd: data.cwd, active_skill: data.active_skill}
 
-    {gated, allowed} =
-      Enum.split_with(tool_calls, fn %{name: name, arguments: args} ->
-        Tau.Permissions.Evaluator.evaluate(rule_set, name, args, eval_ctx, mode) == :deny
-      end)
+    # SPEC-PERMISSION-PROMPTS §4 B1 (D-091): three-way partition — `:deny`,
+    # `:ask`, `:allow`. The prior two-way split treated `:ask` as `:allow`,
+    # silently exposing unmatched tools. Replace with an explicit three-way
+    # reduce so each verdict class is handled correctly.
+    {gated, ask_calls, allowed} =
+      Enum.reduce(
+        tool_calls,
+        {[], [], []},
+        fn %{name: name, arguments: args} = call, {denied, asking, allowed_acc} ->
+          case PermEvaluator.evaluate(rule_set, name, args, eval_ctx, mode) do
+            :deny -> {[call | denied], asking, allowed_acc}
+            :ask -> {denied, [call | asking], allowed_acc}
+            :allow -> {denied, asking, [call | allowed_acc]}
+          end
+        end
+      )
 
-    # Synthesise tool_results for denied calls — model sees them as is_error.
+    # Restore emit order (reduce reverses).
+    gated = Enum.reverse(gated)
+    ask_calls = Enum.reverse(ask_calls)
+    allowed = Enum.reverse(allowed)
+
+    # Synthesise tool_results for deny-rule denied calls — model sees them as
+    # is_error. Always done via {:tool_done} messages; processed by :tool_executing
+    # (non-permission path) or the :awaiting_permission {:tool_done} handler.
     Enum.each(gated, fn %{id: id, name: name} ->
       result =
         ToolResult.new(
@@ -2267,94 +2711,206 @@ defmodule Tau.Session do
 
       :telemetry.execute([:tau, :permissions, :decision], %{system_time: System.system_time()}, %{
         tool: name,
+        tool_call_id: id,
         decision: :deny,
         session_id: data.id
       })
     end)
 
-    # Run :pre_tool_use synchronously per call. Hook-vetoed calls synthesise
-    # a tool_result on the spot; survivors form the parallel batch handed to
-    # the dispatcher (#33).
-    {_hook_denied, parallel_calls} =
-      Enum.reduce(allowed, {[], []}, fn %{id: id, name: name, arguments: args}, {denied, kept} ->
-        case Tau.Hooks.Dispatcher.run(
-               :pre_tool_use,
-               hook_payload(data, :pre_tool_use, %{
-                 tool_name: name,
-                 tool_call_id: id,
-                 tool_input: args
-               })
-             ) do
-          {:halt, reason} ->
-            result =
-              ToolResult.new(
-                tool_call_id: id,
-                tool_name: name,
-                content: "Hook blocked: #{inspect(reason)}",
-                is_error: true
-              )
+    # SPEC-PERMISSION-PROMPTS §4 B1 (D-092, D-093): handle the `:ask` batch.
+    #
+    # Non-interactive (D-093): resolve immediately to fail-closed `:deny`.
+    # The FSM never enters `:awaiting_permission`; the factory-loop substrate
+    # (`tau run`) is never deadlocked.
+    #
+    # Interactive (D-092): broadcast `%PermissionRequest{}` per call, collect
+    # into `pending_permission_requests`, enter `:awaiting_permission`.
+    {data, ask_in_flight} =
+      if data.interactive? do
+        # Interactive: broadcast and defer.
+        pending =
+          Enum.reduce(ask_calls, %{}, fn %{id: id, name: name, arguments: args}, acc ->
+            :telemetry.execute(
+              [:tau, :permissions, :request],
+              %{system_time: System.system_time()},
+              %{session_id: data.id, tool_call_id: id, tool_name: name}
+            )
 
-            Process.send(parent, {:tool_done, id, result}, [])
-            {[id | denied], kept}
+            broadcast(data.id, %Events.PermissionRequest{
+              session_id: data.id,
+              tool_call_id: id,
+              name: name,
+              arguments: args,
+              decision_reason: "Tool not matched by any allow rule in current mode."
+            })
 
-          {:deny, reason} ->
-            result =
-              ToolResult.new(
-                tool_call_id: id,
-                tool_name: name,
-                content: "Hook denied: #{reason}",
-                is_error: true
-              )
+            Map.put(acc, id, %{name: name, arguments: args})
+          end)
 
-            Process.send(parent, {:tool_done, id, result}, [])
-            {[id | denied], kept}
+        ask_in_flight = Enum.into(ask_calls, %{}, fn %{id: id} -> {id, :awaiting_permission} end)
+        {%{data | pending_permission_requests: pending}, ask_in_flight}
+      else
+        # Non-interactive: fail-closed deny (D-093).
+        Enum.each(ask_calls, fn %{id: id, name: name} ->
+          result =
+            ToolResult.new(
+              tool_call_id: id,
+              tool_name: name,
+              content:
+                "Permission required for #{name} but session is non-interactive; denied by policy.",
+              is_error: true
+            )
 
-          {:cont, payload} ->
-            rewritten_args = Map.get(payload, :tool_input, args)
-            {denied, [{id, name, rewritten_args} | kept]}
-        end
-      end)
+          Process.send(parent, {:tool_done, id, result}, [])
 
-    parallel_calls = Enum.reverse(parallel_calls)
+          :telemetry.execute(
+            [:tau, :permissions, :decision],
+            %{system_time: System.system_time()},
+            %{
+              session_id: data.id,
+              tool_call_id: id,
+              tool_name: name,
+              decision: :deny_non_interactive
+            }
+          )
+        end)
 
-    # D-060 / #293: refresh lookups for hook-rewritten args so the
-    # recorded hash matches what the tool executed against.
-    call_lookups =
-      Enum.reduce(parallel_calls, call_lookups, fn {id, name, args}, acc ->
-        Map.put(acc, id, {name, tool_args_hash(args)})
-      end)
-
-    dispatcher_pid =
-      case parallel_calls do
-        [] -> nil
-        _ -> spawn_parallel_dispatcher(parallel_calls, data, parent)
+        ask_in_flight = Enum.into(ask_calls, %{}, fn %{id: id} -> {id, :denied} end)
+        {data, ask_in_flight}
       end
 
-    real_tasks = Enum.into(parallel_calls, %{}, fn {id, _n, _a} -> {id, :running} end)
+    # D-091 (whole-round deferral): when entering :awaiting_permission, do NOT
+    # dispatch the :allow calls. Add them raw to permission_dispatch_batch so
+    # finish_permission_round/1 can run hooks and dispatch them after all :ask
+    # calls are resolved. Instant-resolve {:tool_done} messages (gated, whitelist,
+    # activated) are processed by the :awaiting_permission {:tool_done} handler.
+    if data.interactive? and ask_calls != [] do
+      # Pre-approved :allow calls: held raw — hooks run in finish_permission_round/1.
+      allow_batch =
+        Enum.map(allowed, fn %{id: id, name: name, arguments: args} ->
+          {id, name, args}
+        end)
 
-    initial_in_flight =
-      real_tasks
-      |> Map.merge(Enum.into(gated, %{}, fn %{id: id} -> {id, :denied} end))
-      |> Map.merge(Enum.into(whitelisted_out, %{}, fn %{id: id} -> {id, :whitelist_filtered} end))
-      |> Map.merge(activated_in_flight)
+      # tools_in_flight covers: :ask sentinels, gated (deny-rule) instant results,
+      # whitelist-filtered instant results, and activated (skill) instant results.
+      # All these have {:tool_done} messages in the mailbox; the
+      # :awaiting_permission {:tool_done} handler processes them without
+      # triggering the post-round transition (that only fires when
+      # pending_permission_requests is empty).
+      initial_in_flight =
+        ask_in_flight
+        |> Map.merge(Enum.into(gated, %{}, fn %{id: id} -> {id, :denied} end))
+        |> Map.merge(Enum.into(whitelisted_out, %{}, fn %{id: id} -> {id, :whitelist_filtered} end))
+        |> Map.merge(activated_in_flight)
 
-    {:next_state, :tool_executing,
-     %{
-       data
-       | tools_in_flight: initial_in_flight,
-         tool_dispatcher: dispatcher_pid,
-         provider_task: nil,
-         assembler: nil,
-         stream_ref: nil,
-         # C76 (SPEC-OTEL-REPORTER): the provider.request span was closed in
-         # finalize_assistant/2 before dispatch_tools/2 is called. Clear the
-         # ref so it doesn't linger stale across the tool-execution phase.
-         provider_span_ref: nil,
-         # D-060 / #293: merge this round's lookups with any carried from
-         # earlier rounds in the same turn. The `:tool_done` handler
-         # removes its own entry after consuming it.
-         tool_loop_call_lookups: Map.merge(data.tool_loop_call_lookups, call_lookups)
-     }}
+      transition(data.id, data, :awaiting_permission)
+
+      {:next_state, :awaiting_permission,
+       %{
+         data
+         | tools_in_flight: initial_in_flight,
+           tool_dispatcher: nil,
+           # Pre-approved :allow calls + any :allow_once decisions accumulate here.
+           permission_dispatch_batch: allow_batch,
+           permission_pending_results: [],
+           provider_task: nil,
+           assembler: nil,
+           stream_ref: nil,
+           # C76 (SPEC-OTEL-REPORTER): clear span discriminator.
+           provider_span_ref: nil,
+           # D-060 / #293: merge this round's lookups.
+           tool_loop_call_lookups: Map.merge(data.tool_loop_call_lookups, call_lookups)
+       }}
+    else
+      # Non-permission path: run hooks on :allow calls and dispatch immediately.
+
+      # Run :pre_tool_use synchronously per call. Hook-vetoed calls synthesise
+      # a tool_result on the spot; survivors form the parallel batch handed to
+      # the dispatcher (#33).
+      {_hook_denied, parallel_calls} =
+        Enum.reduce(allowed, {[], []}, fn %{id: id, name: name, arguments: args}, {denied, kept} ->
+          case Tau.Hooks.Dispatcher.run(
+                 :pre_tool_use,
+                 hook_payload(data, :pre_tool_use, %{
+                   tool_name: name,
+                   tool_call_id: id,
+                   tool_input: args
+                 })
+               ) do
+            {:halt, reason} ->
+              result =
+                ToolResult.new(
+                  tool_call_id: id,
+                  tool_name: name,
+                  content: "Hook blocked: #{inspect(reason)}",
+                  is_error: true
+                )
+
+              Process.send(parent, {:tool_done, id, result}, [])
+              {[id | denied], kept}
+
+            {:deny, reason} ->
+              result =
+                ToolResult.new(
+                  tool_call_id: id,
+                  tool_name: name,
+                  content: "Hook denied: #{reason}",
+                  is_error: true
+                )
+
+              Process.send(parent, {:tool_done, id, result}, [])
+              {[id | denied], kept}
+
+            {:cont, payload} ->
+              rewritten_args = Map.get(payload, :tool_input, args)
+              {denied, [{id, name, rewritten_args} | kept]}
+          end
+        end)
+
+      parallel_calls = Enum.reverse(parallel_calls)
+
+      # D-060 / #293: refresh lookups for hook-rewritten args so the
+      # recorded hash matches what the tool executed against.
+      call_lookups =
+        Enum.reduce(parallel_calls, call_lookups, fn {id, name, args}, acc ->
+          Map.put(acc, id, {name, tool_args_hash(args)})
+        end)
+
+      dispatcher_pid =
+        case parallel_calls do
+          [] -> nil
+          _ -> spawn_parallel_dispatcher(parallel_calls, data, parent)
+        end
+
+      real_tasks = Enum.into(parallel_calls, %{}, fn {id, _n, _a} -> {id, :running} end)
+
+      initial_in_flight =
+        real_tasks
+        |> Map.merge(ask_in_flight)
+        |> Map.merge(Enum.into(gated, %{}, fn %{id: id} -> {id, :denied} end))
+        |> Map.merge(Enum.into(whitelisted_out, %{}, fn %{id: id} -> {id, :whitelist_filtered} end))
+        |> Map.merge(activated_in_flight)
+
+      transition(data.id, data, :tool_executing)
+
+      {:next_state, :tool_executing,
+       %{
+         data
+         | tools_in_flight: initial_in_flight,
+           tool_dispatcher: dispatcher_pid,
+           provider_task: nil,
+           assembler: nil,
+           stream_ref: nil,
+           # C76 (SPEC-OTEL-REPORTER): the provider.request span was closed in
+           # finalize_assistant/2 before dispatch_tools/2 is called. Clear the
+           # ref so it doesn't linger stale across the tool-execution phase.
+           provider_span_ref: nil,
+           # D-060 / #293: merge this round's lookups with any carried from
+           # earlier rounds in the same turn. The `:tool_done` handler
+           # removes its own entry after consuming it.
+           tool_loop_call_lookups: Map.merge(data.tool_loop_call_lookups, call_lookups)
+       }}
+    end
   end
 
   # #33: single iterator over the parallel batch via
@@ -2439,6 +2995,157 @@ defmodule Tau.Session do
 
   defp whitelist_size(:all), do: :all
   defp whitelist_size(list) when is_list(list), do: length(list)
+
+  # SPEC-PERMISSION-PROMPTS §4 B3 (D-091): called when the last pending
+  # permission request is resolved. Emits accumulated instant-resolve results
+  # (from :deny_once decisions and pre-resolved items tracked in
+  # permission_pending_results), then dispatches the approved batch
+  # (permission_dispatch_batch — pre-approved :allow calls + :allow_once calls).
+  #
+  # The :awaiting_permission {:tool_done} handler has already processed
+  # pre-resolved items (deny-rule, whitelist, activated) from tools_in_flight
+  # while we were waiting for consent. The only remaining tools_in_flight
+  # entries at this point are the :awaiting_permission sentinels (the :ask
+  # calls now resolved). We remove those and build a fresh tools_in_flight
+  # for the :tool_executing state from only the newly dispatched tasks.
+  defp finish_permission_round(data) do
+    parent = self()
+
+    # Remove all :awaiting_permission sentinel entries from tools_in_flight.
+    # They represent :ask calls that have now been resolved. Any remaining
+    # entries (non-sentinel) are pre-resolved items whose {:tool_done} messages
+    # were processed by the :awaiting_permission {:tool_done} handler.
+    tools_in_flight_after =
+      Map.reject(data.tools_in_flight, fn {_id, status} -> status == :awaiting_permission end)
+
+    # Emit all accumulated instant-resolve results (deny_once decisions +
+    # any accumulated permission_pending_results). These are broadcast as
+    # ToolEnd events and appended to history directly — no {:tool_done} routing.
+    data =
+      Enum.reduce(
+        Enum.reverse(data.permission_pending_results),
+        %{data | tools_in_flight: tools_in_flight_after},
+        fn {call_id, result_msg}, acc ->
+          {_lookup, call_lookups_rest} = Map.pop(acc.tool_loop_call_lookups, call_id)
+
+          acc =
+            acc
+            |> append_message(result_msg)
+            |> persist_event("tool_result", tool_result_to_data(result_msg))
+            |> Map.put(:tool_loop_call_lookups, call_lookups_rest)
+
+          broadcast(acc.id, %Events.ToolEnd{
+            session_id: acc.id,
+            tool_call_id: call_id,
+            result: result_msg
+          })
+
+          acc
+        end
+      )
+
+    # Capture the batch before clearing data fields.
+    batch = Enum.reverse(data.permission_dispatch_batch)
+
+    data = %{
+      data
+      | pending_permission_requests: %{},
+        permission_dispatch_batch: [],
+        permission_pending_results: []
+    }
+
+    # Run :pre_tool_use hooks on the approved batch (pre-approved :allow calls
+    # + :allow_once user-approved calls). Hook-denied calls are emitted directly
+    # rather than via {:tool_done} — we are not yet in :tool_executing.
+    {hook_denied_results, parallel_calls} =
+      Enum.reduce(
+        batch,
+        {[], []},
+        fn {id, name, args}, {denied_acc, kept} ->
+          case Tau.Hooks.Dispatcher.run(
+                 :pre_tool_use,
+                 hook_payload(data, :pre_tool_use, %{
+                   tool_name: name,
+                   tool_call_id: id,
+                   tool_input: args
+                 })
+               ) do
+            {:halt, reason} ->
+              result =
+                ToolResult.new(
+                  tool_call_id: id,
+                  tool_name: name,
+                  content: "Hook blocked: #{inspect(reason)}",
+                  is_error: true
+                )
+
+              {[{id, result} | denied_acc], kept}
+
+            {:deny, reason} ->
+              result =
+                ToolResult.new(
+                  tool_call_id: id,
+                  tool_name: name,
+                  content: "Hook denied: #{reason}",
+                  is_error: true
+                )
+
+              {[{id, result} | denied_acc], kept}
+
+            {:cont, payload} ->
+              rewritten_args = Map.get(payload, :tool_input, args)
+              {denied_acc, [{id, name, rewritten_args} | kept]}
+          end
+        end
+      )
+
+    parallel_calls = Enum.reverse(parallel_calls)
+
+    # D-060 / #293: update lookups for hook-rewritten args.
+    call_lookups =
+      Enum.reduce(parallel_calls, data.tool_loop_call_lookups, fn {id, name, args}, acc ->
+        Map.put(acc, id, {name, tool_args_hash(args)})
+      end)
+
+    # Emit hook-denied results directly.
+    data =
+      Enum.reduce(hook_denied_results, %{data | tool_loop_call_lookups: call_lookups}, fn {call_id,
+                                                                                           result_msg},
+                                                                                          acc ->
+        {_lookup, call_lookups_rest} = Map.pop(acc.tool_loop_call_lookups, call_id)
+
+        acc =
+          acc
+          |> append_message(result_msg)
+          |> persist_event("tool_result", tool_result_to_data(result_msg))
+          |> Map.put(:tool_loop_call_lookups, call_lookups_rest)
+
+        broadcast(acc.id, %Events.ToolEnd{
+          session_id: acc.id,
+          tool_call_id: call_id,
+          result: result_msg
+        })
+
+        acc
+      end)
+
+    if parallel_calls == [] do
+      # No approved calls to run (all denied or all batch empty). Proceed
+      # directly to the provider with the accumulated results in history.
+      handle_event(
+        :internal,
+        :start_provider,
+        :provider_streaming,
+        %{data | tools_in_flight: %{}, tool_dispatcher: nil}
+      )
+    else
+      dispatcher_pid = spawn_parallel_dispatcher(parallel_calls, data, parent)
+      running = Enum.into(parallel_calls, %{}, fn {id, _n, _a} -> {id, :running} end)
+
+      {:next_state, :tool_executing,
+       %{data | tools_in_flight: running, tool_dispatcher: dispatcher_pid}}
+    end
+  end
 
   # ADR-0013 / #16: format the synthetic ToolResult content for a
   # permissions :deny. When an active skill is in effect AND the tool is

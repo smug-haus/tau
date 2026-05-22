@@ -400,6 +400,9 @@ defmodule Tau.CLI.HeadlessRunTest do
           session_id: parent_sid,
           provider: MultiFixtureProvider,
           model: "multi-fixture",
+          # SPEC-PERMISSION-PROMPTS: bypass permissions — this test exercises
+          # the Gemini-shape two-turn run (f-1 regression), not the permission system.
+          metadata: %{permissions_mode: :bypass},
           provider_ctx: provider_ctx
         )
 

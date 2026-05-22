@@ -108,7 +108,13 @@ defmodule Tau.Permissions.Evaluator do
     if Tau.Permissions.Heuristics.destructive_bash?(args), do: :deny, else: :allow
   end
 
-  defp default_for_mode(:auto, tool, _) when tool in ["Read", "Grep", "Glob"], do: :allow
+  # "Agent" is dispatch infrastructure (same rationale as :plan above — see
+  # Issue #166). :auto mode governs write-capability for content tools; it
+  # should not gate sub-agent delegation. The child inherits :auto as its
+  # permission ceiling via Tau.Permissions.Mode.clamp/2.
+  defp default_for_mode(:auto, tool, _) when tool in ["Read", "Grep", "Glob", "Agent"],
+    do: :allow
+
   defp default_for_mode(:auto, _, _), do: :ask
   defp default_for_mode(_, _, _), do: :ask
 end

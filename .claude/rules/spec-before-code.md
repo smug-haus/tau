@@ -85,6 +85,16 @@ The current spec catalog:
   `prompt_cache_key`), or any new adapter that needs to declare caching
   behaviour. Triage score 3/5; D-063..D-065 live here.
 
+- `docs/spec/SPEC-PERMISSION-PROMPTS.md` — interactive permission prompts for
+  `:ask`-verdict tool calls; the `:awaiting_permission` FSM state; non-interactive
+  fail-closed `:deny` resolution; the `interactive?` session property; the
+  `decide_permission/3` and `set_permissions_mode/2` public API.
+  Mandatory for any PR touching `lib/tau/session.ex` (the permission gate in
+  `dispatch_tools/2` or the `:awaiting_permission` state), `lib/tau/session/events.ex`
+  (the `%PermissionRequest{}` struct), or `lib/tau/cli.ex` (the `interactive:` opt in
+  `run_cmd/1`). Also mandatory for PR-B (TUI approval dialog / `Shift+Tab` cycle /
+  status-bar indicator). Triage score 4/5; D-090..D-099 live here.
+
 Future SPECs land here as new components reach triage threshold.
 
 ## What this rule requires

@@ -122,6 +122,9 @@ defmodule Tau.QA.CoordinatorRoundtripTest do
         provider: MultiFixtureProvider,
         session_id: parent_sid,
         cwd: tmp,
+        # SPEC-PERMISSION-PROMPTS: bypass permissions — this test exercises
+        # the coordinator round-trip, not the permission system.
+        metadata: %{permissions_mode: :bypass},
         provider_ctx: provider_ctx
       )
 
