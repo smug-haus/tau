@@ -134,7 +134,12 @@ defmodule Tau.Extensions.LoaderTest do
         nil
       )
 
-      on_exit(fn -> :telemetry.detach(handler_id) end)
+      on_exit(fn ->
+        :telemetry.detach(handler_id)
+        Loader.unload(HelloWorldExt)
+        # Allow the async cast to complete before the test process exits.
+        :timer.sleep(50)
+      end)
 
       # Load via module atom (already compiled, skips collision check).
       Loader.reload(HelloWorldExt)
@@ -155,6 +160,11 @@ defmodule Tau.Extensions.LoaderTest do
     end
 
     test "extension tools registered via module atom are visible via Tau.Tool.lookup/1" do
+      on_exit(fn ->
+        Loader.unload(HelloWorldExt)
+        :timer.sleep(50)
+      end)
+
       # Register by module atom (bypasses compilation path).
       Loader.reload(HelloWorldExt)
       # Allow the async cast to process.
@@ -170,6 +180,11 @@ defmodule Tau.Extensions.LoaderTest do
 
   describe "AC-5 / D-123: auto-discovery and collision guard" do
     test "load_entry with a module atom appears in loaded list" do
+      on_exit(fn ->
+        Loader.unload(HelloWorldExt)
+        :timer.sleep(50)
+      end)
+
       # HelloWorldExt is compiled from test/support at test compile time.
       # Register it directly by module atom.
       Loader.reload(HelloWorldExt)
@@ -231,6 +246,11 @@ defmodule Tau.Extensions.LoaderTest do
 
   describe "AC-6 / D-124: reload does not leave stale generation" do
     test "reloading a module removes prior generation from loaded map" do
+      on_exit(fn ->
+        Loader.unload(HelloWorldExt)
+        :timer.sleep(50)
+      end)
+
       # First load.
       Loader.reload(HelloWorldExt)
       :timer.sleep(100)
@@ -251,6 +271,11 @@ defmodule Tau.Extensions.LoaderTest do
     end
 
     test "tool is still resolvable after reload (not unregistered without re-registering)" do
+      on_exit(fn ->
+        Loader.unload(HelloWorldExt)
+        :timer.sleep(50)
+      end)
+
       Loader.reload(HelloWorldExt)
       :timer.sleep(100)
 
@@ -258,6 +283,196 @@ defmodule Tau.Extensions.LoaderTest do
       :timer.sleep(100)
 
       assert {:ok, HelloWorldExt.HelloTool} = Tau.Tool.lookup("hello_world")
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # AC-3 / D-122: init/1 crash-isolation — the REAL path (f-1)
+  #
+  # The tests above exercise crash-isolation in handle_cast (Loader.reload/1).
+  # This section starts a FRESH Loader process whose init/1 encounters a
+  # raising extension, and asserts init/1 returns {:ok, _} (not {:stop, _}).
+  # ---------------------------------------------------------------------------
+
+  describe "AC-3 / D-122: init/1 crash-isolation for a raising extension" do
+    test "a fresh Loader whose init/1 encounters a raising extension starts successfully" do
+      # AC-3 requires that Loader.init/1 itself is crash-isolated, not just
+      # handle_cast (which Loader.reload/1 uses). This test starts a FRESH,
+      # anonymous Loader process with a raising extension injected directly
+      # into init/1 via opts[:entries]. If the crash-isolation guard were
+      # absent from the init/1 load path, start_link would return {:error, _}
+      # because init/1 would propagate the raise to the supervisor.
+      #
+      # A known-good sibling extension (HelloWorldExt) registered before the
+      # raising extension MUST still be registered — proves the failing extension
+      # was skipped, not the whole load aborted — D-120, D-122.
+      uid = unique_id()
+
+      # Write a raising extension source file to a temp dir.
+      tmp = Path.join(System.tmp_dir!(), "tau-loader-init-#{uid}")
+      File.mkdir_p!(tmp)
+      on_exit(fn -> File.rm_rf!(tmp) end)
+
+      raising_file = Path.join(tmp, "raising_#{uid}.ex")
+
+      raising_src =
+        "defmodule Tau.Extensions.LoaderTest.InitRaising#{uid} do\n" <>
+          "  @behaviour Tau.Extension\n" <>
+          "  def tools, do: raise(\"boom — intentional crash inside init/1 load path\")\n" <>
+          "  def hooks, do: []\n" <>
+          "  def commands, do: []\n" <>
+          "  def skills, do: []\n" <>
+          "end\n"
+
+      File.write!(raising_file, raising_src)
+
+      # opts[:entries] bypasses Settings.Cache — passes HelloWorldExt (good)
+      # and the raising file path as init/1 entries directly. start_link calls
+      # init/1 synchronously; if init/1 does not crash-isolate the raiser, it
+      # propagates the exception and start_link returns {:error, reason}.
+      test_name = :"test_loader_init_#{uid}"
+
+      result =
+        start_supervised(
+          %{
+            id: test_name,
+            start:
+              {Tau.Extensions.Loader, :start_link,
+               [[name: test_name, entries: [HelloWorldExt, raising_file]]]}
+          },
+          id: test_name
+        )
+
+      assert {:ok, pid} = result,
+             "Loader.init/1 MUST return {:ok, state} even when a raising extension is present. " <>
+               "Got: #{inspect(result)}. This means init/1 propagated the raise — " <>
+               "the crash-isolation guard in the init/1 load path is missing or broken."
+
+      assert Process.alive?(pid),
+             "Fresh Loader process must be alive after init/1 encountered a raising extension"
+
+      # The good extension (HelloWorldExt) must be registered despite the raiser.
+      entries = GenServer.call(test_name, :list)
+
+      assert Enum.any?(entries, fn %{key: k} -> k == HelloWorldExt end),
+             "HelloWorldExt must be registered — the raising extension must be skipped, " <>
+               "not cause the entire load to abort (D-120, D-122)"
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # AC-5 / D-123: collision guard for brand-new (never-compiled) modules (f-3)
+  # ---------------------------------------------------------------------------
+
+  describe "AC-5 / D-123: collision guard catches brand-new module name collisions" do
+    test "two dirs each defining the same never-before-seen module: second is skipped" do
+      # Use a unique module name so neither file is compiled at test-compile time.
+      # This is the scenario the old String.to_existing_atom guard MISSED:
+      # the name had no existing atom, so peek_module_names/1 returned [] for it,
+      # and both files passed the guard independently.
+      uid = unique_id()
+      mod_name = "TauTestCollision#{uid}"
+      full_mod = "Tau.Extensions.LoaderTest.#{mod_name}"
+
+      dir_a = Path.join(System.tmp_dir!(), "tau-coll-a-#{uid}")
+      dir_b = Path.join(System.tmp_dir!(), "tau-coll-b-#{uid}")
+      File.mkdir_p!(dir_a)
+      File.mkdir_p!(dir_b)
+
+      on_exit(fn ->
+        File.rm_rf!(dir_a)
+        File.rm_rf!(dir_b)
+      end)
+
+      src_template = fn extra ->
+        """
+        defmodule #{full_mod} do
+          @behaviour Tau.Extension
+          def tools, do: []
+          def hooks, do: []
+          def commands, do: []
+          def skills, do: []
+          def marker, do: #{inspect(extra)}
+        end
+        """
+      end
+
+      File.write!(Path.join(dir_a, "ext.ex"), src_template.(:dir_a))
+      File.write!(Path.join(dir_b, "ext.ex"), src_template.(:dir_b))
+
+      # Load dir_a first — this compiles the module.
+      Loader.reload(dir_a)
+      :timer.sleep(200)
+
+      # Now load dir_b — same module name, already compiled from dir_a.
+      # The collision guard should detect the collision and skip dir_b.
+      Loader.reload(dir_b)
+      :timer.sleep(200)
+
+      # The module from dir_a should be the one that stuck.
+      # Its marker/0 should return :dir_a.
+      mod_atom = String.to_existing_atom("Elixir." <> full_mod)
+
+      assert Code.ensure_loaded?(mod_atom),
+             "Module from dir_a should be compiled"
+
+      assert mod_atom.marker() == :dir_a,
+             "Collision guard failed: dir_b clobbered dir_a's module. " <>
+               "The guard must detect collisions even for brand-new module names."
+
+      on_exit(fn ->
+        Loader.unload(dir_a)
+        Loader.unload(dir_b)
+        :timer.sleep(50)
+      end)
+    end
+
+    test "two dirs each defining the same never-before-seen module in one load: first file wins, second skipped" do
+      # Variant: both files are in the same directory scan, i.e. both go through
+      # compile_with_collision_guard in the same load_entry call. After the first
+      # file is compiled, the second should be skipped.
+      uid = unique_id()
+      mod_name = "TauTestCollSameDir#{uid}"
+      full_mod = "Tau.Extensions.LoaderTest.#{mod_name}"
+
+      dir = Path.join(System.tmp_dir!(), "tau-coll-same-#{uid}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf!(dir) end)
+
+      src = fn extra ->
+        """
+        defmodule #{full_mod} do
+          @behaviour Tau.Extension
+          def tools, do: []
+          def hooks, do: []
+          def commands, do: []
+          def skills, do: []
+          def marker, do: #{inspect(extra)}
+        end
+        """
+      end
+
+      # Two files in the same dir — alphabetical order determines which compiles first.
+      File.write!(Path.join(dir, "a_first.ex"), src.(:first))
+      File.write!(Path.join(dir, "b_second.ex"), src.(:second))
+
+      Loader.reload(dir)
+      :timer.sleep(200)
+
+      mod_atom = String.to_existing_atom("Elixir." <> full_mod)
+
+      assert Code.ensure_loaded?(mod_atom),
+             "First file in the dir should have compiled the module"
+
+      # The first file (alphabetically a_first.ex) defines :first.
+      assert mod_atom.marker() == :first,
+             "The second file should have been skipped by the collision guard — " <>
+               "its defmodule defines the same module as the first file"
+
+      on_exit(fn ->
+        Loader.unload(dir)
+        :timer.sleep(50)
+      end)
     end
   end
 
@@ -271,6 +486,11 @@ defmodule Tau.Extensions.LoaderTest do
     end
 
     test "each entry has :key and :info fields" do
+      on_exit(fn ->
+        Loader.unload(HelloWorldExt)
+        :timer.sleep(50)
+      end)
+
       Loader.reload(HelloWorldExt)
       :timer.sleep(100)
 

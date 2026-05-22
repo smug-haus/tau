@@ -30,7 +30,13 @@ defmodule Tau.Extensions.Loader do
   # Public API
   # ---------------------------------------------------------------------------
 
-  def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  def start_link(opts) do
+    # Allow tests to pass a custom name via opts[:name] (for anonymous instances).
+    # Production start_link is called with [] from the supervision tree, which
+    # defaults to the module name as required by D-121.
+    name = Keyword.get(opts, :name, __MODULE__)
+    GenServer.start_link(__MODULE__, opts, name: name)
+  end
 
   @doc """
   Load (or reload) an extension entry. `entry` is one of:
@@ -40,6 +46,14 @@ defmodule Tau.Extensions.Loader do
     * `{module, opts}` (programmatic API; module assumed already loaded)
   """
   def reload(entry), do: GenServer.cast(__MODULE__, {:reload, entry})
+
+  @doc """
+  Unload an extension entry, removing its registrations from all four
+  registries. No-op if the entry was never loaded. Used by tests to
+  remove loaded extensions and prevent cross-test registry leakage — f-2.
+  """
+  @spec unload(term()) :: :ok
+  def unload(entry), do: GenServer.cast(__MODULE__, {:unload, entry})
 
   @doc """
   Reload every entry currently configured in `settings.extensions`.
@@ -62,16 +76,23 @@ defmodule Tau.Extensions.Loader do
   # ---------------------------------------------------------------------------
 
   @impl true
-  def init(_opts) do
+  def init(opts) do
     # Synchronous load in init/1 — D-121, C-004.
     # This is safe because Settings.Cache starts before the Loader in the
     # :rest_for_one tree (position 5 vs 14). A crash in an extension callback
     # is caught inside load_entry/1 (D-120, D-122). The only way init/1 can
     # return {:stop, _} is if Settings.Cache.get/0 itself raises — which
     # would indicate a deeper startup ordering bug.
-    settings = Tau.Settings.Cache.get()
-    explicit_entries = Map.get(settings, :extensions, [])
-    discovered_entries = discover_extension_dirs()
+    #
+    # opts[:entries] — if present, use as the entries list directly, bypassing
+    # Settings.Cache and auto-discovery. Used only in tests (f-1). D-122.
+    {explicit_entries, discovered_entries} =
+      if Keyword.has_key?(opts, :entries) do
+        {Keyword.fetch!(opts, :entries), []}
+      else
+        settings = Tau.Settings.Cache.get()
+        {Map.get(settings, :extensions, []), discover_extension_dirs()}
+      end
 
     # Deduplicate: explicit entries take priority over discovered ones.
     all_entries = explicit_entries ++ Enum.reject(discovered_entries, &(&1 in explicit_entries))
@@ -100,6 +121,11 @@ defmodule Tau.Extensions.Loader do
 
     :telemetry.execute([:tau, :extensions, :reloaded], %{count: 1}, %{entry: entry})
 
+    {:noreply, state}
+  end
+
+  def handle_cast({:unload, entry}, state) do
+    state = unload_entry(entry, state)
     {:noreply, state}
   end
 
@@ -140,14 +166,18 @@ defmodule Tau.Extensions.Loader do
   # ---------------------------------------------------------------------------
 
   # Returns a list of directory path strings to scan.
+  # Uses File.cwd/0 (non-raising) so a missing cwd does not propagate
+  # as an unguarded raise from init/1 — D-122, f-5.
   defp discover_extension_dirs do
     home = System.user_home() || "."
-    cwd = File.cwd!()
 
-    [
-      Path.join(home, ".tau/extensions"),
-      Path.join(cwd, ".tau/extensions")
-    ]
+    cwd_dirs =
+      case File.cwd() do
+        {:ok, cwd} -> [Path.join(cwd, ".tau/extensions")]
+        {:error, _reason} -> []
+      end
+
+    [Path.join(home, ".tau/extensions") | cwd_dirs]
     |> Enum.filter(&File.dir?/1)
   end
 
@@ -235,21 +265,20 @@ defmodule Tau.Extensions.Loader do
 
   # Best-effort extraction of module names from source without full compilation.
   # Looks for `defmodule Foo.Bar` patterns. Returns {:ok, [atom]} or :error.
+  #
+  # Uses String.to_atom/1 (not String.to_existing_atom/1) so that module names
+  # that have never been compiled — i.e. brand-new extension modules — are
+  # still extracted and checked for collisions via Code.ensure_loaded?/1.
+  # Module names in extension files are bounded in number, so adding atoms here
+  # is acceptable. — D-123, f-3.
   defp peek_module_names(path) do
     case File.read(path) do
       {:ok, src} ->
         names =
           Regex.scan(~r/defmodule\s+([\w.]+)/, src, capture: :all_but_first)
           |> List.flatten()
-          |> Enum.map(fn name ->
-            # Convert string like "Foo.Bar" to an atom module name.
-            try do
-              String.to_existing_atom("Elixir." <> name)
-            rescue
-              ArgumentError -> nil
-            end
-          end)
-          |> Enum.reject(&is_nil/1)
+          # credo:disable-for-next-line Credo.Check.Warning.UnsafeToAtom
+          |> Enum.map(fn name -> String.to_atom("Elixir." <> name) end)
 
         {:ok, names}
 
@@ -281,7 +310,7 @@ defmodule Tau.Extensions.Loader do
           :telemetry.execute(
             [:tau, :extensions, :load, :stop],
             %{duration: duration},
-            Map.merge(meta, %{modules: [mod]})
+            Map.merge(meta, %{result: :ok, modules: [mod]})
           )
 
           {:ok, key, info}
@@ -292,7 +321,8 @@ defmodule Tau.Extensions.Loader do
           :telemetry.execute(
             [:tau, :extensions, :load, :stop],
             %{duration: duration_val},
-            Map.merge(meta, %{skipped: true})
+            # result: :skipped distinguishes "loaded nothing" from :ok (f-6 / SPEC-EXTENSIONS §5).
+            Map.merge(meta, %{result: :skipped, skipped: true})
           )
 
           :error

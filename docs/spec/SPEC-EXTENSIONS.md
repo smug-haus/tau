@@ -106,10 +106,12 @@ discovery supplements, not replaces.
 
 **C-007** — A module-name collision across two discovered directories is
 a silent BEAM module-table clobber (last `Code.compile_file/1` wins).
-The guard is `Code.ensure_loaded?/1` collision detection BEFORE
-`Code.compile_file/1`. If a collision is detected, the later file is
-skipped with a `:warning` log; `Enum.uniq_by` after the fact is
-insufficient.
+The guard extracts declared module names from the source text via
+`String.to_atom/1` (not `String.to_existing_atom/1` — the latter silently
+drops names for modules not yet compiled, defeating the guard for brand-new
+modules) and checks via `Code.ensure_loaded?/1` BEFORE `Code.compile_file/1`.
+If a collision is detected, the later file is skipped with a `:warning` log;
+`Enum.uniq_by` after compilation is insufficient.
 
 ### Hot-reload constraints
 
@@ -227,6 +229,27 @@ Called synchronously in `Loader.init/1` and in `handle_cast(:reload_all)`
 to obtain the `extensions` key. `Settings.Cache` is guaranteed to be
 started before the Loader in the `:rest_for_one` tree (C-005).
 
+### Loader ↔ Hooks Dispatcher — `:pre_tool_use` payload contract
+
+Extension hook handlers receive a payload built by `Tau.Session.hook_payload/3`.
+The canonical fields are documented in `Tau.Hook` (Phase-10 base fields:
+`:session_id`, `:cwd`, `:permission_mode`, `:hook_event_name`, `:transcript_path`,
+`:metadata`).
+
+For `:pre_tool_use`, the event-specific fields are (f-4):
+
+```elixir
+%{
+  tool_name:    String.t(),   # public tool name, e.g. "hello_world"
+  tool_call_id: String.t(),   # unique ID for the call within the turn
+  tool_input:   map()         # decoded arguments map
+}
+```
+
+Extension hooks matching on `:pre_tool_use` MUST pattern-match at minimum
+`:tool_name` and MAY inspect the other fields. This contract is stable for
+Stage A; Stage B may extend but not remove keys.
+
 ---
 
 ## §5 Telemetry
@@ -241,11 +264,18 @@ Every extension load attempt emits a `[:tau, :extensions, :load]` span:
   %{entry: entry}
 )
 
-# on success:
+# on success (result: :ok):
 :telemetry.execute(
   [:tau, :extensions, :load, :stop],
   %{duration: duration},
-  %{entry: entry, modules: [mod]}
+  %{entry: entry, result: :ok, modules: [mod]}
+)
+
+# on non-raise skip (module does not implement Tau.Extension; result: :skipped):
+:telemetry.execute(
+  [:tau, :extensions, :load, :stop],
+  %{duration: duration},
+  %{entry: entry, result: :skipped, skipped: true}
 )
 
 # on extension callback crash:
@@ -255,6 +285,11 @@ Every extension load attempt emits a `[:tau, :extensions, :load]` span:
   %{entry: entry, kind: kind, reason: reason, stacktrace: stacktrace}
 )
 ```
+
+The `result:` key in `*.stop` disambiguates `:ok` (extension loaded and
+registered) from `:skipped` (module present but not a `Tau.Extension`).
+Consumers counting successful loads MUST filter on `result: :ok`. The
+`skipped: true` key is retained for backwards compatibility — f-6.
 
 Reload events emit `[:tau, :extensions, :reloaded]` as before.
 
@@ -273,15 +308,20 @@ extension tools are registered before `Tau.Sessions.Supervisor` starts.
 
 **D-122** — `Tau.Extensions.Loader.init/1` MUST return `{:ok, state}` even if
 every configured extension fails to load. The Loader is never the source of a
-`:max_restarts` boot-failure cascade. A crash inside `init/1` propagates only
-if `Settings.Cache.get/0` itself fails (which would indicate a deeper startup
-ordering bug, not an extension bug).
+`:max_restarts` boot-failure cascade. Two sources can propagate a crash from
+`init/1`: `Settings.Cache.get/0` failing (deeper startup ordering bug) and
+`File.cwd/0` failing (OS-level cwd error). The Loader guards both: `Settings.Cache`
+is an upstream dependency — its failure is intentional propagation; `File.cwd/0`
+(non-raising form; f-5) is used in `discover_extension_dirs/0` so a missing cwd
+produces an empty discovery list rather than a raised exception.
 
 **D-123** — Auto-discovery scans `~/.tau/extensions/` then
-`<cwd>/.tau/extensions/`. A module-name collision is detected via
-`Code.ensure_loaded?/1` BEFORE `Code.compile_file/1`. The later file is
-skipped with a `:warning` log. `Enum.uniq_by` after compilation is
-insufficient because BEAM already has the clobbered module in the table.
+`<cwd>/.tau/extensions/`. Module names are extracted from source text via
+`String.to_atom/1` (not `String.to_existing_atom/1`, which silently drops
+names for brand-new modules). Collision is detected via `Code.ensure_loaded?/1`
+BEFORE `Code.compile_file/1`. The later file is skipped with a `:warning` log.
+`Enum.uniq_by` after compilation is insufficient because BEAM already has the
+clobbered module in the table.
 
 **D-124** — `reload/1` calls `unload/1` for the prior generation of the
 extension before registering the new one. The prior generation's entries

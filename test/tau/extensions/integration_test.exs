@@ -80,6 +80,11 @@ defmodule Tau.Extensions.IntegrationTest do
     :timer.sleep(150)
 
     on_exit(fn ->
+      # Unload HelloWorldExt so its /hello command and other registrations
+      # are removed from the global registries — prevents cross-test leakage
+      # into catalog_test.exs and other suites — f-2.
+      Loader.unload(HelloWorldExt)
+      :timer.sleep(100)
       File.rm_rf!(tmp)
       Application.delete_env(:tau, :data_dir)
     end)
