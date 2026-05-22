@@ -4,9 +4,9 @@
 |---|---|
 | **Status** | Draft — #374 (M7 foundation) implementation PR open. |
 | **Date** | 2026-05-22 |
-| **Scope** | The `:tau_web` Phoenix poncho package: endpoint lifecycle, LiveView → PubSub → session FSM boundary, `/health` liveness probe, and the D-170..D-179 runtime invariants. |
+| **Scope** | The `:tau_web` Phoenix poncho package: endpoint lifecycle, LiveView → PubSub → session FSM boundary, `/health` liveness probe, and the D-180..D-189 runtime invariants. |
 | **Method** | PSDH (`.claude/skills/design-reasoning`); triage score 4/5. |
-| **D-NNN block** | D-170..D-179 (reserved in `docs/MISSION.md`). |
+| **D-NNN block** | D-180..D-189 (reserved in `docs/MISSION.md`). |
 | **Tracking issues** | #374 (M7 foundation — this PR), #42 (LiveView dashboard tracking), #43–#48 (individual dashboard features). |
 
 ## 0. Why this spec exists
@@ -55,7 +55,7 @@ by `Tau.Application`. `TauWeb.Application` MUST NOT start a second
 `Phoenix.PubSub` child — only one `Tau.PubSub` process exists in the BEAM
 node. The endpoint is configured with `pubsub_server: Tau.PubSub`; the
 `Application.get_env(:tau_web, TauWeb.Endpoint)[:pubsub_server]` returns
-`Tau.PubSub` (D-174, see §4 B4 and §6).
+`Tau.PubSub` (D-184, see §4 B4 and §6).
 
 **Endpoint.** `TauWebWeb.Endpoint` is the Phoenix endpoint module (following
 `phx.new --app tau_web` naming convention). It is supervised by
@@ -73,7 +73,7 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
 - **★ [C2-B1]** The mount-then-subscribe window. Between `mount/3` completion
   and `handle_info/2` wiring the socket subscribes; events broadcast in that
   window are lost. The replay (reading from `Tau.Persistence`) covers this
-  window. The de-dup logic (D-170) prevents double-display of events present
+  window. The de-dup logic (D-180) prevents double-display of events present
   in both the replay and the live stream.
 
 ### Q2: What ordering is semantically critical?
@@ -81,20 +81,20 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
 - **★ [C3-B1]** Replay MUST complete before the socket subscribes. Subscribing
   before replay creates a race: live events arrive before replay is done and
   de-dup state is incomplete. The correct sequence: `Tau.Persistence.read/1` →
-  apply replay events → `Phoenix.PubSub.subscribe/2` (D-171).
+  apply replay events → `Phoenix.PubSub.subscribe/2` (D-181).
 - **[C4-B2]** Session drive calls (via the public `Tau` API) MUST NOT bypass
   the `Tau.Session` gen_statem interface. Direct `:gen_statem.call/cast` on the
-  session PID from LiveView is forbidden (D-172).
+  session PID from LiveView is forbidden (D-182).
 
 ### Q3: What crosses a process boundary?
 
 - **[C5-B1]** LiveView `handle_info/2` receives `Tau.Session.Events` structs
   broadcast over `Tau.PubSub`. These are the same structs the TUI consumes;
-  the web layer MUST NOT define a parallel event format (D-173).
+  the web layer MUST NOT define a parallel event format (D-183).
 - **[C6-B3]** `Tau.Sessions.Registry` liveness ping is a cross-process call.
   The `/health` endpoint uses `Application.spec(:tau, :vsn)` (a pure env read,
   no process call) rather than a registry lookup to avoid flakiness in test
-  (D-175).
+  (D-185).
 
 ### Q4: Are there feedback loops?
 
@@ -122,7 +122,7 @@ On `connected?/1 == true`:
 2. Apply the replay events to socket assigns.
 3. Call `Phoenix.PubSub.subscribe(Tau.PubSub, topic)` to begin live stream.
 4. In `handle_info/2`, de-dup incoming events against already-applied replay
-   events using a monotonic event ID or timestamp cursor (D-170).
+   events using a monotonic event ID or timestamp cursor (D-180).
 
 On `connected?/1 == false` (static render): skip steps 1-4; render empty or
 loading state.
@@ -132,7 +132,7 @@ loading state.
 LiveView handlers that drive a session MUST call only the public `Tau` module
 API (e.g. `Tau.send_message/2`, `Tau.cancel/1`). They MUST NOT:
 
-- Call `:gen_statem.call/cast` on a session PID directly (D-172).
+- Call `:gen_statem.call/cast` on a session PID directly (D-182).
 - Access `Tau.Session` internal state structs.
 - Call any `Tau.Session.*` private function.
 
@@ -145,18 +145,18 @@ Tau.Sessions.Registry.lookup(session_id)
 ```
 
 which returns `{:ok, pid}` or `:error`. Do NOT use `Process.whereis/1` with
-a derived atom name (D-176).
+a derived atom name (D-186).
 
 ### B4 — PubSub reuse (no second Phoenix.PubSub)
 
 `:tau_web` MUST NOT start its own `Phoenix.PubSub` process. The invariant is
 enforced at two levels:
 
-1. **Supervisor children (D-174a):** `TauWeb.Application.start/2` MUST NOT
+1. **Supervisor children (D-184a):** `TauWeb.Application.start/2` MUST NOT
    include `{Phoenix.PubSub, …}` in its child list. `Supervisor.which_children/1`
    on `TauWeb.Supervisor` MUST return an empty list when filtered for
    `Phoenix.PubSub` children.
-2. **Endpoint configuration (D-174b):** `Application.get_env(:tau_web,
+2. **Endpoint configuration (D-184b):** `Application.get_env(:tau_web,
    TauWeb.Endpoint)[:pubsub_server]` MUST equal `Tau.PubSub`.
 
 ### B5 — Telemetry namespace
@@ -164,7 +164,7 @@ enforced at two levels:
 All `:tau_web`-originated telemetry events MUST use the `[:tau, :web, …]`
 prefix. Examples: `[:tau, :web, :request, :start]`,
 `[:tau, :web, :live_view, :mount]`. Events MUST NOT use the `[:phoenix, …]`
-or `[:tau_web, …]` prefixes at the application level (D-177).
+or `[:tau_web, …]` prefixes at the application level (D-187).
 
 ## 5. Acceptance criteria
 
@@ -184,21 +184,21 @@ or `[:tau_web, …]` prefixes at the application level (D-177).
 - **AC-5 (meta)** `.gitignore` excludes `web/{_build,deps,assets/node_modules}`;
   core `lib/tau/`, root `mix.exs`, and `config/` are unchanged.
 
-## 6. D-NNN namespace (D-170..D-179)
+## 6. D-NNN namespace (D-180..D-189)
 
 | D-NNN | Invariant |
 |---|---|
-| D-170 | LiveView mount-replay de-dup: events present in the JSONL replay AND arriving via live PubSub MUST NOT be rendered twice. De-dup cursor is a monotonic event ID or timestamp applied before subscription. |
-| D-171 | Replay-before-subscribe ordering: `Tau.Persistence.read/1` MUST complete and replay events MUST be applied to assigns BEFORE `Phoenix.PubSub.subscribe/2` is called in `mount/3`. |
-| D-172 | No direct gen_statem access: LiveView handlers MUST NOT call `:gen_statem.call/cast` on session PIDs. All session interaction goes through the public `Tau` module API. |
-| D-173 | No parallel event format: `handle_info/2` MUST consume `Tau.Session.Events` structs as-is. `:tau_web` MUST NOT define a parallel or shadow event struct for the same events. |
-| D-174a | No second PubSub child: `TauWeb.Application.start/2` MUST NOT include `{Phoenix.PubSub, …}` in its children. `Supervisor.which_children(TauWeb.Supervisor)` filtered for `Phoenix.PubSub` MUST return `[]`. |
-| D-174b | Endpoint PubSub config: `Application.get_env(:tau_web, TauWeb.Endpoint)[:pubsub_server]` MUST equal `Tau.PubSub`. |
-| D-175 | /health uses Application.spec: the `/health` controller MUST use `Application.spec(:tau, :vsn)` to obtain the `:tau` version, not a process call to `Tau.Sessions.Registry`. |
-| D-176 | Registry lookup via public API: `Tau.Sessions.Registry.lookup/1` is the only permitted session-liveness probe from LiveView. `Process.whereis/1` with a derived atom is forbidden. |
-| D-177 | Telemetry namespace: `:tau_web`-originated telemetry MUST use `[:tau, :web, …]` prefix. |
-| D-178 | Poncho isolation: `:tau_web` MUST NOT be added to `Tau.Application`'s supervision tree. The Burrito binary MUST NOT include the Phoenix stack. |
-| D-179 | reserved |
+| D-180 | LiveView mount-replay de-dup: events present in the JSONL replay AND arriving via live PubSub MUST NOT be rendered twice. De-dup cursor is a monotonic event ID or timestamp applied before subscription. |
+| D-181 | Replay-before-subscribe ordering: `Tau.Persistence.read/1` MUST complete and replay events MUST be applied to assigns BEFORE `Phoenix.PubSub.subscribe/2` is called in `mount/3`. |
+| D-182 | No direct gen_statem access: LiveView handlers MUST NOT call `:gen_statem.call/cast` on session PIDs. All session interaction goes through the public `Tau` module API. |
+| D-183 | No parallel event format: `handle_info/2` MUST consume `Tau.Session.Events` structs as-is. `:tau_web` MUST NOT define a parallel or shadow event struct for the same events. |
+| D-184a | No second PubSub child: `TauWeb.Application.start/2` MUST NOT include `{Phoenix.PubSub, …}` in its children. `Supervisor.which_children(TauWeb.Supervisor)` filtered for `Phoenix.PubSub` MUST return `[]`. |
+| D-184b | Endpoint PubSub config: `Application.get_env(:tau_web, TauWeb.Endpoint)[:pubsub_server]` MUST equal `Tau.PubSub`. |
+| D-185 | /health uses Application.spec: the `/health` controller MUST use `Application.spec(:tau, :vsn)` to obtain the `:tau` version, not a process call to `Tau.Sessions.Registry`. |
+| D-186 | Registry lookup via public API: `Tau.Sessions.Registry.lookup/1` is the only permitted session-liveness probe from LiveView. `Process.whereis/1` with a derived atom is forbidden. |
+| D-187 | Telemetry namespace: `:tau_web`-originated telemetry MUST use `[:tau, :web, …]` prefix. |
+| D-188 | Poncho isolation: `:tau_web` MUST NOT be added to `Tau.Application`'s supervision tree. The Burrito binary MUST NOT include the Phoenix stack. |
+| D-189 | reserved |
 
 ## Appendix A — PSDH triage record
 
@@ -219,13 +219,13 @@ from this document):
 
 | File | Owner boundary |
 |---|---|
-| `web/lib/tau_web/application.ex` | B4, D-174a, D-178 |
-| `web/lib/tau_web_web/endpoint.ex` | B4, D-174b |
+| `web/lib/tau_web/application.ex` | B4, D-184a, D-188 |
+| `web/lib/tau_web_web/endpoint.ex` | B4, D-184b |
 | `web/lib/tau_web_web/router.ex` | AC-3 |
-| `web/lib/tau_web_web/controllers/health_controller.ex` | AC-3, D-175 |
-| `web/lib/tau_web_web/telemetry.ex` | B5, D-177 |
-| `web/config/config.exs` | B4, D-174b |
-| `web/mix.exs` | AC-2, D-178 |
+| `web/lib/tau_web_web/controllers/health_controller.ex` | AC-3, D-185 |
+| `web/lib/tau_web_web/telemetry.ex` | B5, D-187 |
+| `web/config/config.exs` | B4, D-184b |
+| `web/mix.exs` | AC-2, D-188 |
 | `web/test/tau_web/foundation_test.exs` | AC-3, AC-4 |
 | `web/test/support/conn_case.ex` | AC-3, AC-4 |
 
