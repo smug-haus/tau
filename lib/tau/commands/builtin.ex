@@ -41,6 +41,16 @@ defmodule Tau.Commands.Builtin do
   @callback name() :: String.t()
 
   @doc """
+  Returns a short one-line description of the command for `/help` and the
+  completion menu (SPEC-TUI-COMPLETION AC-1).
+
+  This callback is **optional** — existing built-ins that do not implement it
+  compile unchanged; `Tau.Commands.Catalog.list/1` falls back to `""`.
+  """
+  @callback description() :: String.t()
+  @optional_callbacks description: 0
+
+  @doc """
   Run the built-in command.
 
   `args` is the tail of the user's input after the command name (trimmed).
@@ -58,6 +68,7 @@ defmodule Tau.Commands.Builtin do
   @spec table() :: %{String.t() => module()}
   def table do
     %{
+      "/help" => Tau.Commands.Builtin.Help,
       "/ping" => Tau.Commands.Builtin.Ping,
       "/tree" => Tau.Commands.Builtin.Tree,
       "/copy" => Tau.Commands.Builtin.Copy,

@@ -27,6 +27,9 @@ defmodule Tau.Commands.Builtin.Tree do
   def name, do: "/tree"
 
   @impl Tau.Commands.Builtin
+  def description, do: "Show the session fork/clone lineage tree"
+
+  @impl Tau.Commands.Builtin
   def run(_args, data) do
     session_id = data.id
     forked_from = Map.get(data.metadata || %{}, :forked_from)

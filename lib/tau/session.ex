@@ -41,6 +41,7 @@ defmodule Tau.Session do
   # unchanged (D-037).
   alias Tau.CodingAgent.Event, as: CAEvent
   alias Tau.CodingAgent.Workspace, as: CAWorkspace
+  alias Tau.Commands.Catalog
 
   # #17: name of the synthetic FSM-internal tool the model emits to
   # activate a discovered skill. Not registered as a `Tau.Tool` module
@@ -824,6 +825,14 @@ defmodule Tau.Session do
           permission_pending_results: []
         }
 
+        # D-103 / D-108 (SPEC-TUI-COMPLETION §4 B1): broadcast the command
+        # catalog once at session start so the TUI menu is pre-populated
+        # before the first `/` keystroke. The catalog is derived here from
+        # the freshly-constructed `data` so skills and templates discovered
+        # at init are included. Re-broadcast on every `/reload` (D-108).
+        catalog_entries = Catalog.list(data)
+        broadcast(id, %Events.CommandCatalog{session_id: id, entries: catalog_entries})
+
         {:ok, :awaiting_user, data}
 
       err ->
@@ -902,6 +911,14 @@ defmodule Tau.Session do
       {:model_command, new_model, _msg} ->
         # /model <id>: attempt swap
         handle_slash_model_swap(data, new_model)
+
+      {:unknown_command, name} ->
+        # D-101 (SPEC-TUI-COMPLETION AC-2): unrecognized slash command.
+        # Emit a SystemNotice and stay in :awaiting_user — do NOT start a
+        # provider turn (never call process_user_message/2 from here).
+        notice = "Unknown command #{name} — type /help to list available commands"
+        broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: notice})
+        {:keep_state, data}
 
       {:sync, msg} ->
         process_user_message(msg, data)
@@ -4745,10 +4762,7 @@ defmodule Tau.Session do
                         {:sync, rewritten}
 
                       nil ->
-                        # Unknown slash command; pass through verbatim — the
-                        # model can handle it as a stylistic preface or report
-                        # that it's unknown.
-                        {:sync, msg}
+                        unknown_or_passthrough(bare_name, args, msg)
                     end
                 end
             end
@@ -4760,6 +4774,12 @@ defmodule Tau.Session do
   end
 
   defp classify_slash_command(msg, _skills, _templates, _cwd), do: {:sync, msg}
+
+  # D-101 (SPEC-TUI-COMPLETION C8-B5): only intercept whitespace-free tokens
+  # (args == "") with no catalog match. When args is non-empty the user provided
+  # arguments, pass through to the model (AC-7 guard).
+  defp unknown_or_passthrough(bare_name, "", _msg), do: {:unknown_command, "/" <> bare_name}
+  defp unknown_or_passthrough(_bare_name, _args, msg), do: {:sync, msg}
 
   defp build_template_context(cwd) do
     user =
@@ -4894,6 +4914,16 @@ defmodule Tau.Session do
         if is_binary(notice) do
           broadcast(data2.id, %Events.SystemNotice{session_id: data2.id, text: notice})
         end
+
+        # D-108 (SPEC-TUI-COMPLETION §4 B1): re-broadcast the catalog after
+        # any {:mutate} outcome so /reload's updated skills and templates are
+        # reflected in the TUI menu immediately (without a session restart).
+        catalog_entries2 = Catalog.list(data2)
+
+        broadcast(data2.id, %Events.CommandCatalog{
+          session_id: data2.id,
+          entries: catalog_entries2
+        })
 
         {:keep_state, data2}
 

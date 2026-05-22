@@ -46,6 +46,9 @@ defmodule Tau.Commands.Builtin.Logout do
   def name, do: "/logout"
 
   @impl Tau.Commands.Builtin
+  def description, do: "Remove stored credentials for a provider"
+
+  @impl Tau.Commands.Builtin
   def run(args, _data) do
     provider = String.trim(args)
 

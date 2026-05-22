@@ -35,6 +35,9 @@ defmodule Tau.Commands.Builtin.Export do
   def name, do: "/export"
 
   @impl Tau.Commands.Builtin
+  def description, do: "Export the conversation to markdown or JSON"
+
+  @impl Tau.Commands.Builtin
   def run(args, data) do
     format = args |> String.trim() |> normalise_format()
 
