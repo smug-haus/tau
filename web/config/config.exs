@@ -11,23 +11,17 @@ config :tau_web,
   generators: [timestamp_type: :utc_datetime]
 
 # Configure the endpoint.
-# TauWebWeb.Endpoint is the actual Phoenix Endpoint module (phx.new naming convention).
-# TauWeb.Endpoint is the canonical public name used in configuration lookups and
-# in the SPEC-WEB-DASHBOARD §4 B4 PubSub-reuse contract; both keys carry the
-# pubsub_server setting so that `Application.get_env(:tau_web, TauWeb.Endpoint)`
-# returns the correct value.
-config :tau_web, TauWebWeb.Endpoint,
+# :tau_web reuses the running Tau.PubSub from the core :tau application
+# (SPEC-WEB-DASHBOARD §4 B4 / AC-4). It MUST NOT start its own Phoenix.PubSub.
+config :tau_web, TauWeb.Endpoint,
   url: [host: "localhost"],
   adapter: Bandit.PhoenixAdapter,
   render_errors: [
-    formats: [html: TauWebWeb.ErrorHTML, json: TauWebWeb.ErrorJSON],
+    formats: [html: TauWeb.ErrorHTML, json: TauWeb.ErrorJSON],
     layout: false
   ],
   pubsub_server: Tau.PubSub,
   live_view: [signing_salt: "n4BS+YXr"]
-
-# Canonical config key used by SPEC-WEB-DASHBOARD §4 B4 and AC-4 gating test.
-config :tau_web, TauWeb.Endpoint, pubsub_server: Tau.PubSub
 
 # Configure esbuild (the version is required)
 config :esbuild,

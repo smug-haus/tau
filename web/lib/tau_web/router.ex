@@ -1,11 +1,11 @@
-defmodule TauWebWeb.Router do
-  use TauWebWeb, :router
+defmodule TauWeb.Router do
+  use TauWeb, :router
 
   pipeline :browser do
     plug :accepts, ["html"]
     plug :fetch_session
     plug :fetch_live_flash
-    plug :put_root_layout, html: {TauWebWeb.Layouts, :root}
+    plug :put_root_layout, html: {TauWeb.Layouts, :root}
     plug :protect_from_forgery
     plug :put_secure_browser_headers
   end
@@ -14,7 +14,7 @@ defmodule TauWebWeb.Router do
     plug :accepts, ["json"]
   end
 
-  scope "/", TauWebWeb do
+  scope "/", TauWeb do
     pipe_through :browser
 
     get "/", PageController, :home
@@ -22,7 +22,7 @@ defmodule TauWebWeb.Router do
 
   # Health check endpoint — AC-3 (SPEC-WEB-DASHBOARD §4 B1).
   # Proves :tau_web reached the :tau core application by including its version.
-  scope "/", TauWebWeb do
+  scope "/", TauWeb do
     pipe_through :api
 
     get "/health", HealthController, :index
@@ -40,7 +40,7 @@ defmodule TauWebWeb.Router do
     scope "/dev" do
       pipe_through :browser
 
-      live_dashboard "/dashboard", metrics: TauWebWeb.Telemetry
+      live_dashboard "/dashboard", metrics: TauWeb.Telemetry
     end
   end
 end

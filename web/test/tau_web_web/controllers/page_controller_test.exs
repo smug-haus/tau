@@ -1,4 +1,4 @@
-defmodule TauWebWeb.PageControllerTest do
+defmodule TauWeb.PageControllerTest do
   use TauWeb.ConnCase
 
   test "GET /", %{conn: conn} do

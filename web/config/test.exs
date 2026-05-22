@@ -2,7 +2,7 @@ import Config
 
 # We don't run a server during test. If one is required,
 # you can enable the server option below.
-config :tau_web, TauWebWeb.Endpoint,
+config :tau_web, TauWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4002],
   secret_key_base: "2HK0eq5xoHWCVMj3LfJDrXP2X1iP0/giaVWyRUSOHLm8bJua7lJhY3VyVtTvnd18",
   server: false

@@ -6,7 +6,7 @@ import Config
 # The watchers configuration can be used to run external
 # watchers to your application. For example, we can use it
 # to bundle .js and .css sources.
-config :tau_web, TauWebWeb.Endpoint,
+config :tau_web, TauWeb.Endpoint,
   # Binding to loopback ipv4 address prevents access from other machines.
   # Change to `ip: {0, 0, 0, 0}` to allow access from other machines.
   http: [ip: {127, 0, 0, 1}],
@@ -43,7 +43,7 @@ config :tau_web, TauWebWeb.Endpoint,
 # different ports.
 
 # Reload browser tabs when matching files change.
-config :tau_web, TauWebWeb.Endpoint,
+config :tau_web, TauWeb.Endpoint,
   live_reload: [
     web_console_logger: true,
     patterns: [
@@ -52,8 +52,8 @@ config :tau_web, TauWebWeb.Endpoint,
       # Gettext translations
       ~r"priv/gettext/.*\.po$",
       # Router, Controllers, LiveViews and LiveComponents
-      ~r"lib/tau_web_web/router\.ex$",
-      ~r"lib/tau_web_web/(controllers|live|components)/.*\.(ex|heex)$"
+      ~r"lib/tau_web/router\.ex$",
+      ~r"lib/tau_web/(controllers|live|components)/.*\.(ex|heex)$"
     ]
   ]
 

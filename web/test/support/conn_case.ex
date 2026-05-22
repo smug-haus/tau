@@ -7,9 +7,7 @@ defmodule TauWeb.ConnCase do
   import other functionality to make it easier
   to build common data structures and query the data layer.
 
-  The module is named `TauWeb.ConnCase` (matching the `:tau_web` app namespace)
-  rather than `TauWebWeb.ConnCase` so that gating tests may `use TauWeb.ConnCase`
-  without namespace confusion.
+  The module is named `TauWeb.ConnCase` (matching the `:tau_web` app namespace).
   """
 
   use ExUnit.CaseTemplate
@@ -17,9 +15,9 @@ defmodule TauWeb.ConnCase do
   using do
     quote do
       # The default endpoint for testing
-      @endpoint TauWebWeb.Endpoint
+      @endpoint TauWeb.Endpoint
 
-      use TauWebWeb, :verified_routes
+      use TauWeb, :verified_routes
 
       # Import conveniences for testing with connections
       import Plug.Conn

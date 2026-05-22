@@ -1,4 +1,4 @@
-defmodule TauWebWeb.Endpoint do
+defmodule TauWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :tau_web
 
   # The session will be stored in the cookie and signed,
@@ -24,7 +24,7 @@ defmodule TauWebWeb.Endpoint do
     at: "/",
     from: :tau_web,
     gzip: not code_reloading?,
-    only: TauWebWeb.static_paths(),
+    only: TauWeb.static_paths(),
     raise_on_missing_only: code_reloading?
 
   # Code reloading can be explicitly enabled under the
@@ -50,5 +50,5 @@ defmodule TauWebWeb.Endpoint do
   plug Plug.MethodOverride
   plug Plug.Head
   plug Plug.Session, @session_options
-  plug TauWebWeb.Router
+  plug TauWeb.Router
 end

@@ -17,11 +17,10 @@ import Config
 # Alternatively, you can use `mix phx.gen.release` to generate a `bin/server`
 # script that automatically sets the env var above.
 if System.get_env("PHX_SERVER") do
-  config :tau_web, TauWebWeb.Endpoint, server: true
+  config :tau_web, TauWeb.Endpoint, server: true
 end
 
-config :tau_web, TauWebWeb.Endpoint,
-  http: [port: String.to_integer(System.get_env("PORT", "4000"))]
+config :tau_web, TauWeb.Endpoint, http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
 if config_env() == :prod do
   # The secret key base is used to sign/encrypt cookies and other secrets.
@@ -40,7 +39,7 @@ if config_env() == :prod do
 
   config :tau_web, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
-  config :tau_web, TauWebWeb.Endpoint,
+  config :tau_web, TauWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
     http: [
       # Enable IPv6 and bind on all interfaces.
@@ -56,7 +55,7 @@ if config_env() == :prod do
   # To get SSL working, you will need to add the `https` key
   # to your endpoint configuration:
   #
-  #     config :tau_web, TauWebWeb.Endpoint,
+  #     config :tau_web, TauWeb.Endpoint,
   #       https: [
   #         ...,
   #         port: 443,
@@ -78,7 +77,7 @@ if config_env() == :prod do
   # We also recommend setting `force_ssl` in your config/prod.exs,
   # ensuring no data is ever sent via http, always redirecting to https:
   #
-  #     config :tau_web, TauWebWeb.Endpoint,
+  #     config :tau_web, TauWeb.Endpoint,
   #       force_ssl: [hsts: true]
   #
   # Check `Plug.SSL` for all available options in `force_ssl`.

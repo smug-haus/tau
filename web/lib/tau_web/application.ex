@@ -8,7 +8,7 @@ defmodule TauWeb.Application do
   @impl true
   def start(_type, _args) do
     children = [
-      TauWebWeb.Telemetry,
+      TauWeb.Telemetry,
       {DNSCluster, query: Application.get_env(:tau_web, :dns_cluster_query) || :ignore},
       # NOTE: :tau_web reuses the running Tau.PubSub from the core :tau application.
       # It MUST NOT start its own Phoenix.PubSub — see SPEC-WEB-DASHBOARD §4 B4
@@ -16,7 +16,7 @@ defmodule TauWeb.Application do
       # Start a worker by calling: TauWeb.Worker.start_link(arg)
       # {TauWeb.Worker, arg},
       # Start to serve requests, typically the last entry
-      TauWebWeb.Endpoint
+      TauWeb.Endpoint
     ]
 
     # See https://hexdocs.pm/elixir/Supervisor.html
@@ -29,7 +29,7 @@ defmodule TauWeb.Application do
   # whenever the application is updated.
   @impl true
   def config_change(changed, _new, removed) do
-    TauWebWeb.Endpoint.config_change(changed, removed)
+    TauWeb.Endpoint.config_change(changed, removed)
     :ok
   end
 end

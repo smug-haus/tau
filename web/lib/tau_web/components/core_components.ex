@@ -1,4 +1,4 @@
-defmodule TauWebWeb.CoreComponents do
+defmodule TauWeb.CoreComponents do
   @moduledoc """
   Provides core UI components.
 
@@ -27,7 +27,7 @@ defmodule TauWebWeb.CoreComponents do
 
   """
   use Phoenix.Component
-  use Gettext, backend: TauWebWeb.Gettext
+  use Gettext, backend: TauWeb.Gettext
 
   alias Phoenix.LiveView.JS
 
@@ -490,9 +490,9 @@ defmodule TauWebWeb.CoreComponents do
     # with our gettext backend as first argument. Translations are
     # available in the errors.po file (as we use the "errors" domain).
     if count = opts[:count] do
-      Gettext.dngettext(TauWebWeb.Gettext, "errors", msg, msg, count, opts)
+      Gettext.dngettext(TauWeb.Gettext, "errors", msg, msg, count, opts)
     else
-      Gettext.dgettext(TauWebWeb.Gettext, "errors", msg, opts)
+      Gettext.dgettext(TauWeb.Gettext, "errors", msg, opts)
     end
   end
 

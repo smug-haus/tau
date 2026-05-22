@@ -1,4 +1,4 @@
-defmodule TauWebWeb.HealthController do
+defmodule TauWeb.HealthController do
   @moduledoc """
   Liveness health-check endpoint for the `:tau_web` poncho package.
 
@@ -9,7 +9,7 @@ defmodule TauWebWeb.HealthController do
   AC-3 / SPEC-WEB-DASHBOARD §4 B1.
   """
 
-  use TauWebWeb, :controller
+  use TauWeb, :controller
 
   @doc """
   Returns `{"status": "ok", "tau_version": "<version>"}`.
