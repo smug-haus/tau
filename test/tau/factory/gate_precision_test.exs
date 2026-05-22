@@ -39,17 +39,20 @@ defmodule Tau.Factory.GatePrecisionTest do
 
       # --- base commit: a root-level project only (NO sub/ directory) ---
       File.mkdir_p!(Path.join(tmp_dir, "lib"))
+
       File.write!(Path.join(tmp_dir, "mix.exs"), """
       defmodule Root.MixProject do
         use Mix.Project
         def project, do: [app: :root, version: "0.1.0"]
       end
       """)
+
       File.write!(Path.join(tmp_dir, "lib/root.ex"), """
       defmodule Root do
         def hello, do: :world
       end
       """)
+
       run.(["add", "-A"])
       run.(["commit", "-q", "-m", "base: root project only"])
       {base_ref, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: tmp_dir)
@@ -58,17 +61,20 @@ defmodule Tau.Factory.GatePrecisionTest do
       # --- HEAD commit: adds an entirely new sub-project (sub/) ---
       File.mkdir_p!(Path.join(tmp_dir, "sub/lib"))
       File.mkdir_p!(Path.join(tmp_dir, "sub/test"))
+
       File.write!(Path.join(tmp_dir, "sub/mix.exs"), """
       defmodule Sub.MixProject do
         use Mix.Project
         def project, do: [app: :sub, version: "0.1.0"]
       end
       """)
+
       File.write!(Path.join(tmp_dir, "sub/lib/sub.ex"), """
       defmodule Sub do
         def run, do: :ok
       end
       """)
+
       File.write!(Path.join(tmp_dir, "sub/test/sub_gate_test.exs"), """
       defmodule SubGateTest do
         use ExUnit.Case
@@ -78,6 +84,7 @@ defmodule Tau.Factory.GatePrecisionTest do
         end
       end
       """)
+
       run.(["add", "-A"])
       run.(["commit", "-q", "-m", "head: add sub project"])
 
