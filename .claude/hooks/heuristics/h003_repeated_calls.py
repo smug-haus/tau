@@ -23,7 +23,7 @@ Two scoping rules are load-bearing:
 
 import re
 
-THRESHOLD = 3
+THRESHOLD = 6
 SCAN_WINDOW = 10
 
 # Read-only shell commands: inspection, polling, waiting. A repeat of any
