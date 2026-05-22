@@ -57,7 +57,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
       test "q on empty prompt returns model unchanged (quit is async side-effect)" do
         m = model()
-        next = App.update(m, {:event, %{ch: ?q}})
+        next = App.update(m, {:event, %{key: 0, ch: ?q, mod: 0}})
         # Model is returned as-is; the async spawn stops the supervisor.
         assert Editor.empty?(next.editor)
         assert next.status == m.status
@@ -66,13 +66,13 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
       test "q on non-empty prompt appends q to input" do
         m = %{model() | editor: Editor.new() |> Editor.insert("hel")}
-        next = App.update(m, {:event, %{ch: ?q}})
+        next = App.update(m, {:event, %{key: 0, ch: ?q, mod: 0}})
         assert Editor.text(next.editor) == "helq"
       end
 
       test "q on non-empty prompt does not change status or transcript" do
         m = %{model() | editor: Editor.new() |> Editor.insert("hello")}
-        next = App.update(m, {:event, %{ch: ?q}})
+        next = App.update(m, {:event, %{key: 0, ch: ?q, mod: 0}})
         assert next.status == m.status
         assert next.transcript == m.transcript
       end
@@ -262,20 +262,20 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     describe "update/2 — menu open on / (AC-3, D-102)" do
       test "typing / opens the menu" do
         m = %{model() | catalog: sample_catalog(), status: :idle}
-        next = App.update(m, {:event, %{ch: ?/}})
+        next = App.update(m, {:event, %{key: 0, ch: ?/, mod: 0}})
         assert next.menu != nil, "menu should open when / is typed"
       end
 
       test "menu opens with builtins floor when catalog is nil (AC-9 / D-104)" do
         m = %{model() | catalog: nil, status: :idle}
-        next = App.update(m, {:event, %{ch: ?/}})
+        next = App.update(m, {:event, %{key: 0, ch: ?/, mod: 0}})
         assert next.menu != nil, "menu should open even with nil catalog (builtins floor)"
         assert next.menu.entries != []
       end
 
       test "menu.query is empty when only / is typed" do
         m = %{model() | catalog: sample_catalog(), status: :idle}
-        next = App.update(m, {:event, %{ch: ?/}})
+        next = App.update(m, {:event, %{key: 0, ch: ?/, mod: 0}})
         assert next.menu.query == ""
       end
 
@@ -290,8 +290,8 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
             status: :idle
         }
 
-        # Append 'c' to produce "/c"
-        next = App.update(m, {:event, %{ch: ?c}})
+        # Append 'c' to produce "/c" — realistic printable-char event shape
+        next = App.update(m, {:event, %{key: 0, ch: ?c, mod: 0}})
 
         if next.menu != nil do
           names = Enum.map(next.menu.entries, fn {_, e} -> e.name end)
@@ -305,7 +305,8 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         m = %{model() | editor: editor_with_slash_compact, catalog: sample_catalog(), status: :idle}
         # Open menu first
         m2 = %{m | menu: %{query: "compact", entries: [{0, hd(sample_catalog())}], selected: 0}}
-        next = App.update(m2, {:event, %{key: 32}})
+        # Space: termbox delivers space as key=32, ch=0 (quirk noted in handle_key)
+        next = App.update(m2, {:event, %{key: 32, ch: 0, mod: 0}})
         assert next.menu == nil, "space should close the menu"
       end
     end
@@ -332,24 +333,24 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       end
 
       test "arrow-down increments selected", %{model: m} do
-        next = App.update(m, {:event, %{key: 65_516}})
+        next = App.update(m, {:event, %{key: 65_516, ch: 0, mod: 0}})
         assert next.menu.selected == 1
       end
 
       test "arrow-up decrements selected", %{model: m} do
         m2 = %{m | menu: %{m.menu | selected: 2}}
-        next = App.update(m2, {:event, %{key: 65_517}})
+        next = App.update(m2, {:event, %{key: 65_517, ch: 0, mod: 0}})
         assert next.menu.selected == 1
       end
 
       test "arrow-up does not go below 0 (clamped)", %{model: m} do
-        next = App.update(m, {:event, %{key: 65_517}})
+        next = App.update(m, {:event, %{key: 65_517, ch: 0, mod: 0}})
         assert next.menu.selected == 0
       end
 
       test "arrow-down does not exceed count-1 (clamped)", %{model: m, entries: entries} do
         m2 = %{m | menu: %{m.menu | selected: length(entries) - 1}}
-        next = App.update(m2, {:event, %{key: 65_516}})
+        next = App.update(m2, {:event, %{key: 65_516, ch: 0, mod: 0}})
         assert next.menu.selected == length(entries) - 1
       end
 
@@ -358,7 +359,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         # Move to second entry
         m2 = %{m | menu: %{m.menu | selected: 1}}
         {_, selected_entry} = Enum.at(m2.menu.entries, 1)
-        next = App.update(m2, {:event, %{key: 13}})
+        next = App.update(m2, {:event, %{key: 13, ch: 0, mod: 0}})
         assert next.menu == nil, "menu should close after Enter"
         assert Editor.text(next.editor) == selected_entry.name <> " ", "input should be filled"
         # NOT submitted: status should not be :sending
@@ -371,7 +372,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         menu = %{query: "", entries: [], selected: 0}
         editor_with_slash = Editor.new() |> Editor.insert("/")
         m = %{model() | editor: editor_with_slash, menu: menu, status: :idle}
-        next = App.update(m, {:event, %{key: 27}})
+        next = App.update(m, {:event, %{key: 27, ch: 0, mod: 0}})
         assert next.menu == nil, "Esc should close menu"
         # Status should not be affected by Esc (no cancel)
         assert next.status == :idle
@@ -381,7 +382,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         menu = %{query: "", entries: [], selected: 0}
         editor_with_slash = Editor.new() |> Editor.insert("/")
         m = %{model() | editor: editor_with_slash, menu: menu, status: :idle}
-        next = App.update(m, {:event, %{key: 27}})
+        next = App.update(m, {:event, %{key: 27, ch: 0, mod: 0}})
         # cancel/1 calls Tau.cancel/1 but model.status would change
         # With menu open, Esc should just nil the menu
         assert next.menu == nil
@@ -392,7 +393,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         m = %{model() | menu: nil, status: :idle}
         # cancel/1 calls Tau.cancel but since this is a unit test (no FSM)
         # we just verify the model fields that cancel/1 sets
-        next = App.update(m, {:event, %{key: 27}})
+        next = App.update(m, {:event, %{key: 27, ch: 0, mod: 0}})
         # cancel/1 sets status: :idle and calls Tau.cancel (side effect)
         # The test verifies the model is returned (doesn't crash)
         assert is_map(next)
@@ -405,7 +406,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     describe "update/2 — Ctrl+J inserts newline (AC-1 / D-145)" do
       test "Ctrl+J inserts a newline at cursor without submitting" do
         m = %{model() | editor: Editor.new() |> Editor.insert("hello"), status: :idle}
-        next = App.update(m, {:event, %{key: 10}})
+        next = App.update(m, {:event, %{key: 10, ch: 0, mod: 0}})
         assert length(next.editor.lines) == 2
         assert next.status == :idle
       end
@@ -415,7 +416,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       test "Enter after trailing backslash inserts newline, does not submit" do
         # Buffer ends in backslash immediately before cursor
         m = %{model() | editor: Editor.new() |> Editor.insert("hello\\"), status: :idle}
-        next = App.update(m, {:event, %{key: 13}})
+        next = App.update(m, {:event, %{key: 13, ch: 0, mod: 0}})
         # Should have 2 lines (newline inserted, backslash removed)
         assert length(next.editor.lines) == 2
         # Not submitted
@@ -430,7 +431,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         # we check status becomes :sending
         # Note: Tau.send/2 in test env — catch the expected process-not-found
         try do
-          next = App.update(m, {:event, %{key: 13}})
+          next = App.update(m, {:event, %{key: 13, ch: 0, mod: 0}})
           assert next.status == :sending
         rescue
           _ -> :ok
@@ -452,7 +453,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         assert elem(ed.cursor, 0) == 1
 
         m = %{model() | editor: ed}
-        next = App.update(m, {:event, %{key: 65_517}})
+        next = App.update(m, {:event, %{key: 65_517, ch: 0, mod: 0}})
         # Cursor should move to row 0 (within buffer, not history)
         {row, _col} = next.editor.cursor
         assert row == 0
@@ -467,7 +468,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         # Move cursor to first line
         ed_first = %{ed | cursor: {0, 0}}
         m = %{model() | editor: ed_first, history: hist}
-        next = App.update(m, {:event, %{key: 65_517}})
+        next = App.update(m, {:event, %{key: 65_517, ch: 0, mod: 0}})
         # History should have been navigated (cursor changed in history)
         assert next.history != m.history or Editor.text(next.editor) == "old entry"
       end
@@ -484,7 +485,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         assert elem(ed.cursor, 0) == 0
 
         m = %{model() | editor: ed}
-        next = App.update(m, {:event, %{key: 65_516}})
+        next = App.update(m, {:event, %{key: 65_516, ch: 0, mod: 0}})
         # menu is nil so this goes to arrow_down
         {row, _col} = next.editor.cursor
         assert row == 1
@@ -496,7 +497,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         assert elem(ed.cursor, 0) == 0
         # With no history navigation pending, history_next returns nil
         m = %{model() | editor: ed}
-        next = App.update(m, {:event, %{key: 65_516}})
+        next = App.update(m, {:event, %{key: 65_516, ch: 0, mod: 0}})
         # history unchanged (nothing to navigate to)
         assert next.history == m.history
       end
@@ -506,21 +507,21 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       test "Ctrl+A (key 1) moves cursor to start of line" do
         ed = Editor.new() |> Editor.insert("hello")
         m = %{model() | editor: ed}
-        next = App.update(m, {:event, %{key: 1}})
+        next = App.update(m, {:event, %{key: 1, ch: 0, mod: 0}})
         assert next.editor.cursor == {0, 0}
       end
 
       test "Ctrl+E (key 5) moves cursor to end of line" do
         ed = Editor.new() |> Editor.insert("hello") |> Editor.move_line_start()
         m = %{model() | editor: ed}
-        next = App.update(m, {:event, %{key: 5}})
+        next = App.update(m, {:event, %{key: 5, ch: 0, mod: 0}})
         assert next.editor.cursor == {0, 5}
       end
 
       test "Ctrl+W (key 23) kills word before cursor" do
         ed = Editor.new() |> Editor.insert("alpha beta")
         m = %{model() | editor: ed}
-        next = App.update(m, {:event, %{key: 23}})
+        next = App.update(m, {:event, %{key: 23, ch: 0, mod: 0}})
         assert Editor.text(next.editor) == "alpha "
         assert hd(next.editor.kill_ring) == "beta"
       end
@@ -528,7 +529,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       test "Ctrl+U (key 21) kills to line start" do
         ed = Editor.new() |> Editor.insert("hello")
         m = %{model() | editor: ed}
-        next = App.update(m, {:event, %{key: 21}})
+        next = App.update(m, {:event, %{key: 21, ch: 0, mod: 0}})
         assert Editor.text(next.editor) == ""
         assert hd(next.editor.kill_ring) == "hello"
       end
@@ -536,7 +537,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       test "Ctrl+K (key 11) kills to line end" do
         ed = Editor.new() |> Editor.insert("hello") |> Editor.move_line_start()
         m = %{model() | editor: ed}
-        next = App.update(m, {:event, %{key: 11}})
+        next = App.update(m, {:event, %{key: 11, ch: 0, mod: 0}})
         assert Editor.text(next.editor) == ""
         assert hd(next.editor.kill_ring) == "hello"
       end
@@ -548,7 +549,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
           |> Editor.kill_to_line_start()
 
         m = %{model() | editor: ed}
-        next = App.update(m, {:event, %{key: 25}})
+        next = App.update(m, {:event, %{key: 25, ch: 0, mod: 0}})
         assert Editor.text(next.editor) == "hello"
       end
     end
@@ -556,7 +557,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     describe "update/2 — Ctrl+R search mode (FIX-3 / AC-7 / D-147)" do
       test "Ctrl+R (key 18) enters search mode" do
         m = model()
-        next = App.update(m, {:event, %{key: 18}})
+        next = App.update(m, {:event, %{key: 18, ch: 0, mod: 0}})
         assert next.search != nil
         assert next.search.query == ""
       end
@@ -565,10 +566,10 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         ed = Editor.new() |> Editor.insert("my draft")
         m = %{model() | editor: ed}
         # Enter search mode
-        m2 = App.update(m, {:event, %{key: 18}})
+        m2 = App.update(m, {:event, %{key: 18, ch: 0, mod: 0}})
         assert m2.search != nil
         # Esc restores pre-search editor
-        m3 = App.update(m2, {:event, %{key: 27}})
+        m3 = App.update(m2, {:event, %{key: 27, ch: 0, mod: 0}})
         assert m3.search == nil
         assert Editor.text(m3.editor) == "my draft"
       end
@@ -577,10 +578,10 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         hist = History.new() |> History.push("foo bar") |> History.push("foo baz")
         m = %{model() | history: hist}
         # Enter search mode
-        m2 = App.update(m, {:event, %{key: 18}})
+        m2 = App.update(m, {:event, %{key: 18, ch: 0, mod: 0}})
         assert m2.search.search_index == 0
         # Ctrl+R again increments search_index
-        m3 = App.update(m2, {:event, %{key: 18}})
+        m3 = App.update(m2, {:event, %{key: 18, ch: 0, mod: 0}})
         assert m3.search.search_index == 1
       end
 
@@ -592,10 +593,10 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         hist = History.new() |> History.push("foo bar") |> History.push("foo baz")
         m = %{model() | history: hist}
         # Enter search and type query "foo"
-        m2 = App.update(m, {:event, %{key: 18}})
-        m3 = App.update(m2, {:event, %{ch: ?f}})
-        m4 = App.update(m3, {:event, %{ch: ?o}})
-        m5 = App.update(m4, {:event, %{ch: ?o}})
+        m2 = App.update(m, {:event, %{key: 18, ch: 0, mod: 0}})
+        m3 = App.update(m2, {:event, %{key: 0, ch: ?f, mod: 0}})
+        m4 = App.update(m3, {:event, %{key: 0, ch: ?o, mod: 0}})
+        m5 = App.update(m4, {:event, %{key: 0, ch: ?o, mod: 0}})
         assert m5.search.search_index == 0
 
         # Render and extract the prompt bar label content
@@ -616,12 +617,12 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         hist = History.new() |> History.push("foo bar") |> History.push("foo baz")
         m = %{model() | history: hist}
         # Enter search and type query "foo"
-        m2 = App.update(m, {:event, %{key: 18}})
-        m3 = App.update(m2, {:event, %{ch: ?f}})
-        m4 = App.update(m3, {:event, %{ch: ?o}})
-        m5 = App.update(m4, {:event, %{ch: ?o}})
+        m2 = App.update(m, {:event, %{key: 18, ch: 0, mod: 0}})
+        m3 = App.update(m2, {:event, %{key: 0, ch: ?f, mod: 0}})
+        m4 = App.update(m3, {:event, %{key: 0, ch: ?o, mod: 0}})
+        m5 = App.update(m4, {:event, %{key: 0, ch: ?o, mod: 0}})
         # Press Ctrl+R again to cycle to match index 1
-        m6 = App.update(m5, {:event, %{key: 18}})
+        m6 = App.update(m5, {:event, %{key: 18, ch: 0, mod: 0}})
         assert m6.search.search_index == 1
 
         # Render and extract the prompt bar label content
@@ -641,15 +642,15 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         hist = History.new() |> History.push("foo bar") |> History.push("foo baz")
         m = %{model() | history: hist}
         # Enter search, type "foo", cycle to index 1
-        m2 = App.update(m, {:event, %{key: 18}})
-        m3 = App.update(m2, {:event, %{ch: ?f}})
-        m4 = App.update(m3, {:event, %{ch: ?o}})
-        m5 = App.update(m4, {:event, %{ch: ?o}})
-        m6 = App.update(m5, {:event, %{key: 18}})
+        m2 = App.update(m, {:event, %{key: 18, ch: 0, mod: 0}})
+        m3 = App.update(m2, {:event, %{key: 0, ch: ?f, mod: 0}})
+        m4 = App.update(m3, {:event, %{key: 0, ch: ?o, mod: 0}})
+        m5 = App.update(m4, {:event, %{key: 0, ch: ?o, mod: 0}})
+        m6 = App.update(m5, {:event, %{key: 18, ch: 0, mod: 0}})
         assert m6.search.search_index == 1
 
         # Now Backspace — mutates query, MUST reset search_index
-        m7 = App.update(m6, {:event, %{key: 127}})
+        m7 = App.update(m6, {:event, %{key: 127, ch: 0, mod: 0}})
 
         assert m7.search.search_index == 0,
                "Backspace in search mode MUST reset search_index to 0; got: #{m7.search.search_index}"
@@ -659,18 +660,59 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         hist = History.new() |> History.push("foo bar") |> History.push("foo baz")
         m = %{model() | history: hist}
         # Enter search, type "foo", cycle to index 1
-        m2 = App.update(m, {:event, %{key: 18}})
-        m3 = App.update(m2, {:event, %{ch: ?f}})
-        m4 = App.update(m3, {:event, %{ch: ?o}})
-        m5 = App.update(m4, {:event, %{ch: ?o}})
-        m6 = App.update(m5, {:event, %{key: 18}})
+        m2 = App.update(m, {:event, %{key: 18, ch: 0, mod: 0}})
+        m3 = App.update(m2, {:event, %{key: 0, ch: ?f, mod: 0}})
+        m4 = App.update(m3, {:event, %{key: 0, ch: ?o, mod: 0}})
+        m5 = App.update(m4, {:event, %{key: 0, ch: ?o, mod: 0}})
+        m6 = App.update(m5, {:event, %{key: 18, ch: 0, mod: 0}})
         assert m6.search.search_index == 1
 
         # Now Space — mutates query, MUST reset search_index
-        m7 = App.update(m6, {:event, %{key: 32}})
+        # Space: termbox delivers space as key=32 (quirk noted in handle_key)
+        m7 = App.update(m6, {:event, %{key: 32, ch: 0, mod: 0}})
 
         assert m7.search.search_index == 0,
                "Space in search mode MUST reset search_index to 0; got: #{m7.search.search_index}"
+      end
+    end
+
+    # Regression guard for the clause-precedence bug fixed in FIX-1 of refine-4.
+    # A printable char event has key=0 and ch=<codepoint>. The pre-fix code matched
+    # the `%{key: key}` clause first (key=0 is always present), routing the char to
+    # handle_readline_key/2 which silently dropped it in its catch-all. This broke
+    # typed character input entirely (AC-H2/H3/H4 all require chars to reach the editor).
+    # This test MUST fail against the pre-fix handle_event clause order and pass after.
+    describe "update/2 — printable char reaches editor (FIX-1 regression guard)" do
+      test "realistic printable-char event %{key: 0, ch: ?h, mod: 0} inserts h into editor" do
+        m = %{model() | editor: Editor.new(), status: :idle}
+        # Exact termbox shape for a printable character
+        next = App.update(m, {:event, %{key: 0, ch: ?h, mod: 0}})
+
+        assert Editor.text(next.editor) == "h",
+               "printable char event %{key: 0, ch: ?h, mod: 0} MUST insert 'h' into the editor; " <>
+                 "got: #{inspect(Editor.text(next.editor))} — " <>
+                 "this is the FIX-1 regression guard: if it fails, the handle_event " <>
+                 "clause ordering has regressed and typed chars are silently dropped"
+      end
+
+      test "sequence of printable chars builds correct buffer" do
+        m = %{model() | editor: Editor.new(), status: :idle}
+
+        m2 = App.update(m, {:event, %{key: 0, ch: ?h, mod: 0}})
+        m3 = App.update(m2, {:event, %{key: 0, ch: ?i, mod: 0}})
+
+        assert Editor.text(m3.editor) == "hi",
+               "sequence of printable-char events MUST accumulate in the editor"
+      end
+
+      test "control key Enter (%{key: 13, ch: 0}) does NOT insert a char" do
+        # Discriminator test: Enter (key=13, ch=0) must route to handle_key, not handle_char.
+        # handle_key for key=13 on empty buffer is a no-op (submit on empty = no-op).
+        m = %{model() | editor: Editor.new(), status: :idle}
+        next = App.update(m, {:event, %{key: 13, ch: 0, mod: 0}})
+        # No char inserted; empty buffer submit is no-op
+        assert Editor.text(next.editor) == "",
+               "Enter on empty buffer MUST NOT insert a char (routes to handle_key, not handle_char)"
       end
     end
 
@@ -686,8 +728,8 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
         assert Editor.text(ed) == "second"
         m = %{model() | editor: ed}
-        # Alt+Y: mod != 0, ch == ?y
-        next = App.update(m, {:event, %{mod: 1, ch: ?y}})
+        # Alt+Y: mod != 0, ch == ?y, key == 0 (realistic termbox shape)
+        next = App.update(m, {:event, %{mod: 1, key: 0, ch: ?y}})
         assert Editor.text(next.editor) == "first"
       end
     end
@@ -696,8 +738,8 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       test "unrecognised mod-prefixed event (Alt+Z) does not insert literal char" do
         ed = Editor.new() |> Editor.insert("hello")
         m = %{model() | editor: ed}
-        # Send Alt+Z (unrecognised alt-chord)
-        next = App.update(m, {:event, %{mod: 1, ch: ?z}})
+        # Send Alt+Z (unrecognised alt-chord) — realistic termbox shape
+        next = App.update(m, {:event, %{mod: 1, key: 0, ch: ?z}})
         # Buffer MUST be unchanged — must not insert 'z'
         assert Editor.text(next.editor) == "hello",
                "unrecognised alt-chord MUST NOT insert a literal char (D-141)"
@@ -718,7 +760,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       test "Alt+B (mod != 0, ch == ?b) moves word left" do
         ed = Editor.new() |> Editor.insert("alpha beta")
         m = %{model() | editor: ed}
-        next = App.update(m, {:event, %{mod: 1, ch: ?b}})
+        next = App.update(m, {:event, %{mod: 1, key: 0, ch: ?b}})
         # Cursor should move left by one word
         {_row, col} = next.editor.cursor
         assert col < 10
@@ -727,7 +769,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       test "Alt+F (mod != 0, ch == ?f) moves word right" do
         ed = Editor.new() |> Editor.insert("alpha beta") |> Editor.move_line_start()
         m = %{model() | editor: ed}
-        next = App.update(m, {:event, %{mod: 1, ch: ?f}})
+        next = App.update(m, {:event, %{mod: 1, key: 0, ch: ?f}})
         {_row, col} = next.editor.cursor
         assert col > 0
       end

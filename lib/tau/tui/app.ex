@@ -177,13 +177,23 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     # FIX-8: mod-bearing events MUST reach handle_alt regardless of whether
     # `key` is also present. Check mod first so alt-chords are not shadowed
     # by the key-only handler. D-141: unrecognised alt-chords MUST be no-ops.
+    #
+    # Termbox event shapes (clause ordering is load-bearing):
+    #   alt-chord:       %{mod: N, key: _, ch: _, ...}  where N != 0
+    #   printable char:  %{mod: 0, key: 0, ch: CP, ...} where CP != 0
+    #   control/special: %{mod: 0, key: N, ch: 0, ...}  where N != 0
+    #
+    # Clause 2 MUST guard `ch != 0` so printable chars do NOT fall through
+    # to clause 3 (key handler). Without the guard, key=0 printable events
+    # match the `%{key: key}` clause and are silently dropped in
+    # handle_readline_key's catch-all, breaking typed character input (AC-H2).
     defp handle_event(model, %{mod: mod} = event) when mod != 0 do
       ch = Map.get(event, :ch, 0)
       handle_alt(model, ch)
     end
 
+    defp handle_event(model, %{ch: ch}) when ch != 0, do: handle_char(model, ch)
     defp handle_event(model, %{key: key} = event), do: handle_key(model, key, event)
-    defp handle_event(model, %{ch: ch}), do: handle_char(model, ch)
     defp handle_event(model, _), do: model
 
     # Handle events with a `key:` code. Dispatches to sub-handlers to keep
