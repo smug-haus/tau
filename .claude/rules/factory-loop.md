@@ -138,11 +138,14 @@ no brief/PR drift. It MUST state:
 - **Dependencies** — issues or PRs this is blocked-by or blocks.
 - **SPECs** — every `docs/spec/SPEC-*.md` in scope, whether this PR authors,
   amends, or merely conforms to each, and the `AC-N` / `D-NNN` it advances.
-- **Acceptance criteria** — list each `AC-N` the PR advances. An AC verified
-  by CI wiring or inspection (not a unit gating test) MUST be marked
-  `AC-N (meta)` immediately after its identifier (e.g. `**AC-4 (meta)**`).
-  Gate 5.1 exempts meta-ACs from the test-linkage check; non-meta ACs MUST
-  have a matching gating-test name or `@tag`.
+- **Acceptance criteria** — the single authoritative claims list for Gate
+  5.1. List each `AC-N` AND each `D-NNN` the PR advances here. Gate 5.1
+  scans ONLY this section for claimed tokens; tokens cited elsewhere in the
+  PR body (e.g. in Background prose) are context, not claims, and are not
+  checked. An AC verified by CI wiring or inspection (not a unit gating test)
+  MUST be marked `AC-N (meta)` immediately after its identifier (e.g.
+  `**AC-4 (meta)**`). Gate 5.1 exempts meta-ACs from the test-linkage check;
+  non-meta ACs MUST have a matching gating-test name or `@tag`.
 - **Gating-test paths** — the exact `test/...` file paths the test-author owns
   for this PR (filled in at cycle step 4b; absent for PRs claiming no
   `AC-N`/`D-NNN`). This path set is the boundary the mechanical gates key on;
@@ -292,8 +295,11 @@ provides the three pure functions; `mix tau.gate.ac_linkage`,
 `mix tau.gate.masking`, and `mix tau.gate.mutation` are the CLI wrappers;
 `.github/workflows/ci.yml` wires them into the `lint` and `mutation-check` jobs.
 
-**Gate 5.1 — AC-to-test linkage.** Every `AC-N`/`D-NNN` the draft-PR body
-claims MUST appear in a gating-test name or `@tag`. Verified by CI via
+**Gate 5.1 — AC-to-test linkage.** Every `AC-N`/`D-NNN` token in the
+draft-PR body's `## Acceptance criteria` section MUST appear in a
+gating-test name or `@tag`. The scan is scoped to that section only —
+tokens cited outside it (e.g. in a Background or Context section) are
+background prose and are NOT treated as claims. Verified by CI via
 `mix tau.gate.ac_linkage` in the `lint` job (blocking).
 
 *Meta-AC exemption:* an AC whose identifier is immediately followed by the
@@ -321,6 +327,17 @@ restored separately, so reverting "everything else" to the merge-base reverts
 no test-author work. Path-based rather than commit-based so it survives
 refine-cycle rebases. Verified by CI via `mix tau.gate.mutation` in the
 dedicated `mutation-check` job (blocking).
+
+*Project-creation N/A:* when every declared gating-test path lives in a Mix
+project whose nearest-ancestor `mix.exs` is absent at the merge-base (the
+entire sub-project is PR-created), Gate 5.3 reports `:not_applicable` and
+exits 0 rather than failing. No pre-implementer production code exists in the
+reverted tree, so the mutation check cannot meaningfully evaluate the suite.
+
+*Runner crash:* if `mix test` exits without producing a valid
+`"N tests, M failures"` summary (e.g. a compile error or process crash), Gate
+5.3 prints a diagnostic and exits 3 (`CaseClauseError` is no longer possible —
+issue #372). Exit 3 indicates an infrastructure failure, not a gate decision.
 
 ### Residual — what these gates do NOT close
 
