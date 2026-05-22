@@ -123,7 +123,7 @@ claim that a gating test contradicts a SPEC §4 contract), adjudicate it:
 
 ## Masking-detection review
 
-When the masking detector (gate 5.2, pending PR-B / issue #370) flags a
+When the masking detector (gate 5.2) flags a
 deleted or weakened assertion — a `-  assert` or `-  refute` line in the
 diff, or any implementer edit to a declared gating-test path — review
 that deletion as a mandatory item. Rule whether the deletion is
@@ -131,9 +131,9 @@ legitimate (e.g. a test superseded by a more precise one in the same PR)
 or whether it weakens the oracle. A weakening deletion is a **BLOCKING**
 finding.
 
-## Structured findings (work-record emission)
+## Structured findings
 
-In addition to the narrative review and the final `{"ok": …}` line, emit a single fenced ```json``` block immediately before the final ok line, with the structured findings shape consumed by `.claude/work-records/`:
+In addition to the narrative review and the final `{"ok": …}` line, emit a single fenced ```json``` block immediately before the final ok line, with the structured findings shape used by the `/pr` workflow:
 
 ```json
 {
@@ -144,7 +144,7 @@ In addition to the narrative review and the final `{"ok": …}` line, emit a sin
 }
 ```
 
-`file`, `line`, `category`, `evidence` are optional but preferred. Use `BLOCKING` for findings that must be addressed before merge, `SUGGESTION` otherwise. Empty findings list is valid when the diff is clean. The `single_most_important_id` identifies which finding leads the review (or `null` if no findings). See `.claude/work-records/SCHEMA.md` for the full record shape.
+`file`, `line`, `category`, `evidence` are optional but preferred. Use `BLOCKING` for findings that must be addressed before merge, `SUGGESTION` otherwise. Empty findings list is valid when the diff is clean. The `single_most_important_id` identifies which finding leads the review (or `null` if no findings).
 
 ## Prompt Review (Additional)
 

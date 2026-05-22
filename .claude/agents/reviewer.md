@@ -81,7 +81,7 @@ Do NOT re-run `mix test`, `mix format`, `mix credo`, or
 
 When the PR includes a **Gating-test paths** section in its draft-PR
 body, confirm whether the three mechanical gates ran and passed. These
-gates are now implemented as CI (PR-B / issue #370):
+gates are now implemented as CI:
 
 - **Gate 5.1 — AC-to-test linkage**: every `AC-N`/`D-NNN` the draft-PR
   body claims MUST appear in a gating-test name or `@tag`. Verified by CI
@@ -105,9 +105,9 @@ After running the steps above, the **last line of your response** must be a
 single JSON object: `{"ok": true}` if all gates pass, or
 `{"ok": false, "reason": "<specific failing gate or finding>"}` otherwise.
 
-## Structured verdict (work-record emission)
+## Structured verdict
 
-In addition to the narrative report and the final `{"ok": …}` line, emit a single fenced ```json``` block immediately before the final ok line, with the structured verdict shape consumed by `.claude/work-records/`:
+In addition to the narrative report and the final `{"ok": …}` line, emit a single fenced ```json``` block immediately before the final ok line, with the structured verdict shape used by the `/pr` workflow:
 
 ```json
 {
@@ -119,7 +119,7 @@ In addition to the narrative report and the final `{"ok": …}` line, emit a sin
 }
 ```
 
-`PASS` = all gates clean and no silent failures. `FAIL` = any blocking gate failed (test failures, format/credo not clean, silent-failure pattern found). `PARTIAL` = mixed (some gates clean, some not, no blocking finding). Populate `tests` from actual `mix test` output; omit the key (or set to `null`) if you didn't run it. See `.claude/work-records/SCHEMA.md` for the full record shape.
+`PASS` = all gates clean and no silent failures. `FAIL` = any blocking gate failed (test failures, format/credo not clean, silent-failure pattern found). `PARTIAL` = mixed (some gates clean, some not, no blocking finding). Per Step 3 above you usually don't run `mix test` — omit the `tests` key or set it to `null`. Populate it only on the rare occasion you ran the suite yourself.
 
 ## Output Format
 
