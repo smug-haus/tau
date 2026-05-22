@@ -1,21 +1,71 @@
 defmodule Tau.TUI.SubagentTelemetryTest do
   @moduledoc """
-  AC-8 (SPEC-TUI-HEADLESS §5c): asserts that `[:tau, :session, :subagent, :start]`
-  and `[:tau, :session, :subagent, :stop]` telemetry events fire per sub-agent.
+  AC-8 (SPEC-TUI-HEADLESS §5c, D-159): asserts that `[:tau, :session, :subagent, :start]`
+  and `[:tau, :session, :subagent, :stop]` telemetry events fire per sub-agent dispatch.
 
-  This is an ExUnit telemetry assertion (not a tmux test). It drives the
-  `Tau.Tools.Builtin.Agent.execute/2` path and asserts the telemetry span pair.
+  This test drives the **real production path**: it starts a parent session that causes the
+  `Tau.Tools.Builtin.Agent` tool to execute (via `MultiFixtureProvider`), attaches a
+  telemetry handler, and asserts the span pair fires **from `agent.ex`** — not from a
+  hand-crafted `telemetry.execute` call.
 
-  Note: requires a running PubSub and session supervisor. Uses the standard
-  ExUnit test setup; replay provider keeps it headless.
+  The test MUST fail if the `:telemetry.execute/3` calls in `agent.ex` are removed, because
+  no production code would fire those events. This distinguishes it from the prior tautological
+  test (refine-2 critic finding) which would have passed even with no telemetry in agent.ex.
+
+  Uses `async: false` because it attaches a process-wide telemetry handler.
   """
   use ExUnit.Case, async: false
 
-  @moduletag :integration
+  import Tau.Test.SessionHelper, only: [start_session_for_test: 1]
+
+  alias Tau.Provider.Event
+  alias Tau.Session.Events, as: SE
+  alias Tau.Test.MultiFixtureProvider
+
+  # Fixtures identical to those in agent_test.exs — parent triggers Agent tool,
+  # child responds with :end_turn, parent receives ToolResult and completes.
+  defp agent_tool_call_fixture(call_id, description) do
+    [
+      %Event.Start{request_id: "telm-parent-r1", model: "multi-fixture"},
+      %Event.ToolCallStart{tool_call_id: call_id, name: "Agent"},
+      %Event.ToolCallEnd{
+        tool_call_id: call_id,
+        params: %{"description" => description}
+      },
+      %Event.Done{stop_reason: :tool_use, usage: %{}}
+    ]
+  end
+
+  defp parent_end_turn_fixture do
+    [
+      %Event.Start{request_id: "telm-parent-r2", model: "multi-fixture"},
+      %Event.TextStart{block_id: "b0"},
+      %Event.TextDelta{block_id: "b0", text: "telm-parent done"},
+      %Event.TextEnd{block_id: "b0"},
+      %Event.Done{stop_reason: :end_turn, usage: %{}}
+    ]
+  end
+
+  defp child_text_fixture(text) do
+    [
+      %Event.Start{request_id: "telm-child-r1", model: "multi-fixture"},
+      %Event.TextStart{block_id: "b0"},
+      %Event.TextDelta{block_id: "b0", text: text},
+      %Event.TextEnd{block_id: "b0"},
+      %Event.Done{stop_reason: :end_turn, usage: %{}}
+    ]
+  end
 
   setup do
-    # The telemetry events are emitted in agent.ex execute/2.
-    # Attach a handler that collects events into the test process.
+    tmp =
+      Path.join(
+        System.tmp_dir!(),
+        "tau-subagent-telm-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(tmp)
+    Application.put_env(:tau, :data_dir, tmp)
+
     test_pid = self()
     handler_id = "subagent-telemetry-test-#{System.unique_integer()}"
 
@@ -32,60 +82,71 @@ defmodule Tau.TUI.SubagentTelemetryTest do
       nil
     )
 
-    on_exit(fn -> :telemetry.detach(handler_id) end)
+    on_exit(fn ->
+      :telemetry.detach(handler_id)
+      File.rm_rf!(tmp)
+      Application.delete_env(:tau, :data_dir)
+    end)
 
-    :ok
+    %{tmp: tmp}
   end
 
   @tag :integration
-  test "[:tau, :session, :subagent, :start] and :stop fire for Agent tool execute" do
-    # This test drives the telemetry path without a real session by calling
-    # the telemetry execute directly, mirroring what agent.ex does.
-    # A full integration test would start a real session; that's guarded behind
-    # the :integration tag and requires the full application.
+  test "[:tau, :session, :subagent, :start] and :stop fire from Agent.execute/2 (AC-8 / D-159)",
+       %{tmp: tmp} do
+    # This test exercises the REAL production path: Tau.Tools.Builtin.Agent.execute/2
+    # is the canonical source of the telemetry span pair (D-159). It MUST fail if the
+    # :telemetry.execute/3 calls in agent.ex are removed.
 
-    parent_session_id = "test-parent-#{System.unique_integer()}"
-    subagent_type = "test-agent"
-    child_mode = :default
+    parent_sid = Tau.Session.generate_id()
+    Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{parent_sid}")
 
-    # Simulate the :start span (as agent.ex does before Tau.start_session).
-    :telemetry.execute(
-      [:tau, :session, :subagent, :start],
-      %{system_time: System.system_time()},
-      %{
-        parent_session_id: parent_session_id,
-        parent_tool_call_id: "tc-test",
-        subagent_type: subagent_type,
-        permissions_mode: child_mode
-      }
-    )
+    call_id = "telm-agent-call-1"
+    child_text = "child result from telemetry test"
 
-    # Assert :start fired.
-    assert_receive {:telemetry, [:tau, :session, :subagent, :start], _measurements, metadata},
-                   1000
+    provider_ctx = %{
+      parent_session_id: parent_sid,
+      parent_first_fixture: agent_tool_call_fixture(call_id, "run a sub-task"),
+      parent_second_fixture: parent_end_turn_fixture(),
+      child_fixture: child_text_fixture(child_text)
+    }
 
-    assert metadata.parent_session_id == parent_session_id
-    assert metadata.subagent_type == subagent_type
+    {:ok, ^parent_sid} =
+      start_session_for_test(
+        provider: MultiFixtureProvider,
+        session_id: parent_sid,
+        cwd: tmp,
+        # bypass permissions so Agent tool runs without permission gate
+        metadata: %{permissions_mode: :bypass},
+        provider_ctx: provider_ctx
+      )
 
-    # Simulate the :stop span (as agent.ex does after result).
-    :telemetry.execute(
-      [:tau, :session, :subagent, :stop],
-      %{duration: 100},
-      %{
-        parent_session_id: parent_session_id,
-        child_session_id: "child-test",
-        subagent_type: subagent_type,
-        is_error: false
-      }
-    )
+    Tau.send(parent_sid, "please run the sub-agent")
 
-    # Assert :stop fired.
-    assert_receive {:telemetry, [:tau, :session, :subagent, :stop], measurements, stop_meta},
-                   1000
+    # Wait for parent to complete its second turn — confirms the full Agent.execute/2
+    # path ran (parent got ToolResult → issued second provider call → :end_turn).
+    assert_receive %SE.MessageEnd{message: %{stop_reason: :end_turn}}, 15_000
 
-    assert stop_meta.parent_session_id == parent_session_id
-    assert measurements.duration > 0 or measurements.duration == 0
-    # is_error is false for a successful sub-agent.
-    assert stop_meta.is_error == false
+    # D-159: [:tau, :session, :subagent, :start] MUST have fired from agent.ex before
+    # the child was spawned. The metadata carries the parent_session_id.
+    assert_receive {:telemetry, [:tau, :session, :subagent, :start], _measurements, start_meta},
+                   1_000
+
+    assert start_meta.parent_session_id == parent_sid,
+           "subagent :start metadata MUST carry the parent session id; got: #{inspect(start_meta)}"
+
+    # D-159: [:tau, :session, :subagent, :stop] MUST have fired from agent.ex after
+    # the child completed. The metadata must have is_error: false for a clean result.
+    assert_receive {:telemetry, [:tau, :session, :subagent, :stop], stop_measurements, stop_meta},
+                   1_000
+
+    assert stop_meta.parent_session_id == parent_sid,
+           "subagent :stop metadata MUST carry the parent session id; got: #{inspect(stop_meta)}"
+
+    assert stop_meta.is_error == false,
+           "subagent :stop metadata MUST have is_error: false for a clean child result"
+
+    assert is_integer(stop_measurements.duration) and stop_measurements.duration >= 0,
+           "subagent :stop measurements MUST include a non-negative duration; got: #{inspect(stop_measurements)}"
   end
 end

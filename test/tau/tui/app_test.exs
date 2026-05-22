@@ -17,6 +17,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     alias Tau.TUI.App
     alias Tau.TUI.Editor
     alias Tau.TUI.History
+    alias Tau.TUI.SubagentTree
 
     defp model do
       %{
@@ -27,7 +28,6 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         history_data_dir: System.tmp_dir!(),
         history_cwd: File.cwd!(),
         transcript: [],
-        tool_output: [],
         # D-150 (SPEC-TUI-HEADLESS §5c): sub-agent tree in model.
         subagents: %{},
         status: :streaming,
@@ -1127,7 +1127,11 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     # D-150..D-154 (SPEC-TUI-HEADLESS §5c): sub-agent event folding in update/2
     # -------------------------------------------------------------------------
     describe "update/2 — sub-agent events (D-150..D-154, AC-1, AC-2, AC-7)" do
-      test "SubagentStart adds node to subagents tree and start marker to transcript (AC-1)" do
+      test "SubagentStart adds node to subagents tree with :running state (AC-1 / D-158)" do
+        # AC-1 / D-158: SubagentStart MUST add the node to the tree.
+        # The in-flight display is the live region derived from model.subagents
+        # each frame (not a static frozen transcript entry — that was the bug).
+        # Permanent markers are end markers only (AC-2).
         m = %{model() | status: :idle, last_assistant: nil}
 
         next =
@@ -1142,11 +1146,39 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
         assert Map.has_key?(next.subagents, "child-1")
         assert next.subagents["child-1"].state == :running
+        assert next.subagents["child-1"].label == "general-purpose"
 
-        assert Enum.any?(next.transcript, fn {line, _} ->
-                 String.contains?(line, "┌─ sub-agent: general-purpose [running]")
-               end),
-               "Start marker must appear in transcript (AC-1)"
+        # No static frozen start marker in the transcript — the live region
+        # handles in-flight display; transcript is unchanged.
+        assert next.transcript == m.transcript,
+               "SubagentStart must NOT append a frozen start marker to transcript (live region handles it)"
+      end
+
+      test "SubagentStart live region shows running sub-agent (AC-1 / AC-3)" do
+        # The live region is derived from model.subagents every frame.
+        # After SubagentStart, render/1 must include a live-region line for the node.
+        m = %{model() | status: :idle, last_assistant: nil}
+
+        next =
+          App.update(m, %Events.SubagentStart{
+            session_id: "sess-test",
+            subagent_id: "child-live",
+            kind: :builtin_agent,
+            label: "live-agent",
+            parent_tool_call_id: nil,
+            child_session_id: "child-live"
+          })
+
+        # Live region line is derived from SubagentNode state, not transcript.
+        node = next.subagents["child-live"]
+        assert node.state == :running
+        live_line = SubagentTree.format_live_line(node)
+
+        assert String.contains?(live_line, "▶ sub-agent: live-agent"),
+               "live region line MUST contain the sub-agent label; got: #{inspect(live_line)}"
+
+        assert String.contains?(live_line, "0 tool calls"),
+               "live region line MUST show 0 tool calls before any progress; got: #{inspect(live_line)}"
       end
 
       test "SubagentEnd transitions node to :done and appends end marker to transcript (AC-2)" do
@@ -1213,7 +1245,11 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
                end)
       end
 
-      test "SubagentProgress updates node tool_calls (AC-3)" do
+      test "SubagentProgress updates node tool_calls and live-region count rises (AC-3)" do
+        # AC-3 live criterion: the rendered tool-call count MUST rise as
+        # SubagentProgress events are folded in. The live region is derived
+        # from model.subagents state every frame — so the count update in
+        # SubagentNode.tool_calls directly drives the next-frame render.
         m = %{model() | status: :idle, last_assistant: nil}
 
         m =
@@ -1226,6 +1262,13 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
             child_session_id: nil
           })
 
+        # Before any progress: live region shows 0 tool calls
+        node_before = m.subagents["child-2"]
+        live_before = SubagentTree.format_live_line(node_before)
+
+        assert String.contains?(live_before, "0 tool calls"),
+               "live region MUST show 0 tool calls before any progress; got: #{inspect(live_before)}"
+
         next =
           App.update(m, %Events.SubagentProgress{
             session_id: "sess-test",
@@ -1236,6 +1279,16 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
         assert next.subagents["child-2"].tool_calls == 1
         assert next.subagents["child-2"].last_activity == {:tool_call, "Bash"}
+
+        # After progress: live region now shows 1 tool call and activity excerpt
+        node_after = next.subagents["child-2"]
+        live_after = SubagentTree.format_live_line(node_after)
+
+        assert String.contains?(live_after, "1 tool calls"),
+               "live region MUST show 1 tool call after SubagentProgress; got: #{inspect(live_after)}"
+
+        assert String.contains?(live_after, "Bash"),
+               "live region MUST show last-activity tool name; got: #{inspect(live_after)}"
       end
 
       test "SubagentCost updates node cost without affecting transcript (AC-4/D-153)" do
@@ -1270,7 +1323,12 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
                "SubagentCost must not append a transcript line"
       end
 
-      test "ToolStart owned by sub-agent does not append to tool_output (B1/D-151)" do
+      test "ToolStart owned by sub-agent does not produce a [tool_call] transcript line (B1/D-151)" do
+        # B1 rule (D-151): a ToolStart whose tool_call_id is owned by a
+        # sub-agent MUST NOT appear as a bare [tool_call] line in the transcript.
+        # The owned call's visual representation is the sub-agent live region
+        # and end marker. We verify via on_message_end which is where the
+        # [tool_call] suppression for owned calls is enforced.
         m = %{model() | status: :idle, last_assistant: nil}
 
         m =
@@ -1291,34 +1349,39 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
             child_tool_call_id: "tc-owned"
           })
 
-        tool_output_before = m.tool_output
+        # MessageEnd carrying the owned tool_call as a tool_call block:
+        # it must be suppressed in the transcript (B1 / on_message_end de-dup).
+        msg = %Tau.Message.Assistant{
+          content: [%{type: :tool_call, id: "tc-owned", name: "Bash"}],
+          timestamp: DateTime.utc_now(),
+          stop_reason: :stop
+        }
 
-        # ToolStart with an owned tool_call_id must be skipped (B1).
-        next =
-          App.update(m, %Events.ToolStart{
-            session_id: "sess-test",
-            tool_call_id: "tc-owned",
-            name: "Bash",
-            arguments: %{"command" => "ls"}
-          })
+        next = App.update(m, %Events.MessageEnd{session_id: "sess-test", message: msg})
 
-        assert next.tool_output == tool_output_before,
-               "ToolStart owned by sub-agent must not append to tool_output (B1/D-151)"
+        refute Enum.any?(next.transcript, fn {line, _} ->
+                 String.contains?(line, "[tool_call] Bash")
+               end),
+               "B1: tool_call block with owned id must NOT produce a [tool_call] transcript line"
       end
 
-      test "ToolStart NOT owned by sub-agent is rendered normally (B1)" do
+      test "ToolStart NOT owned by sub-agent produces a [tool_call] transcript line via MessageEnd (B1)" do
+        # Non-owned tool calls MUST produce a [tool_call] line in the transcript
+        # (the un-owned path in on_message_end).
         m = %{model() | status: :idle, last_assistant: nil}
 
-        next =
-          App.update(m, %Events.ToolStart{
-            session_id: "sess-test",
-            tool_call_id: "tc-unowned",
-            name: "Read",
-            arguments: %{"path" => "/tmp/foo"}
-          })
+        msg = %Tau.Message.Assistant{
+          content: [%{type: :tool_call, id: "tc-unowned", name: "Read"}],
+          timestamp: DateTime.utc_now(),
+          stop_reason: :stop
+        }
 
-        assert length(next.tool_output) == 1
-        assert hd(next.tool_output) =~ "Read"
+        next = App.update(m, %Events.MessageEnd{session_id: "sess-test", message: msg})
+
+        assert Enum.any?(next.transcript, fn {line, _} ->
+                 String.contains?(line, "[tool_call] Read")
+               end),
+               "B1: non-owned tool_call MUST produce a [tool_call] transcript line"
       end
 
       test "unknown SubagentProgress subagent_id does not crash (D-152)" do

@@ -330,6 +330,13 @@ SPEC-CODING-AGENT (D-031 parity) and conforms to its boundary contract:
 `Subagent*` events extend, not replace, the `ToolStart`/`ToolEnd` pair
 so existing audit consumers continue to receive the flattened triad.
 
+**`child_session_id` for `:coding_agent` Path B:** `SubagentStart` events emitted
+on Path B (coding-agent dispatcher) carry `child_session_id: nil` because the
+coding agent subprocess runs inside the parent's own session id — it does not
+spawn a distinct Tau session via `Tau.start_session/1`. Only the builtin `Agent`
+tool (Path A) spawns a real child session; Path A therefore carries a non-nil
+`child_session_id` equal to the child's session id.
+
 | ID | Statement | Severity | Detection | Source |
 |---|---|---|---|---|
 | D-150 | Sub-agent lifecycle events (`SubagentStart`, `SubagentProgress`, `SubagentCost`, `SubagentEnd`) MUST be broadcast on the **parent** session PubSub topic `"session:<parent_id>"`. Child-topic emission is invisible to the TUI EventBridge (which subscribes only to the parent topic). Both dispatch paths (builtin `Agent` tool and coding-agent dispatcher) MUST use the parent topic. | high | unit test: observe events on parent topic after Agent.execute/2; assert no event arrives on child topic for the TUI EventBridge. | B1 / elaboration §3.1 |
@@ -340,7 +347,7 @@ so existing audit consumers continue to receive the flattened triad.
 | D-155 | `SubagentProgress` events with `activity: {:tool_call, name}` MUST increment `SubagentNode.tool_calls` by 1. Non-tool_call activity (`:assistant_text`, `:file_edit`, `:tool_result`) MUST NOT increment the counter. | medium | property test: generate N tool_call progress events; assert node.tool_calls == N. | AC-3 |
 | D-156 | The `Tau.TUI.SubagentTree` module MUST be a pure fold module — no GenServer, no process, no behaviour. All state is threaded through the MVU model's `subagents` field. A "SubagentManager" GenServer would violate OTP non-negotiables §1/#3. | high | structural: assert module has no `use GenServer` or supervised start. | D2 / OTP non-negotiables §3/#8 |
 | D-157 | State transitions in `SubagentNode` are monotone: once `:done`, `:failed`, or `:cancelled`, no further event may revert the node to `:running`. A `SubagentProgress` arriving after `SubagentEnd` is silently discarded. | medium | property test: fold SubagentEnd; fold SubagentProgress; assert state unchanged. | D-154 monotonicity |
-| D-158 | The `Tau.TUI.App.update/2` handler for `%SubagentStart{}` MUST append a `"┌─ sub-agent: <label> [running]"` line to `model.transcript`. The handler for `%SubagentEnd{}` MUST append a `"└─ sub-agent: <label> [<state> · ...]"` end marker. Both markers are part of the single-column transcript (S3 / no right-hand panel for this PR). | medium | unit test: fold SubagentStart then SubagentEnd; assert transcript contains expected marker strings. | AC-1, AC-2 |
+| D-158 | In-flight sub-agent display uses a **live region** derived from `model.subagents` every render frame. `%SubagentStart{}` MUST NOT append a frozen start marker to `model.transcript`; instead `render/1` produces one `"▶ sub-agent: <label> · <N> tool calls · <excerpt>"` line per `:running` node, re-computed each frame so the count and excerpt update live (AC-3). `%SubagentEnd{}` MUST append a permanent `"└─ sub-agent: <label> [<state> · ...]"` end marker to `model.transcript` (AC-2). The live region is a compact single-column element within the existing transcript panel (S3 / no right-hand panel for this PR). | medium | unit test: (a) SubagentStart — transcript unchanged, node in subagents tree with :running state; (b) SubagentProgress — format_live_line shows increased tool-call count; (c) SubagentEnd — end marker in transcript, node not :running. | AC-1, AC-2, AC-3 |
 | D-159 | `[:tau, :session, :subagent, :start]` and `[:tau, :session, :subagent, :stop]` telemetry spans MUST fire per sub-agent dispatch. The existing span pair in `Tau.Tools.Builtin.Agent.execute/2` is the canonical source; a second competing `[:tau, :session, :subagent, :start]` from the relay path MUST NOT be emitted (S5 critic finding). Separate `[:tau, :session, :subagent, :progress]` and `[:tau, :session, :subagent, :cost]` metrics events are out of scope for this PR. | medium | ExUnit telemetry handler: assert :start and :stop events fire per Agent.execute/2 invocation. | AC-8 |
 
 ## 6. Acceptance criteria — UX surface

@@ -180,8 +180,38 @@ defmodule Tau.TUI.SubagentTree do
   end
 
   @doc """
+  Format the live-region line for a running sub-agent (rendered every frame).
+
+  Returns `"▶ sub-agent: <label> · <N> tool calls · <activity_excerpt>"`.
+  The line is re-derived each render tick so the count and excerpt update
+  as `SubagentProgress` events are folded in — this is the AC-3 live
+  criterion. Only `:running` nodes should be passed; callers filter on
+  `node.state == :running` before calling this function.
+  """
+  @spec format_live_line(SubagentNode.t()) :: String.t()
+  def format_live_line(%SubagentNode{label: label, tool_calls: n, last_activity: act}) do
+    base = "▶ sub-agent: #{label} · #{n} tool calls"
+
+    case act do
+      nil ->
+        base
+
+      {:tool_call, name} ->
+        base <> " · calling #{name}"
+
+      {:tool_result, summary} when is_binary(summary) and summary != "" ->
+        base <> " · #{summary}"
+
+      _ ->
+        base
+    end
+  end
+
+  @doc """
   Format the start marker line for a sub-agent.
   Returns `"┌─ sub-agent: <label> [running]"`.
+  Retained for use in tests and legacy callers; the live region supersedes
+  this as the in-flight display (D-158 / AC-3).
   """
   @spec format_start_marker(SubagentNode.t()) :: String.t()
   def format_start_marker(%SubagentNode{label: label}) do

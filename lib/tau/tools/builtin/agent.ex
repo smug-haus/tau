@@ -528,6 +528,14 @@ defmodule Tau.Tools.Builtin.Agent do
       %SE.MessageUpdate{session_id: ^child_id} ->
         await_child(child_id, ctx, parent_ref, started)
 
+      # B2 (FIX-4): discard any other child-session event not explicitly
+      # matched above — SystemNotice, ProviderFallback, QueueRestored,
+      # CommandCatalog, etc. Without this catch-all they accumulate in the
+      # tool-task mailbox and the "B2 any non-forwarded child event is
+      # discarded" guarantee only partially holds.
+      %{session_id: ^child_id} ->
+        await_child(child_id, ctx, parent_ref, started)
+
       # Terminal branch 3: SessionEnd.
       %SE.SessionEnd{session_id: ^child_id, reason: reason} ->
         duration = System.monotonic_time(:millisecond) - started

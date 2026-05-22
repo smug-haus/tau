@@ -94,7 +94,6 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         history_data_dir: data_dir,
         history_cwd: cwd,
         transcript: [],
-        tool_output: [],
         # D-150 (SPEC-TUI-HEADLESS §5c): sub-agent tree — pure derived
         # render state, folded synchronously by on_subagent_*/2 handlers.
         # Map of subagent_id => %SubagentTree.SubagentNode{}.
@@ -492,6 +491,18 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
                 for sub <- Wrap.wrap("[streaming] " <> model.last_assistant, model.wrap_width) do
                   label(content: sub)
                 end
+              end
+
+              # D-158 / AC-3 (SPEC-TUI-HEADLESS §5c): live region — one line
+              # per *running* sub-agent, derived from model.subagents every
+              # frame so the tool-call count and activity excerpt update each
+              # tick without a static frozen marker in the transcript.
+              # Each line: "▶ sub-agent: <label> · <N> tool calls · <excerpt>"
+              for {_id, node} <- model.subagents,
+                  node.state == :running,
+                  line <- [SubagentTree.format_live_line(node)],
+                  sub <- Wrap.wrap(line, model.wrap_width) do
+                label(content: sub)
               end
             end
           end
@@ -1031,23 +1042,20 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       %{model | editor: Editor.new(), search: nil}
     end
 
-    # D-150 (SPEC-TUI-HEADLESS §5c): fold SubagentStart into the tree and
-    # append a boxed start marker to the transcript (AC-1).
-    # If the fold rejects the event (unknown kind, D-152), skip the marker too.
+    # D-150 / D-158 (SPEC-TUI-HEADLESS §5c): fold SubagentStart into the tree.
+    # No static start marker is appended to the transcript — the running sub-agent
+    # appears in the live region (rendered every frame from model.subagents by render/1)
+    # so the tool-call count and activity excerpt update live (AC-3).
+    # The permanent `└─` end marker is appended by on_subagent_end/2 when the
+    # node transitions to a terminal state (AC-2).
+    # If the fold rejects the event (unknown kind, D-152), model is unchanged.
     defp on_subagent_start(model, e) do
       new_tree = SubagentTree.fold(model.subagents, e)
 
       if Map.has_key?(new_tree, e.subagent_id) do
-        node = new_tree[e.subagent_id]
-        marker = SubagentTree.format_start_marker(node)
-
-        %{
-          model
-          | subagents: new_tree,
-            transcript: bounded_append(model.transcript, {marker, []})
-        }
+        %{model | subagents: new_tree}
       else
-        # Unknown kind — tree unchanged, no marker (D-152).
+        # Unknown kind — tree unchanged (D-152).
         model
       end
     end
@@ -1145,31 +1153,13 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       }
     end
 
-    defp on_tool_start(model, %{tool_call_id: tcid, name: n, arguments: args}) do
-      # B1 rule (D-151): skip tool calls owned by a known sub-agent — the
-      # sub-agent marker owns the render. Still record non-owned calls.
-      if SubagentTree.tool_call_owned?(model.subagents, tcid) do
-        model
-      else
-        %{model | tool_output: model.tool_output ++ ["▶ " <> n <> " " <> inspect(args)]}
-      end
-    end
+    # B1 rule (D-151): ToolStart/ToolEnd on the parent topic are no-ops.
+    # Calls owned by a sub-agent: the live region and end marker own the
+    # visual representation. Non-owned calls: tool_output was removed in
+    # FIX-3; a future PR may surface non-owned tool calls in the transcript.
+    defp on_tool_start(model, _e), do: model
 
-    defp on_tool_end(model, %{tool_call_id: tcid, result: %{content: c, is_error: e}}) do
-      # B1 rule (D-151): skip tool results owned by a known sub-agent.
-      if SubagentTree.tool_call_owned?(model.subagents, tcid) do
-        model
-      else
-        prefix = if e, do: "✗", else: "✓"
-
-        summary =
-          if is_binary(c),
-            do: String.slice(c, 0..160),
-            else: c |> inspect() |> String.slice(0..160)
-
-        %{model | tool_output: model.tool_output ++ [prefix <> " " <> summary]}
-      end
-    end
+    defp on_tool_end(model, _e), do: model
 
     defp on_cancelled(model, %{reason: reason}) do
       reason_str = inspect(reason)
