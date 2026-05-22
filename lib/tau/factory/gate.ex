@@ -9,9 +9,11 @@ defmodule Tau.Factory.Gate do
 
   ## Gate 5.1 — AC-to-test linkage (`ac_linkage/2`)
 
-  Parses every `AC-N` / `D-NNN` token from the draft-PR body and returns
-  the subset not found (as a test name substring or `@tag`) in any of the
-  supplied gating-test source strings.
+  Parses every `AC-N` / `D-NNN` token from the `## Acceptance criteria`
+  section of the draft-PR body and returns the subset not found (as a test
+  name substring or `@tag`) in any of the supplied gating-test source
+  strings. Tokens cited only outside that section (e.g. in a Background
+  section) are background prose and are NOT checked.
 
   ## Gate 5.2 — Masking detection (`masking_violations/1`)
 
@@ -33,6 +35,10 @@ defmodule Tau.Factory.Gate do
 
   - `:ok` when ≥1 test fails (the tests are discriminating).
   - `{:error, :all_passed}` when no test fails (the gating suite is vacuous).
+  - `:not_applicable` when every declared gating-test path lives in a Mix
+    project whose nearest-ancestor `mix.exs` is absent at `base_ref` (i.e.
+    the entire sub-project is PR-created). In this case there is no
+    pre-implementer production code to mutate; the check is skipped.
   - `{:error, {:runner_crashed, detail}}` when `mix test` does not emit a
     valid `"N tests, M failures"` summary — e.g. a compile error or process
     crash crashed the runner before it could produce a summary. This outcome
@@ -45,9 +51,16 @@ defmodule Tau.Factory.Gate do
   # ---------------------------------------------------------------------------
 
   @doc """
-  Returns `:ok` when every `AC-N` / `D-NNN` token in `pr_body` appears in
-  at least one of `gating_test_sources` (as a test name substring or
-  `@tag`), or `{:error, missing}` listing those that do not.
+  Returns `:ok` when every `AC-N` / `D-NNN` token in the `## Acceptance
+  criteria` section of `pr_body` appears in at least one of
+  `gating_test_sources` (as a test name substring or `@tag`), or
+  `{:error, missing}` listing those that do not.
+
+  Only tokens in the `## Acceptance criteria` section are treated as claims.
+  Tokens cited outside that section (e.g. in a Background or Context section)
+  are background prose and are NOT checked. If no `## Acceptance criteria`
+  heading exists in the PR body, the claims region is empty and `:ok` is
+  returned.
 
   Token format:
   - `AC-N` — one or more digits, e.g. `AC-1`, `AC-12`
@@ -63,7 +76,8 @@ defmodule Tau.Factory.Gate do
   verified by CI wiring or inspection, not a unit gating test. Meta-ACs
   are exempt from the linkage check: they are never reported as missing.
   An AC is considered meta if ANY occurrence of `AC-N (meta)` exists in
-  `pr_body` (allowing optional whitespace between the token and the marker).
+  the `## Acceptance criteria` section (allowing optional whitespace between
+  the token and the marker).
 
   Examples of meta-AC forms recognised in a PR body:
   - `AC-4 (meta)` — plain
@@ -72,8 +86,9 @@ defmodule Tau.Factory.Gate do
   @spec ac_linkage(String.t(), [String.t()]) :: :ok | {:error, [String.t()]}
   def ac_linkage(pr_body, gating_test_sources)
       when is_binary(pr_body) and is_list(gating_test_sources) do
-    meta_acs = parse_meta_ac_tokens(pr_body)
-    claimed = parse_ac_tokens(pr_body)
+    ac_section = extract_acceptance_criteria_section(pr_body)
+    meta_acs = parse_meta_ac_tokens(ac_section)
+    claimed = parse_ac_tokens(ac_section)
     non_meta = Enum.reject(claimed, &MapSet.member?(meta_acs, &1))
     missing = Enum.reject(non_meta, &token_covered?(&1, gating_test_sources))
 
@@ -83,27 +98,58 @@ defmodule Tau.Factory.Gate do
     end
   end
 
+  # Extract the content of the "## Acceptance criteria" section from the PR body.
+  # The section starts after the heading line whose text (stripped of leading #,
+  # trimmed, downcased) begins with "acceptance criteria".
+  # The section ends at the next markdown heading line (matching ~r/^#{1,6}\s/)
+  # or EOF. Returns "" if no such heading is found.
+  defp extract_acceptance_criteria_section(pr_body) do
+    lines = String.split(pr_body, "\n")
+    heading_pattern = ~r/^[#]{1,6}\s/
+
+    # Find the index of the acceptance criteria heading
+    ac_heading_idx =
+      Enum.find_index(lines, fn line ->
+        stripped = line |> String.replace(~r/^#+\s*/, "") |> String.trim() |> String.downcase()
+
+        String.starts_with?(stripped, "acceptance criteria") and
+          String.match?(line, heading_pattern)
+      end)
+
+    case ac_heading_idx do
+      nil ->
+        ""
+
+      idx ->
+        # Take lines after the heading, up to the next heading or EOF
+        lines
+        |> Enum.drop(idx + 1)
+        |> Enum.take_while(&(not String.match?(&1, heading_pattern)))
+        |> Enum.join("\n")
+    end
+  end
+
   # Parse AC-N tokens that are marked as meta (exempt from the linkage gate).
-  # An AC is meta if ANY occurrence in pr_body is immediately followed by
-  # "(meta)" (optionally with surrounding ** bold markers and optional
+  # An AC is meta if ANY occurrence in the section text is immediately followed
+  # by "(meta)" (optionally with surrounding ** bold markers and optional
   # whitespace between the token and the marker).
-  defp parse_meta_ac_tokens(pr_body) do
+  defp parse_meta_ac_tokens(section_text) do
     # Matches forms like: AC-4 (meta), **AC-4 (meta)**, AC-4  (meta)
     meta_pattern = ~r/\bAC-(\d+)\s*\(meta\)/
 
-    Regex.scan(meta_pattern, pr_body, capture: :all_but_first)
+    Regex.scan(meta_pattern, section_text, capture: :all_but_first)
     |> List.flatten()
     |> Enum.map(&"AC-#{&1}")
     |> MapSet.new()
   end
 
-  # Parse all AC-N and D-NNN tokens from the PR body.
-  defp parse_ac_tokens(pr_body) do
+  # Parse all AC-N and D-NNN tokens from the given text.
+  defp parse_ac_tokens(section_text) do
     ac_pattern = ~r/\bAC-\d+\b/
     d_pattern = ~r/\bD-\d+\b/
 
-    ac_tokens = Regex.scan(ac_pattern, pr_body) |> List.flatten()
-    d_tokens = Regex.scan(d_pattern, pr_body) |> List.flatten()
+    ac_tokens = Regex.scan(ac_pattern, section_text) |> List.flatten()
+    d_tokens = Regex.scan(d_pattern, section_text) |> List.flatten()
 
     (ac_tokens ++ d_tokens) |> Enum.uniq()
   end
@@ -217,6 +263,10 @@ defmodule Tau.Factory.Gate do
 
   Returns:
   - `:ok` when ≥1 gating test fails against the reverted tree (tests discriminate).
+  - `:not_applicable` when every declared gating-test path lives in a Mix
+    project whose nearest-ancestor `mix.exs` is absent at `base_ref` (the entire
+    sub-project is PR-created). No pre-implementer production code exists to
+    mutate; the check is skipped rather than failing.
   - `{:error, :all_passed}` when no gating test fails (vacuous suite).
   - `{:error, {:runner_crashed, detail}}` when `mix test` exits without
     producing a valid `"N tests, M failures"` summary — e.g. a compile error
@@ -229,11 +279,77 @@ defmodule Tau.Factory.Gate do
   check, then restored.
   """
   @spec mutation_check([String.t()], String.t()) ::
-          :ok | {:error, :all_passed} | {:error, {:runner_crashed, String.t()}}
+          :ok
+          | :not_applicable
+          | {:error, :all_passed}
+          | {:error, {:runner_crashed, String.t()}}
   def mutation_check(gating_test_paths, base_ref)
       when is_list(gating_test_paths) and is_binary(base_ref) do
     repo_dir = locate_repo_for_gating_tests(gating_test_paths, File.cwd!(), base_ref)
-    mutation_check_in(gating_test_paths, base_ref, repo_dir)
+
+    if project_creation_pr?(gating_test_paths, base_ref, repo_dir) do
+      :not_applicable
+    else
+      mutation_check_in(gating_test_paths, base_ref, repo_dir)
+    end
+  end
+
+  # Returns true iff the gating_test_paths list is non-empty AND every path's
+  # enclosing Mix project (nearest ancestor mix.exs) is absent at base_ref —
+  # i.e. every gating test lives in a PR-created project.
+  #
+  # Conservative: a path with NO ancestor mix.exs is treated as NOT PR-created.
+  # A mixed PR (some paths in existing projects, some in new ones) returns false
+  # — the N/A short-circuit applies only when ALL paths are PR-created.
+  defp project_creation_pr?([], _base_ref, _repo_dir), do: false
+
+  defp project_creation_pr?(gating_test_paths, base_ref, repo_dir) do
+    Enum.all?(gating_test_paths, fn test_path ->
+      case find_enclosing_mix_exs(test_path, repo_dir) do
+        nil ->
+          # No ancestor mix.exs found — conservative: treat as NOT PR-created
+          false
+
+        mix_exs_relpath ->
+          # PR-created iff the mix.exs is absent at base_ref
+          not path_exists_at_ref?(mix_exs_relpath, base_ref, repo_dir)
+      end
+    end)
+  end
+
+  # Walk up from a gating-test file's directory to find the nearest ancestor
+  # directory containing a mix.exs file, returning the repo-relative path of
+  # that mix.exs (e.g. "sub/mix.exs" or "mix.exs"), or nil if none found.
+  defp find_enclosing_mix_exs(test_path, repo_dir) do
+    # Start from the directory containing the test file
+    start_dir = test_path |> Path.dirname()
+    do_find_mix_exs(start_dir, repo_dir)
+  end
+
+  # Recursively walk up toward the repo root, looking for a mix.exs.
+  # Returns the repo-relative path of the first mix.exs found, or nil.
+  defp do_find_mix_exs(rel_dir, repo_dir) do
+    mix_exs_relpath =
+      if rel_dir == "." do
+        "mix.exs"
+      else
+        Path.join(rel_dir, "mix.exs")
+      end
+
+    abs_mix_exs = Path.join(repo_dir, mix_exs_relpath)
+
+    if File.exists?(abs_mix_exs) do
+      mix_exs_relpath
+    else
+      parent = Path.dirname(rel_dir)
+
+      if parent == rel_dir do
+        # Reached the filesystem root — no mix.exs found
+        nil
+      else
+        do_find_mix_exs(parent, repo_dir)
+      end
+    end
   end
 
   # Locate the git repo root that contains the gating test files AND the given
