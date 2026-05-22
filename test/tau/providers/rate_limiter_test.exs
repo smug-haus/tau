@@ -11,27 +11,24 @@ defmodule Tau.Providers.RateLimiterTest do
 
   alias Tau.Providers.RateLimiter
 
-  defmodule FakeProvider do
-    @moduledoc false
-  end
-
-  setup do
-    on_exit(fn ->
-      RateLimiter
-      |> apply(:state, [FakeProvider])
-      |> case do
-        :no_limiter -> :ok
-        _ -> Tau.Providers.RateLimiter.Supervisor.stop(FakeProvider)
-      end
-    end)
-
-    :ok
-  end
+  # No shared module-level FakeProvider: every test that starts a limiter uses
+  # a unique atom derived from System.unique_integer/1 and registers its own
+  # on_exit to stop it. This avoids a TOCTOU window where a previous test's
+  # DynamicSupervisor.terminate_child returns (process dead) but the Registry
+  # has not yet processed the DOWN and deregistered the entry — a subsequent
+  # GenServer.call on the stale pid crashes the on_exit runner, and ExUnit
+  # reports the *next* test as failed (pointing to the on_exit line).
 
   describe "acquire/3 with available budget" do
     test "returns :ok immediately and emits :acquired telemetry" do
+      # Unique atom: isolates this limiter from concurrent on_exit cleanup.
+      provider =
+        String.to_atom("FakeProviderAcquire_#{System.unique_integer([:positive])}")
+
+      on_exit(fn -> Tau.Providers.RateLimiter.Supervisor.stop(provider) end)
+
       {:ok, _pid} =
-        Tau.Providers.RateLimiter.Supervisor.ensure_started(FakeProvider, rpm: 600, tpm: 6_000)
+        Tau.Providers.RateLimiter.Supervisor.ensure_started(provider, rpm: 600, tpm: 6_000)
 
       ref = make_ref()
 
@@ -49,7 +46,7 @@ defmodule Tau.Providers.RateLimiterTest do
       send(self(), {ref, :primer, %{}, %{}})
       _ = receive(do: ({^ref, :primer, _, _} -> :ok))
 
-      assert :ok = RateLimiter.acquire(FakeProvider, 100, 1_000)
+      assert :ok = RateLimiter.acquire(provider, 100, 1_000)
 
       :telemetry.detach("rl-test-#{inspect(ref)}")
     end
@@ -61,17 +58,23 @@ defmodule Tau.Providers.RateLimiterTest do
 
   describe "acquire/3 starvation" do
     test "with zero budget and zero refill returns :rate_limit_timeout quickly" do
+      # Unique atom — same isolation rationale as the other tests in this file.
+      provider =
+        String.to_atom("FakeProviderStarve_#{System.unique_integer([:positive])}")
+
+      on_exit(fn -> Tau.Providers.RateLimiter.Supervisor.stop(provider) end)
+
       # rpm: 0 == "no gating" per TokenBucket spec, so use a tiny budget
       # with a high request count.
       {:ok, _} =
-        Tau.Providers.RateLimiter.Supervisor.ensure_started(FakeProvider, rpm: 60, tpm: 60)
+        Tau.Providers.RateLimiter.Supervisor.ensure_started(provider, rpm: 60, tpm: 60)
 
       # Drain the rpm bucket. rate_per_sec = 60/60 = 1, so refill is
       # 1 token/sec — easy to starve.
-      Enum.each(1..60, fn _ -> RateLimiter.acquire(FakeProvider, 0, 5_000) end)
+      Enum.each(1..60, fn _ -> RateLimiter.acquire(provider, 0, 5_000) end)
 
       # Now ask for one more with a 50ms timeout — should reject.
-      assert {:error, :rate_limit_timeout} = RateLimiter.acquire(FakeProvider, 0, 50)
+      assert {:error, :rate_limit_timeout} = RateLimiter.acquire(provider, 0, 50)
     end
   end
 
