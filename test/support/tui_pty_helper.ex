@@ -119,6 +119,14 @@ defmodule Tau.Test.TuiPtyHelper do
       :ctrl_u          → C-u (kill to start of line)
       :ctrl_l          → C-l (clear screen)
       :ctrl_r          → C-r (reverse history search)
+      :ctrl_w          → C-w (kill word backward)
+      :ctrl_j          → C-j (newline / multi-line)
+      :ctrl_p          → C-p (history prev)
+      :ctrl_n          → C-n (history next)
+      :ctrl_d          → C-d (delete forward)
+      :alt_b           → M-b (move word backward)
+      :alt_f           → M-f (move word forward)
+      :alt_y           → M-y (yank-pop)
   """
   @spec send(session(), iodata() | atom()) :: :ok
   def send(%{tmux_name: name} = sess, input) do
@@ -293,6 +301,16 @@ defmodule Tau.Test.TuiPtyHelper do
   defp key_for(:ctrl_u), do: ["C-u"]
   defp key_for(:ctrl_l), do: ["C-l"]
   defp key_for(:ctrl_r), do: ["C-r"]
+  defp key_for(:ctrl_w), do: ["C-w"]
+  defp key_for(:ctrl_j), do: ["C-j"]
+  defp key_for(:ctrl_p), do: ["C-p"]
+  defp key_for(:ctrl_n), do: ["C-n"]
+  defp key_for(:ctrl_d), do: ["C-d"]
+  # Alt-chords: tmux sends as M-<key>. Termbox may mangle to ESC-prefix;
+  # wiring is best-effort. D-141: Alt-chords MUST NOT insert literal char.
+  defp key_for(:alt_b), do: ["M-b"]
+  defp key_for(:alt_f), do: ["M-f"]
+  defp key_for(:alt_y), do: ["M-y"]
   defp key_for(s) when is_binary(s), do: [s]
   defp key_for(s) when is_list(s), do: [IO.iodata_to_binary(s)]
 end

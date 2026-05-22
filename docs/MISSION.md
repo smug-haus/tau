@@ -128,6 +128,7 @@ elaboration briefs independently claimed D-066.
 | D-110–D-119 | SPEC-SESSION-MANAGEMENT (new, #343) |
 | D-120–D-129 | SPEC-EXTENSIONS (new, #180) |
 | D-130–D-139 | reserved — SPEC-CLUSTER (M9, future) |
+| D-140–D-149 | SPEC-TUI-HEADLESS extension — input editor invariants (#338) |
 
 A SPEC author who needs a D-NNN outside their block MUST update this
 registry and SPEC-TUI-HEADLESS §5 note before using the new identifier.

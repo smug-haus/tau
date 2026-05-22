@@ -7,7 +7,7 @@
 | **Scope** | The `tau tui` UX surface end-to-end: behaviour contracts for every user-visible TUI feature, plus a repeatable, CI-runnable UX testing protocol that exercises those features via the proven tmux-drive + pane-capture + screen-interpretation harness. |
 | **Method** | PSDH spike + design. Spike conducted 2026-05-04; results in §3 and Appendix A. UX surface analysis conducted 2026-05-21 (competitive analysis against Pi and Claude Code). |
 | **Companion** | `docs/spec/SPEC-USER-TURN.md` — AC-1 / AC-2 / AC-3 / AC-4 / AC-7 / AC-8 from that SPEC are the session-FSM contracts this SPEC operationalises at the UX layer. |
-| **D-NNN block** | D-066–D-075 (this SPEC's exclusive allocation; see §5). |
+| **D-NNN block** | D-066–D-075 (original allocation; see §5). D-140–D-149 (input-editor extension; see §5b). |
 | **Spec home for** | #335 (sub-agent visibility), #338 (input editor), #340 (status surfaces + `context_window/1`), #345 (themes/keybindings). Acceptance criteria in those issues map to protocol steps here. |
 
 ## 0. Why this spec exists
@@ -139,6 +139,44 @@ This SPEC is re-chartered from a test-harness spec (AC-1..AC-7 only) into the
   and fails. The TUI MUST detect this and return to the input prompt with the
   buffer unchanged; the harness verifies this does not crash the TUI.
 
+### Input editor key-detection constraints (#338 B2 — in-repo evidence + documented termbox behaviour)
+
+The following constraints are evidenced by (a) the existing in-repo termbox
+observation at `app.ex` that Space arrives as `key: 32` (not `ch: 32`) and
+(b) the documented behaviour of termbox v1/v2 which does not implement the
+Kitty keyboard protocol. No standalone binary spike was run; the evidence is
+in-repo code inspection plus termbox documentation.
+
+- **★ [HC23-H6] — L0 constraint.** Ratatouille 0.5.1 / termbox does NOT
+  implement the Kitty keyboard protocol. `Shift+Enter` arrives identically to
+  plain `Enter` (`key: 13`); there is no `mod` bit to distinguish them under
+  termbox. **Implication:** `Shift+Enter` cannot be the guaranteed multi-line
+  path. The portable v1 multi-line contract is `\`+Enter` (backslash followed
+  by Enter) and `Ctrl+J` (`key: 10`). Wire `Shift+Enter` only if a future
+  spike confirms `mod` carries it; until then it is best-effort only.
+- **★ [HC24-H6] — L0 constraint.** `Alt`-chords (e.g. `Alt+B`, `Alt+F`,
+  `Alt+Y`) arrive via the ESC-prefix two-byte sequence (an `key: 27` event
+  followed by a `ch:` or `key:` for the chord character), NOT as a reliable
+  `mod` bit. Under tmux with default settings, the ESC-prefix may be swallowed
+  or delayed. **Implication:** Alt-chord keys are wired as a `mod != 0` pattern
+  match if the runtime exposes the bit, otherwise they are **no-ops** — they
+  MUST NOT insert a literal character (D-141).
+- **[HC25-H6]** `Ctrl`-chord keys (`Ctrl+A/E/W/U/K/Y/R`) map to unambiguous
+  single-byte control codes (`key: 1/5/23/21/11/25/18` respectively) and are
+  the reliable editing core. `Ctrl+J` is `key: 10` (newline byte). These are
+  the primary surface; Alt-chords are best-effort enhancement.
+- **[HC26-H6]** The per-cwd history JSONL file (`<data_dir>/history/<sha256(cwd)>.jsonl`)
+  is shared across concurrent `tau` sessions in the same directory. Each
+  `File.write/3` with `:append` is POSIX-atomic for lines under 4 KiB, so
+  line interleaving does not occur. However, the in-memory history ring is NOT
+  shared — each session loads at startup and appends on submit. Two concurrent
+  sessions do not see each other's history until they restart. This is a
+  known limitation, not a defect (D-148).
+- **[HC27-H6]** `History.Store` MUST accept an explicit `data_dir` argument.
+  `Settings.data_dir/0` does not read `TAU_DATA_DIR` under `mix test`
+  (`config/runtime.exs` reads it only under `:prod`). Tests pass a per-test
+  `tmp_dir`; the `App` wiring passes `Settings.data_dir()` at runtime (D-140).
+
 ### Sub-agent visibility constraints (#335)
 
 - **★ [HC17-H7]** Sub-agent progress arrives asynchronously via `Phoenix.PubSub`
@@ -262,6 +300,24 @@ are taken by prior SPECs (verify with `grep -rn 'D-0[0-9][0-9]'`).
 superseded by D-066–D-071, which restate the same constraints with the
 updated identifier allocation. D-020–D-025 are retired as of this
 revision; do not reference them in new work.
+
+## 5b. PSDH catalog (D-140–D-149) — input editor runtime invariants
+
+D-NNN allocation: this SPEC owns D-140–D-149 as an extension block for
+the input editor feature (#338). See `docs/MISSION.md` registry.
+
+| ID | Statement | Severity | Detection | Source |
+|---|---|---|---|---|
+| D-140 | `Tau.TUI.History.Store` MUST accept an explicit `data_dir` argument. The `App` wiring passes `Settings.data_dir()`; tests pass a per-test `tmp_dir`. A store keyed only off a global accessor is non-hermetic under `mix test`. | high | unit test: call `Store.load/2` with a `tmp_dir`; assert the path written is under `tmp_dir`, not `~/.tau`. | [HC27] |
+| D-141 | Alt-chord keys (`Alt+B`, `Alt+F`, `Alt+Y`) MUST degrade to no-ops if termbox/tmux mangles the ESC-prefix. They MUST NOT insert a literal character (`b`, `f`, or `y`). | high | unit test: send an unrecognised `mod`-prefixed event for an alt-chord; assert `Editor.text/1` is unchanged. | [HC24] |
+| D-142 | `Tau.TUI.Editor` cursor positions are grapheme-column indices, never byte indices. Every cursor-mutating function MUST use `String.graphemes/1` arithmetic. Byte-index cursor math splits UTF-8 multi-byte graphemes. | high | property test: generate strings containing non-ASCII graphemes; assert no split after any `move_*` or `insert/2` call. | [HC24] |
+| D-143 | The history ring is capped at 100 entries. `History.push/2` MUST drop the oldest entry when the cap is reached. Consecutive duplicate entries MUST be suppressed (only one of a run of identical submissions is kept). | medium | property test: push 101 identical-then-distinct entries; assert `length(entries) <= 100` and no adjacent duplicates. | elaboration §3.2 |
+| D-144 | The kill-ring is capped at 10 entries. `Editor.kill_*/1` appends to the ring (most-recent-first) and drops the oldest when the cap is reached. | low | unit test: perform 11 kills; assert `length(kill_ring) == 10`. | elaboration §3.1 |
+| D-145 | The multi-line contract for v1 is `\`+Enter` (backslash followed by Enter) and `Ctrl+J` (`key: 10`). These two paths MUST insert a newline into the editor buffer without submitting the turn. `Shift+Enter` is wired opportunistically only. | high | unit test: send `\` then Enter; assert `Editor.text/1` contains a newline; assert no `Tau.send/2` was called. | [HC23] |
+| D-146 | Per-cwd history is stored as JSONL at `Path.join([data_dir, "history", sha256_hex(cwd) <> ".jsonl"])`. The sha256 is a hex-encoded binary digest of the raw cwd string. | medium | unit test: call `Store.append/3` with a known cwd; assert the file path contains the expected sha256 hex. | elaboration §3.2 |
+| D-147 | `Ctrl+R` mode is a transient sub-state of the input editor. Pressing `Esc` in `Ctrl+R` mode exits search and restores the pre-search buffer. Pressing `Enter` in `Ctrl+R` mode accepts the matched entry into the active buffer and exits search mode. | medium | unit test: set model to search mode; send Esc; assert model.search is nil and buffer is restored. | elaboration §3.2 |
+| D-148 | **Known limitation:** Two concurrent `tau` sessions in the same cwd each maintain independent in-memory history. `Store.append/3` writes are POSIX-atomic (single `:append` write ≤ 4 KiB), so line-level interleaving does not occur. However, each session's in-memory ring does not see the other session's appends until a new session starts and calls `Store.load/2`. This is acceptable for v1 (history is advisory, not correctness-bearing). | low | No test required; documented here so it is not filed as a bug. | [HC26] |
+| D-149 | The `Tau.TUI.Editor` and `Tau.TUI.History` modules MUST be pure value modules — no GenServer, no process, no behaviour. All state is threaded through the Ratatouille MVU model. | high | Structural: assert neither module has a `use GenServer` or `@behaviour` directive. | OTP non-negotiables §3, §8 |
 
 ## 6. Acceptance criteria — UX surface
 
