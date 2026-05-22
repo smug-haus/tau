@@ -121,6 +121,21 @@ The current spec catalog:
   `test/support/extensions/`. Triage score 4/5; D-120..D-129 live here.
   Spec home for #180 (Stage A) and Stage B (#337, #345 — deferred surfaces).
 
+- `docs/spec/SPEC-WEB-DASHBOARD.md` — the `:tau_web` Phoenix poncho package:
+  endpoint lifecycle (`TauWeb.Application`, `TauWeb.Endpoint`), LiveView →
+  `Tau.PubSub` mount-replay-subscribe temporal coupling (D-180, D-181), session
+  drive via the public `Tau` API only (D-182), `Tau.Session.Events` struct reuse
+  (D-183), PubSub-reuse invariant (D-184 — no second `Phoenix.PubSub`), and
+  `[:tau, :web, …]` telemetry namespace (D-187). Mandatory for any PR touching
+  `web/lib/tau_web/application.ex`, `web/lib/tau_web/endpoint.ex`,
+  `web/lib/tau_web/router.ex`,
+  `web/lib/tau_web/controllers/health_controller.ex`,
+  `web/lib/tau_web/telemetry.ex`, `web/config/config.exs`, `web/mix.exs`,
+  `web/test/tau_web/foundation_test.exs`, `web/test/support/conn_case.ex`, or any
+  future `web/lib/tau_web/live/` LiveView module. Triage score 4/5;
+  D-180..D-189 live here. Spec home for #374 (M7 foundation) and #43–#48
+  (dashboard features).
+
 Future SPECs land here as new components reach triage threshold.
 
 ## What this rule requires

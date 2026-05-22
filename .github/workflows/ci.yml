@@ -551,3 +551,45 @@ jobs:
           name: tau-escript
           path: tau
           retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # web job — :tau_web Phoenix poncho package (issue #374 / M7 foundation)
+  # Separate from the core :tau jobs so M7 and M1.1 can proceed in parallel
+  # without entangling their CI timelines.
+  # ---------------------------------------------------------------------------
+  web:
+    name: web (tau_web poncho · compile + test)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pin Python 3.10 so :ex_termbox's waf 2.0.14 build compiles.
+      # The :tau path-dep pulls in ex_termbox; same constraint applies.
+      - name: Setup Python (3.10 for ex_termbox waf)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Setup BEAM
+        id: beam
+        uses: erlef/setup-beam@v1
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
+      - name: Cache deps (web)
+        uses: actions/cache@v4
+        with:
+          path: |
+            web/deps
+            web/_build
+          key: ${{ runner.os }}-mix-web-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('web/mix.lock', 'web/mix.exs', 'mix.lock', 'mix.exs') }}
+
+      - name: Install web deps
+        run: cd web && mix deps.get
+
+      - name: Compile (warnings-as-errors)
+        run: cd web && mix compile --warnings-as-errors
+
+      - name: Run tests
+        run: cd web && mix test
