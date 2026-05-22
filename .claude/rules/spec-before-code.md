@@ -14,18 +14,13 @@ spec.
 
 The current spec catalog:
 
-- `docs/spec/SPEC-TUI-HEADLESS.md` — M1.1 TUI behaviour + UX testing protocol.
-  Re-chartered from a test-harness spec (2026-05-04) to the full M1.1 UX surface
-  (2026-05-21). Mandatory for any PR touching `lib/tau/tui/` (all files),
-  `lib/tau/tui/app.ex`, `lib/tau/tui/input_editor.ex`,
-  `lib/tau/tui/sub_agent_panel.ex`, `lib/tau/tui/status_bar.ex`,
-  `lib/tau/tui/theme.ex`, `lib/tau/tui/keybindings.ex`,
+- `docs/spec/SPEC-TUI-HEADLESS.md` — M1.1 TUI behaviour + UX testing
+  protocol. Mandatory for any PR touching `lib/tau/tui/` (all files),
   `lib/tau/provider.ex` (the `context_window/1` callback),
-  `lib/tau/provider/context_windows.ex` (the `ContextWindows` lookup table),
-  `test/support/tui_pty_helper.ex`, or `test/tau/cli/tui_smoke_test.exs` /
-  `test/tau/cli/tui_ux_test.exs`. Triage score 5/5; D-066..D-075 live here.
-  D-160..D-169 (status surface, #340) also live here.
-  Spec home for M1.1 child issues #335, #338, #340, #345.
+  `lib/tau/provider/context_windows.ex` (the `ContextWindows` lookup
+  table), `test/support/tui_pty_helper.ex`, or
+  `test/tau/cli/tui_smoke_test.exs`. Triage score 5/5; D-066..D-075,
+  D-140..D-169 live here.
 
 - `docs/spec/SPEC-USER-TURN.md` — the binary launch → TUI → session FSM →
   provider stream → render loop. Mandatory for any PR touching `lib/tau/cli.ex`,

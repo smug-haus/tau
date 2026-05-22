@@ -115,7 +115,7 @@ Each question lists raw constraints. Format: `[Cn-Bm]` = constraint number + bou
 - **★ [C24-B6]** Tool-call iteration in a single turn is **unbounded**. `Tau.Session` (lib/tau/session.ex:1056-1066) loops while `tool_calls != []`. A model that always emits a tool call (e.g., a buggy persona that loops on `Bash`) consumes API calls and tokens without limit. No `max_tool_iterations` guard visible in the FSM.
 - **[C25-B5]** Rate limiter on 429: halves both buckets and arms a fixed 60-second floor (lib/tau/providers/rate_limiter.ex:50, 198). NOT exponential, no max-retry. Per-call bound is `acquire/3` timeout (default 30s) → FSM falls back to `:awaiting_user` with a rate_limit_timeout error. Persistent 429 produces continuous 60s holds; user sees repeated "rate_limit_timeout" errors with no escalation. Acceptable for v1, but [C25] flag remains for a future "max consecutive 429s" guard.
 - **★ [C26-B5]** Compactor failure: `compactor.compact(...)` returns `{:error, _}` and the FSM silently drops it (`{:error, _} -> data`, lib/tau/session.ex:1094). No telemetry, no log. `should_compact?` refires next turn → silent loop on a persistent failure. Confirmed via OQ-4 reading.
-- **★ [C50-B6]** Tool-call iteration cap value is read from `opts[:max_tool_iterations]` at session init, falling back to `get_in(Settings.Cache.get(), [:session, :max_tool_iterations])`, then defaulting to 20. The cap is snapshotted at session start, not re-read each turn (D-007 consistency). A new session inherits any settings change, but in-flight sessions use their init-time cap. This is the correct behaviour for D-007 compliance; naming it as a constraint so future callers know the precedence order.
+- **★ [C50-B6]** Tool-call iteration cap value is read from `opts[:max_tool_iterations]` at session init, falling back to `get_in(Settings.Cache.get(), [:session, :max_tool_iterations])`, then defaulting to 100. The cap is snapshotted at session start, not re-read each turn (D-007 consistency). A new session inherits any settings change, but in-flight sessions use their init-time cap. This is the correct behaviour for D-007 compliance; naming it as a constraint so future callers know the precedence order.
 - **[C27-B5]** Fallback chain is bounded by chain length (ADR-0012). OK.
 - **[C28-B4]** Session resume replays JSONL. Fork chains (ADR-0007) reference parent events; cycle in fork chain would diverge replay. Verify acyclic invariant.
 
@@ -572,7 +572,7 @@ These are the bar for closing the umbrella issue (#153/#149) and unblocking the 
 - This test runs in CI on every PR and is a blocking gate.
 
 ### AC-6: Tool-iteration safety
-- A property test runs a session backed by a bespoke `AlwaysToolCallProvider` (a `Tau.Provider` behaviour implementation that always emits a `tool_call` event stream). The session terminates within `max_tool_iterations` (default 20) with `stop_reason: :tool_loop_aborted`.
+- A property test runs a session backed by a bespoke `AlwaysToolCallProvider` (a `Tau.Provider` behaviour implementation that always emits a `tool_call` event stream). The session terminates within `max_tool_iterations` (default 100) with `stop_reason: :tool_loop_aborted`.
 
 ### AC-7: Resume sanity
 - After AC-2, `tau sessions list` shows the session. `tau sessions show <id>` prints the JSONL events. `tau resume <id>` opens a TUI for the resumed session whose transcript pane includes the prior turn.
@@ -704,7 +704,7 @@ For each constraint, the file:line where it lives in the current codebase:
 | L1-C43 | `lib/tau/session.ex` :stopped transition |
 | L1-C45 | `lib/tau/tui/app.ex:18-21` (no monitor on FSM pid) |
 
-| C50 | `lib/tau/session.ex` init/1 — `max_tool_iterations` resolution (opts → Settings.Cache → 20) |
+| C50 | `lib/tau/session.ex` init/1 — `max_tool_iterations` resolution (opts → Settings.Cache → 100) |
 | C53 | `lib/tau/application.ex` — `cli_argv/0` (env-marker read → delete → decode); `test/support/tui_pty_helper.ex` — `start/2` plain-release branch; `test/tau/application/cli_argv_test.exs` |
 | C54 | `lib/tau/session.ex` — `do_swap_model/2` (pure mutation core), `apply_model_swap/2` (shared helper with telemetry+persist), `handle_event({:call, from}, {:swap_model, _}, ...)` (gated call handler), `handle_slash_model_swap/2` (/model slash path), `reconfigure_model/2` ({:reconfigure} cast routing); `lib/tau/session/events.ex` — `%SystemNotice{}`; `lib/tau/tui/app.ex` — `%SystemNotice{}` dispatch clause; `test/tau/session/swap_model_test.exs`; `test/tau/session/slash_model_command_test.exs` |
 | C55 | `lib/tau/commands/builtin.ex` — `Tau.Commands.Builtin` behaviour + `table/0`; `lib/tau/commands/builtin/ping.ex` — `Tau.Commands.Builtin.Ping` seed entry; `lib/tau/commands/parser.ex` — `lookup_builtin/1`; `lib/tau/session.ex` — `classify_slash_command/2` (builtin arm before extension lookup), `handle_event` `{:builtin, mod, args, msg}` arm, `handle_builtin_command/4`, `outcome_tag/1`; `test/tau/commands/builtin_test.exs`; `test/tau/session/builtin_command_dispatch_test.exs` |

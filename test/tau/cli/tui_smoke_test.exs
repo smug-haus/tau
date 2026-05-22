@@ -126,7 +126,8 @@ defmodule Tau.CLI.TuiSmokeTest do
   defp run_ac_h4_quit(%{binary: binary, tmpdir: tmpdir}) do
     {:ok, sess} = TuiPtyHelper.start(binary, env: [{"TAU_DATA_DIR", tmpdir}])
 
-    # Capture before quitting (D-023).
+    # Capture pane before sending the quit key, so the assertion below
+    # sees the prompt state at the moment of the test, not after exit.
     {:ok, _pane} = TuiPtyHelper.capture(sess)
 
     :ok = TuiPtyHelper.send(sess, "q")

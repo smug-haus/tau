@@ -94,7 +94,8 @@ sessions.
 
 **C-005** — `Loader.init/1` MUST call `Tau.Settings.Cache.get/0` to
 obtain the `extensions` list. `Settings.Cache` starts before the Loader
-in the `:rest_for_one` tree (position 4 vs 10); the call is safe.
+in the `:rest_for_one` tree (see `lib/tau/application.ex` for the boot
+order); the call is safe.
 
 ### Auto-discovery constraints
 

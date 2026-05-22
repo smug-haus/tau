@@ -106,8 +106,8 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
   is swallowed. The façade MUST log a telemetry event
   `[:tau, :circuit_breaker, :open]` so the TUI and session FSM have an
   observable signal.
-- **★ [C63-B2]** If `Store` crashes, the ETS table is destroyed (it is
-  `:private` to the owner process — see §4). All concurrent reads and writes
+- **★ [C63-B2]** If `Store` crashes, the ETS table is destroyed (the
+  Store owns it and is its lifecycle anchor — see §4 B2). All concurrent reads and writes
   fail. The supervisor MUST restart `Store` and the table is recreated empty —
   all breakers reset to `:closed`. This is acceptable: a restart means the
   crash cost is a momentary reset of error counters, not data loss of

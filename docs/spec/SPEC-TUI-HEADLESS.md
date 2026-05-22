@@ -899,22 +899,23 @@ Files this SPEC touches (or proposes touching) on landing:
 | `Tau.TUI.App.@tick_interval` | `lib/tau/tui/app.ex:16` |
 | `Tau.TUI.App.init/1` | `lib/tau/tui/app.ex:18-37` |
 | `Tau.TUI.App.run/0` quit_events | `lib/tau/tui/app.ex:115-119` |
-| `Tau.TUI.InputEditor` (proposed, #338) | `lib/tau/tui/input_editor.ex` |
-| `Tau.TUI.SubagentTree` (#335, landed) | `lib/tau/tui/subagent_tree.ex` |
-| `Tau.TUI.App.subagents` model field (#335, landed) | `lib/tau/tui/app.ex` |
-| `Tau.Session.Events.SubagentStart/Progress/Cost/End` (#335, landed) | `lib/tau/session/events.ex` |
-| `Tau.Tools.Builtin.Agent.await_child/4` relay (#335, landed) | `lib/tau/tools/builtin/agent.ex` |
-| `Tau.TUI.SubAgentPanel` (proposed, #361 follow-up) | `lib/tau/tui/sub_agent_panel.ex` |
-| `Tau.TUI.StatusBar` (#340, landed) | `lib/tau/tui/status_bar.ex` |
-| `Tau.Provider.context_window/1` (#340, landed) | `lib/tau/provider.ex` |
-| `Tau.Provider.ContextWindows` (#340, landed) | `lib/tau/provider/context_windows.ex` |
-| `Tau.Session.Events.ModelSwapped` (#340, landed) | `lib/tau/session/events.ex` |
-| `Tau.Session.Events.CompactionStarted` (#340, landed) | `lib/tau/session/events.ex` |
-| `Tau.Session.Events.CompactionFinished` (#340, landed) | `lib/tau/session/events.ex` |
-| `Tau.TUI.Theme` (proposed, #345) | `lib/tau/tui/theme.ex` |
-| `Tau.TUI.Keybindings` (proposed, #345) | `lib/tau/tui/keybindings.ex` |
+| `Tau.TUI.Editor` | `lib/tau/tui/editor.ex` |
+| `Tau.TUI.SubagentTree` | `lib/tau/tui/subagent_tree.ex` |
+| `Tau.TUI.App.subagents` model field | `lib/tau/tui/app.ex` |
+| `Tau.Session.Events.SubagentStart/Progress/Cost/End` | `lib/tau/session/events.ex` |
+| `Tau.Tools.Builtin.Agent.await_child/4` relay | `lib/tau/tools/builtin/agent.ex` |
+| `Tau.TUI.StatusBar` | `lib/tau/tui/status_bar.ex` |
+| `Tau.Provider.context_window/1` | `lib/tau/provider.ex` |
+| `Tau.Provider.ContextWindows` | `lib/tau/provider/context_windows.ex` |
+| `Tau.Session.Events.ModelSwapped` | `lib/tau/session/events.ex` |
+| `Tau.Session.Events.CompactionStarted` | `lib/tau/session/events.ex` |
+| `Tau.Session.Events.CompactionFinished` | `lib/tau/session/events.ex` |
 | `Tau.Settings.data_dir` | reads `TAU_DATA_DIR` env or default |
-| `Tau.Persistence.Jsonl.path_for/2` | `lib/tau/persistence/jsonl.ex:168-175` |
-| Helper (exists) | `test/support/tui_pty_helper.ex` |
-| Smoke tests (proposed) | `test/tau/cli/tui_smoke_test.exs` |
-| UX protocol tests (proposed) | `test/tau/cli/tui_ux_test.exs` |
+| `Tau.Persistence.Jsonl.path_for/2` | `lib/tau/persistence/jsonl.ex` |
+| Helper | `test/support/tui_pty_helper.ex` |
+| Smoke tests | `test/tau/cli/tui_smoke_test.exs` |
+
+Future work (not yet landed; tracked in their own issues):
+`Tau.TUI.Theme` / `Tau.TUI.Keybindings` (#345), an `:tui_ux`-tagged
+protocol-test file extending the smoke suite, and a dedicated
+sub-agent-panel module (a follow-up to #361's interactive surface).
