@@ -47,6 +47,7 @@ defmodule Tau.Providers.AzureOpenAI do
 
   @behaviour Tau.Provider
 
+  alias Tau.Provider.ContextWindows
   alias Tau.Providers.RateLimiter
   alias Tau.Providers.Shared.{FinchStream, OpenAIChatWire, TokenEstimate}
 
@@ -58,7 +59,7 @@ defmodule Tau.Providers.AzureOpenAI do
   def default_model, do: @default_model
 
   @impl Tau.Provider
-  def context_window(model), do: Tau.Provider.ContextWindows.lookup(__MODULE__, model)
+  def context_window(model), do: ContextWindows.lookup(__MODULE__, model)
 
   @impl Tau.Provider
   def capabilities do

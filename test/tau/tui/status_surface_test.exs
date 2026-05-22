@@ -15,11 +15,15 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     """
     use ExUnit.Case, async: true
 
+    alias Tau.Provider.ContextWindows
+    alias Tau.Providers.Anthropic
+    alias Tau.Providers.Bedrock
+    alias Tau.Providers.Gemini
     alias Tau.Session.Events
     alias Tau.TUI.App
     alias Tau.TUI.Editor
     alias Tau.TUI.History
-    alias Tau.Provider.ContextWindows
+    alias Tau.TUI.StatusBar
 
     # --- base model (mirrors App test fixture, plus status-surface fields) ----
 
@@ -41,7 +45,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         menu: nil,
         # Status surface fields (#340):
         model: "claude-opus-4-7",
-        provider: Tau.Providers.Anthropic,
+        provider: Anthropic,
         usage: %{input_tokens: 0, output_tokens: 0, cache_read: 0, cache_write: 0},
         context_tokens: 0,
         context_window: 200_000,
@@ -78,7 +82,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         next = App.update(m, event)
 
         assert next.context_window ==
-                 ContextWindows.lookup(Tau.Providers.Anthropic, "claude-3-5-haiku-20241022")
+                 ContextWindows.lookup(Anthropic, "claude-3-5-haiku-20241022")
       end
 
       test "sets context_window to nil for unknown model" do
@@ -166,7 +170,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
           status: next.status
         }
 
-        text = Tau.TUI.StatusBar.render_text(status_model)
+        text = StatusBar.render_text(status_model)
 
         refute String.contains?(text, "compacting…"),
                "AC-5: 'compacting…' MUST be absent after CompactionFinished; got: #{text}"
@@ -181,7 +185,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
         event = %Events.SessionStart{
           session_id: m.session_id,
-          provider: Tau.Providers.Anthropic,
+          provider: Anthropic,
           model: "claude-3-5-haiku-20241022"
         }
 
@@ -194,12 +198,12 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
         event = %Events.SessionStart{
           session_id: m.session_id,
-          provider: Tau.Providers.Anthropic,
+          provider: Anthropic,
           model: "claude-opus-4-7"
         }
 
         next = App.update(m, event)
-        assert next.provider == Tau.Providers.Anthropic
+        assert next.provider == Anthropic
       end
 
       test "context_window resolved via context_window/1 callback on SessionStart" do
@@ -207,7 +211,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
         event = %Events.SessionStart{
           session_id: m.session_id,
-          provider: Tau.Providers.Gemini,
+          provider: Gemini,
           model: "gemini-2.0-flash"
         }
 
@@ -221,7 +225,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
         event = %Events.SessionStart{
           session_id: m.session_id,
-          provider: Tau.Providers.Anthropic,
+          provider: Anthropic,
           model: "claude-unknown-xyz"
         }
 
@@ -234,16 +238,16 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
     describe "Tau.Provider.ContextWindows.lookup/2" do
       test "returns context window for Anthropic claude-opus-4-7" do
-        assert ContextWindows.lookup(Tau.Providers.Anthropic, "claude-opus-4-7") == 200_000
+        assert ContextWindows.lookup(Anthropic, "claude-opus-4-7") == 200_000
       end
 
       test "returns context window for Gemini 2.0 flash" do
-        assert ContextWindows.lookup(Tau.Providers.Gemini, "gemini-2.0-flash") == 1_048_576
+        assert ContextWindows.lookup(Gemini, "gemini-2.0-flash") == 1_048_576
       end
 
       test "returns context window for Bedrock Anthropic model" do
         assert ContextWindows.lookup(
-                 Tau.Providers.Bedrock,
+                 Bedrock,
                  "anthropic.claude-3-5-sonnet-20241022-v2:0"
                ) ==
                  200_000
@@ -254,7 +258,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       end
 
       test "returns nil for unknown model" do
-        assert ContextWindows.lookup(Tau.Providers.Anthropic, "claude-unknown-xyz") == nil
+        assert ContextWindows.lookup(Anthropic, "claude-unknown-xyz") == nil
       end
 
       test "returns nil for unknown provider" do
@@ -272,37 +276,37 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       setup do
         # function_exported?/3 only works on loaded modules; ensure loading
         # before checking. At runtime all provider modules are loaded at startup.
-        Code.ensure_loaded(Tau.Providers.Anthropic)
-        Code.ensure_loaded(Tau.Providers.Gemini)
-        Code.ensure_loaded(Tau.Providers.Bedrock)
+        Code.ensure_loaded(Anthropic)
+        Code.ensure_loaded(Gemini)
+        Code.ensure_loaded(Bedrock)
         :ok
       end
 
       test "Anthropic implements context_window/1" do
-        assert function_exported?(Tau.Providers.Anthropic, :context_window, 1)
-        assert Tau.Providers.Anthropic.context_window("claude-opus-4-7") == 200_000
+        assert function_exported?(Anthropic, :context_window, 1)
+        assert Anthropic.context_window("claude-opus-4-7") == 200_000
       end
 
       test "Gemini implements context_window/1" do
-        assert function_exported?(Tau.Providers.Gemini, :context_window, 1)
-        assert Tau.Providers.Gemini.context_window("gemini-2.0-flash") == 1_048_576
+        assert function_exported?(Gemini, :context_window, 1)
+        assert Gemini.context_window("gemini-2.0-flash") == 1_048_576
       end
 
       test "Bedrock implements context_window/1" do
-        assert function_exported?(Tau.Providers.Bedrock, :context_window, 1)
+        assert function_exported?(Bedrock, :context_window, 1)
 
-        assert Tau.Providers.Bedrock.context_window("anthropic.claude-3-5-sonnet-20241022-v2:0") ==
+        assert Bedrock.context_window("anthropic.claude-3-5-sonnet-20241022-v2:0") ==
                  200_000
       end
 
       test "context_window/1 returns nil for unknown model (triggers fallback)" do
-        assert Tau.Providers.Anthropic.context_window("unknown-model") == nil
+        assert Anthropic.context_window("unknown-model") == nil
       end
 
       test "function_exported? dispatch works for optional callback detection" do
         # The dispatch pattern: if function_exported?(provider, :context_window, 1) do
         #   provider.context_window(model) — else nil end
-        provider = Tau.Providers.Anthropic
+        provider = Anthropic
         model_id = "claude-opus-4-7"
 
         result =
