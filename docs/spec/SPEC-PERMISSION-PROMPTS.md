@@ -78,9 +78,13 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
   `:ask`. The FSM collects ALL of them into `pending_permission_requests` before
   entering `:awaiting_permission` (D1: defer the whole round). The TUI resolves
   them one at a time via separate `{:permission_decision}` casts. The `:allow_once`
-  path adds the resolved call to the parallel dispatch batch; `:deny_once` emits a
-  synthesised `is_error` ToolResult immediately. When the last pending entry is
-  cleared, the FSM exits `:awaiting_permission`.
+  path adds the resolved call to `permission_dispatch_batch`. The `:deny_once`
+  path accumulates a synthesised `is_error` ToolResult in `permission_pending_results`.
+  When the last pending entry is cleared, `finish_permission_round/1` emits all
+  accumulated results (ToolEnd broadcast + history append), then dispatches the
+  approved batch. The FSM then exits `:awaiting_permission` into `:tool_executing`
+  (if any approved calls remain) or directly invokes `:start_provider` (if all
+  were denied).
 
 - **★ [C3-B4] (D-092)** A `{:permission_decision}` arriving BEFORE
   `:awaiting_permission` is entered (e.g., a race where the TUI resolves faster
@@ -212,33 +216,44 @@ Entry condition: `data.interactive? == true` AND `ask_calls != []`.
 Data additions:
 - `data.pending_permission_requests :: %{tool_call_id => %{name, arguments}}` —
   initialised from `ask_calls` at entry.
-- `data.permission_dispatch_batch :: [{id, name, args}]` — accumulates resolved
-  `:allow_once` calls for dispatch when the last pending entry is cleared.
+- `data.permission_dispatch_batch :: [{id, name, args}]` — accumulates the
+  pre-approved `:allow`-verdict calls (deferred at entry) plus any `:allow_once`
+  user decisions. Dispatched as one batch in `finish_permission_round/1`.
+- `data.permission_pending_results :: [{call_id, %ToolResult{}}]` — accumulates
+  instant-resolve results for `:deny_once` decisions. Emitted in
+  `finish_permission_round/1` via broadcast + history append (not via
+  `{:tool_done}` messages). Cleared on exit.
+
+Instant-resolve items (deny-rule gated, whitelist-filtered, skill-activated)
+are tracked in `tools_in_flight` and processed by a Clause 0 `{:tool_done}`
+handler in `:awaiting_permission`. This handler processes them identically to
+`:tool_executing` but does NOT trigger the post-round transition (that only
+fires when `pending_permission_requests` is empty).
 
 Exits:
 1. `{:permission_decision, tool_call_id, :allow_once}` — remove from
    `pending_permission_requests`, add to `permission_dispatch_batch`. If map empty
-   → dispatch `permission_dispatch_batch` (existing parallel dispatcher path) →
-   `:tool_executing`.
+   → call `finish_permission_round/1`.
 2. `{:permission_decision, tool_call_id, :deny_once}` — remove from
-   `pending_permission_requests`, synthesise `is_error` ToolResult (see §3 B1).
-   If map empty → same as above (dispatch any accumulated allows or transition
-   to `:awaiting_user` if none).
+   `pending_permission_requests`, accumulate result in `permission_pending_results`.
+   If map empty → call `finish_permission_round/1`.
 3. `:cancel` cast → deny all pending (D-098) → `:awaiting_user`.
 
 Unknown/stale `tool_call_id` in `{:permission_decision}` → logged no-op (D-090).
 
-When `permission_dispatch_batch` is empty after the last pending decision is
-cleared (all were denied), the FSM transitions to `:awaiting_user` (the model
-needs to be informed of all denials and issue a new turn; the model has already
-received the `is_error` ToolResults for the denied calls so this is a clean
-return).
+`finish_permission_round/1` behaviour:
+- Removes all `:awaiting_permission` sentinel entries from `tools_in_flight`.
+- Emits all `permission_pending_results` (broadcast ToolEnd + append to history).
+- Runs `:pre_tool_use` hooks on `permission_dispatch_batch`; hook-denied results
+  are also emitted directly (not via `{:tool_done}`).
+- If approved calls remain → dispatch via parallel executor → `:tool_executing`.
+- If no approved calls → invoke `:start_provider` directly (skip `:tool_executing`).
 
-**Important (D1):** When entering `:awaiting_permission`, the entire tool-dispatch
-round is deferred — even `:allow` calls from the same round are already dispatched
-before the partition is known. The partition is applied BEFORE dispatching anything
-to hooks/executor; only `gated` and non-interactive-ask denials are synthesised
-inline. Interactive `:ask` calls are held in `pending_permission_requests`.
+**D1 (whole-round deferral):** When entering `:awaiting_permission`, NO calls are
+dispatched — not even `:allow`-verdict calls. The partition is applied before any
+dispatch; `:allow` calls go into `permission_dispatch_batch` at entry, `:ask` calls
+go into `pending_permission_requests`, and instant-resolve items (deny-rule,
+whitelist) produce `{:tool_done}` messages handled by Clause 0.
 
 ### B4 — `interactive?` session property
 
@@ -304,7 +319,7 @@ returns `{:error, :busy}` if the state is not `:awaiting_user`.
 | ID | Invariant |
 |----|-----------|
 | D-090 | A `{:permission_decision}` cast for an unknown or already-resolved `tool_call_id`, or arriving outside `:awaiting_permission`, MUST be a logged debug no-op. It MUST NOT crash the FSM. |
-| D-091 | ALL `:ask` calls from one assistant turn are collected into `pending_permission_requests` before `:awaiting_permission` is entered (whole-round deferral). |
+| D-091 | ALL `:ask` calls from one assistant turn are collected into `pending_permission_requests` before `:awaiting_permission` is entered (whole-round deferral). NO calls (including `:allow`-verdict calls) are dispatched at entry; `:allow` calls are held in `permission_dispatch_batch` and dispatched only after all `:ask` decisions are resolved via `finish_permission_round/1`. |
 | D-092 | `interactive? == true` AND `ask_calls != []` → enter `:awaiting_permission`. Interactive sessions MUST NOT auto-deny `:ask` calls. |
 | D-093 | `interactive? == false` AND any `:ask` verdict → fail-closed `:deny` (synthesised `is_error` ToolResult, message `"Permission required for <name> but session is non-interactive; denied by policy."`). FSM MUST NOT enter `:awaiting_permission`. |
 | D-094 | PubSub broadcast of `%PermissionRequest{}` is fire-and-forget. FSM MUST NOT wait for delivery acknowledgement. |
