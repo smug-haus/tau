@@ -356,17 +356,8 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     # Resolve the head permission request with `verdict`, pop it from the queue,
     # and (when a real session is running) call decide_permission/3.
     defp resolve_permission(%{pending_permissions: [head | rest]} = model, verdict) do
-      # Async call to avoid blocking the render loop. Tolerate missing session.
-      spawn(fn ->
-        try do
-          Tau.Session.decide_permission(model.session_id, head.tool_call_id, verdict)
-        rescue
-          _ -> :ok
-        catch
-          _, _ -> :ok
-        end
-      end)
-
+      # decide_permission/3 is a cast (non-blocking); call directly like Tau.send/2.
+      Tau.Session.decide_permission(model.session_id, head.tool_call_id, verdict)
       %{model | pending_permissions: rest}
     end
 
@@ -1178,17 +1169,9 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
           model_cleared
 
         true ->
-          # AC-B6: set mode locally and call FSM (async, tolerates no session).
-          spawn(fn ->
-            try do
-              Tau.Session.set_permissions_mode(model.session_id, mode)
-            rescue
-              _ -> :ok
-            catch
-              _, _ -> :ok
-            end
-          end)
-
+          # AC-B6: set mode locally and call FSM; set_permissions_mode/2 is a
+          # cast (non-blocking), called directly like Tau.send/2.
+          Tau.Session.set_permissions_mode(model.session_id, mode)
           %{model_cleared | permissions_mode: mode}
       end
     end
