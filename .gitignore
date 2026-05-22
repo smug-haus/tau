@@ -51,6 +51,12 @@ coverage.json
 # Tau runtime data (when developing against the local cwd)
 /.tau/settings.local.json
 
+# Per-agent XDG_DATA_HOME (Burrito unpack-cache isolation, see worktree-discipline.md)
+/.xdg-data/
+
+# Scratch dir used by some mix tasks
+/tmp/
+
 # Claude Code agent worktrees (created by Agent calls with isolation: "worktree")
 /.claude/worktrees/
 

@@ -1,5 +1,11 @@
 # M1 Self-Hosting Verification — Runbook
 
+> **Historical.** Milestone M1 — Self-hosting closed (20 issues; verified
+> via #256). This runbook is preserved under `docs/history/` for reference;
+> it is no longer the source of truth for "is self-hosting working" (the
+> answer lives in CI's `binary-qa` job and the M1 milestone state on GitHub).
+> Per ADR-0023.
+
 The final M1 step is *running* the coordinator workflow end-to-end inside a Tau session against a real provider. This runbook is one-time bootstrap + one invocation. Everything else (build, smoke, full QA gate) is automated by `mix tau.qa` (issue #268) and the CI `binary-qa` job.
 
 Smoke-task body in [`smoke-task.md`](smoke-task.md). Evidence destination is [`evidence/`](evidence/).

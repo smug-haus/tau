@@ -1,5 +1,11 @@
 # Tau System Olog
 
+> **Frozen snapshot.** This file was cross-checked against `lib/tau/` at
+> HEAD `a9a5de7`. It is no longer maintained. The code has moved on; if
+> you need a current categorical model, regenerate it — do not patch this
+> file. Kept under `docs/history/` for reference. Per ADR-0023, durable
+> docs describe intent, not state.
+
 This file is the canonical ontology log (Spivak) of the Tau project: every
 object (type/concept) and morphism (functional relationship) of the running
 system, synthesised from four subsystem inventories and cross-checked against
