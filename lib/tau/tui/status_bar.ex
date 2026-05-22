@@ -86,7 +86,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     def context_pct(_tokens, window) when window <= 0, do: nil
 
     def context_pct(tokens, window) when is_integer(tokens) and is_integer(window) do
-      min(round(tokens / window * 100), 100)
+      max(0, min(round(tokens / window * 100), 100))
     end
 
     @doc """

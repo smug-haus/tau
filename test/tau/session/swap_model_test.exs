@@ -69,6 +69,7 @@ defmodule Tau.Session.SwapModelTest do
     on_exit(fn -> :telemetry.detach(handler_id) end)
 
     sid = "swap-ok-#{System.unique_integer([:positive])}"
+    Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{sid}")
 
     {:ok, ^sid} =
       start_session_for_test(
@@ -86,6 +87,9 @@ defmodule Tau.Session.SwapModelTest do
     assert_receive {:telemetry, _measurements,
                     %{from: "old-model", to: "new-model", session_id: ^sid}},
                    1_000
+
+    # AC-6 / D-160: ModelSwapped broadcast fires on a mid-session /model switch.
+    assert_receive %SE.ModelSwapped{session_id: ^sid, from: "old-model", to: "new-model"}, 1_000
   end
 
   test "swap rejected {:error, :busy} mid-stream" do

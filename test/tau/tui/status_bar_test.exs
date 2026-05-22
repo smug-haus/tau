@@ -146,7 +146,8 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     describe "property tests (AC-7)" do
       property "context_pct/2 always returns nil or an integer in 0..100" do
         check all(
-                tokens <- one_of([constant(nil), integer(0..1_000_000)]),
+                tokens <-
+                  one_of([constant(nil), integer(-2_000_000..2_000_000)]),
                 window <-
                   one_of([constant(nil), constant(0), constant(-1), integer(1..2_000_000)])
               ) do

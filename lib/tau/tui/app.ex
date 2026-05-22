@@ -1206,10 +1206,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       try do
         Tau.Cost.for_session(session_id)
       rescue
-        _ ->
-          %{input_tokens: 0, output_tokens: 0, cache_read: 0, cache_write: 0}
-      catch
-        _, _ ->
+        ArgumentError ->
           %{input_tokens: 0, output_tokens: 0, cache_read: 0, cache_write: 0}
       end
     end
