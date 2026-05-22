@@ -14,6 +14,9 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     alias Ratatouille.Runtime.Subscription
     alias Tau.TUI.Render.{Wrap, Markdown}
     alias Tau.TUI.Fuzzy
+    alias Tau.TUI.Editor
+    alias Tau.TUI.History
+    alias Tau.TUI.History.Store
     alias Tau.Commands.Builtin
 
     # Adaptive tick: 16 ms while a turn is streaming (last_assistant non-nil);
@@ -70,9 +73,24 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       # dimensions). Falls back to 80 if context is unavailable (unit tests).
       initial_width = get_in(context, [:window, :width]) || 80
 
+      # D-140: data_dir injected from Settings; Store.load/2 uses it to
+      # locate the per-cwd history JSONL without touching global state.
+      data_dir = Tau.Settings.data_dir()
+      cwd = File.cwd!()
+      history = Store.load(data_dir, cwd)
+
       %{
         session_id: session_id,
-        input: "",
+        # #338: editor replaces the bare `input` string field.
+        editor: Editor.new(),
+        # #338: per-cwd history, pre-loaded from Store.
+        history: history,
+        # #338: transient Ctrl+R reverse-search sub-state (D-147).
+        # nil = normal mode; map = search mode with :query and :pre_search_editor.
+        search: nil,
+        # #338: remember data_dir and cwd for Store.append on submit.
+        history_data_dir: data_dir,
+        history_cwd: cwd,
         transcript: [],
         tool_output: [],
         status: :idle,
@@ -104,65 +122,8 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     @impl true
     def update(model, msg) do
       case msg do
-        # SPEC-TUI-COMPLETION D-106 / D-105: Enter while menu is open fills
-        # the input with `name <> " "` and closes the menu — does NOT submit.
-        # This clause MUST precede the generic Enter→submit/1 clause.
-        {:event, %{key: 13}} when model.menu != nil ->
-          menu_accept(model)
-
-        {:event, %{key: 13}} ->
-          submit(model)
-
-        # SPEC-TUI-COMPLETION D-105 / D-106: Esc while the menu is open
-        # dismisses the menu WITHOUT cancelling the session turn. This clause
-        # MUST precede the Esc→cancel/1 clause below (C4-B2).
-        {:event, %{key: 27}} when model.menu != nil ->
-          %{model | menu: nil}
-
-        {:event, %{key: 27}} ->
-          cancel(model)
-
-        # Arrow-up: move menu selection up (clamped at 0).
-        {:event, %{key: 65_517}} when model.menu != nil ->
-          menu_navigate(model, -1)
-
-        # Arrow-down: move menu selection down (clamped at length - 1).
-        {:event, %{key: 65_516}} when model.menu != nil ->
-          menu_navigate(model, 1)
-
-        # Termbox / Ratatouille deliver Space as `key: 32` (the SPC special
-        # key), NOT as `ch: 32`. The `ch != 0` clause below therefore
-        # never fires for spaces, and they were silently dropped. Map
-        # the special key to a literal space here. A space also closes the
-        # menu (the query now contains whitespace → no longer a slash token).
-        {:event, %{key: 32}} ->
-          model
-          |> append_input(" ")
-          |> close_menu_if_whitespace()
-
-        # D-003 ([C7] / AC-4): `q` is context-aware. On an empty prompt it
-        # quits (matching the old quit_events behaviour); on a non-empty
-        # prompt it appends `q` like any other character. The bare
-        # `{:ch, ?q}` entry has been removed from `quit_events` so that
-        # Ratatouille forwards the event here instead of consuming it
-        # unconditionally at the runtime layer.
-        {:event, %{ch: ?q}} ->
-          quit_or_append(model)
-
-        {:event, %{ch: ch}} when ch != 0 ->
-          model
-          |> append_input(<<ch::utf8>>)
-          |> update_menu()
-
-        {:event, %{key: 127}} ->
-          model
-          |> backspace()
-          |> update_menu()
-
-        {:event, %{key: 8}} ->
-          model
-          |> backspace()
-          |> update_menu()
+        {:event, event} ->
+          handle_event(model, event)
 
         # Resize: update wrap_width so subsequent wraps use the new terminal width
         {:resize, %{w: w}} ->
@@ -209,6 +170,114 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         _ ->
           model
       end
+    end
+
+    # Route terminal key events to sub-handlers by event shape.
+    # Ordering: key-with-code first (Ctrl/special), then ch (character), then catch-all.
+    defp handle_event(model, %{key: key} = event), do: handle_key(model, key, event)
+    defp handle_event(model, %{mod: mod, ch: ch}) when mod != 0, do: handle_alt(model, ch)
+    defp handle_event(model, %{ch: ch}), do: handle_char(model, ch)
+    defp handle_event(model, _), do: model
+
+    # Handle events with a `key:` code. Dispatches to sub-handlers to keep
+    # cyclomatic complexity within bounds. Clause ordering is load-bearing.
+    defp handle_key(model, key, _event) do
+      case key do
+        # Enter — context-aware: menu → accept, search → accept, else → submit
+        13 when model.menu != nil ->
+          menu_accept(model)
+
+        13 when model.search != nil ->
+          search_accept(model)
+
+        13 ->
+          submit(model)
+
+        # Ctrl+J — guaranteed newline (D-145)
+        10 ->
+          %{model | editor: Editor.newline(model.editor), search: nil}
+
+        # Esc — context-aware
+        27 when model.menu != nil ->
+          %{model | menu: nil}
+
+        27 when model.search != nil ->
+          search_cancel(model)
+
+        27 ->
+          cancel(model)
+
+        # Space (termbox quirk: key 32, not ch 32)
+        32 when model.search != nil ->
+          %{model | search: %{model.search | query: model.search.query <> " "}}
+
+        32 ->
+          model |> editor_insert(" ") |> close_menu_if_whitespace()
+
+        # Backspace (key 127 and 8)
+        bsp when bsp in [127, 8] and model.search != nil ->
+          %{model | search: %{model.search | query: String.slice(model.search.query, 0..-2//1)}}
+
+        bsp when bsp in [127, 8] ->
+          model |> editor_backspace() |> update_menu()
+
+        # Readline chords and arrows delegate to further helpers
+        _ ->
+          handle_readline_key(model, key)
+      end
+    end
+
+    # Readline editing chords (Ctrl+A/E/W/U/K/Y/D/P/N/R) and arrow keys.
+    # Split from handle_key/3 to keep cyclomatic complexity within bounds.
+    defp handle_readline_key(model, key) do
+      case key do
+        1 -> %{model | editor: Editor.move_line_start(model.editor), search: nil}
+        4 -> %{model | editor: Editor.delete_forward(model.editor), search: nil}
+        5 -> %{model | editor: Editor.move_line_end(model.editor), search: nil}
+        11 -> %{model | editor: Editor.kill_to_line_end(model.editor), search: nil}
+        14 -> history_next(model)
+        16 -> history_prev(model)
+        18 -> search_start(model)
+        21 -> %{model | editor: Editor.kill_to_line_start(model.editor), search: nil}
+        23 -> %{model | editor: Editor.kill_word_back(model.editor), search: nil}
+        25 -> %{model | editor: Editor.yank(model.editor), search: nil}
+        65_517 when model.menu != nil -> menu_navigate(model, -1)
+        65_517 -> history_prev(model)
+        65_516 when model.menu != nil -> menu_navigate(model, 1)
+        65_516 -> history_next(model)
+        65_515 -> %{model | editor: Editor.move_char_left(model.editor), search: nil}
+        65_514 -> %{model | editor: Editor.move_char_right(model.editor), search: nil}
+        _ -> model
+      end
+    end
+
+    # Handle Alt-chord events (mod != 0). Best-effort: degrade to no-op
+    # if termbox/tmux mangles the ESC-prefix (D-141).
+    defp handle_alt(model, ?y), do: %{model | editor: Editor.yank_pop(model.editor), search: nil}
+
+    defp handle_alt(model, ?b),
+      do: %{model | editor: Editor.move_word_left(model.editor), search: nil}
+
+    defp handle_alt(model, ?f),
+      do: %{model | editor: Editor.move_word_right(model.editor), search: nil}
+
+    # All other alt-chords: no-op (D-141: MUST NOT insert literal char).
+    defp handle_alt(model, _ch), do: model
+
+    # Handle printable character events (ch != 0, no mod).
+    # D-003: `q` is context-aware on empty prompt.
+    defp handle_char(model, 0), do: model
+
+    defp handle_char(model, ?q) when model.search == nil do
+      quit_or_append(model)
+    end
+
+    defp handle_char(model, ch) when model.search != nil do
+      %{model | search: %{model.search | query: model.search.query <> <<ch::utf8>>}}
+    end
+
+    defp handle_char(model, ch) do
+      model |> editor_insert(<<ch::utf8>>) |> update_menu()
     end
 
     # Each tick, fold every event the bridge has buffered through the
@@ -391,9 +460,42 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     @cursor_glyph "█"
 
     defp prompt(model) do
+      # Render multi-line editor: one label per logical line.
+      # The cursor glyph is injected at the grapheme-column position (D-142).
+      # Search mode shows a prefix indicating active Ctrl+R.
+      # Variables must be computed before entering the view DSL macro.
+      prompt_labels = build_prompt_labels(model)
+
       bar do
-        label(content: "> " <> model.input <> @cursor_glyph)
+        prompt_labels
       end
+    end
+
+    defp build_prompt_labels(model) do
+      lines = Editor.render_lines(model.editor)
+      prefix = if model.search != nil, do: "(search `" <> model.search.query <> "`) ", else: "> "
+
+      lines
+      |> Enum.with_index()
+      |> Enum.map(fn {{line, cursor_col}, idx} ->
+        line_prefix = if idx == 0, do: prefix, else: "  "
+
+        content =
+          if cursor_col != nil do
+            inject_cursor(line, cursor_col)
+          else
+            line
+          end
+
+        label(content: line_prefix <> content)
+      end)
+    end
+
+    # Inject the cursor glyph at grapheme position `col` in `line`.
+    defp inject_cursor(line, col) do
+      graphemes = String.graphemes(line)
+      {before_cursor, after_cursor} = Enum.split(graphemes, col)
+      IO.iodata_to_binary([before_cursor, @cursor_glyph, after_cursor])
     end
 
     # D-003 ([C7] / AC-4): context-aware quit. On an empty prompt, stop the
@@ -402,26 +504,95 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     # rather than storing its pid in the model (which would require a
     # Ratatouille API extension). On a non-empty prompt, append "q" as
     # ordinary input.
-    defp quit_or_append(%{input: ""} = model) do
-      spawn(fn ->
-        Tau.TUI.Supervisor
-        |> DynamicSupervisor.which_children()
-        |> Enum.each(fn {_, pid, _, _} -> Supervisor.stop(pid) end)
-      end)
-
-      model
-    end
-
     defp quit_or_append(model) do
-      model
-      |> append_input("q")
-      |> update_menu()
+      if Editor.empty?(model.editor) do
+        spawn(fn ->
+          Tau.TUI.Supervisor
+          |> DynamicSupervisor.which_children()
+          |> Enum.each(fn {_, pid, _, _} -> Supervisor.stop(pid) end)
+        end)
+
+        model
+      else
+        model
+        |> editor_insert("q")
+        |> update_menu()
+      end
     end
 
-    defp append_input(model, ch), do: %{model | input: model.input <> ch}
+    # Insert a character string into the editor.
+    defp editor_insert(model, text) do
+      %{model | editor: Editor.insert(model.editor, text), search: nil}
+    end
 
-    defp backspace(%{input: ""} = m), do: m
-    defp backspace(model), do: %{model | input: String.slice(model.input, 0..-2//1)}
+    # Backspace in the editor.
+    defp editor_backspace(model) do
+      %{model | editor: Editor.backspace(model.editor), search: nil}
+    end
+
+    # History navigation: prev (older). On empty editor, navigate to
+    # most recent entry. On non-empty, allow navigation from any state.
+    defp history_prev(model) do
+      current_text = Editor.text(model.editor)
+      {new_hist, entry} = History.prev(model.history, current_text)
+
+      case entry do
+        nil ->
+          %{model | history: new_hist}
+
+        text ->
+          new_editor = Editor.new() |> Editor.insert(text) |> Editor.move_line_end()
+          %{model | history: new_hist, editor: new_editor, search: nil}
+      end
+    end
+
+    # History navigation: next (newer / restore draft).
+    defp history_next(model) do
+      {new_hist, entry} = History.next(model.history)
+
+      case entry do
+        nil ->
+          %{model | history: new_hist}
+
+        text ->
+          new_editor = Editor.new() |> Editor.insert(text) |> Editor.move_line_end()
+          %{model | history: new_hist, editor: new_editor, search: nil}
+      end
+    end
+
+    # Ctrl+R: enter reverse-search mode (D-147).
+    defp search_start(model) do
+      case model.search do
+        nil ->
+          %{model | search: %{query: "", pre_search_editor: model.editor}}
+
+        %{query: q} ->
+          # Already in search: extend query with an additional character
+          # is handled via the char handler; this just re-enters.
+          %{model | search: %{query: q, pre_search_editor: model.editor}}
+      end
+    end
+
+    # Accept the current search match and exit search mode (D-147).
+    defp search_accept(%{search: nil} = model), do: submit(model)
+
+    defp search_accept(%{search: %{query: query}, history: hist} = model) do
+      case History.search(hist, query) do
+        {:match, text} ->
+          new_editor = Editor.new() |> Editor.insert(text) |> Editor.move_line_end()
+          %{model | editor: new_editor, search: nil}
+
+        :no_match ->
+          %{model | search: nil}
+      end
+    end
+
+    # Esc in search mode: restore pre-search buffer (D-147).
+    defp search_cancel(%{search: %{pre_search_editor: pre}} = model) do
+      %{model | editor: pre, search: nil}
+    end
+
+    defp search_cancel(model), do: %{model | search: nil}
 
     # --- Menu helpers (SPEC-TUI-COMPLETION) ---
 
@@ -445,7 +616,8 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     # Menu opens when input is a /-prefixed whitespace-free token.
     # Menu stays open and re-filters while the token remains whitespace-free.
     # Menu closes if the input becomes empty, has whitespace, or no longer starts with /.
-    defp update_menu(%{input: input} = model) do
+    defp update_menu(model) do
+      input = Editor.text(model.editor)
       trimmed = String.trim_leading(input)
 
       if String.starts_with?(trimmed, "/") and not String.contains?(trimmed, " ") do
@@ -465,7 +637,9 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     end
 
     # Close menu if the input now contains whitespace (space was typed).
-    defp close_menu_if_whitespace(%{input: input} = model) do
+    defp close_menu_if_whitespace(model) do
+      input = Editor.text(model.editor)
+
       if String.contains?(input, " ") do
         %{model | menu: nil}
       else
@@ -493,7 +667,8 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     defp menu_accept(%{menu: %{entries: entries, selected: selected}} = model) do
       idx = clamp(selected, length(entries) - 1)
       {_score, entry} = Enum.at(entries, idx)
-      %{model | input: entry.name <> " ", menu: nil}
+      new_editor = Editor.new() |> Editor.insert(entry.name <> " ")
+      %{model | editor: new_editor, menu: nil}
     end
 
     defp clamp(_n, max) when max < 0, do: 0
@@ -501,17 +676,42 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     defp clamp(n, max) when n > max, do: max
     defp clamp(n, _max), do: n
 
-    defp submit(%{input: ""} = m), do: m
-
     defp submit(model) do
-      Tau.send(model.session_id, model.input)
+      text = Editor.text(model.editor)
 
-      %{
-        model
-        | input: "",
-          transcript: bounded_append(model.transcript, {"> " <> model.input, []}),
-          status: :sending
-      }
+      cond do
+        # D-145: backslash before Enter → insert newline into editor buffer
+        # (the portable multi-line path). Strip the trailing backslash and
+        # replace it with a newline in the editor.
+        String.ends_with?(text, "\\") ->
+          # Remove the backslash and insert a real newline
+          stripped = String.slice(text, 0..-2//1)
+
+          new_editor =
+            Editor.new()
+            |> Editor.insert(stripped)
+            |> Editor.newline()
+
+          %{model | editor: new_editor, search: nil}
+
+        Editor.empty?(model.editor) ->
+          model
+
+        true ->
+          # Normal submit
+          Tau.send(model.session_id, text)
+          new_hist = History.push(model.history, text)
+          Store.append(model.history_data_dir, model.history_cwd, text)
+
+          %{
+            model
+            | editor: Editor.new(),
+              history: new_hist,
+              search: nil,
+              transcript: bounded_append(model.transcript, {"> " <> text, []}),
+              status: :sending
+          }
+      end
     end
 
     defp cancel(model) do

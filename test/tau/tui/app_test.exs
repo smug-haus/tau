@@ -15,11 +15,17 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
     alias Tau.Session.Events
     alias Tau.TUI.App
+    alias Tau.TUI.Editor
+    alias Tau.TUI.History
 
     defp model do
       %{
         session_id: "sess-test",
-        input: "",
+        editor: Editor.new(),
+        history: History.new(),
+        search: nil,
+        history_data_dir: System.tmp_dir!(),
+        history_cwd: File.cwd!(),
         transcript: [],
         tool_output: [],
         status: :streaming,
@@ -50,22 +56,22 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       # the `update/2` contract that AC-H4 depends on.
 
       test "q on empty prompt returns model unchanged (quit is async side-effect)" do
-        m = %{model() | input: ""}
+        m = model()
         next = App.update(m, {:event, %{ch: ?q}})
         # Model is returned as-is; the async spawn stops the supervisor.
-        assert next.input == ""
+        assert Editor.empty?(next.editor)
         assert next.status == m.status
         assert next.transcript == m.transcript
       end
 
       test "q on non-empty prompt appends q to input" do
-        m = %{model() | input: "hel"}
+        m = %{model() | editor: Editor.new() |> Editor.insert("hel")}
         next = App.update(m, {:event, %{ch: ?q}})
-        assert next.input == "helq"
+        assert Editor.text(next.editor) == "helq"
       end
 
       test "q on non-empty prompt does not change status or transcript" do
-        m = %{model() | input: "hello"}
+        m = %{model() | editor: Editor.new() |> Editor.insert("hello")}
         next = App.update(m, {:event, %{ch: ?q}})
         assert next.status == m.status
         assert next.transcript == m.transcript
@@ -235,19 +241,16 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       test "does not open menu when input is empty" do
         entries = sample_catalog()
         event = %Events.CommandCatalog{session_id: "sess-test", entries: entries}
-        m = %{model() | input: ""}
+        m = model()
         next = App.update(m, event)
         assert next.menu == nil
       end
 
       test "re-filters open menu after catalog update" do
-        m = %{model() | input: "/c", catalog: nil, menu: nil}
-        # First type / to open menu with builtins floor
-        m2 = App.update(m, {:event, %{ch: ?/}})
-        # ... actually the input is already set; trigger update directly
-        m3 = %{m | input: "/c"}
+        editor_with_slash_c = Editor.new() |> Editor.insert("/c")
+        m = %{model() | editor: editor_with_slash_c, catalog: nil, menu: nil}
         event = %Events.CommandCatalog{session_id: "sess-test", entries: sample_catalog()}
-        m4 = App.update(m3, event)
+        m4 = App.update(m, event)
         # After receiving catalog with /c query, menu should show /compact
         if m4.menu != nil do
           names = Enum.map(m4.menu.entries, fn {_, e} -> e.name end)
@@ -258,26 +261,35 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
     describe "update/2 — menu open on / (AC-3, D-102)" do
       test "typing / opens the menu" do
-        m = %{model() | input: "", catalog: sample_catalog(), status: :idle}
+        m = %{model() | catalog: sample_catalog(), status: :idle}
         next = App.update(m, {:event, %{ch: ?/}})
         assert next.menu != nil, "menu should open when / is typed"
       end
 
       test "menu opens with builtins floor when catalog is nil (AC-9 / D-104)" do
-        m = %{model() | input: "", catalog: nil, status: :idle}
+        m = %{model() | catalog: nil, status: :idle}
         next = App.update(m, {:event, %{ch: ?/}})
         assert next.menu != nil, "menu should open even with nil catalog (builtins floor)"
         assert next.menu.entries != []
       end
 
       test "menu.query is empty when only / is typed" do
-        m = %{model() | input: "", catalog: sample_catalog(), status: :idle}
+        m = %{model() | catalog: sample_catalog(), status: :idle}
         next = App.update(m, {:event, %{ch: ?/}})
         assert next.menu.query == ""
       end
 
       test "typing extra chars narrows menu (AC-4)" do
-        m = %{model() | input: "/", catalog: sample_catalog(), menu: nil, status: :idle}
+        editor_with_slash = Editor.new() |> Editor.insert("/")
+
+        m = %{
+          model()
+          | editor: editor_with_slash,
+            catalog: sample_catalog(),
+            menu: nil,
+            status: :idle
+        }
+
         # Append 'c' to produce "/c"
         next = App.update(m, {:event, %{ch: ?c}})
 
@@ -289,11 +301,11 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       end
 
       test "space closes the menu (menu becomes nil)" do
-        m = %{model() | input: "/compact", catalog: sample_catalog(), status: :idle}
-        m2 = App.update(m, {:event, %{ch: ?/}})
-        # Open menu first by typing on "/compact" trigger
-        m3 = %{m2 | menu: %{query: "compact", entries: [{0, hd(sample_catalog())}], selected: 0}}
-        next = App.update(m3, {:event, %{key: 32}})
+        editor_with_slash_compact = Editor.new() |> Editor.insert("/compact")
+        m = %{model() | editor: editor_with_slash_compact, catalog: sample_catalog(), status: :idle}
+        # Open menu first
+        m2 = %{m | menu: %{query: "compact", entries: [{0, hd(sample_catalog())}], selected: 0}}
+        next = App.update(m2, {:event, %{key: 32}})
         assert next.menu == nil, "space should close the menu"
       end
     end
@@ -305,8 +317,17 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
           |> Enum.with_index()
           |> Enum.map(fn {e, i} -> {i, e} end)
 
+        editor_with_slash = Editor.new() |> Editor.insert("/")
         menu = %{query: "", entries: entries_scored, selected: 0}
-        m = %{model() | input: "/", catalog: sample_catalog(), menu: menu, status: :idle}
+
+        m = %{
+          model()
+          | editor: editor_with_slash,
+            catalog: sample_catalog(),
+            menu: menu,
+            status: :idle
+        }
+
         {:ok, model: m, entries: entries_scored}
       end
 
@@ -339,7 +360,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         {_, selected_entry} = Enum.at(m2.menu.entries, 1)
         next = App.update(m2, {:event, %{key: 13}})
         assert next.menu == nil, "menu should close after Enter"
-        assert next.input == selected_entry.name <> " ", "input should be filled"
+        assert Editor.text(next.editor) == selected_entry.name <> " ", "input should be filled"
         # NOT submitted: status should not be :sending
         assert next.status != :sending
       end
@@ -348,7 +369,8 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     describe "update/2 — Esc dismisses menu without cancel (AC-6, D-105)" do
       test "Esc with menu open closes menu but does not cancel" do
         menu = %{query: "", entries: [], selected: 0}
-        m = %{model() | input: "/", menu: menu, status: :idle}
+        editor_with_slash = Editor.new() |> Editor.insert("/")
+        m = %{model() | editor: editor_with_slash, menu: menu, status: :idle}
         next = App.update(m, {:event, %{key: 27}})
         assert next.menu == nil, "Esc should close menu"
         # Status should not be affected by Esc (no cancel)
@@ -357,7 +379,8 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
       test "Esc with menu open does NOT cancel (no status change to cancelled)" do
         menu = %{query: "", entries: [], selected: 0}
-        m = %{model() | input: "/", menu: menu, status: :idle}
+        editor_with_slash = Editor.new() |> Editor.insert("/")
+        m = %{model() | editor: editor_with_slash, menu: menu, status: :idle}
         next = App.update(m, {:event, %{key: 27}})
         # cancel/1 calls Tau.cancel/1 but model.status would change
         # With menu open, Esc should just nil the menu
@@ -366,7 +389,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       end
 
       test "Esc without menu open still cancels (existing behaviour)" do
-        m = %{model() | input: "", menu: nil, status: :idle}
+        m = %{model() | menu: nil, status: :idle}
         # cancel/1 calls Tau.cancel but since this is a unit test (no FSM)
         # we just verify the model fields that cancel/1 sets
         next = App.update(m, {:event, %{key: 27}})
