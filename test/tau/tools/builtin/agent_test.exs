@@ -116,6 +116,10 @@ defmodule Tau.Tools.Builtin.AgentTest do
           provider: MultiFixtureProvider,
           session_id: parent_sid,
           cwd: tmp,
+          # SPEC-PERMISSION-PROMPTS: bypass permissions so the Agent tool is not
+          # gated by the permission evaluator — this test exercises the Agent
+          # tool dispatch path, not the permission system.
+          metadata: %{permissions_mode: :bypass},
           provider_ctx: provider_ctx
         )
 
@@ -171,6 +175,9 @@ defmodule Tau.Tools.Builtin.AgentTest do
           provider: MultiFixtureProvider,
           session_id: parent_sid,
           cwd: tmp,
+          # SPEC-PERMISSION-PROMPTS: bypass permissions — this test exercises
+          # the :stop normalisation fix (#315), not the permission system.
+          metadata: %{permissions_mode: :bypass},
           provider_ctx: provider_ctx
         )
 
@@ -215,6 +222,9 @@ defmodule Tau.Tools.Builtin.AgentTest do
           provider: MultiFixtureProvider,
           session_id: parent_sid,
           cwd: tmp,
+          # SPEC-PERMISSION-PROMPTS: bypass permissions — this test exercises
+          # crash isolation, not the permission system.
+          metadata: %{permissions_mode: :bypass},
           provider_ctx: provider_ctx
         )
 
@@ -285,6 +295,9 @@ defmodule Tau.Tools.Builtin.AgentTest do
           provider: MultiFixtureProvider,
           session_id: parent_sid,
           cwd: tmp,
+          # SPEC-PERMISSION-PROMPTS: bypass permissions — this test exercises
+          # cancel cascade behaviour, not the permission system.
+          metadata: %{permissions_mode: :bypass},
           provider_ctx: provider_ctx
         )
 
@@ -537,6 +550,9 @@ defmodule Tau.Tools.Builtin.AgentTest do
           session_id: parent_sid,
           # cwd must be tmp so the skill is discovered.
           cwd: tmp,
+          # SPEC-PERMISSION-PROMPTS: bypass permissions on the parent — this
+          # test exercises child whitelist inheritance, not the permission system.
+          metadata: %{permissions_mode: :bypass},
           provider_ctx: provider_ctx
         )
 
@@ -602,6 +618,9 @@ defmodule Tau.Tools.Builtin.AgentTest do
           provider: MultiFixtureProvider,
           session_id: parent_sid,
           cwd: tmp,
+          # SPEC-PERMISSION-PROMPTS: bypass permissions — this test exercises
+          # parallel fan-out, not the permission system.
+          metadata: %{permissions_mode: :bypass},
           provider_ctx: provider_ctx
         )
 
@@ -675,6 +694,9 @@ defmodule Tau.Tools.Builtin.AgentTest do
           provider: MultiFixtureProvider,
           session_id: parent_sid,
           cwd: tmp,
+          # SPEC-PERMISSION-PROMPTS: bypass permissions — this test exercises
+          # general-purpose subagent defaults, not the permission system.
+          metadata: %{permissions_mode: :bypass},
           provider_ctx: provider_ctx
         )
 

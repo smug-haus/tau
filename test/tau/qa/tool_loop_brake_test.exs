@@ -127,6 +127,9 @@ defmodule Tau.QA.ToolLoopBrakeTest do
           model: "loopy",
           max_tool_iterations: 50,
           tool_loop_brake_threshold: 3,
+          # SPEC-PERMISSION-PROMPTS: bypass permissions — this test exercises
+          # tool loop brake detection, not the permission system.
+          metadata: %{permissions_mode: :bypass},
           provider_ctx: %{variant: :identical}
         )
 
@@ -181,6 +184,9 @@ defmodule Tau.QA.ToolLoopBrakeTest do
           model: "loopy",
           max_tool_iterations: 3,
           tool_loop_brake_threshold: 3,
+          # SPEC-PERMISSION-PROMPTS: bypass permissions — this test exercises
+          # tool loop brake with varied args, not the permission system.
+          metadata: %{permissions_mode: :bypass},
           provider_ctx: %{variant: :varied}
         )
 

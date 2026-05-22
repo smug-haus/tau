@@ -377,7 +377,8 @@ defmodule Tau.Session do
   """
   @spec snapshot(id()) :: {:ok, snapshot()} | {:error, :not_found}
   def snapshot(id) do
-    with {:ok, pid} <- whereis(id) do
+    with {:ok, pid} <- whereis(id),
+         {:alive, true} <- {:alive, Process.alive?(pid)} do
       {state, data} = :sys.get_state(pid)
 
       {:ok,
@@ -403,6 +404,9 @@ defmodule Tau.Session do
          provider_retry_max: Map.get(data, :provider_retry_max, 3),
          interactive?: Map.get(data, :interactive?, true)
        }}
+    else
+      # :not_found from Registry, or process no longer alive (shutting down).
+      _ -> {:error, :not_found}
     end
   end
 

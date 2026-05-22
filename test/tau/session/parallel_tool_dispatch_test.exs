@@ -117,7 +117,10 @@ defmodule Tau.Session.ParallelToolDispatchTest do
       start_session_for_test(
         provider: ProviderWithToolCall,
         model: "p33",
-        session_id: sid
+        session_id: sid,
+        # SPEC-PERMISSION-PROMPTS: bypass permissions — this test exercises
+        # tool worker crash isolation, not the permission system.
+        metadata: %{permissions_mode: :bypass}
       )
 
     Tau.send(sid, "please use the crashing tool")

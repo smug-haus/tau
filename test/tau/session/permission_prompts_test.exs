@@ -374,7 +374,7 @@ defmodule Tau.Session.PermissionPromptsTest do
                 StreamData.string(:alphanumeric, min_length: 4, max_length: 16),
                 length: call_count
               )
-                |> StreamData.filter(&(Enum.uniq(&1) == &1))
+              |> StreamData.filter(&(Enum.uniq(&1) == &1))
           ) do
       # Use the single-call provider with call_count = 1 (we test the property
       # over the non-interactive path by varying call_ids in snapshot checks).
@@ -399,6 +399,7 @@ defmodule Tau.Session.PermissionPromptsTest do
 
       # Drain until end_turn — should complete without needing any permission decision.
       result = drain_until_end_turn(10_000)
+
       assert result == :end_turn,
              "expected :end_turn without permission decision; got #{inspect(result)}"
 
