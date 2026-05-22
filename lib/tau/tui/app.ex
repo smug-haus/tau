@@ -17,6 +17,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     alias Tau.TUI.Editor
     alias Tau.TUI.History
     alias Tau.TUI.History.Store
+    alias Tau.TUI.SubagentTree
     alias Tau.Commands.Builtin
 
     # Adaptive tick: 16 ms while a turn is streaming (last_assistant non-nil);
@@ -93,7 +94,11 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         history_data_dir: data_dir,
         history_cwd: cwd,
         transcript: [],
-        tool_output: [],
+        # D-150 (SPEC-TUI-HEADLESS §5c): sub-agent tree — pure derived
+        # render state, folded synchronously by on_subagent_*/2 handlers.
+        # Map of subagent_id => %SubagentTree.SubagentNode{}.
+        # No GenServer; no process. OTP non-negotiables #1/#3.
+        subagents: %{},
         status: :idle,
         last_assistant: nil,
         coding_agent: Map.get(runtime_opts, :coding_agent),
@@ -198,6 +203,24 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
         %Tau.Session.Events.QueueRestored{} ->
           model
+
+        # D-150..D-154 (SPEC-TUI-HEADLESS §5c): sub-agent lifecycle events.
+        # Fold into the sub-agent tree AND append boxed markers to the transcript.
+        # SubagentStart: add node + append start marker line.
+        %Tau.Session.Events.SubagentStart{} = e ->
+          on_subagent_start(model, e)
+
+        # SubagentProgress: update node state (tool_calls, last_activity).
+        %Tau.Session.Events.SubagentProgress{} = e ->
+          on_subagent_progress(model, e)
+
+        # SubagentCost: update node cost fields.
+        %Tau.Session.Events.SubagentCost{} = e ->
+          on_subagent_cost(model, e)
+
+        # SubagentEnd: transition node to terminal state + append end marker line.
+        %Tau.Session.Events.SubagentEnd{} = e ->
+          on_subagent_end(model, e)
 
         _ ->
           model
@@ -468,6 +491,18 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
                 for sub <- Wrap.wrap("[streaming] " <> model.last_assistant, model.wrap_width) do
                   label(content: sub)
                 end
+              end
+
+              # D-158 / AC-3 (SPEC-TUI-HEADLESS §5c): live region — one line
+              # per *running* sub-agent, derived from model.subagents every
+              # frame so the tool-call count and activity excerpt update each
+              # tick without a static frozen marker in the transcript.
+              # Each line: "▶ sub-agent: <label> · <N> tool calls · <excerpt>"
+              for {_id, node} <- model.subagents,
+                  node.state == :running,
+                  line <- [SubagentTree.format_live_line(node)],
+                  sub <- Wrap.wrap(line, model.wrap_width) do
+                label(content: sub)
               end
             end
           end
@@ -1007,6 +1042,59 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       %{model | editor: Editor.new(), search: nil}
     end
 
+    # D-150 / D-158 (SPEC-TUI-HEADLESS §5c): fold SubagentStart into the tree.
+    # No static start marker is appended to the transcript — the running sub-agent
+    # appears in the live region (rendered every frame from model.subagents by render/1)
+    # so the tool-call count and activity excerpt update live (AC-3).
+    # The permanent `└─` end marker is appended by on_subagent_end/2 when the
+    # node transitions to a terminal state (AC-2).
+    # If the fold rejects the event (unknown kind, D-152), model is unchanged.
+    defp on_subagent_start(model, e) do
+      new_tree = SubagentTree.fold(model.subagents, e)
+
+      if Map.has_key?(new_tree, e.subagent_id) do
+        %{model | subagents: new_tree}
+      else
+        # Unknown kind — tree unchanged (D-152).
+        model
+      end
+    end
+
+    # D-151 (SPEC-TUI-HEADLESS §5c): fold SubagentProgress — updates the node's
+    # tool_calls count and last_activity. No transcript line; the end marker
+    # carries the final rollup (AC-3).
+    defp on_subagent_progress(model, e) do
+      %{model | subagents: SubagentTree.fold(model.subagents, e)}
+    end
+
+    # D-153 (SPEC-TUI-HEADLESS §5c): fold SubagentCost — updates cost fields
+    # in the node. Does NOT affect the parent's own cost display (R4/AC-4).
+    defp on_subagent_cost(model, e) do
+      %{model | subagents: SubagentTree.fold(model.subagents, e)}
+    end
+
+    # D-154 (SPEC-TUI-HEADLESS §5c): fold SubagentEnd — transitions node to
+    # terminal state and appends the boxed end marker to the transcript (AC-2).
+    # If the fold ignores the event (unknown subagent_id, D-152), skip marker.
+    defp on_subagent_end(model, e) do
+      new_tree = SubagentTree.fold(model.subagents, e)
+
+      case Map.get(new_tree, e.subagent_id) do
+        nil ->
+          # Unknown subagent_id — no node, no marker (D-152).
+          model
+
+        node ->
+          marker = SubagentTree.format_end_marker(node)
+
+          %{
+            model
+            | subagents: new_tree,
+              transcript: bounded_append(model.transcript, {marker, []})
+          }
+      end
+    end
+
     defp on_message_start(model, _e), do: %{model | status: :streaming, last_assistant: ""}
 
     defp on_message_update(model, %{message: msg}) do
@@ -1037,6 +1125,18 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
             %{type: :thinking, text: t} when is_binary(t) and t != "" ->
               [{"[thinking] " <> t, []}]
 
+            # B1 rule (D-151): if this tool call's id is owned by a known
+            # sub-agent, do NOT render it as a bare [tool_call] line —
+            # the sub-agent start/end markers own the visual representation.
+            # For Agent tool calls without an owned id, fall back to the
+            # legacy inline render (backwards compat).
+            %{type: :tool_call, id: tcid, name: n} when is_binary(tcid) ->
+              if SubagentTree.tool_call_owned?(model.subagents, tcid) do
+                []
+              else
+                [{"[tool_call] " <> n <> "(...)", []}]
+              end
+
             %{type: :tool_call, name: n} ->
               [{"[tool_call] " <> n <> "(...)", []}]
 
@@ -1053,20 +1153,13 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       }
     end
 
-    defp on_tool_start(model, %{name: n, arguments: args}) do
-      %{model | tool_output: model.tool_output ++ ["▶ " <> n <> " " <> inspect(args)]}
-    end
+    # B1 rule (D-151): ToolStart/ToolEnd on the parent topic are no-ops.
+    # Calls owned by a sub-agent: the live region and end marker own the
+    # visual representation. Non-owned calls: tool_output was removed in
+    # FIX-3; a future PR may surface non-owned tool calls in the transcript.
+    defp on_tool_start(model, _e), do: model
 
-    defp on_tool_end(model, %{result: %{content: c, is_error: e}}) do
-      prefix = if e, do: "✗", else: "✓"
-
-      summary =
-        if is_binary(c),
-          do: String.slice(c, 0..160),
-          else: c |> inspect() |> String.slice(0..160)
-
-      %{model | tool_output: model.tool_output ++ [prefix <> " " <> summary]}
-    end
+    defp on_tool_end(model, _e), do: model
 
     defp on_cancelled(model, %{reason: reason}) do
       reason_str = inspect(reason)

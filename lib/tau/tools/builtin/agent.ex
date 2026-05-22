@@ -71,13 +71,25 @@ defmodule Tau.Tools.Builtin.Agent do
   alias Tau.Session.Events, as: SE
   alias Tau.Tool.Result
 
+  # D-150 (SPEC-TUI-HEADLESS §5c): relay child events as Subagent* on the
+  # PARENT topic so the TUI EventBridge (subscribed only to the parent topic)
+  # receives them. The tool task is the natural relay point — it is the one
+  # process bridging child topic and parent identity.
+
   @general_purpose "general-purpose"
 
   # Bounded await for the child's `:end_turn`. Sub-agents are model
   # turns; their unbounded counterpart is the parent's. We use a
   # generous default and let the parent FSM cascade `:cancel` if the
   # parent itself is cancelled or crashes.
+  #
+  # Test override: set `Application.put_env(:tau, :subagent_await_timeout_ms, N)`
+  # to inject a short timeout in unit tests exercising the timeout branch.
   @await_timeout_ms 10 * 60 * 1000
+
+  defp await_timeout_ms do
+    Application.get_env(:tau, :subagent_await_timeout_ms, @await_timeout_ms)
+  end
 
   @impl Tau.Tool
   def name, do: "Agent"
@@ -193,6 +205,21 @@ defmodule Tau.Tools.Builtin.Agent do
 
         # ADR-0008: monitor lives in this tool task, NOT the FSM.
         parent_ref = parent_pid && Process.monitor(parent_pid)
+
+        # D-150 (SPEC-TUI-HEADLESS §5c): emit SubagentStart on the PARENT
+        # topic before sending the brief. The label is the subagent_type
+        # (or "general-purpose" when nil). The parent_tool_call_id is the
+        # correlation key for the B1 de-dup rule in the render layer.
+        label = subagent_type || @general_purpose
+
+        Phoenix.PubSub.broadcast(Tau.PubSub, "session:#{ctx.session_id}", %SE.SubagentStart{
+          session_id: ctx.session_id,
+          subagent_id: child_id,
+          kind: :builtin_agent,
+          label: label,
+          parent_tool_call_id: ctx.tool_call_id,
+          child_session_id: child_id
+        })
 
         :ok = Tau.send(child_id, brief)
 
@@ -410,23 +437,53 @@ defmodule Tau.Tools.Builtin.Agent do
   @subagent_natural_end [:stop, :end_turn, :length, :stop_sequence]
   @subagent_failure_end [:error, :aborted, :tool_loop_aborted, :compaction_failed]
 
+  # B2 (SPEC-TUI-HEADLESS §5c): relay child events as Subagent* on the parent
+  # topic. SubagentEnd MUST be emitted on ALL FIVE terminal branches:
+  #   1. natural_end (MessageEnd with natural stop_reason)
+  #   2. failure_end (MessageEnd with failure stop_reason)
+  #   3. SessionEnd (child FSM terminated)
+  #   4. {:DOWN, parent_ref} (parent died)
+  #   5. after-timeout
+  # A missed branch leaves the node stuck running (AC-7 failure).
+  #
+  # MessageUpdate MUST be explicitly matched-and-discarded. Otherwise the
+  # tool-task mailbox grows unbounded on a chatty child (B2 / F-mode).
   defp await_child(child_id, ctx, parent_ref, started) do
     receive do
       %SE.MessageEnd{session_id: ^child_id, message: %Assistant{} = msg} ->
         cond do
           msg.stop_reason in @subagent_natural_end ->
             content = extract_text(msg)
+            duration = System.monotonic_time(:millisecond) - started
+
+            broadcast_subagent_end(
+              ctx.session_id,
+              child_id,
+              :done,
+              duration,
+              "completed in #{div(duration, 1000)}s"
+            )
 
             Result.text(content,
               details: %{
                 kind: :subagent_result,
                 child_session_id: child_id,
                 stop_reason: msg.stop_reason,
-                duration_ms: System.monotonic_time(:millisecond) - started
+                duration_ms: duration
               }
             )
 
           msg.stop_reason in @subagent_failure_end ->
+            duration = System.monotonic_time(:millisecond) - started
+
+            broadcast_subagent_end(
+              ctx.session_id,
+              child_id,
+              :failed,
+              duration,
+              "failed: #{inspect(msg.stop_reason)}"
+            )
+
             Result.error(
               "Sub-agent failed (stop_reason: #{inspect(msg.stop_reason)}). " <>
                 (msg.error_message || ""),
@@ -442,7 +499,54 @@ defmodule Tau.Tools.Builtin.Agent do
             await_child(child_id, ctx, parent_ref, started)
         end
 
+      # Relay child ToolStart as SubagentProgress on the parent topic.
+      # The child_tool_call_id is the correlation key for B1 de-dup.
+      %SE.ToolStart{session_id: ^child_id, tool_call_id: tcid, name: name} ->
+        Phoenix.PubSub.broadcast(Tau.PubSub, "session:#{ctx.session_id}", %SE.SubagentProgress{
+          session_id: ctx.session_id,
+          subagent_id: child_id,
+          activity: {:tool_call, name},
+          child_tool_call_id: tcid
+        })
+
+        await_child(child_id, ctx, parent_ref, started)
+
+      # Relay child ToolEnd as SubagentProgress (activity carries result summary).
+      %SE.ToolEnd{session_id: ^child_id, tool_call_id: tcid, result: result} ->
+        summary =
+          if is_binary(result.content), do: String.slice(result.content, 0..80), else: ""
+
+        Phoenix.PubSub.broadcast(Tau.PubSub, "session:#{ctx.session_id}", %SE.SubagentProgress{
+          session_id: ctx.session_id,
+          subagent_id: child_id,
+          activity: {:tool_result, summary},
+          child_tool_call_id: tcid
+        })
+
+        await_child(child_id, ctx, parent_ref, started)
+
+      # D-031 parity: relay child MessageEnd (non-natural) as progress.
+      # Natural MessageEnd is handled above in the top clause.
+      %SE.MessageEnd{session_id: ^child_id} ->
+        await_child(child_id, ctx, parent_ref, started)
+
+      # B2: explicitly discard MessageUpdate — never forward, never accumulate.
+      # The child may emit one per token; ignoring keeps the mailbox bounded.
+      %SE.MessageUpdate{session_id: ^child_id} ->
+        await_child(child_id, ctx, parent_ref, started)
+
+      # Terminal branch 3: SessionEnd.
       %SE.SessionEnd{session_id: ^child_id, reason: reason} ->
+        duration = System.monotonic_time(:millisecond) - started
+
+        broadcast_subagent_end(
+          ctx.session_id,
+          child_id,
+          :failed,
+          duration,
+          "session ended: #{inspect(reason)}"
+        )
+
         Result.error(
           "Sub-agent session ended before :end_turn (#{inspect(reason)})",
           details: %{
@@ -458,6 +562,7 @@ defmodule Tau.Tools.Builtin.Agent do
         # parent, or another MessageEnd if the parent un-cancels.
         await_child(child_id, ctx, parent_ref, started)
 
+      # Terminal branch 4: parent died.
       {:DOWN, ^parent_ref, :process, _pid, _reason} ->
         # Parent died. Cascade-cancel the child to flush its persistence
         # then return an is_error. The FSM cancel cast is fire-and-
@@ -466,23 +571,66 @@ defmodule Tau.Tools.Builtin.Agent do
         # tool task is on borrowed time too. Return promptly.
         Tau.cancel(child_id)
 
+        broadcast_subagent_end(ctx.session_id, child_id, :cancelled, 0, "parent terminated")
+
         Result.error(
           "Sub-agent aborted: parent session terminated",
           details: %{kind: :parent_down, child_session_id: child_id}
         )
+
+      # B2 (FIX-4): discard any other child-session event not explicitly
+      # matched above — SystemNotice, ProviderFallback, QueueRestored,
+      # CommandCatalog, etc. Without this catch-all they accumulate in the
+      # tool-task mailbox and the "B2 any non-forwarded child event is
+      # discarded" guarantee only partially holds.
+      # MUST be the LAST receive clause so specific terminal/relay clauses
+      # (MessageEnd/ToolStart/ToolEnd/MessageUpdate/SessionEnd/Cancelled/DOWN)
+      # always match first.
+      %{session_id: ^child_id} ->
+        await_child(child_id, ctx, parent_ref, started)
     after
-      @await_timeout_ms ->
+      # Terminal branch 5: timeout.
+      await_timeout_ms() ->
+        timeout = await_timeout_ms()
         Tau.cancel(child_id)
 
+        broadcast_subagent_end(
+          ctx.session_id,
+          child_id,
+          :cancelled,
+          timeout,
+          "timed out after #{div(timeout, 1000)}s"
+        )
+
         Result.error(
-          "Sub-agent timed out after #{@await_timeout_ms}ms",
+          "Sub-agent timed out after #{timeout}ms",
           details: %{
             kind: :subagent_timeout,
             child_session_id: child_id,
-            timeout_ms: @await_timeout_ms
+            timeout_ms: timeout
           }
         )
     end
+  end
+
+  # Emit SubagentEnd on the parent topic. Best-effort: PubSub.broadcast
+  # is fire-and-forget; a failure here does not affect the result.
+  defp broadcast_subagent_end(parent_session_id, child_id, state, duration_ms, summary) do
+    Phoenix.PubSub.broadcast(Tau.PubSub, "session:#{parent_session_id}", %SE.SubagentEnd{
+      session_id: parent_session_id,
+      subagent_id: child_id,
+      state: state,
+      summary: summary
+    })
+
+    # Also emit cost with whatever duration we tracked.
+    Phoenix.PubSub.broadcast(Tau.PubSub, "session:#{parent_session_id}", %SE.SubagentCost{
+      session_id: parent_session_id,
+      subagent_id: child_id,
+      tokens: nil,
+      usd: nil,
+      duration_ms: duration_ms
+    })
   end
 
   defp extract_text(%Assistant{content: blocks}) when is_list(blocks) do

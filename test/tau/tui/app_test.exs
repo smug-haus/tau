@@ -17,6 +17,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     alias Tau.TUI.App
     alias Tau.TUI.Editor
     alias Tau.TUI.History
+    alias Tau.TUI.SubagentTree
 
     defp model do
       %{
@@ -27,7 +28,8 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         history_data_dir: System.tmp_dir!(),
         history_cwd: File.cwd!(),
         transcript: [],
-        tool_output: [],
+        # D-150 (SPEC-TUI-HEADLESS §5c): sub-agent tree in model.
+        subagents: %{},
         status: :streaming,
         last_assistant: "partial",
         wrap_width: 80,
@@ -1118,6 +1120,301 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         assert Ratatouille.EventManager in ids
         assert Ratatouille.Window in ids
         assert Ratatouille.Runtime in ids
+      end
+    end
+
+    # -------------------------------------------------------------------------
+    # D-150..D-154 (SPEC-TUI-HEADLESS §5c): sub-agent event folding in update/2
+    # -------------------------------------------------------------------------
+    describe "update/2 — sub-agent events (D-150..D-154, AC-1, AC-2, AC-7)" do
+      test "SubagentStart adds node to subagents tree with :running state (AC-1 / D-158)" do
+        # AC-1 / D-158: SubagentStart MUST add the node to the tree.
+        # The in-flight display is the live region derived from model.subagents
+        # each frame (not a static frozen transcript entry — that was the bug).
+        # Permanent markers are end markers only (AC-2).
+        m = %{model() | status: :idle, last_assistant: nil}
+
+        next =
+          App.update(m, %Events.SubagentStart{
+            session_id: "sess-test",
+            subagent_id: "child-1",
+            kind: :builtin_agent,
+            label: "general-purpose",
+            parent_tool_call_id: "tc-parent",
+            child_session_id: "child-1"
+          })
+
+        assert Map.has_key?(next.subagents, "child-1")
+        assert next.subagents["child-1"].state == :running
+        assert next.subagents["child-1"].label == "general-purpose"
+
+        # No static frozen start marker in the transcript — the live region
+        # handles in-flight display; transcript is unchanged.
+        assert next.transcript == m.transcript,
+               "SubagentStart must NOT append a frozen start marker to transcript (live region handles it)"
+      end
+
+      test "SubagentStart live region shows running sub-agent (AC-1 / AC-3)" do
+        # The live region is derived from model.subagents every frame.
+        # After SubagentStart, render/1 must include a live-region line for the node.
+        m = %{model() | status: :idle, last_assistant: nil}
+
+        next =
+          App.update(m, %Events.SubagentStart{
+            session_id: "sess-test",
+            subagent_id: "child-live",
+            kind: :builtin_agent,
+            label: "live-agent",
+            parent_tool_call_id: nil,
+            child_session_id: "child-live"
+          })
+
+        # Live region line is derived from SubagentNode state, not transcript.
+        node = next.subagents["child-live"]
+        assert node.state == :running
+        live_line = SubagentTree.format_live_line(node)
+
+        assert String.contains?(live_line, "▶ sub-agent: live-agent"),
+               "live region line MUST contain the sub-agent label; got: #{inspect(live_line)}"
+
+        assert String.contains?(live_line, "0 tool calls"),
+               "live region line MUST show 0 tool calls before any progress; got: #{inspect(live_line)}"
+      end
+
+      test "SubagentEnd transitions node to :done and appends end marker to transcript (AC-2)" do
+        m = %{model() | status: :idle, last_assistant: nil}
+
+        m =
+          App.update(m, %Events.SubagentStart{
+            session_id: "sess-test",
+            subagent_id: "child-1",
+            kind: :builtin_agent,
+            label: "test-agent",
+            parent_tool_call_id: nil,
+            child_session_id: nil
+          })
+
+        next =
+          App.update(m, %Events.SubagentEnd{
+            session_id: "sess-test",
+            subagent_id: "child-1",
+            state: :done,
+            summary: "completed"
+          })
+
+        assert next.subagents["child-1"].state == :done
+
+        assert Enum.any?(next.transcript, fn {line, _} ->
+                 String.contains?(line, "└─ sub-agent: test-agent") and
+                   String.contains?(line, "done")
+               end),
+               "End marker must appear in transcript (AC-2)"
+      end
+
+      test "SubagentEnd :failed produces failed end marker — no node left :running (AC-7)" do
+        m = %{model() | status: :idle, last_assistant: nil}
+
+        m =
+          App.update(m, %Events.SubagentStart{
+            session_id: "sess-test",
+            subagent_id: "crash-agent",
+            kind: :builtin_agent,
+            label: "crash-agent",
+            parent_tool_call_id: nil,
+            child_session_id: nil
+          })
+
+        next =
+          App.update(m, %Events.SubagentEnd{
+            session_id: "sess-test",
+            subagent_id: "crash-agent",
+            state: :failed,
+            summary: "crashed"
+          })
+
+        # No node left in :running state after terminal event (AC-7).
+        running_count =
+          next.subagents
+          |> Map.values()
+          |> Enum.count(&(&1.state == :running))
+
+        assert running_count == 0, "No sub-agent node should remain :running after SubagentEnd"
+
+        assert Enum.any?(next.transcript, fn {line, _} ->
+                 String.contains?(line, "failed")
+               end)
+      end
+
+      test "SubagentProgress updates node tool_calls and live-region count rises (AC-3)" do
+        # AC-3 live criterion: the rendered tool-call count MUST rise as
+        # SubagentProgress events are folded in. The live region is derived
+        # from model.subagents state every frame — so the count update in
+        # SubagentNode.tool_calls directly drives the next-frame render.
+        m = %{model() | status: :idle, last_assistant: nil}
+
+        m =
+          App.update(m, %Events.SubagentStart{
+            session_id: "sess-test",
+            subagent_id: "child-2",
+            kind: :builtin_agent,
+            label: "worker",
+            parent_tool_call_id: nil,
+            child_session_id: nil
+          })
+
+        # Before any progress: live region shows 0 tool calls
+        node_before = m.subagents["child-2"]
+        live_before = SubagentTree.format_live_line(node_before)
+
+        assert String.contains?(live_before, "0 tool calls"),
+               "live region MUST show 0 tool calls before any progress; got: #{inspect(live_before)}"
+
+        next =
+          App.update(m, %Events.SubagentProgress{
+            session_id: "sess-test",
+            subagent_id: "child-2",
+            activity: {:tool_call, "Bash"},
+            child_tool_call_id: "tc-child-x"
+          })
+
+        assert next.subagents["child-2"].tool_calls == 1
+        assert next.subagents["child-2"].last_activity == {:tool_call, "Bash"}
+
+        # After progress: live region now shows 1 tool call and activity excerpt
+        node_after = next.subagents["child-2"]
+        live_after = SubagentTree.format_live_line(node_after)
+
+        assert String.contains?(live_after, "1 tool call"),
+               "live region MUST show 1 tool call after SubagentProgress; got: #{inspect(live_after)}"
+
+        assert String.contains?(live_after, "Bash"),
+               "live region MUST show last-activity tool name; got: #{inspect(live_after)}"
+      end
+
+      test "SubagentCost updates node cost without affecting transcript (AC-4/D-153)" do
+        m = %{model() | status: :idle, last_assistant: nil}
+
+        m =
+          App.update(m, %Events.SubagentStart{
+            session_id: "sess-test",
+            subagent_id: "child-3",
+            kind: :builtin_agent,
+            label: "worker",
+            parent_tool_call_id: nil,
+            child_session_id: nil
+          })
+
+        transcript_len_before = length(m.transcript)
+
+        next =
+          App.update(m, %Events.SubagentCost{
+            session_id: "sess-test",
+            subagent_id: "child-3",
+            tokens: %{input: 100},
+            usd: 0.005,
+            duration_ms: 5000
+          })
+
+        assert next.subagents["child-3"].usd == 0.005
+        assert next.subagents["child-3"].duration_ms == 5000
+
+        # Cost event must NOT add a transcript line (D-153: no double-count risk).
+        assert length(next.transcript) == transcript_len_before,
+               "SubagentCost must not append a transcript line"
+      end
+
+      test "ToolStart owned by sub-agent does not produce a [tool_call] transcript line (B1/D-151)" do
+        # B1 rule (D-151): a ToolStart whose tool_call_id is owned by a
+        # sub-agent MUST NOT appear as a bare [tool_call] line in the transcript.
+        # The owned call's visual representation is the sub-agent live region
+        # and end marker. We verify via on_message_end which is where the
+        # [tool_call] suppression for owned calls is enforced.
+        m = %{model() | status: :idle, last_assistant: nil}
+
+        m =
+          App.update(m, %Events.SubagentStart{
+            session_id: "sess-test",
+            subagent_id: "child-4",
+            kind: :builtin_agent,
+            label: "worker",
+            parent_tool_call_id: nil,
+            child_session_id: nil
+          })
+
+        m =
+          App.update(m, %Events.SubagentProgress{
+            session_id: "sess-test",
+            subagent_id: "child-4",
+            activity: {:tool_call, "Bash"},
+            child_tool_call_id: "tc-owned"
+          })
+
+        # MessageEnd carrying the owned tool_call as a tool_call block:
+        # it must be suppressed in the transcript (B1 / on_message_end de-dup).
+        msg = %Tau.Message.Assistant{
+          content: [%{type: :tool_call, id: "tc-owned", name: "Bash"}],
+          timestamp: DateTime.utc_now(),
+          stop_reason: :stop
+        }
+
+        next = App.update(m, %Events.MessageEnd{session_id: "sess-test", message: msg})
+
+        refute Enum.any?(next.transcript, fn {line, _} ->
+                 String.contains?(line, "[tool_call] Bash")
+               end),
+               "B1: tool_call block with owned id must NOT produce a [tool_call] transcript line"
+      end
+
+      test "ToolStart NOT owned by sub-agent produces a [tool_call] transcript line via MessageEnd (B1)" do
+        # Non-owned tool calls MUST produce a [tool_call] line in the transcript
+        # (the un-owned path in on_message_end).
+        m = %{model() | status: :idle, last_assistant: nil}
+
+        msg = %Tau.Message.Assistant{
+          content: [%{type: :tool_call, id: "tc-unowned", name: "Read"}],
+          timestamp: DateTime.utc_now(),
+          stop_reason: :stop
+        }
+
+        next = App.update(m, %Events.MessageEnd{session_id: "sess-test", message: msg})
+
+        assert Enum.any?(next.transcript, fn {line, _} ->
+                 String.contains?(line, "[tool_call] Read")
+               end),
+               "B1: non-owned tool_call MUST produce a [tool_call] transcript line"
+      end
+
+      test "unknown SubagentProgress subagent_id does not crash (D-152)" do
+        m = %{model() | status: :idle, last_assistant: nil}
+
+        # Should not raise.
+        next =
+          App.update(m, %Events.SubagentProgress{
+            session_id: "sess-test",
+            subagent_id: "nonexistent",
+            activity: {:tool_call, "Bash"},
+            child_tool_call_id: "tc-x"
+          })
+
+        assert next.subagents == %{}, "no node should be created for unknown subagent_id"
+      end
+
+      test "SubagentStart with unknown kind does not crash and tree unchanged (D-152)" do
+        m = %{model() | status: :idle, last_assistant: nil}
+
+        next =
+          App.update(m, %Events.SubagentStart{
+            session_id: "sess-test",
+            subagent_id: "x",
+            kind: :some_future_kind,
+            label: "future",
+            parent_tool_call_id: nil,
+            child_session_id: nil
+          })
+
+        assert next.subagents == %{}
+        # No marker appended for unknown kind — transcript unchanged.
+        assert next.transcript == m.transcript
       end
     end
   end

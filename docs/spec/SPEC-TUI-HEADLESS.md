@@ -319,6 +319,37 @@ the input editor feature (#338). See `docs/MISSION.md` registry.
 | D-148 | **Known limitation:** Two concurrent `tau` sessions in the same cwd each maintain independent in-memory history. `Store.append/3` writes are POSIX-atomic (single `:append` write ≤ 4 KiB), so line-level interleaving does not occur. However, each session's in-memory ring does not see the other session's appends until a new session starts and calls `Store.load/2`. This is acceptable for v1 (history is advisory, not correctness-bearing). | low | No test required; documented here so it is not filed as a bug. | [HC26] |
 | D-149 | The `Tau.TUI.Editor` and `Tau.TUI.History` modules MUST be pure value modules — no GenServer, no process, no behaviour. All state is threaded through the Ratatouille MVU model. | high | Structural: assert neither module has a `use GenServer` or `@behaviour` directive. | OTP non-negotiables §3, §8 |
 
+## 5c. PSDH catalog (D-150–D-159) — sub-agent visibility runtime invariants
+
+D-NNN allocation: this SPEC owns D-150–D-159 as an extension block for
+the sub-agent visibility feature (#335). See `docs/MISSION.md` registry.
+
+This block was introduced in PR #362 (feat/subagent-visibility-335).
+Path B (coding-agent CAEvent FSM handlers) is in scope of
+SPEC-CODING-AGENT (D-031 parity) and conforms to its boundary contract:
+`Subagent*` events extend, not replace, the `ToolStart`/`ToolEnd` pair
+so existing audit consumers continue to receive the flattened triad.
+
+**`child_session_id` for `:coding_agent` Path B:** `SubagentStart` events emitted
+on Path B (coding-agent dispatcher) carry `child_session_id: nil` because the
+coding agent subprocess runs inside the parent's own session id — it does not
+spawn a distinct Tau session via `Tau.start_session/1`. Only the builtin `Agent`
+tool (Path A) spawns a real child session; Path A therefore carries a non-nil
+`child_session_id` equal to the child's session id.
+
+| ID | Statement | Severity | Detection | Source |
+|---|---|---|---|---|
+| D-150 | Sub-agent lifecycle events (`SubagentStart`, `SubagentProgress`, `SubagentCost`, `SubagentEnd`) MUST be broadcast on the **parent** session PubSub topic `"session:<parent_id>"`. Child-topic emission is invisible to the TUI EventBridge (which subscribes only to the parent topic). Both dispatch paths (builtin `Agent` tool and coding-agent dispatcher) MUST use the parent topic. | high | unit test: observe events on parent topic after Agent.execute/2; assert no event arrives on child topic for the TUI EventBridge. | B1 / elaboration §3.1 |
+| D-151 | `SubagentProgress.child_tool_call_id` is the correlation key for the render-layer de-dup rule (B1): a parent-topic `%ToolStart{}` / `%ToolEnd{}` whose `tool_call_id` is present in any node's `owned_tool_call_ids` set MUST NOT be rendered as an inline `[tool_call]` line — the sub-agent start/end markers own its visual representation. | high | unit test: SubagentProgress with child_tool_call_id "x"; ToolStart with tool_call_id "x"; assert no bare [tool_call] line appended to transcript. | B1 / issue #335 |
+| D-152 | An unknown `subagent_id` in `SubagentProgress`, `SubagentCost`, or `SubagentEnd` MUST be silently ignored (tree unchanged). An unknown `kind` atom in `SubagentStart` MUST also be silently ignored. No exception, no crash. The closed `kind` set is `{:builtin_agent, :coding_agent}`; future kinds may be added by amending this invariant. | high | property test: generate arbitrary unknown subagent_id and unknown kind; fold into tree; assert tree unchanged. | D-152 / S4 critic finding |
+| D-153 | Sub-agent cost reported via `SubagentCost` MUST NOT be folded into the parent session's own cost display. The `SubagentNode` owns its cost; the parent status bar shows parent-only cost. This prevents double-counting (R4). | high | unit test: apply SubagentCost; assert parent model cost fields unchanged. | R4 / AC-4 |
+| D-154 | `SubagentEnd` MUST be emitted on **all five** terminal branches of `await_child/4` in `Tau.Tools.Builtin.Agent`: (1) natural MessageEnd, (2) failure MessageEnd, (3) `%SessionEnd{}`, (4) `{:DOWN, parent_ref}`, (5) `after`-timeout. A missed branch leaves the node stuck `▶ running` after the parent turn ends (AC-7 failure). | high | unit test: trigger each terminal branch via a stub child session; assert SubagentEnd arrives on the parent topic for each. | B2 / AC-7 |
+| D-155 | `SubagentProgress` events with `activity: {:tool_call, name}` MUST increment `SubagentNode.tool_calls` by 1. Non-tool_call activity (`:assistant_text`, `:file_edit`, `:tool_result`) MUST NOT increment the counter. | medium | property test: generate N tool_call progress events; assert node.tool_calls == N. | AC-3 |
+| D-156 | The `Tau.TUI.SubagentTree` module MUST be a pure fold module — no GenServer, no process, no behaviour. All state is threaded through the MVU model's `subagents` field. A "SubagentManager" GenServer would violate OTP non-negotiables §1/#3. | high | structural: assert module has no `use GenServer` or supervised start. | D2 / OTP non-negotiables §3/#8 |
+| D-157 | State transitions in `SubagentNode` are monotone: once `:done`, `:failed`, or `:cancelled`, no further event may revert the node to `:running`. A `SubagentProgress` arriving after `SubagentEnd` is silently discarded. | medium | property test: fold SubagentEnd; fold SubagentProgress; assert state unchanged. | D-154 monotonicity |
+| D-158 | In-flight sub-agent display uses a **live region** derived from `model.subagents` every render frame. `%SubagentStart{}` MUST NOT append a frozen start marker to `model.transcript`; instead `render/1` produces one `"▶ sub-agent: <label> · <N> tool calls · <excerpt>"` line per `:running` node, re-computed each frame so the count and excerpt update live (AC-3). `%SubagentEnd{}` MUST append a permanent `"└─ sub-agent: <label> [<state> · ...]"` end marker to `model.transcript` (AC-2). The live region is a compact single-column element within the existing transcript panel (S3 / no right-hand panel for this PR). | medium | unit test: (a) SubagentStart — transcript unchanged, node in subagents tree with :running state; (b) SubagentProgress — format_live_line shows increased tool-call count; (c) SubagentEnd — end marker in transcript, node not :running. | AC-1, AC-2, AC-3 |
+| D-159 | `[:tau, :session, :subagent, :start]` and `[:tau, :session, :subagent, :stop]` telemetry spans MUST fire per sub-agent dispatch. The existing span pair in `Tau.Tools.Builtin.Agent.execute/2` is the canonical source; a second competing `[:tau, :session, :subagent, :start]` from the relay path MUST NOT be emitted (S5 critic finding). Separate `[:tau, :session, :subagent, :progress]` and `[:tau, :session, :subagent, :cost]` metrics events are out of scope for this PR. | medium | ExUnit telemetry handler: assert :start and :stop events fire per Agent.execute/2 invocation. | AC-8 |
+
 ## 6. Acceptance criteria — UX surface
 
 These criteria define the M1.1 UX bar. Each maps to one or more protocol
@@ -837,7 +868,11 @@ Files this SPEC touches (or proposes touching) on landing:
 | `Tau.TUI.App.init/1` | `lib/tau/tui/app.ex:18-37` |
 | `Tau.TUI.App.run/0` quit_events | `lib/tau/tui/app.ex:115-119` |
 | `Tau.TUI.InputEditor` (proposed, #338) | `lib/tau/tui/input_editor.ex` |
-| `Tau.TUI.SubAgentPanel` (proposed, #335) | `lib/tau/tui/sub_agent_panel.ex` |
+| `Tau.TUI.SubagentTree` (#335, landed) | `lib/tau/tui/subagent_tree.ex` |
+| `Tau.TUI.App.subagents` model field (#335, landed) | `lib/tau/tui/app.ex` |
+| `Tau.Session.Events.SubagentStart/Progress/Cost/End` (#335, landed) | `lib/tau/session/events.ex` |
+| `Tau.Tools.Builtin.Agent.await_child/4` relay (#335, landed) | `lib/tau/tools/builtin/agent.ex` |
+| `Tau.TUI.SubAgentPanel` (proposed, #361 follow-up) | `lib/tau/tui/sub_agent_panel.ex` |
 | `Tau.TUI.StatusBar` (proposed, #340) | `lib/tau/tui/status_bar.ex` |
 | `Tau.Provider.context_window/1` (proposed, #340) | `lib/tau/provider.ex` |
 | `Tau.TUI.Theme` (proposed, #345) | `lib/tau/tui/theme.ex` |

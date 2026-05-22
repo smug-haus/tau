@@ -142,4 +142,80 @@ defmodule Tau.Session.Events do
     defstruct [:session_id, :messages]
     @type t :: %__MODULE__{}
   end
+
+  defmodule SubagentStart do
+    @moduledoc """
+    Broadcast on the **parent** session topic when a sub-agent is dispatched.
+
+    D-150 (SPEC-TUI-HEADLESS §5c): sub-agent lifecycle events MUST be emitted
+    on the parent topic `"session:<parent_id>"` so the TUI EventBridge, which
+    subscribes only to the parent topic, receives them without needing a
+    per-child subscription.
+
+    `kind` is a closed atom set: `:builtin_agent` (the `Agent` builtin tool,
+    Path A) or `:coding_agent` (the coding-agent dispatcher, Path B). Consumers
+    MUST pattern-match on atoms; unknown `kind` values MUST be ignored, not
+    crashed (D-152).
+
+    `parent_tool_call_id` is the parent FSM's tool-call id for this Agent
+    invocation, used by the render layer to de-dup owned child tool calls (B1).
+    """
+    @enforce_keys [:session_id, :subagent_id, :kind, :label]
+    defstruct [:session_id, :subagent_id, :kind, :label, :parent_tool_call_id, :child_session_id]
+    @type t :: %__MODULE__{}
+  end
+
+  defmodule SubagentProgress do
+    @moduledoc """
+    Broadcast on the **parent** session topic for each notable child activity:
+    a tool call, an assistant-text chunk, or a file edit.
+
+    D-151 (SPEC-TUI-HEADLESS §5c): progress is coalesced — one event per child
+    tool-call / text chunk, never per token — to bound mailbox and render cost.
+
+    `child_tool_call_id` is the child session's tool-call id (may be `nil` for
+    non-tool activity). The render layer uses it to correlate: a parent-topic
+    `%ToolStart{}` / `%ToolEnd{}` whose `tool_call_id` belongs to a known
+    sub-agent is NOT rendered inline — the sub-agent markers own it (B1 rule).
+
+    `activity` is one of:
+      - `{:tool_call, name}` — child invoked a tool
+      - `{:assistant_text, excerpt}` — child produced assistant text (short excerpt)
+      - `{:file_edit, path, kind}` — child performed a file edit
+    """
+    @enforce_keys [:session_id, :subagent_id, :activity]
+    defstruct [:session_id, :subagent_id, :activity, :child_tool_call_id]
+    @type t :: %__MODULE__{}
+  end
+
+  defmodule SubagentCost do
+    @moduledoc """
+    Broadcast on the **parent** session topic when the sub-agent reports cost
+    information (e.g. on completion or via a cost event from the adapter).
+
+    D-153 (SPEC-TUI-HEADLESS §5c): sub-agent cost MUST NOT be folded into the
+    parent's own cost line. The node owns its cost; the parent status bar shows
+    parent-only cost. This prevents double-counting (R4).
+    """
+    @enforce_keys [:session_id, :subagent_id]
+    defstruct [:session_id, :subagent_id, :tokens, :usd, :duration_ms]
+    @type t :: %__MODULE__{}
+  end
+
+  defmodule SubagentEnd do
+    @moduledoc """
+    Broadcast on the **parent** session topic when the sub-agent terminates.
+
+    D-154 (SPEC-TUI-HEADLESS §5c): `SubagentEnd` MUST be emitted on ALL FIVE
+    terminal branches of `await_child/4`: `natural_end`, `failure_end`,
+    `SessionEnd`, `{:DOWN, …}`, and the `after`-timeout. A missed branch
+    produces a node stuck `▶ running` after the parent turn ends (AC-7 failure).
+
+    `state` is a closed atom set: `:done`, `:failed`, or `:cancelled`.
+    `summary` is a short human-readable string for the transcript end marker.
+    """
+    @enforce_keys [:session_id, :subagent_id, :state]
+    defstruct [:session_id, :subagent_id, :state, :summary]
+    @type t :: %__MODULE__{}
+  end
 end
