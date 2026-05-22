@@ -12,6 +12,8 @@ defmodule Tau.Factory.GateTest do
   """
   use ExUnit.Case, async: true
 
+  alias Tau.Factory.Gate
+
   # ---------------------------------------------------------------------------
   # AC-1 — Tau.Factory.Gate.ac_linkage/2
   #
@@ -52,7 +54,7 @@ defmodule Tau.Factory.GateTest do
         """
       ]
 
-      assert {:error, missing} = Tau.Factory.Gate.ac_linkage(@pr_body, sources)
+      assert {:error, missing} = Gate.ac_linkage(@pr_body, sources)
       assert "AC-2" in missing
       refute "AC-1" in missing
       refute "D-200" in missing
@@ -77,7 +79,7 @@ defmodule Tau.Factory.GateTest do
         """
       ]
 
-      assert :ok = Tau.Factory.Gate.ac_linkage(@pr_body, sources)
+      assert :ok = Gate.ac_linkage(@pr_body, sources)
     end
   end
 
@@ -122,7 +124,7 @@ defmodule Tau.Factory.GateTest do
     """
 
     test "AC-2: returns the removed-assertion list for a diff that deletes an assert" do
-      violations = Tau.Factory.Gate.masking_violations(@diff_with_removed_assert)
+      violations = Gate.masking_violations(@diff_with_removed_assert)
 
       assert is_list(violations)
       assert length(violations) == 1
@@ -135,7 +137,7 @@ defmodule Tau.Factory.GateTest do
     end
 
     test "AC-2: returns [] for a diff that deletes no assertion" do
-      assert [] = Tau.Factory.Gate.masking_violations(@diff_without_removed_assert)
+      assert [] = Gate.masking_violations(@diff_without_removed_assert)
     end
   end
 
@@ -209,7 +211,7 @@ defmodule Tau.Factory.GateTest do
       run.(["commit", "-q", "-m", "head"])
 
       assert :ok =
-               Tau.Factory.Gate.mutation_check(["test/widget_gate_test.exs"], base_ref)
+               Gate.mutation_check(["test/widget_gate_test.exs"], base_ref)
     after
       _ = tmp_dir
     end
@@ -233,7 +235,7 @@ defmodule Tau.Factory.GateTest do
       run.(["commit", "-q", "-m", "head"])
 
       assert {:error, :all_passed} =
-               Tau.Factory.Gate.mutation_check(["test/widget_gate_test.exs"], base_ref)
+               Gate.mutation_check(["test/widget_gate_test.exs"], base_ref)
     after
       _ = tmp_dir
     end
