@@ -102,10 +102,13 @@ The follow-up drain routes through `handle_event(:cast, {:user_message, msg, :fo
 
 **Accepted tradeoffs:**
 
-- Steering messages are held until a tool round occurs (pure-text turns do not
-  drain the steering queue). This is the correct Pi semantics: steering is
-  meaningful only at the tool-round boundary. Users who want immediate injection
-  should cancel and re-send.
+- Steering messages are held until a tool round occurs within the current turn.
+  If the current turn is pure-text (no tool round), steering messages are NOT
+  silently lost: on `MessageEnd`, any remaining `steering_queue` entries are
+  merged into the front of `followup_queue` (D-079 / FIX-4). They run as
+  post-turn continuations immediately after the current turn completes, giving
+  them early delivery while preventing stale steering context from bleeding into
+  an unrelated later turn's tool-round boundary.
 - The `:gen_statem` callback mode remains `[:state_enter, :handle_event_function]`
   without change; `:drain_followups` is an `:internal` event, not a `state_enter`
   action, so no module-wide `callback_mode` change is required.

@@ -389,14 +389,230 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         assert next.status == :idle
       end
 
-      test "Esc without menu open still cancels (existing behaviour)" do
-        m = %{model() | menu: nil, status: :idle}
-        # cancel/1 calls Tau.cancel but since this is a unit test (no FSM)
-        # we just verify the model fields that cancel/1 sets
+      test "Esc without menu open while idle clears the input editor (AC-6 / D-078)" do
+        # After #339, Esc-while-idle routes to clear_input/1, NOT cancel/1.
+        # clear_input/1 resets the editor to empty and clears search; it does not quit.
+        ed = Editor.new() |> Editor.insert("some draft")
+        m = %{model() | menu: nil, status: :idle, editor: ed}
         next = App.update(m, {:event, %{key: 27, ch: 0, mod: 0}})
-        # cancel/1 sets status: :idle and calls Tau.cancel (side effect)
-        # The test verifies the model is returned (doesn't crash)
+        # Editor must be cleared
+        assert Editor.empty?(next.editor),
+               "Esc while idle MUST clear the editor (clear_input); got: #{inspect(Editor.text(next.editor))}"
+
+        # Status must remain :idle — no cancel
+        assert next.status == :idle,
+               "Esc while idle MUST leave status :idle; got: #{inspect(next.status)}"
+
+        # Process is alive (model returned, not crashed)
         assert is_map(next)
+      end
+    end
+
+    # ---------------------------------------------------------------------------
+    # #339 AC-2/3/4/6 TUI keybinding behaviours (D-077 / D-078 / D-082)
+    # ---------------------------------------------------------------------------
+
+    describe "update/2 — Enter while busy enqueues steering (AC-2 / D-077)" do
+      # AC-2: Enter while streaming/sending MUST enqueue a :steering message via
+      # Tau.steer/2 rather than submitting a new turn. Observable effects on the
+      # model: editor cleared, transcript gains a "[queued steer]" notice.
+      # Regression target: if the Enter-while-busy clause is removed and Enter
+      # falls through to submit/continue, the editor content is not cleared and
+      # no "[queued steer]" notice appears in the transcript.
+
+      test "Enter while streaming clears editor and appends [queued steer] notice" do
+        ed = Editor.new() |> Editor.insert("redirect please")
+        m = %{model() | editor: ed, status: :streaming}
+        # Realistic control-key termbox shape: key=13, ch=0, mod=0
+        next = App.update(m, {:event, %{key: 13, ch: 0, mod: 0}})
+
+        assert Editor.empty?(next.editor),
+               "AC-2: editor MUST be cleared after Enter-while-streaming (steer path); " <>
+                 "got: #{inspect(Editor.text(next.editor))}"
+
+        assert Enum.any?(next.transcript, fn {text, _attrs} ->
+                 String.starts_with?(text, "[queued steer]")
+               end),
+               "AC-2: transcript MUST contain '[queued steer]' notice; " <>
+                 "got: #{inspect(next.transcript)}"
+      end
+
+      test "Enter while sending also routes to steer (not submit)" do
+        ed = Editor.new() |> Editor.insert("steer this")
+        m = %{model() | editor: ed, status: :sending}
+        next = App.update(m, {:event, %{key: 13, ch: 0, mod: 0}})
+
+        assert Editor.empty?(next.editor),
+               "AC-2: editor MUST be cleared after Enter-while-sending (steer path)"
+
+        assert Enum.any?(next.transcript, fn {text, _attrs} ->
+                 String.starts_with?(text, "[queued steer]")
+               end),
+               "AC-2: transcript MUST contain '[queued steer]' notice for :sending status"
+      end
+
+      test "Enter while busy with empty editor is a no-op (steer guards empty)" do
+        m = %{model() | editor: Editor.new(), status: :streaming}
+        next = App.update(m, {:event, %{key: 13, ch: 0, mod: 0}})
+        # Empty editor: steer/1 returns model unchanged
+        assert next.transcript == [],
+               "AC-2: Enter-while-busy on empty editor MUST be a no-op (no spurious notice)"
+      end
+    end
+
+    describe "update/2 — Alt+Enter while busy enqueues followup (AC-3 / D-078)" do
+      # AC-3: Alt+Enter while streaming MUST enqueue a :followup message via
+      # Tau.send/2 rather than steering. Observable effects on the model: editor
+      # cleared, transcript gains a "[queued follow-up]" notice.
+      # Regression target: if handle_alt(model, 0, 13) is removed, Alt+Enter falls
+      # through to the handle_alt catch-all no-op and the editor is NOT cleared and
+      # no "[queued follow-up]" notice appears.
+      # Alt+Enter termbox shape: mod != 0, key = 13 (Return), ch = 0.
+
+      test "Alt+Enter while streaming clears editor and appends [queued follow-up] notice" do
+        ed = Editor.new() |> Editor.insert("followup task")
+        m = %{model() | editor: ed, status: :streaming}
+        # Alt+Enter: mod != 0, key = 13, ch = 0 (exact termbox shape documented in app.ex)
+        next = App.update(m, {:event, %{mod: 1, key: 13, ch: 0}})
+
+        assert Editor.empty?(next.editor),
+               "AC-3: editor MUST be cleared after Alt+Enter-while-streaming (followup path); " <>
+                 "got: #{inspect(Editor.text(next.editor))}"
+
+        assert Enum.any?(next.transcript, fn {text, _attrs} ->
+                 String.starts_with?(text, "[queued follow-up]")
+               end),
+               "AC-3: transcript MUST contain '[queued follow-up]' notice; " <>
+                 "got: #{inspect(next.transcript)}"
+      end
+
+      test "Alt+Enter with empty editor is a no-op" do
+        m = %{model() | editor: Editor.new(), status: :streaming}
+        next = App.update(m, {:event, %{mod: 1, key: 13, ch: 0}})
+
+        assert next.transcript == [],
+               "AC-3: Alt+Enter-while-busy on empty editor MUST be a no-op"
+      end
+
+      test "Alt+Enter does NOT route to steer (no [queued steer] notice)" do
+        ed = Editor.new() |> Editor.insert("a followup")
+        m = %{model() | editor: ed, status: :streaming}
+        next = App.update(m, {:event, %{mod: 1, key: 13, ch: 0}})
+
+        refute Enum.any?(next.transcript, fn {text, _attrs} ->
+                 String.starts_with?(text, "[queued steer]")
+               end),
+               "AC-3: Alt+Enter MUST NOT produce a '[queued steer]' notice (wrong tier)"
+      end
+    end
+
+    describe "update/2 — QueueRestored repopulates editor (AC-4 / D-082)" do
+      # AC-4: a %QueueRestored{} event carrying non-empty messages MUST repopulate
+      # the input editor with the restored text (joining multiple messages with \n).
+      # Regression target: if the QueueRestored clause is removed or does not
+      # update model.editor, the editor remains at its prior content and the user
+      # loses sight of their queued steering text.
+
+      test "QueueRestored with a single binary message repopulates editor" do
+        m = %{model() | editor: Editor.new()}
+
+        msg = %Tau.Message.User{
+          content: [%{type: :text, text: "steered text"}],
+          timestamp: DateTime.utc_now()
+        }
+
+        event = %Tau.Session.Events.QueueRestored{session_id: "sess-test", messages: [msg]}
+        next = App.update(m, event)
+
+        assert Editor.text(next.editor) == "steered text",
+               "AC-4: QueueRestored MUST repopulate editor with restored message text; " <>
+                 "got: #{inspect(Editor.text(next.editor))}"
+      end
+
+      test "QueueRestored with multiple messages joins with newline" do
+        m = %{model() | editor: Editor.new()}
+
+        msgs = [
+          %Tau.Message.User{
+            content: [%{type: :text, text: "first steer"}],
+            timestamp: DateTime.utc_now()
+          },
+          %Tau.Message.User{
+            content: [%{type: :text, text: "second steer"}],
+            timestamp: DateTime.utc_now()
+          }
+        ]
+
+        event = %Tau.Session.Events.QueueRestored{session_id: "sess-test", messages: msgs}
+        next = App.update(m, event)
+
+        restored = Editor.text(next.editor)
+
+        assert String.contains?(restored, "first steer"),
+               "AC-4: QueueRestored editor MUST contain first message; got: #{inspect(restored)}"
+
+        assert String.contains?(restored, "second steer"),
+               "AC-4: QueueRestored editor MUST contain second message; got: #{inspect(restored)}"
+      end
+
+      test "QueueRestored with empty messages list is a no-op" do
+        ed = Editor.new() |> Editor.insert("existing draft")
+        m = %{model() | editor: ed}
+        event = %Tau.Session.Events.QueueRestored{session_id: "sess-test", messages: []}
+        next = App.update(m, event)
+        # Empty QueueRestored must not clear the editor
+        assert Editor.text(next.editor) == "existing draft",
+               "AC-4: empty QueueRestored MUST be a no-op (editor unchanged)"
+      end
+    end
+
+    describe "update/2 — Esc while idle clears editor without quitting (AC-6 / D-078)" do
+      # AC-6: Esc while status :idle (no menu, no search) MUST clear the input
+      # editor and NOT quit (process stays alive). This is distinct from Esc-while-
+      # busy which triggers cancel/1.
+      # Regression target: if the `27 when model.status == :idle` clause is removed,
+      # Esc falls through to the `27 ->` cancel/1 clause, changing :idle behaviour.
+
+      test "Esc while idle clears editor" do
+        ed = Editor.new() |> Editor.insert("draft to clear")
+        m = %{model() | editor: ed, status: :idle, menu: nil, search: nil}
+        # Control-key termbox shape: key=27, ch=0, mod=0
+        next = App.update(m, {:event, %{key: 27, ch: 0, mod: 0}})
+
+        assert Editor.empty?(next.editor),
+               "AC-6: Esc while idle MUST clear the editor; got: #{inspect(Editor.text(next.editor))}"
+      end
+
+      test "Esc while idle leaves status :idle (does not quit or cancel)" do
+        ed = Editor.new() |> Editor.insert("some text")
+        m = %{model() | editor: ed, status: :idle, menu: nil, search: nil}
+        next = App.update(m, {:event, %{key: 27, ch: 0, mod: 0}})
+
+        assert next.status == :idle,
+               "AC-6: Esc while idle MUST leave status :idle; got: #{inspect(next.status)}"
+      end
+
+      test "Esc while idle does not append to transcript" do
+        ed = Editor.new() |> Editor.insert("some text")
+        m = %{model() | editor: ed, status: :idle, menu: nil, search: nil, transcript: []}
+        next = App.update(m, {:event, %{key: 27, ch: 0, mod: 0}})
+
+        assert next.transcript == [],
+               "AC-6: Esc while idle MUST NOT append anything to transcript"
+      end
+
+      test "Esc while streaming does NOT clear editor (routes to cancel, not clear_input)" do
+        # Regression guard: Esc-while-streaming MUST NOT route to clear_input.
+        # The `27 when model.status == :idle` guard ensures this.
+        ed = Editor.new() |> Editor.insert("mid-stream text")
+        m = %{model() | editor: ed, status: :streaming, menu: nil, search: nil}
+        next = App.update(m, {:event, %{key: 27, ch: 0, mod: 0}})
+
+        # cancel/1 does NOT clear the editor — the editor is preserved so the
+        # user can re-submit. If clear_input were mistakenly called, editor would be empty.
+        refute Editor.empty?(next.editor),
+               "AC-6 regression guard: Esc while streaming MUST NOT clear the editor " <>
+                 "(routes to cancel, not clear_input)"
       end
     end
 
