@@ -7,7 +7,7 @@
 | **Scope** | The `tau tui` UX surface end-to-end: behaviour contracts for every user-visible TUI feature, plus a repeatable, CI-runnable UX testing protocol that exercises those features via the proven tmux-drive + pane-capture + screen-interpretation harness. |
 | **Method** | PSDH spike + design. Spike conducted 2026-05-04; results in §3 and Appendix A. UX surface analysis conducted 2026-05-21 (competitive analysis against Pi and Claude Code). |
 | **Companion** | `docs/spec/SPEC-USER-TURN.md` — AC-1 / AC-2 / AC-3 / AC-4 / AC-7 / AC-8 from that SPEC are the session-FSM contracts this SPEC operationalises at the UX layer. |
-| **D-NNN block** | D-066–D-075 (original allocation; see §5). D-140–D-149 (input-editor extension; see §5b). |
+| **D-NNN block** | D-066–D-075 (original allocation; see §5). D-140–D-149 (input-editor extension; see §5b). D-150–D-159 (sub-agent visibility; see §5c). D-160–D-169 (status surface; see §5d). |
 | **Spec home for** | #335 (sub-agent visibility), #338 (input editor), #340 (status surfaces + `context_window/1`), #345 (themes/keybindings). Acceptance criteria in those issues map to protocol steps here. |
 
 ## 0. Why this spec exists
@@ -349,6 +349,38 @@ tool (Path A) spawns a real child session; Path A therefore carries a non-nil
 | D-157 | State transitions in `SubagentNode` are monotone: once `:done`, `:failed`, or `:cancelled`, no further event may revert the node to `:running`. A `SubagentProgress` arriving after `SubagentEnd` is silently discarded. | medium | property test: fold SubagentEnd; fold SubagentProgress; assert state unchanged. | D-154 monotonicity |
 | D-158 | In-flight sub-agent display uses a **live region** derived from `model.subagents` every render frame. `%SubagentStart{}` MUST NOT append a frozen start marker to `model.transcript`; instead `render/1` produces one `"▶ sub-agent: <label> · <N> tool calls · <excerpt>"` line per `:running` node, re-computed each frame so the count and excerpt update live (AC-3). `%SubagentEnd{}` MUST append a permanent `"└─ sub-agent: <label> [<state> · ...]"` end marker to `model.transcript` (AC-2). The live region is a compact single-column element within the existing transcript panel (S3 / no right-hand panel for this PR). | medium | unit test: (a) SubagentStart — transcript unchanged, node in subagents tree with :running state; (b) SubagentProgress — format_live_line shows increased tool-call count; (c) SubagentEnd — end marker in transcript, node not :running. | AC-1, AC-2, AC-3 |
 | D-159 | `[:tau, :session, :subagent, :start]` and `[:tau, :session, :subagent, :stop]` telemetry spans MUST fire per sub-agent dispatch. The existing span pair in `Tau.Tools.Builtin.Agent.execute/2` is the canonical source; a second competing `[:tau, :session, :subagent, :start]` from the relay path MUST NOT be emitted (S5 critic finding). Separate `[:tau, :session, :subagent, :progress]` and `[:tau, :session, :subagent, :cost]` metrics events are out of scope for this PR. | medium | ExUnit telemetry handler: assert :start and :stop events fire per Agent.execute/2 invocation. | AC-8 |
+
+## 5d. PSDH catalog (D-160–D-169) — status surface runtime invariants
+
+D-NNN allocation: this SPEC owns D-160–D-169 as an extension block for
+the status surface feature (#340). See `docs/MISSION.md` registry.
+
+This block was introduced in PR #364 (feat/status-surfaces-340).
+
+### New constraint (S-4 / D-169): `context_tokens` is latest-turn `input_tokens`
+
+`context_tokens` in the MVU model MUST be overwritten with the latest
+completed turn's `input_tokens`, NOT accumulated cumulatively across
+turns. Cumulative accumulation would produce a >100% context bar after
+the second turn because the context window is not additive — the
+provider re-reads the full context on every turn and input_tokens
+reflects that full context size.
+
+Pre-first-turn: `context_tokens` reads 0 (renders as `ctx —`).
+Source: the `%MessageEnd{}` event's message usage, or `Tau.Cost.for_session/1`.
+
+| ID | Statement | Severity | Detection | Source |
+|---|---|---|---|---|
+| D-160 | The `%ModelSwapped{}` typed event MUST be broadcast on the session PubSub topic on every model change (via `/model <id>` or `Tau.swap_model/2`). The TUI MUST update `model.model` on receipt, NOT by string-scraping the accompanying `SystemNotice`. | high | unit test: send `%ModelSwapped{}` event; assert `model.model` updates. Send a `SystemNotice` that mentions the old model name; assert `model.model` does NOT change. | B-2 / AC-6 |
+| D-161 | Context-window sizes for all Tau-supported provider/model pairs MUST be stored in a single `Tau.Provider.ContextWindows` lookup table keyed by `{provider_module, model_string}`. No per-adapter maps. | medium | structural: assert `Tau.Provider.ContextWindows.lookup/2` covers at least Anthropic, Gemini, Bedrock, Mistral, Groq, DeepSeek, OpenAI. | S-1 critic finding |
+| D-162 | `Tau.TUI.StatusBar` MUST be a pure value module — no GenServer, no process, no behaviour. `render/1` and `render_text/1` are pure functions over a model map. | high | structural: assert module has no `use GenServer` or supervised start. `render_text/1` MUST be callable without a running Ratatouille runtime. | OTP non-negotiables §3/#8 |
+| D-163 | `%CompactionStarted{}` MUST be broadcast on the session PubSub topic immediately before the async compaction task is spawned. The TUI MUST transition `model.compaction` from `:idle` to `:running` on receipt. | high | unit test: send `%CompactionStarted{}`; assert `model.compaction == :running`. | AC-5 |
+| D-164 | `%CompactionFinished{}` MUST be broadcast on **every** exit from the `:compacting` FSM state — success (Clause 1), benign `:normal` DOWN (Clause 2a, absorbed by Clause 1), worker crash (Clause 2b), live timeout (Clause 3), and stale timeout (Clause 4). The TUI MUST transition `model.compaction` back to `:idle` on receipt regardless of `outcome`. A missed clause leaves `model.compaction` stuck at `:running` and the bar shows `compacting…` forever (S-2 critic blocking item). | high | unit test: send `%CompactionFinished{}` with `{:ok, :compacted}` and `{:error, :timeout}`; assert `model.compaction == :idle` in both cases. | AC-5 / S-2 |
+| D-165 | Context-window warn/critical thresholds MUST be read from `Application.get_env` at render time (`:warn_threshold_pct` default 75, `:critical_threshold_pct` default 90). They are read-only at boot — NOT runtime-mutable via `Application.put_env/3`. | medium | unit test: override `Application.put_env(:tau, :warn_threshold_pct, 50)`; assert `warn_level(50) == :warn`. | D-165 / OTP non-negotiables §1 |
+| D-166 | `StatusBar.context_pct/2` MUST return `nil` (not raise) when either argument is `nil`, or when `window <= 0`. It MUST clamp its return to `0..100` when the raw ratio exceeds 1.0. | high | property test: generate arbitrary nil/zero/negative values; assert no raise; assert return in `0..100 ∨ nil`. | AC-7 |
+| D-167 | `StatusBar.warn_level/1` is monotone non-decreasing in percentage: for any `a ≤ b`, `warn_level(a) ≤ warn_level(b)` in the ordering `:ok < :warn < :critical`. | medium | property test: generate pairs `(a, b)` with `a <= b`; assert monotonicity. | AC-7 |
+| D-168 | `[:tau, :tui, :status, :update]` telemetry MUST be emitted ONLY when `warn_level` transitions (`:ok → :warn`, `:warn → :critical`, or any reverse). A constant level across turns MUST NOT flood telemetry. | medium | unit test: two `on_message_end` calls with same pct; assert telemetry fires once. | OTP non-negotiables §5 |
+| D-169 | `model.context_tokens` in `Tau.TUI.App` MUST be overwritten with the latest completed turn's `input_tokens` on every `%MessageEnd{}` (S-4 invariant). It MUST NOT be a cumulative sum across turns. Pre-first-turn `context_tokens == 0` renders as `ctx —`. | high | unit test: fold two `MessageEnd` events with different `input_tokens`; assert `model.context_tokens` equals the second event's value, not the sum. | S-4 / AC-3 |
 
 ## 6. Acceptance criteria — UX surface
 
@@ -873,8 +905,12 @@ Files this SPEC touches (or proposes touching) on landing:
 | `Tau.Session.Events.SubagentStart/Progress/Cost/End` (#335, landed) | `lib/tau/session/events.ex` |
 | `Tau.Tools.Builtin.Agent.await_child/4` relay (#335, landed) | `lib/tau/tools/builtin/agent.ex` |
 | `Tau.TUI.SubAgentPanel` (proposed, #361 follow-up) | `lib/tau/tui/sub_agent_panel.ex` |
-| `Tau.TUI.StatusBar` (proposed, #340) | `lib/tau/tui/status_bar.ex` |
-| `Tau.Provider.context_window/1` (proposed, #340) | `lib/tau/provider.ex` |
+| `Tau.TUI.StatusBar` (#340, landed) | `lib/tau/tui/status_bar.ex` |
+| `Tau.Provider.context_window/1` (#340, landed) | `lib/tau/provider.ex` |
+| `Tau.Provider.ContextWindows` (#340, landed) | `lib/tau/provider/context_windows.ex` |
+| `Tau.Session.Events.ModelSwapped` (#340, landed) | `lib/tau/session/events.ex` |
+| `Tau.Session.Events.CompactionStarted` (#340, landed) | `lib/tau/session/events.ex` |
+| `Tau.Session.Events.CompactionFinished` (#340, landed) | `lib/tau/session/events.ex` |
 | `Tau.TUI.Theme` (proposed, #345) | `lib/tau/tui/theme.ex` |
 | `Tau.TUI.Keybindings` (proposed, #345) | `lib/tau/tui/keybindings.ex` |
 | `Tau.Settings.data_dir` | reads `TAU_DATA_DIR` env or default |

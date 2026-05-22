@@ -107,7 +107,25 @@ defmodule Tau.Provider do
   @callback cache_regions(messages :: [Tau.Message.t()], opts :: map()) ::
               :explicit | :automatic | :none
 
-  @optional_callbacks [configure: 1, chat: 3, cache_regions: 2]
+  @doc """
+  Returns the total context-window size in tokens for `model` (D-160 /
+  SPEC-TUI-HEADLESS §5d).
+
+  Optional callback. Dispatch is via `function_exported?/3` at the call
+  site; an adapter that does not implement it returns `nil` and the status
+  bar falls back to the compactor's `:compaction_threshold_tokens` config
+  key, rendering the percentage as approximate (`~NN%`).
+
+  Coding-agent adapters MUST return `nil` — the underlying subprocess's
+  context window is opaque to Tau.
+
+  Return values:
+    * `pos_integer()` — total context window in tokens for this model.
+    * `nil`           — window unknown for this model (triggers fallback).
+  """
+  @callback context_window(model :: String.t()) :: pos_integer() | nil
+
+  @optional_callbacks [configure: 1, chat: 3, cache_regions: 2, context_window: 1]
 
   @doc "Look up the configured default provider."
   @spec default() :: module()

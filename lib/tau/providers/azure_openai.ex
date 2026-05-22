@@ -58,6 +58,9 @@ defmodule Tau.Providers.AzureOpenAI do
   def default_model, do: @default_model
 
   @impl Tau.Provider
+  def context_window(model), do: Tau.Provider.ContextWindows.lookup(__MODULE__, model)
+
+  @impl Tau.Provider
   def capabilities do
     %{
       thinking: false,
