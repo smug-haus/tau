@@ -1,0 +1,4 @@
+# Declared gating-test fixture slot for #370 (Tau.Factory.Gate).
+# The AC-3 mutation_check/2 fixture is a synthetic git repo built at runtime
+# under the per-test ExUnit :tmp_dir, so no static fixture file is needed here.
+# This marker keeps the declared `test/support/factory/` path present.
