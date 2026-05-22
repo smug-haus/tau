@@ -8,11 +8,7 @@
           "test/",
           "config/"
         ],
-        excluded: [
-          # Gating-test file: oracle-separation protocol forbids editing it
-          # (issue #370 / PR-B). AliasUsage findings cannot be suppressed inline.
-          "test/tau/factory/gate_test.exs"
-        ]
+        excluded: []
       },
       strict: true,
       color: true,

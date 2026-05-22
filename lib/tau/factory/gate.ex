@@ -21,10 +21,23 @@ defmodule Tau.Factory.Gate do
 
   ## Gate 5.3 — Mutation check (`mutation_check/2`)
 
+  `base_ref` is the PR's merge-base with `main` (computed by
+  `git merge-base origin/main HEAD`). In practice this equals the
+  "pre-implementer" state because the test-author's commits touch only the
+  declared gating-test paths — which the mutation check snapshots and
+  restores separately — so reverting every other path to the merge-base
+  reverts no test-author work.
+
   Keeps the declared gating-test paths at HEAD, reverts every other path
-  to `base_ref`, runs the gating tests, and returns `:ok` when ≥1 test
-  fails (the tests are discriminating) or `{:error, :all_passed}` when
-  none fail (the gating suite is vacuous).
+  to `base_ref`, runs the gating tests via `mix test`, and returns:
+
+  - `:ok` when ≥1 test fails (the tests are discriminating).
+  - `{:error, :all_passed}` when no test fails (the gating suite is vacuous).
+  - `{:error, {:runner_crashed, detail}}` when `mix test` does not emit a
+    valid `"N tests, M failures"` summary — e.g. a compile error or process
+    crash crashed the runner before it could produce a summary. This outcome
+    is DISTINCT from both `:ok` and `{:error, :all_passed}`; callers MUST
+    NOT treat a runner crash as a genuine test result.
   """
 
   # ---------------------------------------------------------------------------
@@ -164,19 +177,30 @@ defmodule Tau.Factory.Gate do
   Orchestrates the mutation check in the current working directory's git repo.
 
   Keeps `gating_test_paths` at HEAD (test-author's state), reverts all other
-  paths to `base_ref` (pre-implementer state), runs the gating tests, then
-  restores the repo to HEAD.
+  paths to `base_ref` (the PR's merge-base with `main`), runs the gating
+  tests via `mix test`, then restores the repo to HEAD.
+
+  `base_ref` is the PR's merge-base with `main` (i.e. `git merge-base
+  origin/main HEAD`). The test-author touches only the declared gating-test
+  paths, which the mutation check snapshots and restores separately, so
+  reverting "everything else" to the merge-base reverts no test-author work —
+  the merge-base and the conceptual "pre-implementer" state are equivalent.
 
   Returns:
   - `:ok` when ≥1 gating test fails against the reverted tree (tests discriminate).
   - `{:error, :all_passed}` when no gating test fails (vacuous suite).
+  - `{:error, {:runner_crashed, detail}}` when `mix test` exits without
+    producing a valid `"N tests, M failures"` summary — e.g. a compile error
+    or process crash prevented the run from completing. Callers MUST treat this
+    as an infrastructure failure, not a genuine test result.
 
   The check is performed in the process's current working directory, which must
   be a git repository. The gating-test paths are kept at their HEAD state;
   all other tracked files are reverted to `base_ref` for the duration of the
   check, then restored.
   """
-  @spec mutation_check([String.t()], String.t()) :: :ok | {:error, :all_passed}
+  @spec mutation_check([String.t()], String.t()) ::
+          :ok | {:error, :all_passed} | {:error, {:runner_crashed, String.t()}}
   def mutation_check(gating_test_paths, base_ref)
       when is_list(gating_test_paths) and is_binary(base_ref) do
     repo_dir = locate_repo_for_gating_tests(gating_test_paths, File.cwd!(), base_ref)
@@ -259,13 +283,16 @@ defmodule Tau.Factory.Gate do
     # Files to revert = all tracked files minus the gating test paths
     paths_to_revert = all_files -- gating_test_paths
 
-    # Revert non-gating files to base_ref (pre-implementer state)
+    # Revert non-gating files to base_ref (pre-implementer state).
+    # PR-added files are absent at base_ref and must be deleted rather than
+    # checked out — git checkout base -- <absent-path> fails or is a no-op.
     revert_to_base(paths_to_revert, base_ref, repo_dir)
 
     # Restore gating test files to their HEAD content (test-author state)
     restore_snapshots(gating_snapshots, repo_dir)
 
-    # Run the gating tests against the reverted tree
+    # Run the gating tests against the reverted tree via mix test.
+    # mix resolves compile order correctly, avoiding fs-order require issues.
     result = run_gating_tests(gating_test_paths, repo_dir)
 
     # Restore all files to HEAD (clean up mutation state)
@@ -288,11 +315,37 @@ defmodule Tau.Factory.Gate do
     end)
   end
 
+  # Revert each non-gating path to base_ref individually, handling two cases:
+  #   - path exists at base_ref: git checkout base_ref -- <path>
+  #   - path was PR-added (absent at base_ref): delete it
   defp revert_to_base([], _base_ref, _repo_dir), do: :ok
 
   defp revert_to_base(paths, base_ref, repo_dir) do
-    {_, 0} = System.cmd("git", ["checkout", base_ref, "--" | paths], cd: repo_dir)
+    Enum.each(paths, fn rel_path ->
+      if path_exists_at_ref?(rel_path, base_ref, repo_dir) do
+        {_, 0} = System.cmd("git", ["checkout", base_ref, "--", rel_path], cd: repo_dir)
+      else
+        # PR-added file: absent at base_ref, must be removed to produce the
+        # pre-implementer tree. git checkout base -- <absent> would fail.
+        abs = Path.join(repo_dir, rel_path)
+        _ = File.rm(abs)
+      end
+    end)
+
     :ok
+  end
+
+  # Returns true iff rel_path exists as a blob object at base_ref in the repo.
+  defp path_exists_at_ref?(rel_path, base_ref, repo_dir) do
+    case System.cmd(
+           "git",
+           ["cat-file", "-e", "#{base_ref}:#{rel_path}"],
+           cd: repo_dir,
+           stderr_to_stdout: true
+         ) do
+      {_, 0} -> true
+      _ -> false
+    end
   end
 
   defp restore_snapshots(snapshots, repo_dir) do
@@ -310,37 +363,84 @@ defmodule Tau.Factory.Gate do
     :ok
   end
 
+  # Run the gating tests, distinguishing three outcomes by parsing the ExUnit
+  # "N tests, M failures" summary line:
+  #
+  #   - summary present, M > 0  → :ok                           (tests discriminate)
+  #   - summary present, M == 0 → {:error, :all_passed}         (vacuous suite)
+  #   - no summary at all       → {:error, {:runner_crashed, output}}
+  #                               (compile error / process crash / no mix.exs)
+  #
+  # Uses `mix test` when a mix.exs is present in repo_dir (the normal CI case).
+  # Falls back to a direct `elixir` runner for minimal synthetic repos (tests).
+  # Both paths parse the same ExUnit summary line.
   defp run_gating_tests(gating_test_paths, repo_dir) do
-    # Collect lib/*.ex source files to require (production code at current state)
+    output =
+      if File.exists?(Path.join(repo_dir, "mix.exs")) do
+        run_via_mix(gating_test_paths, repo_dir)
+      else
+        run_via_elixir(gating_test_paths, repo_dir)
+      end
+
+    case parse_test_summary(output) do
+      {:ok, failures} when failures > 0 ->
+        :ok
+
+      {:ok, 0} ->
+        {:error, :all_passed}
+
+      :no_summary ->
+        {:error, {:runner_crashed, output}}
+    end
+  end
+
+  # Run gating tests with `mix test` (compile-order-correct; requires mix.exs).
+  defp run_via_mix(gating_test_paths, repo_dir) do
+    {output, _} =
+      System.cmd("mix", ["test" | gating_test_paths], cd: repo_dir, stderr_to_stdout: true)
+
+    output
+  end
+
+  # Run gating tests with `elixir` directly for minimal synthetic repos.
+  # Requires lib/*.ex files in the repo, then requires the gating test files.
+  # For single-module mini-repos this is compile-order-safe.
+  defp run_via_elixir(gating_test_paths, repo_dir) do
     lib_files = find_lib_files_recursive(repo_dir)
 
-    # Build a runner script: start ExUnit, require production files, require
-    # gating test files, run, halt with 1 on any failure.
     requires =
       (lib_files ++ gating_test_paths)
-      |> Enum.map_join("\n", fn p -> ~s[Code.require_file("#{p}")] end)
+      |> Enum.map_join("\n", fn p -> ~s[Code.require_file("#{p}", "#{repo_dir}")] end)
 
     runner = """
     ExUnit.start()
     #{requires}
-    result = ExUnit.run()
-    if result.failures > 0, do: System.halt(1)
+    ExUnit.run()
     """
 
-    runner_path = Path.join(repo_dir, "_mutation_runner_#{:erlang.unique_integer([:positive])}.exs")
+    runner_path =
+      Path.join(repo_dir, "_mutation_runner_#{:erlang.unique_integer([:positive])}.exs")
+
     File.write!(runner_path, runner)
 
-    result =
+    {output, _} =
       try do
-        case System.cmd("elixir", [runner_path], cd: repo_dir, stderr_to_stdout: true) do
-          {_, 0} -> {:error, :all_passed}
-          {_, _} -> :ok
-        end
+        System.cmd("elixir", [runner_path], cd: repo_dir, stderr_to_stdout: true)
       after
         File.rm(runner_path)
       end
 
-    result
+    output
+  end
+
+  # Parse the ExUnit summary line, e.g. "3 tests, 1 failure" or "3 tests, 0 failures".
+  # Returns {:ok, failure_count} or :no_summary.
+  defp parse_test_summary(output) do
+    # Match lines like "3 tests, 1 failure" or "5 tests, 2 failures" or "1 test, 0 failures"
+    case Regex.run(~r/\d+ tests?,\s*(\d+) failures?/, output) do
+      [_, failures_str] -> {:ok, String.to_integer(failures_str)}
+      nil -> :no_summary
+    end
   end
 
   # Recursively collect .ex files under the repo's lib/ directory.

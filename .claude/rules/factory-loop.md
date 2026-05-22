@@ -301,11 +301,15 @@ Verified by CI via `mix tau.gate.masking` in the `lint` job (detection-only,
 never hard-fails).
 
 **Gate 5.3 — Mutation check (path-based).** Using the declared gating-test path
-set: check out those paths at the test-author's committed state, revert every
-other path to its pre-implementer state, run the gating tests, and assert that
-≥1 test fails. Path-based rather than commit-based so it survives refine-cycle
-rebases. Verified by CI via `mix tau.gate.mutation` in the dedicated
-`mutation-check` job (blocking).
+set: keep those paths at the test-author's committed state, revert every other
+path to the PR's merge-base with `main` (`git merge-base origin/main HEAD`),
+run the gating tests via `mix test`, and assert that ≥1 test fails. This
+merge-base equals the conceptual "pre-implementer" state: the test-author
+touches only the declared gating-test paths, which are snapshotted and
+restored separately, so reverting "everything else" to the merge-base reverts
+no test-author work. Path-based rather than commit-based so it survives
+refine-cycle rebases. Verified by CI via `mix tau.gate.mutation` in the
+dedicated `mutation-check` job (blocking).
 
 ### Residual — what these gates do NOT close
 
