@@ -160,6 +160,7 @@ defmodule Tau.Factory.GateTest do
 
   describe "mutation_check/2 (AC-3)" do
     @describetag :ac_3
+    @describetag tmp_dir: true
 
     setup %{tmp_dir: tmp_dir} do
       # Build a synthetic two-state git repo:
