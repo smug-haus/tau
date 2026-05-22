@@ -106,6 +106,19 @@ The current spec catalog:
   `lib/tau/tui/app.ex` (the `menu` model field or `catalog` model field).
   Triage score 2/5; D-100..D-109 live here.
 
+- `docs/spec/SPEC-EXTENSIONS.md` — the extension subsystem:
+  `Tau.Extension` behaviour + DSL, `Tau.Extensions.Loader` (supervised
+  GenServer; compile/register/hot-reload), `tau extensions list|reload`
+  CLI handlers, auto-discovery of `~/.tau/extensions/` and
+  `<cwd>/.tau/extensions/`. Mandatory for any PR touching
+  `lib/tau/extension.ex`, `lib/tau/extensions/loader.ex`,
+  `lib/tau/cli/extensions.ex`, `lib/tau/settings/schema.ex` (extensions
+  property only), `lib/tau/application.ex` (Extensions.Loader entry only),
+  `test/tau/extensions/`, `test/tau/cli/extensions_test.exs`,
+  `test/tau/extension_skill_validation_test.exs`, or
+  `test/support/extensions/`. Triage score 4/5; D-120..D-129 live here.
+  Spec home for #180 (Stage A) and Stage B (#337, #345 — deferred surfaces).
+
 Future SPECs land here as new components reach triage threshold.
 
 ## What this rule requires

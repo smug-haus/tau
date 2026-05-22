@@ -232,7 +232,9 @@ defmodule Tau.Commands.CatalogTest do
     test "passing empty map is safe (builtin floor still present)" do
       entries = Catalog.list(%{})
       assert entries != []
-      assert Enum.all?(entries, fn e -> e.origin == :builtin end)
+      # At minimum the builtins are present; extension entries may also appear
+      # if any extensions are loaded at test time.
+      assert Enum.any?(entries, fn e -> e.origin == :builtin end)
     end
 
     test "template entries appear with /name prefix and origin :template" do
