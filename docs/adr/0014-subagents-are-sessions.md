@@ -131,11 +131,10 @@ Concretely:
 
 ## Consequences
 
-- The session FSM stays unchanged in shape: same states
-  (`:awaiting_user | :provider_streaming | :tool_executing |
-   :stopped`), same callback module. The only `data` change is
-  the `child_session_ids` set and a new `handle_event` clause for
-  `{:register_child, _}`.
+- The session FSM stays unchanged in shape: same state set (see
+  `lib/tau/session.ex`'s `@moduledoc`), same callback module. The
+  only `data` change is the `child_session_ids` set and a new
+  `handle_event` clause for `{:register_child, _}`.
 - Tools, hooks, persistence, telemetry, and TUI subscribers
   (`Tau.stream/2`) work on subagents with no special-casing —
   they're sessions, the harness already understands them.

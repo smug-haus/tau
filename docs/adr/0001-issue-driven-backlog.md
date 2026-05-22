@@ -12,8 +12,8 @@
 Tau is built by a mix of humans and agentic loops. Both need a
 shared, queryable, durable record of what's known to be wrong, what
 to work on next, and what was decided about a given finding. Local
-TODO comments and `/root/.claude/plans/` files are not addressable
-from outside a checkout, don't survive `git rm`, and silently rot.
+TODO comments and out-of-tree plan files are not addressable from
+outside a checkout, don't survive `git rm`, and silently rot.
 
 We need a single source of truth for outstanding work, callable from
 both humans (web UI) and agents (`mcp__github__list_issues`,
@@ -31,7 +31,8 @@ Specifics:
 - New finding → issue, with `<type>: <one-liner>` title (`type ∈
   bug | feature | polish | docs | chore | refactor | perf | test`)
   and at least one `area:<subsystem>` label.
-- Plans (`/root/.claude/plans/`) reference issue numbers and call
+- Long-form plans (kept in milestone descriptions) reference issue
+  numbers and call
   out which commits close which issues.
 - Commits end with `Closes #N` (or `Refs #N` for partial work).
 - PR descriptions enumerate every issue the PR closes so the
@@ -63,7 +64,7 @@ Specifics:
 
 ## Notes
 
-`/root/.claude/plans/` continues to host milestone-scale plans
-(M0–M8 implementation, large refactors). Smaller decisions live in
-issue comments. ADRs (this directory) capture _decisions_; issues
-capture _work_; plans capture _sequencing_. They're complementary.
+Milestone-scale plans live in GitHub milestone descriptions. Smaller
+decisions live in issue comments. ADRs (this directory) capture
+_decisions_; issues capture _work_; milestones capture _sequencing_.
+They're complementary.

@@ -20,10 +20,9 @@
 Issue #39 calls for per-provider request budgeting: a token-bucket
 rate limiter sits between `Tau.Session` and the provider's HTTP
 client, gating outgoing calls and reacting to upstream `429`
-responses by halving the bucket. Five providers ship today
-(Anthropic, OpenAI Chat, OpenAI Responses, Gemini, Bedrock); each
-has its own RPM/TPM ceiling that the limiter has to honour
-independently.
+responses by halving the bucket. Multiple providers ship under
+`lib/tau/providers/`, each with its own RPM/TPM ceiling that the
+limiter has to honour independently.
 
 Two questions arose during design.
 

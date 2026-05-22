@@ -74,9 +74,10 @@ whitelist. Permissions are inherited and may only be tightened.**
 Specifics:
 
 1. **Persona = skill lookup.** The `Agent` tool's `subagent_type`
-   parameter is a skill name. At spawn time the tool calls
-   `Tau.Skills.Loader.lookup/2` (or its eventual equivalent
-   keyed off the same registry skills load into). If found, the
+   parameter is a skill name. At spawn time the tool resolves the
+   skill from the parent session's snapshot (`resolve_skill/2` in
+   `Tau.Tools.Builtin.Agent` walks `parent_snap.skills`). If found,
+   the
    skill's `body` is the system prompt addendum (joined onto the
    tool's `system_prompt` parameter), and the skill's
    `allowed_tools` list is the child's tool whitelist. If

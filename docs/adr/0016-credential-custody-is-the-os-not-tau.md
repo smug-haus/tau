@@ -139,7 +139,7 @@ Costs:
   by the design (no value crosses telemetry / logs / event
   metadata). Live macOS validation is the maintainer's manual
   smoke test; CI cannot exercise a real keychain.
-- Wiring providers is incremental. This ADR / PR wires
-  `Tau.Providers.Anthropic` end-to-end as the demonstration; the
-  other three providers move in a follow-up so the surface change
-  is small and reviewable.
+- Wiring providers is incremental. This ADR wires
+  `Tau.Providers.Anthropic` end-to-end as the demonstration; other
+  providers may follow the same pattern, but none of the surface
+  contracts above depend on them doing so.

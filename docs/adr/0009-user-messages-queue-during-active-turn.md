@@ -15,9 +15,11 @@
 
 ## Context
 
-`Tau.Session` is a `:gen_statem` with four user-visible states:
-`:awaiting_user`, `:provider_streaming`, `:tool_executing`, and the
-implicit `:stopped` (gen_statem terminates immediately on `:stop`).
+`Tau.Session` is a `:gen_statem`. The state set has grown since this
+ADR was authored; see `lib/tau/session.ex`'s `@moduledoc` for the
+current list. The point this ADR makes — that user messages need
+handling beyond the simple "match in the current state" pattern —
+applies regardless of how many states there are.
 
 Until this ADR, the user-message handler matched any state:
 

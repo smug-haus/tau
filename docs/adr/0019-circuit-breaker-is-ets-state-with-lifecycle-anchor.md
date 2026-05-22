@@ -85,7 +85,7 @@ benefit.
 own the ETS table named `:tau_circuit_breakers` and serve as its
 lifecycle anchor. It exposes `probe_admitted?/1` (a synchronous call
 that performs a `select_replace` on the `probe_slot` field) and
-`transition/2` (for full-row state transitions via `select_replace`).
+`transition/3` (for full-row state transitions via `select_replace`).
 All reads and counter increments go directly to ETS from the caller
 process — no `GenServer.call/3` serialisation.
 

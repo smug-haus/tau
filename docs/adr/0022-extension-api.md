@@ -49,9 +49,10 @@ completeness.
 
 `Tau.Extensions.Loader.init/1` loads all configured and discovered
 extensions synchronously before returning `{:ok, state}`. The Loader
-occupies position 14 in the `:rest_for_one` child list; `Sessions.Supervisor`
-is at position 18. This is a structural guarantee: sessions see extension
-tools without any race.
+is placed before `Sessions.Supervisor` in the `:rest_for_one` child
+list (see `lib/tau/application.ex` for the exact boot order). This
+is a structural guarantee: sessions see extension tools without any
+race.
 
 **Rejected: deferred self-message** (the original `Process.send_after(self(), :boot_load, 0)` pattern). The self-message guaranteed nothing about ordering relative to session start. A session that started before `:boot_load` fired would silently see no extension tools. The fix is synchronous load — the OTP supervision tree enforces the ordering automatically.
 

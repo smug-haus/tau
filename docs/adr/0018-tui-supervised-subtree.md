@@ -42,8 +42,9 @@ normal application shutdown the ordering was undefined.
 ## Decision
 
 Introduce `Tau.TUI.Supervisor`, a permanent `DynamicSupervisor` in the
-Tau.Application supervision tree (position 11, before
-`Sessions.Supervisor`). When the TUI is invoked,
+`Tau.Application` supervision tree, placed before `Sessions.Supervisor`
+(see `lib/tau/application.ex` for the exact boot order). When the TUI
+is invoked,
 `Tau.TUI.App.run/0` calls `Tau.TUI.Supervisor.start_runtime/1`, which
 starts `Ratatouille.Runtime.Supervisor` as a transient child with
 `type: :supervisor`. `run/0` then monitors the returned pid and blocks
