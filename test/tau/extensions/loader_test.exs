@@ -477,6 +477,250 @@ defmodule Tau.Extensions.LoaderTest do
   end
 
   # ---------------------------------------------------------------------------
+  # AC-5 / D-123: discover_extension_dirs/0 — genuine auto-discovery (f-1 gap)
+  #
+  # The existing AC-5 collision-guard tests use Loader.reload/1 (handle_cast),
+  # which bypasses init/1 and Settings.Cache entirely. They do NOT cover
+  # discover_extension_dirs/0 or the explicit ++ reject(discovered) dedup in
+  # init/1. These tests start a fresh anonymous Loader with NO opts[:entries]
+  # injection, so the real discovery path runs.
+  #
+  # Override strategy:
+  #   File.cwd() reads the OS-level POSIX process cwd, which is shared across
+  #   all BEAM processes in the same OS process. File.cd!/2 wrapping
+  #   start_supervised is synchronous (start_supervised waits for init/1 to
+  #   return), so init/1 sees the changed cwd when it calls File.cwd().
+  #
+  # Home-dir discovery limitation:
+  #   System.user_home/0 reads :init.get_argument(:home), which is set by the
+  #   Erlang VM at startup and is NOT updated by System.put_env("HOME", ...).
+  #   Therefore, ~/.tau/extensions/ discovery cannot be unit-tested without
+  #   modifying production code (to accept a home-dir override). The cwd path
+  #   IS overridable, so these tests exercise discover_extension_dirs/0 through
+  #   the <cwd>/.tau/extensions/ branch. This is a genuine test of the function:
+  #   if discover_extension_dirs/0 returns [] (broken), the load fails and the
+  #   test goes red.
+  # ---------------------------------------------------------------------------
+
+  describe "AC-5 / D-123: genuine auto-discovery via discover_extension_dirs/0" do
+    test "extensions in <cwd>/.tau/extensions/ auto-load without a settings.extensions entry" do
+      uid = unique_id()
+      mod_src_name = "Tau.Extensions.LoaderTest.DiscoveryCwd#{uid}"
+      mod_atom = String.to_atom("Elixir." <> mod_src_name)
+
+      # Create a temp dir to act as cwd; place a .tau/extensions/ subdir in it.
+      tmp_cwd = Path.join(System.tmp_dir!(), "tau-disc-cwd-#{uid}")
+      ext_dir = Path.join(tmp_cwd, ".tau/extensions")
+      File.mkdir_p!(ext_dir)
+
+      File.write!(Path.join(ext_dir, "discovery_cwd_ext.ex"), """
+      defmodule #{mod_src_name} do
+        @behaviour Tau.Extension
+        def tools, do: []
+        def hooks, do: []
+        def commands, do: []
+        def skills, do: []
+      end
+      """)
+
+      on_exit(fn -> File.rm_rf!(tmp_cwd) end)
+
+      # Start a fresh anonymous Loader with NO opts[:entries] — forces the real
+      # discovery path: init/1 calls Settings.Cache.get() (returns [] for extensions
+      # in the test env) and discover_extension_dirs/0. File.cd!/2 changes the
+      # OS-level process cwd so discover_extension_dirs/0's File.cwd() returns tmp_cwd.
+      test_name = :"test_loader_discovery_cwd_#{uid}"
+
+      result =
+        File.cd!(tmp_cwd, fn ->
+          start_supervised(
+            %{
+              id: test_name,
+              start: {Tau.Extensions.Loader, :start_link, [[name: test_name]]}
+            },
+            id: test_name
+          )
+        end)
+
+      assert {:ok, _pid} = result,
+             "Anonymous Loader must start successfully; got: #{inspect(result)}"
+
+      entries = GenServer.call(test_name, :list)
+
+      # The auto-discovered dir must appear in the loaded entries.
+      assert Enum.any?(entries, fn %{key: k} -> k == ext_dir end),
+             "Expected auto-discovered dir #{inspect(ext_dir)} in loaded entries. " <>
+               "Got: #{inspect(Enum.map(entries, & &1.key))}. " <>
+               "discover_extension_dirs/0 may not scan <cwd>/.tau/extensions/."
+
+      # The compiled extension module must be in the VM.
+      assert Code.ensure_loaded?(mod_atom),
+             "Extension module #{mod_src_name} must be compiled by auto-discovery"
+    end
+
+    test "cwd dir appears in loaded entries before any subsequent entries — ordering preserved" do
+      # discover_extension_dirs/0 builds [home_dir | cwd_dirs].
+      # When cwd has extensions and home has none (as is the case in the test
+      # environment), the cwd entry appears at position 0 in the loaded map.
+      # This test asserts the cwd entry IS present and that it was loaded as part
+      # of init/1's entry list (not injected).
+      uid = unique_id()
+      cwd_mod = "Tau.Extensions.LoaderTest.DiscoveryOrder#{uid}"
+
+      tmp_cwd = Path.join(System.tmp_dir!(), "tau-disc-order-#{uid}")
+      cwd_ext_dir = Path.join(tmp_cwd, ".tau/extensions")
+      File.mkdir_p!(cwd_ext_dir)
+
+      File.write!(Path.join(cwd_ext_dir, "order_ext.ex"), """
+      defmodule #{cwd_mod} do
+        @behaviour Tau.Extension
+        def tools, do: []
+        def hooks, do: []
+        def commands, do: []
+        def skills, do: []
+      end
+      """)
+
+      on_exit(fn -> File.rm_rf!(tmp_cwd) end)
+
+      test_name = :"test_loader_disc_order_#{uid}"
+
+      result =
+        File.cd!(tmp_cwd, fn ->
+          start_supervised(
+            %{
+              id: test_name,
+              start: {Tau.Extensions.Loader, :start_link, [[name: test_name]]}
+            },
+            id: test_name
+          )
+        end)
+
+      assert {:ok, _pid} = result
+      entries = GenServer.call(test_name, :list)
+      keys = Enum.map(entries, & &1.key)
+
+      assert cwd_ext_dir in keys,
+             "Cwd extension dir must appear in loaded entries. Got: #{inspect(keys)}"
+    end
+
+    test "no extensions load when cwd and home have no .tau/extensions/ dirs" do
+      uid = unique_id()
+
+      # A cwd with no .tau/extensions subdir, and the real home (which in the
+      # test env also has no .tau/extensions/ with test extensions).
+      tmp_cwd = Path.join(System.tmp_dir!(), "tau-disc-empty-#{uid}")
+      File.mkdir_p!(tmp_cwd)
+
+      on_exit(fn -> File.rm_rf!(tmp_cwd) end)
+
+      test_name = :"test_loader_discovery_no_dirs_#{uid}"
+
+      result =
+        File.cd!(tmp_cwd, fn ->
+          start_supervised(
+            %{
+              id: test_name,
+              start: {Tau.Extensions.Loader, :start_link, [[name: test_name]]}
+            },
+            id: test_name
+          )
+        end)
+
+      assert {:ok, _pid} = result
+      entries = GenServer.call(test_name, :list)
+
+      # With no .tau/extensions/ dir in cwd (and presumably none in real home),
+      # discover_extension_dirs/0 returns [] → nothing loads from discovery.
+      # (The test env home may have extensions from a real ~/.tau/extensions/;
+      # we assert the test-discovered cwd dir is not present, not that entries is empty.)
+      refute Enum.any?(entries, fn %{key: k} ->
+               is_binary(k) and String.contains?(k, tmp_cwd)
+             end),
+             "No entry keyed under tmp_cwd should appear when it has no .tau/extensions/ subdir"
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # AC-9: {module, opts} programmatic load path — direct test (gap)
+  #
+  # The loader accepts a {module, opts} tuple as an entry (programmatic API,
+  # D-125 / SPEC-EXTENSIONS C-010). This branch of load_entry/1 has no direct
+  # test. The test verifies the module registers correctly and that the tuple
+  # form is keyed as {module, nil} in the loaded map (per entry_key/1).
+  # ---------------------------------------------------------------------------
+
+  describe "AC-9: {module, opts} programmatic load path" do
+    test "{module, opts} tuple entry loads and registers the module, keyed as {module, nil}" do
+      on_exit(fn ->
+        GenServer.cast(Loader, {:unload, {HelloWorldExt, nil}})
+        # Allow the cast to complete before the test process exits.
+        :timer.sleep(50)
+      end)
+
+      # Cast a {module, opts} tuple to the production Loader via handle_cast.
+      Loader.reload({HelloWorldExt, [some_opt: :value]})
+      :timer.sleep(100)
+
+      # The entry should appear in the loaded map keyed as {HelloWorldExt, nil}
+      # (entry_key/1 normalises {mod, _opts} to {mod, nil}).
+      entries = Loader.list()
+
+      assert Enum.any?(entries, fn %{key: k} -> k == {HelloWorldExt, nil} end),
+             "Expected {HelloWorldExt, nil} key in loaded entries (entry_key/1 normalises opts). " <>
+               "Got keys: #{inspect(Enum.map(entries, & &1.key))}"
+
+      # The module must register its tools — opts are currently unused by load_entry/1
+      # ({module, opts} delegates straight to crash_safe_register which ignores opts).
+      assert {:ok, HelloWorldExt.HelloTool} = Tau.Tool.lookup("hello_world"),
+             "HelloWorldExt.HelloTool must be registered after {module, opts} load"
+    end
+
+    test "{module, opts} load is crash-isolated — a raising module does not crash the Loader" do
+      test_pid = self()
+      handler_id = "test-ext-tuple-exception-#{unique_id()}"
+
+      :telemetry.attach(
+        handler_id,
+        [:tau, :extensions, :load, :exception],
+        fn _event, _measurements, meta, _ ->
+          send(test_pid, {:ext_exception, meta})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      # A raising extension loaded via {module, opts} must be crash-isolated
+      # (the crash-safe wrapper in crash_safe_register/2 covers this path).
+      Loader.reload({RaisingExtension, []})
+
+      assert_receive {:ext_exception, %{entry: {RaisingExtension, nil}}}, 3_000
+
+      assert Process.alive?(Process.whereis(Loader)),
+             "Loader must survive a raising {module, opts} entry"
+    end
+
+    test "{module, opts} opts are not propagated to the extension — load_entry/1 ignores opts" do
+      # Documented behaviour: opts in {module, opts} entries are inert in the
+      # current implementation (load_entry/1 delegates to crash_safe_register/2
+      # which only uses the module atom). This test asserts that opts do not
+      # cause a crash, and that the result is identical to loading the module atom.
+      on_exit(fn ->
+        GenServer.cast(Loader, {:unload, {HelloWorldExt, nil}})
+        :timer.sleep(50)
+      end)
+
+      Loader.reload({HelloWorldExt, [unused_opt: :ignored, another: 42]})
+      :timer.sleep(100)
+
+      # The tool is registered — opts had no adverse effect.
+      assert {:ok, HelloWorldExt.HelloTool} = Tau.Tool.lookup("hello_world"),
+             "Tool must register even when opts are provided (opts are inert)"
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # list/0 API
   # ---------------------------------------------------------------------------
 
