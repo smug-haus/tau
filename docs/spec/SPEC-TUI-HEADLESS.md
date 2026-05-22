@@ -139,12 +139,13 @@ This SPEC is re-chartered from a test-harness spec (AC-1..AC-7 only) into the
   and fails. The TUI MUST detect this and return to the input prompt with the
   buffer unchanged; the harness verifies this does not crash the TUI.
 
-### Input editor key-detection constraints (#338 B2 — L0 spike evidence)
+### Input editor key-detection constraints (#338 B2 — in-repo evidence + documented termbox behaviour)
 
 The following constraints are evidenced by (a) the existing in-repo termbox
-observation at `app.ex:75-78` that Space arrives as `key: 32` (not `ch: 32`)
-and (b) the documented behaviour of termbox v1/v2 which does not implement the
-Kitty keyboard protocol.
+observation at `app.ex` that Space arrives as `key: 32` (not `ch: 32`) and
+(b) the documented behaviour of termbox v1/v2 which does not implement the
+Kitty keyboard protocol. No standalone binary spike was run; the evidence is
+in-repo code inspection plus termbox documentation.
 
 - **★ [HC23-H6] — L0 constraint.** Ratatouille 0.5.1 / termbox does NOT
   implement the Kitty keyboard protocol. `Shift+Enter` arrives identically to

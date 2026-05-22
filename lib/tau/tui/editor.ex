@@ -194,7 +194,7 @@ defmodule Tau.TUI.Editor do
     %{ed | cursor: {row, len}}
   end
 
-  @doc "Move cursor up one line (clamped to line end)."
+  @doc "Move cursor up one line (clamped to line end). No-op when on first line."
   @spec move_up(t()) :: t()
   def move_up(%__MODULE__{cursor: {0, _}} = ed), do: ed
 
@@ -204,7 +204,7 @@ defmodule Tau.TUI.Editor do
     %{ed | cursor: {new_row, new_col}}
   end
 
-  @doc "Move cursor down one line (clamped to line end)."
+  @doc "Move cursor down one line (clamped to line end). No-op when on last line."
   @spec move_down(t()) :: t()
   def move_down(%__MODULE__{lines: lines, cursor: {row, col}} = ed) do
     last = length(lines) - 1
@@ -221,7 +221,8 @@ defmodule Tau.TUI.Editor do
   @doc """
   Kill to end of current line (Ctrl+K). Killed text pushed to kill-ring.
   If cursor is at EOL and there is a next line, join the next line.
-  Sequential kills coalesce into one ring entry.
+  Sequential kills coalesce in kill order (append): first kill text comes
+  first in the ring entry, subsequent kills are appended.
   """
   @spec kill_to_line_end(t()) :: t()
   def kill_to_line_end(%__MODULE__{lines: lines, cursor: {row, col}} = ed) do
@@ -367,15 +368,18 @@ defmodule Tau.TUI.Editor do
     Enum.drop_while(list, pred)
   end
 
-  defp word_char?(g), do: String.match?(g, ~r/\w/)
+  # FIX f-10: use Unicode-aware \w/u so word motion handles non-ASCII graphemes.
+  defp word_char?(g), do: String.match?(g, ~r/\w/u)
 
   # Push a killed string onto the kill-ring.
-  # If last_kill was :kill, coalesce: prepend to the head entry.
+  # If last_kill was :kill, coalesce: append to the head entry (Emacs kill order:
+  # text killed first comes first, text killed later is appended after).
   # Otherwise push a new entry. Cap at @kill_ring_cap.
   defp push_kill(%__MODULE__{kill_ring: ring, last_kill: :kill} = ed, killed) when killed != "" do
     coalesced =
       case ring do
-        [head | rest] -> [killed <> head | rest]
+        # FIX-4: append killed to head (kill order), not prepend
+        [head | rest] -> [head <> killed | rest]
         [] -> [killed]
       end
 
