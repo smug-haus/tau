@@ -57,6 +57,9 @@ defmodule Tau.Commands.Builtin.Reload do
   def name, do: "/reload"
 
   @impl Tau.Commands.Builtin
+  def description, do: "Reload settings, skills, and prompt templates from disk"
+
+  @impl Tau.Commands.Builtin
   def run(_args, _data) do
     fun = fn data ->
       discovered = SkillsLoader.discover(data.cwd)

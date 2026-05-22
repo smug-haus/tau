@@ -22,6 +22,9 @@ defmodule Tau.Commands.Builtin.New do
   def name, do: "/new"
 
   @impl Tau.Commands.Builtin
+  def description, do: "Start a fresh session in the current directory"
+
+  @impl Tau.Commands.Builtin
   def run(_args, data) do
     opts =
       [

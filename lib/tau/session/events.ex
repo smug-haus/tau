@@ -87,6 +87,22 @@ defmodule Tau.Session.Events do
     @type t :: %__MODULE__{}
   end
 
+  defmodule CommandCatalog do
+    @moduledoc """
+    Broadcast by the session FSM once at `SessionStart` and again on every
+    `/reload` so the TUI completion menu always has a current catalog
+    (D-103, D-108 / SPEC-TUI-COMPLETION §4 B1).
+
+    `entries` is the result of `Tau.Commands.Catalog.list/1` for the current
+    session. The TUI stores it in `model.catalog` and uses it to populate
+    the slash-command autocomplete menu. The TUI MUST NOT call the session
+    synchronously on the render path to fetch catalog data (D-103).
+    """
+    @enforce_keys [:session_id, :entries]
+    defstruct [:session_id, :entries]
+    @type t :: %__MODULE__{}
+  end
+
   defmodule PermissionRequest do
     @moduledoc """
     Broadcast when a tool call receives an `:ask` verdict from

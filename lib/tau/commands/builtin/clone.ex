@@ -31,6 +31,9 @@ defmodule Tau.Commands.Builtin.Clone do
   def name, do: "/clone"
 
   @impl Tau.Commands.Builtin
+  def description, do: "Duplicate the current session (clone at latest event)"
+
+  @impl Tau.Commands.Builtin
   def run(_args, data) do
     case resolve_last_event_id(data.id, data.persistence) do
       {:ok, event_id} ->

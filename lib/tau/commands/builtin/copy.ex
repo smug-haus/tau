@@ -36,6 +36,9 @@ defmodule Tau.Commands.Builtin.Copy do
   def name, do: "/copy"
 
   @impl Tau.Commands.Builtin
+  def description, do: "Copy the last assistant message to the clipboard"
+
+  @impl Tau.Commands.Builtin
   def run(_args, data) do
     case last_assistant_text(data) do
       nil ->

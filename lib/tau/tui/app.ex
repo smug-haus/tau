@@ -13,6 +13,8 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     import Ratatouille.View
     alias Ratatouille.Runtime.Subscription
     alias Tau.TUI.Render.{Wrap, Markdown}
+    alias Tau.TUI.Fuzzy
+    alias Tau.Commands.Builtin
 
     # Adaptive tick: 16 ms while a turn is streaming (last_assistant non-nil);
     # 250 ms while idle. Ratatouille re-reads subscribe/1 each cycle, so the
@@ -76,7 +78,14 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         status: :idle,
         last_assistant: nil,
         coding_agent: Map.get(runtime_opts, :coding_agent),
-        wrap_width: transcript_pane_width(initial_width)
+        wrap_width: transcript_pane_width(initial_width),
+        # SPEC-TUI-COMPLETION §4 B1 (D-103): catalog received via
+        # CommandCatalog broadcast. Nil until the first broadcast arrives;
+        # D-104 mandates the builtins floor is used when nil.
+        catalog: nil,
+        # SPEC-TUI-COMPLETION §4 B2 (D-102): MVU menu sub-state.
+        # nil = closed; non-nil = open with query/entries/selected.
+        menu: nil
       }
     end
 
@@ -95,18 +104,41 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     @impl true
     def update(model, msg) do
       case msg do
+        # SPEC-TUI-COMPLETION D-106 / D-105: Enter while menu is open fills
+        # the input with `name <> " "` and closes the menu — does NOT submit.
+        # This clause MUST precede the generic Enter→submit/1 clause.
+        {:event, %{key: 13}} when model.menu != nil ->
+          menu_accept(model)
+
         {:event, %{key: 13}} ->
           submit(model)
+
+        # SPEC-TUI-COMPLETION D-105 / D-106: Esc while the menu is open
+        # dismisses the menu WITHOUT cancelling the session turn. This clause
+        # MUST precede the Esc→cancel/1 clause below (C4-B2).
+        {:event, %{key: 27}} when model.menu != nil ->
+          %{model | menu: nil}
 
         {:event, %{key: 27}} ->
           cancel(model)
 
+        # Arrow-up: move menu selection up (clamped at 0).
+        {:event, %{key: 65_517}} when model.menu != nil ->
+          menu_navigate(model, -1)
+
+        # Arrow-down: move menu selection down (clamped at length - 1).
+        {:event, %{key: 65_516}} when model.menu != nil ->
+          menu_navigate(model, 1)
+
         # Termbox / Ratatouille deliver Space as `key: 32` (the SPC special
         # key), NOT as `ch: 32`. The `ch != 0` clause below therefore
         # never fires for spaces, and they were silently dropped. Map
-        # the special key to a literal space here.
+        # the special key to a literal space here. A space also closes the
+        # menu (the query now contains whitespace → no longer a slash token).
         {:event, %{key: 32}} ->
-          append_input(model, " ")
+          model
+          |> append_input(" ")
+          |> close_menu_if_whitespace()
 
         # D-003 ([C7] / AC-4): `q` is context-aware. On an empty prompt it
         # quits (matching the old quit_events behaviour); on a non-empty
@@ -118,13 +150,19 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
           quit_or_append(model)
 
         {:event, %{ch: ch}} when ch != 0 ->
-          append_input(model, <<ch::utf8>>)
+          model
+          |> append_input(<<ch::utf8>>)
+          |> update_menu()
 
         {:event, %{key: 127}} ->
-          backspace(model)
+          model
+          |> backspace()
+          |> update_menu()
 
         {:event, %{key: 8}} ->
-          backspace(model)
+          model
+          |> backspace()
+          |> update_menu()
 
         # Resize: update wrap_width so subsequent wraps use the new terminal width
         {:resize, %{w: w}} ->
@@ -159,6 +197,14 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
         %Tau.Session.Events.SystemNotice{text: t} ->
           %{model | transcript: bounded_append(model.transcript, {t, []})}
+
+        # D-103 (SPEC-TUI-COMPLETION §4 B1): store the catalog and re-filter
+        # the menu if it is currently open. Broadcast arrives at SessionStart
+        # and after /reload (D-108).
+        %Tau.Session.Events.CommandCatalog{entries: entries} ->
+          model
+          |> Map.put(:catalog, entries)
+          |> update_menu()
 
         _ ->
           model
@@ -199,6 +245,50 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
             end
           end
         end
+
+        # SPEC-TUI-COMPLETION §4 B2 (D-102): render the slash-command menu
+        # inline above the prompt bar when the menu is open. Ratatouille has
+        # no overlay primitive; a second row renders below the transcript.
+        if model.menu != nil do
+          render_menu(model)
+        end
+      end
+    end
+
+    # Render up to @menu_max_entries entries as an inline panel above the prompt.
+    # The selected row is highlighted with bold. Row format:
+    #   "/name  — description  [origin]"
+    @menu_max_entries 8
+
+    defp render_menu(%{menu: %{entries: entries, selected: selected}} = _model) do
+      visible = Enum.take(entries, @menu_max_entries)
+
+      row do
+        column(size: 12) do
+          panel title: "commands (↑↓ navigate · Enter select · Esc dismiss)" do
+            visible
+            |> Enum.with_index()
+            |> Enum.map(fn {{_score, entry}, idx} ->
+              text = menu_entry_text(entry)
+
+              if idx == selected do
+                label(content: "> " <> text, attributes: [:bold])
+              else
+                label(content: "  " <> text)
+              end
+            end)
+          end
+        end
+      end
+    end
+
+    defp menu_entry_text(%{name: name, description: desc, origin: origin}) do
+      origin_tag = "[" <> to_string(origin) <> "]"
+
+      if desc != "" do
+        name <> "  — " <> desc <> "  " <> origin_tag
+      else
+        name <> "  " <> origin_tag
       end
     end
 
@@ -328,6 +418,91 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
     defp backspace(%{input: ""} = m), do: m
     defp backspace(model), do: %{model | input: String.slice(model.input, 0..-2//1)}
+
+    # --- Menu helpers (SPEC-TUI-COMPLETION) ---
+
+    # Builtins floor: used when no catalog has been received yet (D-104).
+    defp catalog_floor do
+      Builtin.table()
+      |> Enum.map(fn {name, mod} ->
+        desc =
+          if function_exported?(mod, :description, 0), do: mod.description(), else: ""
+
+        %{name: name, description: desc, origin: :builtin}
+      end)
+      |> Enum.sort_by(& &1.name)
+    end
+
+    # Derive the current candidate list: use received catalog or fall back to builtins.
+    defp effective_catalog(%{catalog: nil}), do: catalog_floor()
+    defp effective_catalog(%{catalog: entries}), do: entries
+
+    # After any input change, recompute whether the menu should be open/closed/re-filtered.
+    # Menu opens when input is a /-prefixed whitespace-free token.
+    # Menu stays open and re-filters while the token remains whitespace-free.
+    # Menu closes if the input becomes empty, has whitespace, or no longer starts with /.
+    defp update_menu(%{input: input} = model) do
+      trimmed = String.trim_leading(input)
+
+      if String.starts_with?(trimmed, "/") and not String.contains?(trimmed, " ") do
+        # Menu should be open; compute the query (everything after the /).
+        query = String.slice(trimmed, 1..-1//1)
+        candidates = effective_catalog(model)
+
+        ranked =
+          case Fuzzy.match(query, candidates) do
+            [] when query == "" ->
+              Enum.map(candidates, fn e -> {0, e} end)
+
+            results ->
+              results
+          end
+
+        selected = clamp(Map.get(model.menu || %{}, :selected, 0), length(ranked) - 1)
+
+        %{model | menu: %{query: query, entries: ranked, selected: selected}}
+      else
+        # Input doesn't look like a slash-command token — close the menu.
+        %{model | menu: nil}
+      end
+    end
+
+    # Close menu if the input now contains whitespace (space was typed).
+    defp close_menu_if_whitespace(%{input: input} = model) do
+      if String.contains?(input, " ") do
+        %{model | menu: nil}
+      else
+        model
+      end
+    end
+
+    # Move the selection by `delta` rows, clamped to [0, count-1].
+    defp menu_navigate(%{menu: nil} = model, _delta), do: model
+
+    defp menu_navigate(%{menu: menu} = model, delta) do
+      count = length(menu.entries)
+      new_selected = clamp(menu.selected + delta, count - 1)
+      %{model | menu: %{menu | selected: new_selected}}
+    end
+
+    # Accept the currently-selected menu entry: fill input with `name <> " "` and close menu.
+    # D-106: MUST NOT submit the turn.
+    defp menu_accept(%{menu: nil} = model), do: model
+
+    defp menu_accept(%{menu: %{entries: [], selected: _}} = model) do
+      %{model | menu: nil}
+    end
+
+    defp menu_accept(%{menu: %{entries: entries, selected: selected}} = model) do
+      idx = clamp(selected, length(entries) - 1)
+      {_score, entry} = Enum.at(entries, idx)
+      %{model | input: entry.name <> " ", menu: nil}
+    end
+
+    defp clamp(_n, max) when max < 0, do: 0
+    defp clamp(n, _max) when n < 0, do: 0
+    defp clamp(n, max) when n > max, do: max
+    defp clamp(n, _max), do: n
 
     defp submit(%{input: ""} = m), do: m
 

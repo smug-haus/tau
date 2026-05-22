@@ -13,5 +13,8 @@ defmodule Tau.Commands.Builtin.Ping do
   def name, do: "/ping"
 
   @impl Tau.Commands.Builtin
+  def description, do: "Check session responsiveness (responds with pong)"
+
+  @impl Tau.Commands.Builtin
   def run(_args, _data), do: {:notice, "pong"}
 end

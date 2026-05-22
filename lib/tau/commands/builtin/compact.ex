@@ -28,6 +28,9 @@ defmodule Tau.Commands.Builtin.Compact do
   def name, do: "/compact"
 
   @impl Tau.Commands.Builtin
+  def description, do: "Summarise and compress the conversation history"
+
+  @impl Tau.Commands.Builtin
   def run(_args, data) do
     cond do
       data.compaction_task != nil ->

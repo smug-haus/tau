@@ -27,6 +27,9 @@ defmodule Tau.Commands.Builtin.Fork do
   def name, do: "/fork"
 
   @impl Tau.Commands.Builtin
+  def description, do: "Branch the session from an earlier point in history"
+
+  @impl Tau.Commands.Builtin
   def run(args, data) do
     event_id =
       case String.trim(args) do

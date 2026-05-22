@@ -95,6 +95,17 @@ The current spec catalog:
   `run_cmd/1`). Also mandatory for PR-B (TUI approval dialog / `Shift+Tab` cycle /
   status-bar indicator). Triage score 4/5; D-090..D-099 live here.
 
+- `docs/spec/SPEC-TUI-COMPLETION.md` — the TUI completion sub-state machine:
+  slash-command autocomplete (#333) and `@`-mention autocomplete (#344 — adds its
+  source later). Covers `Tau.TUI.Fuzzy`, `Tau.Commands.Catalog`, the
+  `CommandCatalog` PubSub event, the MVU menu sub-state in `Tau.TUI.App`, the
+  unknown-command guard in `classify_slash_command/2`, and the `/help` builtin.
+  Mandatory for any PR touching `lib/tau/tui/fuzzy.ex`,
+  `lib/tau/commands/catalog.ex`, `lib/tau/commands/builtin/help.ex`,
+  `lib/tau/session/events.ex` (the `CommandCatalog` struct), or
+  `lib/tau/tui/app.ex` (the `menu` model field or `catalog` model field).
+  Triage score 2/5; D-100..D-109 live here.
+
 Future SPECs land here as new components reach triage threshold.
 
 ## What this rule requires
