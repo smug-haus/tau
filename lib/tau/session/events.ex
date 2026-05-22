@@ -120,4 +120,26 @@ defmodule Tau.Session.Events do
     defstruct [:session_id, :tool_call_id, :name, :arguments, :decision_reason]
     @type t :: %__MODULE__{}
   end
+
+  defmodule QueueRestored do
+    @moduledoc """
+    Broadcast by the session FSM when a `:cancel` drains the steering queue
+    back to the caller rather than delivering the queued messages as turns.
+
+    D-082 (#339 / SPEC-USER-TURN §6): a steering message was enqueued to
+    redirect a turn that no longer exists. On `:cancel`, the FSM drains the
+    steering queue and broadcasts this event carrying the restored messages.
+    The TUI repopulates the input editor from `messages` (joining with newline)
+    so the user can review, edit, or re-submit what they typed.
+
+    The follow-up queue is NOT included — follow-up messages survive a cancel
+    and run on the post-cancel turn (see D-080).
+
+    Receivers MUST treat this event as idempotent: a re-delivered
+    `%QueueRestored{}` after a reconnect MUST NOT double-append to the editor.
+    """
+    @enforce_keys [:session_id, :messages]
+    defstruct [:session_id, :messages]
+    @type t :: %__MODULE__{}
+  end
 end

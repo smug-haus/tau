@@ -72,6 +72,9 @@ get rewritten away by the next refactor. ADRs survive.
 | [0016](0016-credential-custody-is-the-os-not-tau.md) | Credential custody is the OS, not Tau | Accepted |
 | [0017](0017-cooperative-provider-cancellation.md) | Cooperative cancellation of in-flight provider streams | Accepted |
 | [0018](0018-tui-supervised-subtree.md) | TUI runs as a transient child of Tau.TUI.Supervisor | Accepted |
+| [0019](0019-circuit-breaker-is-ets-state-with-lifecycle-anchor.md) | Circuit-breaker state lives in ETS with a supervised lifecycle anchor | Accepted |
+| [0020](0020-memory-store-sqlite-driver.md) | Memory store uses SQLite via Exqlite | Accepted |
+| [0021](0021-two-tier-message-queue.md) | Two-tier message queue (steering / follow-up) partially supersedes ADR-0009 | Accepted |
 
 (New ADRs append here. Keep the table sorted by ADR number.)
 
