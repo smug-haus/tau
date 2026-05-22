@@ -25,8 +25,8 @@ defmodule Tau.Telemetry.Handlers do
       [:tau, :settings, :reloaded]
       [:tau, :extensions, :reloaded]
 
-  This module is a one-shot worker: it attaches handlers in `init/1` and
-  exits `:ignore`. The attachments live until detached (or the VM exits).
+  Implemented as a `GenServer` started under the supervision tree:
+  attaches handlers in `init/1` and detaches them in `terminate/2`.
   """
   use GenServer
   require Logger

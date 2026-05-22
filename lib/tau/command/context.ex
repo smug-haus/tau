@@ -35,6 +35,11 @@ defmodule Tau.Command.Context do
           metadata: map()
         }
 
+  @doc """
+  Build a `t/0` from `opts`. Requires `:session_id`; other keys default
+  per `defstruct` (no `:cwd`, `:default` permissions mode, no-op `:emit`,
+  empty `:metadata`).
+  """
   @spec new(keyword()) :: t()
   def new(opts) do
     struct!(__MODULE__,

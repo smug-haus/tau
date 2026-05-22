@@ -17,6 +17,7 @@ defmodule Tau.Message.Assembler do
 
   defstruct message: nil, blocks: %{}, order: [], started?: false, done?: false, error: nil
 
+  @typedoc "Assembler state: in-progress `%Assistant{}`, per-block staging, and any error from the upstream stream."
   @type t :: %__MODULE__{
           message: Assistant.t() | nil,
           blocks: map(),

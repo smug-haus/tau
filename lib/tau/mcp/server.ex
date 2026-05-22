@@ -25,10 +25,18 @@ defmodule Tau.MCP.Server do
 
   # --- Public API -----------------------------------------------------------
 
+  @doc """
+  Start an MCP server process. `config` carries at least `:name` plus one
+  of `:command` (stdio), `:url` (http), or `:sse_url` + `:post_url` (sse).
+  """
   def start_link(config) do
     GenServer.start_link(__MODULE__, config, name: via(config[:name] || config["name"]))
   end
 
+  @doc """
+  Send a `tools/call` to `server_name` for `tool_name` with `params`.
+  Returns `{:ok, result}` or `{:error, reason}`. Times out at 30s.
+  """
   def invoke(server_name, tool_name, params) when is_binary(server_name) do
     GenServer.call(via(server_name), {:invoke, tool_name, params}, @timeout)
   end

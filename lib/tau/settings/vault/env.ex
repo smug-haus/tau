@@ -9,10 +9,9 @@ defmodule Tau.Settings.Vault.Env do
   full process env to find credentials would leak unrelated names
   into telemetry.
 
-  The Env backend exists explicitly so that anyone running Tau today
-  with `ANTHROPIC_API_KEY` exported keeps working with zero config
-  change after this PR. Encryption-at-rest is opt-in (set
-  `vault.backend` in settings); see ADR-0016.
+  The Env backend exists so that running Tau with `ANTHROPIC_API_KEY`
+  exported requires zero vault configuration. Encryption-at-rest is
+  opt-in (set `vault.backend` in settings); see ADR-0016.
   """
 
   @behaviour Tau.Settings.Vault

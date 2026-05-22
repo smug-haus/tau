@@ -1,4 +1,11 @@
 defmodule TauWeb.Router do
+  @moduledoc """
+  HTTP router for the `:tau_web` poncho. Two pipelines (`:browser`,
+  `:api`); mounts `PageController` at `/`, `HealthController` at
+  `/health`, and the LiveDashboard at `/dev/dashboard` when
+  `:dev_routes` is enabled.
+  """
+
   use TauWeb, :router
 
   pipeline :browser do

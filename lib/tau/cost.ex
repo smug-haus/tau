@@ -7,10 +7,9 @@ defmodule Tau.Cost do
   `[:tau, :provider, :request, :stop]` telemetry event; readers
   here do table scans.
 
-  This module ships token aggregation only. Pricing-per-model and
-  dollar-spend estimates are deferred to a follow-up issue —
-  pricing tables churn faster than the surrounding code and
-  belong in their own concern.
+  Token aggregation only. Pricing-per-model and dollar-spend estimates
+  live in a separate concern; pricing tables churn faster than the
+  surrounding code.
   """
 
   alias Tau.Cost.Tracker

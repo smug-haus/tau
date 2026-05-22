@@ -10,6 +10,7 @@ defmodule Tau.MCP.Supervisor do
   """
   use Supervisor
 
+  @doc "Start the top-level MCP supervisor."
   def start_link(opts), do: Supervisor.start_link(__MODULE__, opts, name: __MODULE__)
 
   @impl true

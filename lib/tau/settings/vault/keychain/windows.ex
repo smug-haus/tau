@@ -9,13 +9,11 @@ defmodule Tau.Settings.Vault.Keychain.Windows do
   representation through stdout — viable but with caveats around
   user-context and machine-vs-user scope).
 
-  We ship the stub so the dispatcher resolution is symmetric across
-  platforms; a real implementation lands in a follow-up. Until then
-  every operation returns `{:error, :not_implemented}`. Users on
-  Windows should keep the default `Env` backend.
+  The stub exists so the dispatcher resolution is symmetric across
+  platforms. Every operation returns `{:error, :not_implemented}`;
+  users on Windows should keep the default `Env` backend.
 
-  See ADR-0016 and the follow-up issue tracking the real DPAPI
-  implementation.
+  See ADR-0016.
   """
 
   @behaviour Tau.Settings.Vault

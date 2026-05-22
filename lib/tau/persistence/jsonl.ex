@@ -10,8 +10,9 @@ defmodule Tau.Persistence.Jsonl do
 
       {"id":"01H...","parent_id":"01H..."|null,"ts":"...","kind":"...","data":{...}}
 
-  Files are opened with `:delayed_write` to batch writes; the FSM forces
-  a flush on `:idle` entry, on terminate, and every N events.
+  Files are opened in unbuffered append mode (`[:append, :binary]`).
+  Each `append/2` invokes `:file.datasync/1` so concurrent readers
+  (hooks, tests, dashboards) see events immediately.
 
   Tree-branching is recorded as `parent_id` — `Tau.fork(session, event_id)`
   starts a new file whose first persisted event references the parent
@@ -152,16 +153,6 @@ defmodule Tau.Persistence.Jsonl do
 
   @doc """
   Compute the JSONL path for a session id.
-
-  ### Concurrent reads
-
-  The file is opened with `:delayed_write` for write throughput.
-  Hooks that read this path while the session is still appending
-  may see partial JSONL — the last few events may be sitting in
-  the writer's buffer. Hooks that need a consistent view should
-  treat partial-line failures as "skip and continue" rather than
-  fatal. A future `flush/1` callback can be added if hooks need
-  at-rest semantics.
   """
   @impl Tau.Persistence
   @spec path_for(String.t(), Path.t()) :: String.t()

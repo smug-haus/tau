@@ -12,7 +12,7 @@ defmodule Tau.Provider.ContextWindows do
   Coding-agent adapters are NOT listed here; they return `nil` (window
   opaque to Tau).
 
-  Sources (as of 2026-05):
+  Sources:
     - Anthropic: https://docs.anthropic.com/en/docs/about-claude/models
     - OpenAI: https://platform.openai.com/docs/models
     - Gemini: https://ai.google.dev/gemini-api/docs/models/gemini

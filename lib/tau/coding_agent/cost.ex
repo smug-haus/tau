@@ -30,8 +30,8 @@ defmodule Tau.CodingAgent.Cost do
 
   No process, no state. The session FSM constructs one from each
   `%Event.Cost{}` and hands it to `Tau.Cost.Tracker` via the
-  `[:tau, :coding_agent, :cost]` telemetry event. Pricing-by-model
-  is deferred to the same follow-up issue as the provider path.
+  `[:tau, :coding_agent, :cost]` telemetry event. Pricing-by-model is
+  not computed here.
   """
 
   alias Tau.CodingAgent.Event

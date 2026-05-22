@@ -8,12 +8,15 @@ defmodule Tau.CLI.Init.IO do
   `Tau.CLI.Init.run/2`.
   """
 
+  @doc "Prompt with `prompt` and return the reply, `:eof`, or `{:error, reason}`."
   @spec gets(String.t()) :: binary() | :eof | {:error, term()}
   def gets(prompt), do: IO.gets(prompt)
 
+  @doc "Write `line` to stdout followed by a newline."
   @spec puts(IO.chardata()) :: :ok
   def puts(line), do: IO.puts(line)
 
+  @doc "Write `chars` to stdout without a trailing newline."
   @spec write(IO.chardata()) :: :ok
   def write(chars), do: IO.write(chars)
 end

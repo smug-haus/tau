@@ -25,7 +25,7 @@ defmodule Tau.Providers.RateLimiter.Supervisor do
 
   alias Tau.Providers.RateLimiter
 
-  @doc false
+  @doc "Start the rate-limiter top-level supervisor."
   def start_link(opts) do
     Supervisor.start_link(__MODULE__, opts, name: __MODULE__)
   end

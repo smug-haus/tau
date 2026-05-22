@@ -27,6 +27,12 @@ defmodule Tau.CodingAgents.ClaudeCode.Argv do
 
   @type t :: Tau.CodingAgent.task()
 
+  @doc """
+  Build the `claude` CLI argv list for `task`.
+
+  `opts` may carry `:mcp_config_path` (a tempfile path the adapter owns).
+  Returns the full argv ready to pass to `System.cmd/3`.
+  """
   @spec build(t(), keyword()) :: [String.t()]
   def build(task, opts \\ []) when is_map(task) do
     prompt = Map.fetch!(task, :prompt)

@@ -14,6 +14,10 @@ defmodule Tau.MCP.Reconciler do
   """
   use GenServer
 
+  @doc """
+  Start the MCP reconciler. Schedules an initial reconcile against
+  `settings.mcp` on boot.
+  """
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
   @doc """

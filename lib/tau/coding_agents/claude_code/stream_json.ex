@@ -21,7 +21,7 @@ defmodule Tau.CodingAgents.ClaudeCode.StreamJson do
 
   ## Stream-json shapes handled
 
-  Verified against `claude` 2.1.142, May 2026:
+  Stream-json subtypes handled:
 
       system/init               → %Start{}
       system/<other subtype>    → ignored (e.g. hook_started, hook_response)

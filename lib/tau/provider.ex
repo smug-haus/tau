@@ -32,6 +32,7 @@ defmodule Tau.Provider do
 
   @type messages :: [Tau.Message.t()]
 
+  @typedoc "Per-call options passed to `stream/3`."
   @type stream_opts :: %{
           optional(:model) => String.t(),
           optional(:max_tokens) => pos_integer(),
@@ -46,6 +47,7 @@ defmodule Tau.Provider do
           optional(:metadata) => map()
         }
 
+  @typedoc "Per-call context: cancellation flag, pid, request id, session id."
   @type ctx :: %{
           optional(:cancel_flag) => :counters.counters_ref(),
           optional(:cancel_pid) => pid(),
@@ -53,6 +55,7 @@ defmodule Tau.Provider do
           optional(:session_id) => String.t()
         }
 
+  @typedoc "Static capability flags declared by an adapter."
   @type capabilities :: %{
           thinking: boolean(),
           tools: boolean(),

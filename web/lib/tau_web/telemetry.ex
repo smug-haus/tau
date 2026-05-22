@@ -1,4 +1,9 @@
 defmodule TauWeb.Telemetry do
+  @moduledoc """
+  Telemetry supervisor for `:tau_web`. Hosts a `:telemetry_poller` and
+  declares Phoenix / VM metric definitions for downstream reporters.
+  """
+
   use Supervisor
   import Telemetry.Metrics
 

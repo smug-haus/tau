@@ -1,4 +1,9 @@
 defmodule TauWeb.Endpoint do
+  @moduledoc """
+  Phoenix endpoint for the `:tau_web` poncho. Mounts LiveView at `/live`,
+  serves static assets, and pipes requests through `TauWeb.Router`.
+  """
+
   use Phoenix.Endpoint, otp_app: :tau_web
 
   # The session will be stored in the cookie and signed,

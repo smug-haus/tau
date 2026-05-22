@@ -31,18 +31,18 @@ defmodule Tau.Application do
        at a higher level than rate limiting) and before task supervisors
        so the table exists when any session-turn task first calls a
        provider.
-    9. **Task supervisors** — for tool dispatch.
-    10. **Extensions.Loader** — registers tools/hooks/commands
+    10. **Task supervisors** — for tool dispatch.
+    11. **Extensions.Loader** — registers tools/hooks/commands
         defined by extensions.
-    11. **MCP.Supervisor** — MCP server connections.
-    12. **CodingAgent.Supervisor** — DynamicSupervisor for
+    12. **MCP.Supervisor** — MCP server connections.
+    13. **CodingAgent.Supervisor** — DynamicSupervisor for
         `Tau.CodingAgent.Dispatcher` runs (SPEC-CODING-AGENT).
         Sits between MCP (which the future `tau-context` server
         depends on) and Sessions (which may reference dispatchers
         by id).
-    13. **TUI.Supervisor** — empty DynamicSupervisor; hosts the
+    14. **TUI.Supervisor** — empty DynamicSupervisor; hosts the
         Ratatouille runtime subtree when the TUI is invoked (ADR-0018).
-    14. **Sessions.Supervisor** — dynamic supervisor for session
+    15. **Sessions.Supervisor** — dynamic supervisor for session
         FSMs (must be last; it's the only consumer of all the
         above).
 
