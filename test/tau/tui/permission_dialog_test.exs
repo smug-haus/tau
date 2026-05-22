@@ -14,25 +14,23 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
       * the `pending_permissions` model field + `%PermissionRequest{}`
         `update/2` clause (AC-B1..AC-B4, AC-B8);
-      * the back-tab `update/2` clause cycling `permissions_mode`
-        (AC-B6, AC-B7);
+      * the `/perms <mode>` slash command that sets `permissions_mode`
+        via `set_permissions_mode/2` (AC-B6, AC-B7);
       * the ` mode: <mode>` `StatusBar` segment (AC-B5).
 
     AC-B9 is a `(meta)` criterion (`RuntimeOpts` plumbing, verified by
     inspection + the `tau tui` smoke path) and has NO gating test here,
     per the factory-loop meta-AC exemption.
 
-    SPEC GAP — back-tab keycode (AC-B6 / AC-B7): the exact termbox
-    keycode delivered for the `Shift+Tab` (back-tab) key cannot be
-    determined from the repository. Upstream termbox defines
-    `TB_KEY_BACK_TAB = 0xFFFF - 21 = 65514`, but `lib/tau/tui/app.ex`
-    already binds `65514` to arrow-right (`move_char_right`). The PR-B
-    draft body itself states the keycode "MUST be confirmed by a tmux
-    probe before coding". The AC-B6/AC-B7 tests below therefore drive a
-    `@back_tab_event` placeholder shape; the implementer MUST reconcile
-    that shape with the probed keycode (and either correct this constant
-    via the challenge protocol, or wire `update/2` to match it). The
-    tests still fail-before regardless: no back-tab clause exists yet.
+    Mode-change mechanism (AC-B6 / AC-B7): the original `Shift+Tab`
+    cycle is **infeasible** — an empirical tmux probe confirmed termbox
+    delivers `Shift+Tab` (`CSI Z`) as three separate events (`ESC` `[`
+    `Z`), and the `ESC` functionally collides with cancel/clear. The
+    mode-change mechanism is therefore the **`/perms <mode>`** slash
+    command (`mode ∈ {default, accept_edits, plan}`). The AC-B6/AC-B7
+    tests below drive the user-facing path: realistic printable-char
+    key events that type `/perms <mode>` into the input editor followed
+    by an Enter key event — exactly as a user submits a slash command.
     """
     use ExUnit.Case, async: false
 
@@ -85,9 +83,36 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     # Special/control keys carry a non-zero :key and ch: 0.
     defp key_event(fields), do: {:event, Map.merge(%{key: 0, ch: 0, mod: 0}, fields)}
 
-    # SPEC GAP placeholder — see @moduledoc. The implementer reconciles this
-    # with the tmux-probed back-tab keycode.
-    @back_tab_event {:event, %{key: :back_tab, ch: 0, mod: 0}}
+    # Enter (Return) — termbox control-key shape: key=13, ch=0, mod=0.
+    @enter_event {:event, %{key: 13, ch: 0, mod: 0}}
+
+    # Type a string into the model via the real update/2 key path, one
+    # printable-char event per codepoint — exactly as a user types. Space
+    # is a termbox quirk (key=32, ch=0) and is handled accordingly.
+    defp type_text(model, text) do
+      text
+      |> String.to_charlist()
+      |> Enum.reduce(model, fn cp, m ->
+        event =
+          if cp == ?\s do
+            key_event(%{key: 32, ch: 0})
+          else
+            key_event(%{ch: cp})
+          end
+
+        App.update(m, event)
+      end)
+    end
+
+    # Type `/perms <mode>` then submit with Enter — the user-facing path
+    # for the mode-change slash command.
+    defp run_perms_command(model, arg) do
+      command = if arg == "", do: "/perms", else: "/perms " <> arg
+
+      model
+      |> type_text(command)
+      |> App.update(@enter_event)
+    end
 
     # Render the App view tree to a flat list of all label content strings,
     # so a test can assert dialog text appears somewhere in the frame.
@@ -241,56 +266,123 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     end
 
     # ------------------------------------------------------------------
-    # AC-B6 — back-tab cycles permissions_mode
-    # :default -> :accept_edits -> :plan -> :default.
-    # (SPEC GAP on the back-tab keycode — see @moduledoc.)
+    # AC-B6 — typing `/perms <mode>` + Enter sets permissions_mode via
+    # set_permissions_mode/2; an unknown/empty argument is a no-op that
+    # reports the current mode + valid set (no crash, no mode change).
     # ------------------------------------------------------------------
-    describe "AC-B6 — back-tab cycles the permissions mode" do
+    describe "AC-B6 — `/perms <mode>` sets the permissions mode" do
       @tag :ac_b6
-      test "AC-B6: back-tab cycles :default -> :accept_edits -> :plan -> :default" do
+      test "AC-B6: `/perms accept_edits` + Enter sets permissions_mode to :accept_edits" do
         m0 = model(%{permissions_mode: :default, status: :idle})
 
-        m1 = App.update(m0, @back_tab_event)
+        next = run_perms_command(m0, "accept_edits")
 
-        assert m1.permissions_mode == :accept_edits,
-               "AC-B6: back-tab from :default MUST move to :accept_edits; " <>
-                 "got: #{inspect(m1.permissions_mode)}"
+        assert next.permissions_mode == :accept_edits,
+               "AC-B6: typing `/perms accept_edits` + Enter MUST set permissions_mode " <>
+                 "to :accept_edits via set_permissions_mode/2; " <>
+                 "got: #{inspect(next.permissions_mode)}"
+      end
 
-        m2 = App.update(m1, @back_tab_event)
+      @tag :ac_b6
+      test "AC-B6: `/perms plan` + Enter sets permissions_mode to :plan" do
+        m0 = model(%{permissions_mode: :default, status: :idle})
 
-        assert m2.permissions_mode == :plan,
-               "AC-B6: back-tab from :accept_edits MUST move to :plan; " <>
-                 "got: #{inspect(m2.permissions_mode)}"
+        next = run_perms_command(m0, "plan")
 
-        m3 = App.update(m2, @back_tab_event)
+        assert next.permissions_mode == :plan,
+               "AC-B6: typing `/perms plan` + Enter MUST set permissions_mode to :plan; " <>
+                 "got: #{inspect(next.permissions_mode)}"
+      end
 
-        assert m3.permissions_mode == :default,
-               "AC-B6: back-tab from :plan MUST wrap back to :default; " <>
-                 "got: #{inspect(m3.permissions_mode)}"
+      @tag :ac_b6
+      test "AC-B6: `/perms default` + Enter sets permissions_mode back to :default" do
+        # Start from a non-default mode so the transition is observable.
+        m0 = model(%{permissions_mode: :accept_edits, status: :idle})
+
+        next = run_perms_command(m0, "default")
+
+        assert next.permissions_mode == :default,
+               "AC-B6: typing `/perms default` + Enter MUST set permissions_mode to :default; " <>
+                 "got: #{inspect(next.permissions_mode)}"
+      end
+
+      @tag :ac_b6
+      test "AC-B6: `/perms` with no argument is a no-op that reports the current mode + valid set" do
+        m0 = model(%{permissions_mode: :accept_edits, status: :idle})
+
+        next = run_perms_command(m0, "")
+
+        assert is_map(next),
+               "AC-B6: `/perms` with no argument MUST NOT crash the update loop"
+
+        assert next.permissions_mode == :accept_edits,
+               "AC-B6: `/perms` with no argument MUST NOT change the mode; " <>
+                 "got: #{inspect(next.permissions_mode)}"
+
+        # The no-arg form is not silent: it reports the current mode and the
+        # valid set. The only user-visible sink on the pure update/2 path is
+        # the transcript, so the report MUST land there.
+        report = Enum.map_join(next.transcript, "\n", fn {text, _attrs} -> text end)
+
+        assert String.contains?(report, "accept_edits"),
+               "AC-B6: `/perms` (no arg) MUST report the current mode (accept_edits) " <>
+                 "in the transcript; got transcript: #{inspect(next.transcript)}"
+
+        assert String.contains?(report, "default") and String.contains?(report, "plan"),
+               "AC-B6: `/perms` (no arg) MUST report the valid mode set " <>
+                 "({default, accept_edits, plan}); got transcript: #{inspect(next.transcript)}"
+      end
+
+      @tag :ac_b6
+      test "AC-B6: `/perms bogus` (invalid argument) is a no-op that reports the current mode + valid set" do
+        m0 = model(%{permissions_mode: :default, status: :idle})
+
+        next = run_perms_command(m0, "bogus")
+
+        assert is_map(next),
+               "AC-B6: `/perms bogus` MUST NOT crash the update loop"
+
+        assert next.permissions_mode == :default,
+               "AC-B6: `/perms bogus` (unknown mode) MUST NOT change the mode; " <>
+                 "got: #{inspect(next.permissions_mode)}"
+
+        # An unknown argument is reported, not silently swallowed: the report
+        # names the current mode and the valid set.
+        report = Enum.map_join(next.transcript, "\n", fn {text, _attrs} -> text end)
+
+        assert String.contains?(report, "default"),
+               "AC-B6: `/perms bogus` MUST report the current mode (default) " <>
+                 "in the transcript; got transcript: #{inspect(next.transcript)}"
+
+        assert String.contains?(report, "accept_edits") and String.contains?(report, "plan"),
+               "AC-B6: `/perms bogus` MUST report the valid mode set " <>
+                 "({default, accept_edits, plan}); got transcript: #{inspect(next.transcript)}"
       end
     end
 
     # ------------------------------------------------------------------
-    # AC-B7 — back-tab while streaming does NOT change the displayed mode
-    # (the FSM rejects the change :busy, D-096); it works again once idle.
+    # AC-B7 — `/perms <mode>` while streaming does NOT change the mode
+    # (the FSM rejects set_permissions_mode :busy, D-096); it works again
+    # once the turn ends.
     # ------------------------------------------------------------------
-    describe "AC-B7 — back-tab is inert mid-turn" do
+    describe "AC-B7 — `/perms <mode>` is inert mid-turn" do
       @tag :ac_b7
-      test "AC-B7: back-tab while :streaming does not move the mode; works again when :idle" do
+      test "AC-B7: `/perms accept_edits` while :streaming does not move the mode; works when :idle" do
         streaming = model(%{permissions_mode: :default, status: :streaming})
 
-        mid_turn = App.update(streaming, @back_tab_event)
+        mid_turn = run_perms_command(streaming, "accept_edits")
 
         assert mid_turn.permissions_mode == :default,
-               "AC-B7: back-tab while :streaming MUST NOT change the displayed mode " <>
-                 "(FSM rejects :busy per D-096); got: #{inspect(mid_turn.permissions_mode)}"
+               "AC-B7: `/perms accept_edits` while :streaming MUST NOT change the mode " <>
+                 "(FSM rejects set_permissions_mode :busy per D-096); " <>
+                 "got: #{inspect(mid_turn.permissions_mode)}"
 
-        # After the turn ends the cycle works again.
-        idle = %{mid_turn | status: :idle}
-        resumed = App.update(idle, @back_tab_event)
+        # After the turn ends the command works again.
+        idle = model(%{permissions_mode: :default, status: :idle})
+        resumed = run_perms_command(idle, "accept_edits")
 
         assert resumed.permissions_mode == :accept_edits,
-               "AC-B7: once status is :idle, back-tab MUST cycle the mode again; " <>
+               "AC-B7: once status is :idle, `/perms accept_edits` MUST set the mode again; " <>
                  "got: #{inspect(resumed.permissions_mode)}"
       end
     end
