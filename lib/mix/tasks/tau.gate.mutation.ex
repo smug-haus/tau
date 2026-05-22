@@ -25,9 +25,10 @@ defmodule Mix.Tasks.Tau.Gate.Mutation do
 
   | code | meaning |
   |------|---------|
-  | 0    | ≥1 gating test failed against the reverted tree (discriminating) |
+  | 0    | ≥1 gating test failed against the reverted tree (discriminating); OR N/A (project-creation PR — no pre-implementer code to mutate) |
   | 1    | all gating tests passed against the reverted tree (vacuous suite) |
   | 2    | usage error |
+  | 3    | test runner crashed — gate could not evaluate (compile error or process crash) |
   """
 
   use Mix.Task
@@ -44,12 +45,25 @@ defmodule Mix.Tasks.Tau.Gate.Mutation do
               "tau.gate.mutation: OK — ≥1 gating test failed against reverted tree (suite is discriminating)"
             )
 
+          :not_applicable ->
+            Mix.shell().info(
+              "tau.gate.mutation: N/A — project-creation PR; no pre-implementer production code to mutate"
+            )
+
           {:error, :all_passed} ->
             Mix.shell().error(
               "tau.gate.mutation: FAIL — all gating tests passed against the reverted tree (vacuous suite)"
             )
 
             System.halt(1)
+
+          {:error, {:runner_crashed, detail}} ->
+            Mix.shell().error(
+              "tau.gate.mutation: ERROR — test runner crashed before producing a summary " <>
+                "(compile error or process crash — gate could not evaluate); detail: #{detail}"
+            )
+
+            System.halt(3)
         end
 
       _ ->
