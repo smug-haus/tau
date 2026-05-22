@@ -168,6 +168,37 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
           |> Map.put(:catalog, entries)
           |> update_menu()
 
+        # D-082 (#339 / SPEC-USER-TURN §6): restore queued steering messages to
+        # the input editor when a cancel is issued mid-turn. The FSM drains the
+        # steering queue back to the user via this event. The TUI repopulates the
+        # editor with the first queued message (joining multiple with "\n" as a
+        # best-effort single-line representation; the #338 multi-line editor
+        # handles multi-line content natively). Idempotent: re-delivery of the
+        # same event replaces the editor with the same content.
+        %Tau.Session.Events.QueueRestored{messages: msgs} when msgs != [] ->
+          text =
+            msgs
+            |> Enum.map(fn
+              %Tau.Message.User{content: content} ->
+                content
+                |> Enum.filter(&match?(%{type: :text}, &1))
+                |> Enum.map_join("\n", & &1.text)
+
+              s when is_binary(s) ->
+                s
+
+              _ ->
+                ""
+            end)
+            |> Enum.reject(&(&1 == ""))
+            |> Enum.join("\n")
+
+          new_editor = restore_editor_from_text(text)
+          %{model | editor: new_editor}
+
+        %Tau.Session.Events.QueueRestored{} ->
+          model
+
         _ ->
           model
       end
@@ -189,7 +220,8 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     # handle_readline_key's catch-all, breaking typed character input (AC-H2).
     defp handle_event(model, %{mod: mod} = event) when mod != 0 do
       ch = Map.get(event, :ch, 0)
-      handle_alt(model, ch)
+      key = Map.get(event, :key, 0)
+      handle_alt(model, ch, key)
     end
 
     defp handle_event(model, %{ch: ch}) when ch != 0, do: handle_char(model, ch)
@@ -200,12 +232,18 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     # cyclomatic complexity within bounds. Clause ordering is load-bearing.
     defp handle_key(model, key, _event) do
       case key do
-        # Enter — context-aware: menu → accept, search → accept, else → submit/continue
+        # Enter — context-aware: menu → accept, search → accept, busy → steer, else → submit/continue
         13 when model.menu != nil ->
           menu_accept(model)
 
         13 when model.search != nil ->
           search_accept(model)
+
+        # D-077 (#339 / AC-2): Enter while busy enqueues a steering message delivered
+        # at the next tool-round boundary (before the next provider call). The input
+        # is cleared and the queued text is shown in the transcript for feedback.
+        13 when model.status in [:streaming, :sending] or is_binary(model.status) ->
+          steer(model)
 
         # FIX-2: Enter with trailing backslash → strip backslash, insert newline.
         # Avoids submit, preserving existing multi-line structure (D-145).
@@ -222,6 +260,12 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
         27 when model.search != nil ->
           search_cancel(model)
+
+        # D-078 (#339 / AC-6): Esc while idle → clear the input editor, never quit.
+        # Quit stays Ctrl+C (unconditional, registered in start_runtime_supervisor/0).
+        # Context-aware: busy → cancel (existing ADR-0017 path); idle → clear input.
+        27 when model.status == :idle ->
+          clear_input(model)
 
         27 ->
           cancel(model)
@@ -347,16 +391,35 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     # Handle Alt-chord events (mod != 0). Best-effort: degrade to no-op
     # if termbox/tmux mangles the ESC-prefix (D-141).
     # FIX-3: Ctrl+R search mode — Ctrl+R while already in search cycles to next match.
-    defp handle_alt(model, ?y), do: %{model | editor: Editor.yank_pop(model.editor), search: nil}
+    #
+    # Note: handle_alt/3 receives (model, ch, key) where ch is the printable
+    # codepoint (0 for control keys) and key is the control-key code. Both are
+    # needed to distinguish Alt+Enter (key=13, ch=0) from Alt+arrow (key=65_514,
+    # ch=0) and other alt-chords that happen to carry ch=0.
+    defp handle_alt(model, ?y, _key),
+      do: %{model | editor: Editor.yank_pop(model.editor), search: nil}
 
-    defp handle_alt(model, ?b),
+    defp handle_alt(model, ?b, _key),
       do: %{model | editor: Editor.move_word_left(model.editor), search: nil}
 
-    defp handle_alt(model, ?f),
+    defp handle_alt(model, ?f, _key),
       do: %{model | editor: Editor.move_word_right(model.editor), search: nil}
 
-    # All other alt-chords: no-op (D-141: MUST NOT insert literal char).
-    defp handle_alt(model, _ch), do: model
+    # D-078 (#339 / AC-3): Alt+Enter — enqueue a follow-up message delivered
+    # after the whole turn completes. Termbox delivers Alt+Enter as mod != 0,
+    # ch = 0, key = 13 (Return). Distinguish from other alt-chords with ch=0
+    # (e.g. Alt+arrow: ch=0, key=65_514) by also checking the key field.
+    #
+    # Fallback documented in case Alt+Enter is unreliable in some terminals
+    # (e.g. tmux mangles Alt-chords): document Ctrl+J (key 10) as an alternative
+    # follow-up trigger in the on-screen help (AC-7).
+    defp handle_alt(model, 0, 13) do
+      followup(model)
+    end
+
+    # All other alt-chords (ch=0 with non-Return key, or unrecognised ch):
+    # no-op (D-141: MUST NOT insert literal char).
+    defp handle_alt(model, _ch, _key), do: model
 
     # Handle printable character events (ch != 0, no mod).
     # D-003: `q` is context-aware on empty prompt.
@@ -525,7 +588,13 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
     # --- Helpers --------------------------------------------------------
 
+    # D-078 (#339 / AC-7): honest status-bar keybinding hint. The hint changes
+    # based on whether the session is busy or idle. Claude Code's dishonest hint
+    # (claiming "esc to interrupt" when Esc only moves queued prompts) is exactly
+    # the bug #339 exists to beat.
     defp status_bar(model) do
+      hint = status_bar_hint(model.status)
+
       bar do
         label(
           content:
@@ -534,9 +603,30 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
               status_bar_coding_agent(model) <>
               " | status: " <>
               to_string(model.status) <>
-              " | <Enter> submit · <Esc> cancel · <Ctrl-C> quit"
+              " | " <>
+              hint
         )
       end
+    end
+
+    # Busy states: streaming/sending/cancelled status strings.
+    defp status_bar_hint(:idle) do
+      "<Enter> submit · <Esc> clear · <Ctrl-C> quit"
+    end
+
+    defp status_bar_hint(:streaming), do: status_bar_hint_busy()
+    defp status_bar_hint(:sending), do: status_bar_hint_busy()
+
+    defp status_bar_hint(status) when is_binary(status) do
+      # Covers cancelled/ended status strings — session is not actively busy
+      # but also not cleanly idle; show idle hint so user can type.
+      "<Enter> submit · <Esc> clear · <Ctrl-C> quit"
+    end
+
+    defp status_bar_hint(_), do: status_bar_hint_busy()
+
+    defp status_bar_hint_busy do
+      "<Enter> steer · <Alt+Enter> follow-up · <Esc> interrupt"
     end
 
     # SPEC-CODING-AGENT §4 B1: when the TUI was launched with
@@ -861,6 +951,60 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     defp cancel(model) do
       Tau.cancel(model.session_id)
       %{model | status: :idle}
+    end
+
+    # D-077 (#339 / AC-2): steer — enqueue the current editor text as a steering
+    # message (delivered at the next tool-round boundary, before the next provider
+    # call). Only enqueues when the editor is non-empty. Clears the editor and
+    # appends a "[queued steer]" notice to the transcript for user feedback.
+    defp steer(model) do
+      text = Editor.text(model.editor)
+
+      if Editor.empty?(model.editor) do
+        model
+      else
+        Tau.steer(model.session_id, text)
+
+        %{
+          model
+          | editor: Editor.new(),
+            search: nil,
+            transcript: bounded_append(model.transcript, {"[queued steer] " <> text, []})
+        }
+      end
+    end
+
+    # D-078 (#339 / AC-3): followup — enqueue the current editor text as a
+    # follow-up message (delivered after the whole turn completes). Clears the
+    # editor and appends a "[queued follow-up]" notice to the transcript.
+    # Also used for Alt+Enter while idle (falls back to normal submit in that case).
+    defp followup(model) do
+      text = Editor.text(model.editor)
+
+      cond do
+        Editor.empty?(model.editor) ->
+          model
+
+        model.status == :idle ->
+          # Idle: treat as normal submit (both tiers collapse to "run now").
+          submit(model)
+
+        true ->
+          Tau.send(model.session_id, text)
+
+          %{
+            model
+            | editor: Editor.new(),
+              search: nil,
+              transcript: bounded_append(model.transcript, {"[queued follow-up] " <> text, []})
+          }
+      end
+    end
+
+    # D-078 (#339 / AC-6): clear_input — clear the editor without quitting.
+    # Called on Esc while idle. Never quits (quit stays Ctrl+C).
+    defp clear_input(model) do
+      %{model | editor: Editor.new(), search: nil}
     end
 
     defp on_message_start(model, _e), do: %{model | status: :streaming, last_assistant: ""}

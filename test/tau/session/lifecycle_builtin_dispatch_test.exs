@@ -310,4 +310,62 @@ defmodule Tau.Session.LifecycleBuiltinDispatchTest do
     assert meta.command == "/logout"
     assert meta.outcome == :error
   end
+
+  # ── D-080: /reload queued as follow-up dispatches as command, not provider text ─
+
+  test "D-080: /reload queued as follow-up during streaming dispatches as command (not provider text)" do
+    # D-080 rationale: :drain_followups routes through the full
+    # handle_event(:cast, {:user_message, ...}, :awaiting_user, data) dispatch
+    # path — including classify_slash_command/4. A /reload queued as Alt+Enter
+    # while the FSM is busy MUST be dispatched as a builtin command when it drains,
+    # NOT sent to the provider as plain text.
+    sid = "builtin-reload-followup-d080-#{System.unique_integer([:positive])}"
+    owner = self()
+
+    Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{sid}")
+
+    {:ok, ^sid} =
+      start_session_for_test(
+        provider: SlowProvider,
+        model: "slow-model",
+        session_id: sid,
+        provider_ctx: %{stream_owner: owner, stream_delay_ms: 300}
+      )
+
+    # Start a turn so the FSM enters :provider_streaming.
+    Tau.send(sid, "trigger turn")
+    # Consume the MessageStart from the first turn (PubSub broadcast fires immediately
+    # at :start_provider time, before stream enumeration begins).
+    assert_receive %SE.MessageStart{session_id: ^sid}, 2_000
+    assert_receive {:stream_started, _}, 3_000
+
+    # Queue /reload as a follow-up (Alt+Enter path = :followup tier) while streaming.
+    # When the turn ends, :drain_followups fires and must classify /reload as a builtin.
+    Tau.send(sid, "/reload")
+
+    # The reload notice MUST NOT arrive before MessageEnd (not during streaming).
+    refute_receive %SE.SystemNotice{
+                     session_id: ^sid,
+                     text: "Reloaded settings, skills, and prompt templates."
+                   },
+                   100
+
+    # Wait for the streaming turn to complete.
+    assert_receive %SE.MessageEnd{session_id: ^sid}, 5_000
+
+    # Now :drain_followups fires and /reload is classified as a builtin command.
+    # Verify: a SystemNotice is emitted (command dispatch), NOT a new provider turn.
+    assert_receive %SE.SystemNotice{
+                     session_id: ^sid,
+                     text: "Reloaded settings, skills, and prompt templates."
+                   },
+                   2_000
+
+    # No additional provider turn started (the /reload was dispatched inline, not as text).
+    refute_receive %SE.MessageStart{session_id: ^sid}, 300
+
+    assert {:ok, snap} = Tau.snapshot(sid)
+    assert snap.id == sid
+    assert snap.queues.followup == []
+  end
 end

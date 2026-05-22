@@ -87,9 +87,28 @@ defmodule Tau do
   @doc """
   Send a user message to a running session. Returns immediately;
   consumers should subscribe via `stream/2` to receive the response.
+
+  Messages sent via `Tau.send/2` default to the `:followup` tier (D-078 / #339):
+  they are delivered after the current turn completes. Use `Tau.steer/2` to
+  enqueue a steering message delivered at the next tool-round boundary instead.
   """
   @spec send(session_id(), String.t() | Tau.Message.t()) :: :ok | {:error, term()}
   defdelegate send(session_id, message), to: Session
+
+  @doc """
+  Send a steering message to a running session.
+
+  A steering message is delivered at the **tool-round boundary** (D-079 /
+  SPEC-USER-TURN §6) — after the current round's tool results and before the
+  next provider call. Idle sessions deliver the message immediately as a
+  normal turn.
+
+  On `:cancel`, queued steering messages are returned to the caller via a
+  `%Tau.Session.Events.QueueRestored{}` broadcast rather than being delivered
+  (D-082).
+  """
+  @spec steer(session_id(), String.t() | Tau.Message.t()) :: :ok | {:error, term()}
+  defdelegate steer(session_id, message), to: Session
 
   @doc """
   Subscribe to a session's event stream.

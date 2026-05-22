@@ -1,12 +1,17 @@
 # ADR-0009: User messages queue (postpone) during an active turn
 
-- **Status:** Accepted
+- **Status:** Partially superseded by ADR-0021 (#339)
+  - The `:gen_statem` postpone mechanism for **user messages** (non-`command_task` path)
+    is replaced by explicit `steering_queue` / `followup_queue` fields on the FSM data.
+  - ADR-0008's slash-command-task postpone (`command_task != nil` guard) is **unaffected**.
+  - ADR-0009 is otherwise accepted for historical reference.
 - **Date:** 2026-05-01
 - **Deciders:** the agent loop, with no objection from @smug-haus
 - **Related:**
   - Issue: #64
   - Code: `lib/tau/session.ex` (`handle_event(:cast, {:user_message, _}, …)`)
   - Prior: ADR-0008 (user code never runs synchronously inside the FSM)
+  - Superseded (partial): ADR-0021 (two-tier message queue, #339)
 
 ## Context
 

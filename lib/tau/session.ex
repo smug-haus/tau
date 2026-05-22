@@ -124,6 +124,10 @@ defmodule Tau.Session do
     end
   end
 
+  # D-077 (#339): hard cap on each queue tier. Messages past 32 entries are
+  # dropped with a %SystemNotice{} (D-083 / critic S3).
+  @queue_cap 32
+
   @spec send(id(), String.t() | Tau.Message.t()) :: :ok | {:error, term()}
   def send(id, message) do
     with {:ok, pid} <- whereis(id) do
@@ -134,7 +138,34 @@ defmodule Tau.Session do
           %{} -> message
         end
 
-      :gen_statem.cast(pid, {:user_message, msg})
+      # Default tier is :followup (backward compatible with callers that do not
+      # specify a tier — they get follow-up semantics, same as the old postpone).
+      :gen_statem.cast(pid, {:user_message, msg, :followup})
+    end
+  end
+
+  @doc """
+  Send a steering message to a running session.
+
+  A steering message is delivered at the **tool-round boundary** — after the
+  current round's tool results and before the next provider call (D-079 /
+  SPEC-USER-TURN §6). Idle sessions run the message immediately as a normal
+  turn (both tiers collapse in that case).
+
+  When the session is cancelled, steering messages are returned to the caller
+  via a `%QueueRestored{}` broadcast rather than being delivered (D-082).
+  """
+  @spec steer(id(), String.t() | Tau.Message.t()) :: :ok | {:error, term()}
+  def steer(id, message) do
+    with {:ok, pid} <- whereis(id) do
+      msg =
+        case message do
+          %User{} -> message
+          s when is_binary(s) -> User.new(s)
+          %{} -> message
+        end
+
+      :gen_statem.cast(pid, {:user_message, msg, :steering})
     end
   end
 
@@ -413,7 +444,14 @@ defmodule Tau.Session do
          tool_loop_call_lookups: Map.get(data, :tool_loop_call_lookups, %{}),
          provider_retry_state: Map.get(data, :provider_retry_state, %{count: 0}),
          provider_retry_max: Map.get(data, :provider_retry_max, 3),
-         interactive?: Map.get(data, :interactive?, true)
+         interactive?: Map.get(data, :interactive?, true),
+         # D-077 (#339 / SPEC-USER-TURN §6): expose queue depths and contents.
+         # ADR-0009 explicitly deferred this; #339 delivers it. Makes the queues
+         # introspectable for tests and a future "pending input" panel.
+         queues: %{
+           steering: :queue.to_list(Map.get(data, :steering_queue, :queue.new())),
+           followup: :queue.to_list(Map.get(data, :followup_queue, :queue.new()))
+         }
        }}
     else
       # :not_found from Registry, or process no longer alive (shutting down).
@@ -822,7 +860,26 @@ defmodule Tau.Session do
           # `:deny_once` decisions). Emitted in `finish_permission_round/1`
           # via broadcast + history append, never via `{:tool_done}` messages
           # while in `:awaiting_permission` state.
-          permission_pending_results: []
+          permission_pending_results: [],
+          # D-077 / D-078 (#339 / SPEC-USER-TURN §6): two-tier message queues.
+          # Replaces ADR-0009's single `:postpone` mechanism for user messages
+          # with explicit FIFO queues that have two distinct drain points.
+          #
+          # `steering_queue` — messages tagged `:steering` (Enter while busy).
+          # Drained at the tool-round boundary: after the last `tool_result`
+          # of a round and before the next provider call (D-079). Cleared
+          # (restored to editor via %QueueRestored{}) on `:cancel` (D-082).
+          #
+          # `followup_queue` — messages tagged `:followup` (Alt+Enter while busy).
+          # Drained on every transition into `:awaiting_user` that represents
+          # turn completion — normal end and post-cancel (D-080). Survives a
+          # `:cancel` (D-080).
+          #
+          # Both queues use OTP `:queue` for O(1) enqueue/dequeue. Hard cap of 32
+          # entries each: messages past the cap are dropped with a %SystemNotice{}
+          # (D-083, critic S3).
+          steering_queue: :queue.new(),
+          followup_queue: :queue.new()
         }
 
         # D-103 / D-108 (SPEC-TUI-COMPLETION §4 B1): broadcast the command
@@ -873,22 +930,65 @@ defmodule Tau.Session do
   # ADR-0008: while a slash-command task is in flight, postpone any
   # subsequent user_message casts. They get re-delivered when the FSM
   # next transitions, which guarantees order without dropping input.
-  def handle_event(:cast, {:user_message, _}, state, %{command_task: t} = data)
+  # NOTE: This is ADR-0008's slash-command-task postpone and is intentionally
+  # preserved by ADR-0021 (which supersedes only ADR-0009's user-message-postpone).
+  def handle_event(:cast, {:user_message, _, _tier}, state, %{command_task: t} = data)
       when t != nil do
     emit_user_message_telemetry(:enqueued, data, state)
     {:keep_state_and_data, [{:postpone, true}]}
   end
 
-  # ADR-0009: outside :awaiting_user (provider streaming or tool
-  # executing) postpone the cast so the next provider turn doesn't
-  # interleave with the current one.
-  def handle_event(:cast, {:user_message, _}, state, data)
+  # D-077 / D-078 (#339 / SPEC-USER-TURN §6): replaces ADR-0009's single
+  # `:postpone` with explicit two-tier queue routing. Busy states (any state
+  # other than :awaiting_user, including :awaiting_permission from #341) enqueue
+  # messages onto the appropriate tier rather than postponing them. This gives
+  # two independent drain points and makes queued messages introspectable via
+  # snapshot/1 (ADR-0009's own exit clause, exercised here).
+  #
+  # Both :steering and :followup tiers are handled. The hard cap (D-083) drops
+  # messages past 32 with a %SystemNotice{} to prevent unbounded growth.
+  def handle_event(:cast, {:user_message, msg, tier}, state, data)
       when state != :awaiting_user do
-    emit_user_message_telemetry(:enqueued, data, state)
-    {:keep_state_and_data, [{:postpone, true}]}
+    {queue_field, tier_atom} =
+      case tier do
+        :steering -> {:steering_queue, :steering}
+        _ -> {:followup_queue, :followup}
+      end
+
+    queue = Map.get(data, queue_field)
+    queue_size = :queue.len(queue)
+
+    if queue_size >= @queue_cap do
+      # D-083: hard cap — drop with a %SystemNotice{}, no unbounded growth.
+      notice =
+        "Message queue full (#{@queue_cap} #{tier_atom} messages queued); " <>
+          "message dropped. Wait for the current turn to complete."
+
+      broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: notice})
+
+      :telemetry.execute(
+        [:tau, :session, tier_atom, :dropped],
+        %{system_time: System.system_time()},
+        %{session_id: data.id, from_state: state, queue_size: queue_size}
+      )
+
+      {:keep_state_and_data, []}
+    else
+      new_queue = :queue.in(msg, queue)
+      new_data = Map.put(data, queue_field, new_queue)
+
+      :telemetry.execute(
+        [:tau, :session, tier_atom, :enqueued],
+        %{system_time: System.system_time()},
+        %{session_id: data.id, from_state: state, queue_size: queue_size + 1}
+      )
+
+      emit_user_message_telemetry(:enqueued, data, state)
+      {:keep_state, new_data}
+    end
   end
 
-  def handle_event(:cast, {:user_message, msg}, :awaiting_user, %{command_task: nil} = data) do
+  def handle_event(:cast, {:user_message, msg, _tier}, :awaiting_user, %{command_task: nil} = data) do
     emit_user_message_telemetry(:delivered, data, :awaiting_user)
 
     case classify_slash_command(msg, data.skills, data.prompt_templates, data.cwd) do
@@ -923,6 +1023,53 @@ defmodule Tau.Session do
       {:sync, msg} ->
         process_user_message(msg, data)
     end
+  end
+
+  # D-080 (#339 / SPEC-USER-TURN §6): follow-up drain handler.
+  # Posted as an :internal event on every :awaiting_user transition that
+  # represents turn completion (normal end, post-cancel, error paths). Dequeues
+  # one follow-up message and starts a fresh turn (one-at-a-time mode, Pi's
+  # default). This is the follow-up drain point — only fires in :awaiting_user
+  # with no command_task (if a command task is in flight, the ADR-0008 postpone
+  # re-delivers the event after the command completes).
+  #
+  # Using :internal (not state_enter) avoids a module-wide callback_mode change
+  # (critic S1 from the pre-implementation review).
+  #
+  # IMPORTANT: re-routes through handle_event(:cast, {:user_message, ...})
+  # rather than process_user_message/2 directly, so that slash-command
+  # classification (classify_slash_command/4) runs. Without this, a queued
+  # "/reload" would start a provider turn instead of executing the builtin.
+  def handle_event(:internal, :drain_followups, :awaiting_user, %{command_task: nil} = data) do
+    case :queue.out(data.followup_queue) do
+      {:empty, _} ->
+        {:keep_state, data}
+
+      {{:value, msg}, rest} ->
+        :telemetry.execute(
+          [:tau, :session, :followup, :delivered],
+          %{system_time: System.system_time()},
+          %{session_id: data.id, from_state: :awaiting_user}
+        )
+
+        # Re-route through the full user_message dispatch path so slash commands
+        # are classified (classify_slash_command/4 runs). The :followup tier tag
+        # is preserved but irrelevant in :awaiting_user — the handler delivers
+        # immediately. Note: handle_event will also emit :delivered telemetry via
+        # emit_user_message_telemetry, which is intentional — one pair per drain.
+        handle_event(:cast, {:user_message, msg, :followup}, :awaiting_user, %{
+          data
+          | followup_queue: rest
+        })
+    end
+  end
+
+  # Busy or command_task in flight: re-deliver after next transition.
+  # (ADR-0008's postpone handles the command_task case via re-delivery; for
+  # the no-command-task busy case this should not happen since :drain_followups
+  # is only posted on :awaiting_user transitions, but guard defensively.)
+  def handle_event(:internal, :drain_followups, _state, data) do
+    {:keep_state, data}
   end
 
   def handle_event(:info, {:command_done, result, original_msg}, _state, data) do
@@ -1146,8 +1293,14 @@ defmodule Tau.Session do
 
             broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: msg})
 
-            {:next_state, :awaiting_user,
-             %{data | cancel_flag: nil, stream_ref: nil, provider_span_ref: nil}}
+            next_data = %{data | cancel_flag: nil, stream_ref: nil, provider_span_ref: nil}
+            # D-080: drain follow-up on turn-end (error path).
+            actions =
+              if :queue.is_empty(next_data.followup_queue),
+                do: [],
+                else: [{:next_event, :internal, :drain_followups}]
+
+            {:next_state, :awaiting_user, next_data, actions}
         end
 
       {:error, reason} ->
@@ -1178,8 +1331,14 @@ defmodule Tau.Session do
 
         broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: msg})
 
-        {:next_state, :awaiting_user,
-         %{data | cancel_flag: nil, stream_ref: nil, provider_span_ref: nil}}
+        next_data = %{data | cancel_flag: nil, stream_ref: nil, provider_span_ref: nil}
+        # D-080: drain follow-up on turn-end (error path).
+        actions =
+          if :queue.is_empty(next_data.followup_queue),
+            do: [],
+            else: [{:next_event, :internal, :drain_followups}]
+
+        {:next_state, :awaiting_user, next_data, actions}
     end
   end
 
@@ -1590,24 +1749,48 @@ defmodule Tau.Session do
 
     data = persist_event(data, "cancellation", %{cause: "user", reason: "awaiting_permission"})
 
-    {:next_state, :awaiting_user,
-     %{
-       data
-       | pending_permission_requests: %{},
-         permission_dispatch_batch: [],
-         permission_pending_results: [],
-         tools_in_flight: %{},
-         tool_dispatcher: nil,
-         provider_task: nil,
-         assembler: nil,
-         stream_ref: nil,
-         provider_span_ref: nil,
-         active_skill: nil,
-         tool_iterations: 0,
-         tool_loop_state: %{},
-         tool_loop_call_lookups: %{},
-         provider_retry_state: %{count: 0}
-     }}
+    # D-082 (#339 / SPEC-USER-TURN §6): drain steering queue back to user,
+    # consistent with the general :cancel handler. The :awaiting_permission
+    # state is a "busy" state from the steering/follow-up queue perspective
+    # (B2 from the critic: it is in the busy-state queueing guard). On cancel,
+    # restore queued steering messages to the editor via %QueueRestored{}.
+    # Follow-up queue is kept (D-080) and drains on next :awaiting_user entry.
+    steering_messages = :queue.to_list(data.steering_queue)
+
+    if steering_messages != [] do
+      broadcast(data.id, %Events.QueueRestored{
+        session_id: data.id,
+        messages: steering_messages
+      })
+    end
+
+    next_data = %{
+      data
+      | pending_permission_requests: %{},
+        permission_dispatch_batch: [],
+        permission_pending_results: [],
+        tools_in_flight: %{},
+        tool_dispatcher: nil,
+        provider_task: nil,
+        assembler: nil,
+        stream_ref: nil,
+        provider_span_ref: nil,
+        active_skill: nil,
+        tool_iterations: 0,
+        tool_loop_state: %{},
+        tool_loop_call_lookups: %{},
+        provider_retry_state: %{count: 0},
+        # D-082: steering queue cleared; follow-up queue preserved.
+        steering_queue: :queue.new()
+    }
+
+    # D-080: drain follow-up queue on transition into :awaiting_user.
+    actions =
+      if :queue.is_empty(next_data.followup_queue),
+        do: [],
+        else: [{:next_event, :internal, :drain_followups}]
+
+    {:next_state, :awaiting_user, next_data, actions}
   end
 
   def handle_event(:cast, :cancel, _state, data) do
@@ -1661,48 +1844,77 @@ defmodule Tau.Session do
 
     broadcast(data.id, %Events.Cancelled{session_id: data.id, reason: :user})
 
-    persist_event(data, "cancellation", %{
-      cause: "user",
-      # ADR-0017: distinguishes the cooperative path (clean socket
-      # release, partial content captured) from the brutal-kill
-      # fallback (provider task didn't yield within 250ms).
-      reason: Atom.to_string(cancel_mechanism)
-    })
+    data =
+      persist_event(data, "cancellation", %{
+        cause: "user",
+        # ADR-0017: distinguishes the cooperative path (clean socket
+        # release, partial content captured) from the brutal-kill
+        # fallback (provider task didn't yield within 250ms).
+        reason: Atom.to_string(cancel_mechanism)
+      })
 
-    {:next_state, :awaiting_user,
-     %{
-       data
-       | provider_task: nil,
-         cancel_flag: nil,
-         stream_ref: nil,
-         # C76 (SPEC-OTEL-REPORTER): clear discriminator; the OTel reporter
-         # consumed it at the *.cancelled / *.brutal_kill emit site above.
-         provider_span_ref: nil,
-         tools_in_flight: %{},
-         tool_dispatcher: nil,
-         assembler: nil,
-         command_task: nil,
-         # ADR-0013 (#16): cancel ends the current turn — drop any
-         # active skill alongside it.
-         active_skill: nil,
-         # D-027: reset per-turn tool-iteration counter on every
-         # return to :awaiting_user, including cancellation.
-         tool_iterations: 0,
-         # D-060 / #293: tool-loop brake state is per-turn; reset on cancel.
-         tool_loop_state: %{},
-         tool_loop_call_lookups: %{},
-         # D-061 / #303: provider-retry counter is per-turn; reset on cancel.
-         provider_retry_state: %{count: 0},
-         # SPEC-CODING-AGENT: dispatcher state is per-turn; reset on
-         # cancel. Workspace is per-session — preserved.
-         coding_agent_dispatcher: nil,
-         coding_agent_pending: nil,
-         coding_agent_blocks: [],
-         # C67-B4: clear compaction worker fields. compaction_failures
-         # is intentionally NOT reset (see guard comment above).
-         compaction_task: nil,
-         compaction_monitor: nil
-     }}
+    # D-082 (#339 / SPEC-USER-TURN §6): drain the steering queue back to the
+    # caller as a %QueueRestored{} event. A steering message was meant to
+    # redirect the now-cancelled turn; auto-delivering it on the post-cancel
+    # turn would surprise the user. The follow-up queue is kept (D-080) —
+    # follow-up messages survive cancel and run on the post-cancel turn.
+    steering_messages = :queue.to_list(data.steering_queue)
+
+    if steering_messages != [] do
+      broadcast(data.id, %Events.QueueRestored{
+        session_id: data.id,
+        messages: steering_messages
+      })
+    end
+
+    next_data = %{
+      data
+      | provider_task: nil,
+        cancel_flag: nil,
+        stream_ref: nil,
+        # C76 (SPEC-OTEL-REPORTER): clear discriminator; the OTel reporter
+        # consumed it at the *.cancelled / *.brutal_kill emit site above.
+        provider_span_ref: nil,
+        tools_in_flight: %{},
+        tool_dispatcher: nil,
+        assembler: nil,
+        command_task: nil,
+        # ADR-0013 (#16): cancel ends the current turn — drop any
+        # active skill alongside it.
+        active_skill: nil,
+        # D-027: reset per-turn tool-iteration counter on every
+        # return to :awaiting_user, including cancellation.
+        tool_iterations: 0,
+        # D-060 / #293: tool-loop brake state is per-turn; reset on cancel.
+        tool_loop_state: %{},
+        tool_loop_call_lookups: %{},
+        # D-061 / #303: provider-retry counter is per-turn; reset on cancel.
+        provider_retry_state: %{count: 0},
+        # SPEC-CODING-AGENT: dispatcher state is per-turn; reset on
+        # cancel. Workspace is per-session — preserved.
+        coding_agent_dispatcher: nil,
+        coding_agent_pending: nil,
+        coding_agent_blocks: [],
+        # C67-B4: clear compaction worker fields. compaction_failures
+        # is intentionally NOT reset (see guard comment above).
+        compaction_task: nil,
+        compaction_monitor: nil,
+        # D-082: steering queue is drained back to the user; clear it.
+        # Follow-up queue is kept (D-080) — it drains on the next
+        # :awaiting_user entry via the :drain_followups internal event.
+        steering_queue: :queue.new()
+    }
+
+    # D-080 (#339 / SPEC-USER-TURN §6): if the follow-up queue is non-empty,
+    # post a :drain_followups internal event so it fires on the transition to
+    # :awaiting_user. Using :internal (not state_enter) avoids a module-wide
+    # callback_mode change (critic S1).
+    actions =
+      if :queue.is_empty(next_data.followup_queue),
+        do: [],
+        else: [{:next_event, :internal, :drain_followups}]
+
+    {:next_state, :awaiting_user, next_data, actions}
   end
 
   def handle_event(:cast, :stop, _state, data) do
@@ -1781,6 +1993,15 @@ defmodule Tau.Session do
 
       {:continue, data} ->
         if map_size(tools) == 0 do
+          # D-079 (#339 / SPEC-USER-TURN §6): steering drain point.
+          # Before re-entering :start_provider, check if any steering messages
+          # were queued while this tool round was executing. If so, drain one
+          # message (one-at-a-time mode, matching Pi's default) and append it
+          # to data.messages AFTER all tool_result blocks and BEFORE the next
+          # provider call. This is the ordering invariant from D-079 — no
+          # tool_call is ever orphaned (AC-8 property test).
+          data = drain_steering_queue_one(data)
+
           handle_event(
             :internal,
             :start_provider,
@@ -1879,7 +2100,13 @@ defmodule Tau.Session do
 
     broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: notice})
 
-    {:next_state, :awaiting_user, data}
+    # D-080: drain follow-up queue on :awaiting_user transition.
+    actions =
+      if :queue.is_empty(data.followup_queue),
+        do: [],
+        else: [{:next_event, :internal, :drain_followups}]
+
+    {:next_state, :awaiting_user, data, actions}
   end
 
   # Clause 2a — benign {:DOWN, :normal}: async_nolink emits both {ref, result}
@@ -1916,10 +2143,23 @@ defmodule Tau.Session do
 
     failures = data.compaction_failures + 1
     notice = "Compaction worker crashed (#{failures} consecutive failure(s))."
-    data = %{data | compaction_task: nil, compaction_monitor: nil, compaction_failures: failures}
+
+    next_data = %{
+      data
+      | compaction_task: nil,
+        compaction_monitor: nil,
+        compaction_failures: failures
+    }
+
     broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: notice})
 
-    {:next_state, :awaiting_user, data}
+    # D-080: drain follow-up queue on :awaiting_user transition.
+    actions =
+      if :queue.is_empty(next_data.followup_queue),
+        do: [],
+        else: [{:next_event, :internal, :drain_followups}]
+
+    {:next_state, :awaiting_user, next_data, actions}
   end
 
   # Clause 3 — live timeout: fired while the worker is still running.
@@ -1945,10 +2185,23 @@ defmodule Tau.Session do
 
     failures = data.compaction_failures + 1
     notice = "Compaction timed out (#{failures} consecutive failure(s))."
-    data = %{data | compaction_task: nil, compaction_monitor: nil, compaction_failures: failures}
+
+    next_data = %{
+      data
+      | compaction_task: nil,
+        compaction_monitor: nil,
+        compaction_failures: failures
+    }
+
     broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: notice})
 
-    {:next_state, :awaiting_user, data}
+    # D-080: drain follow-up queue on :awaiting_user transition.
+    actions =
+      if :queue.is_empty(next_data.followup_queue),
+        do: [],
+        else: [{:next_event, :internal, :drain_followups}]
+
+    {:next_state, :awaiting_user, next_data, actions}
   end
 
   # Clause 4 — stale timeout: arrives AFTER the worker already completed
@@ -2410,20 +2663,27 @@ defmodule Tau.Session do
 
         broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: abort_msg})
 
-        {:next_state, :awaiting_user,
-         %{
-           data
-           | provider_task: nil,
-             assembler: nil,
-             cancel_flag: nil,
-             stream_ref: nil,
-             provider_span_ref: nil,
-             tool_iterations: 0,
-             tool_loop_state: %{},
-             tool_loop_call_lookups: %{},
-             # D-061 / #303: provider-retry counter is per-turn; reset.
-             provider_retry_state: %{count: 0}
-         }}
+        next_data = %{
+          data
+          | provider_task: nil,
+            assembler: nil,
+            cancel_flag: nil,
+            stream_ref: nil,
+            provider_span_ref: nil,
+            tool_iterations: 0,
+            tool_loop_state: %{},
+            tool_loop_call_lookups: %{},
+            # D-061 / #303: provider-retry counter is per-turn; reset.
+            provider_retry_state: %{count: 0}
+        }
+
+        # D-080: drain follow-up queue on turn-completion :awaiting_user transition.
+        actions =
+          if :queue.is_empty(next_data.followup_queue),
+            do: [],
+            else: [{:next_event, :internal, :drain_followups}]
+
+        {:next_state, :awaiting_user, next_data, actions}
 
       compact_result ->
         # Unwrap {:soft_error, data} — soft_error increments compaction_failures
@@ -2472,19 +2732,54 @@ defmodule Tau.Session do
             # iteration counter — a fresh turn starts with no history.
             # D-061 / #303: provider-retry counter reset on successful
             # Done — a fresh turn starts with the full retry budget.
-            {:next_state, :awaiting_user,
-             %{
-               data
-               | provider_task: nil,
-                 assembler: nil,
-                 cancel_flag: nil,
-                 stream_ref: nil,
-                 provider_span_ref: nil,
-                 tool_iterations: 0,
-                 tool_loop_state: %{},
-                 tool_loop_call_lookups: %{},
-                 provider_retry_state: %{count: 0}
-             }}
+            #
+            # D-079 / FIX-4 (#339): steering messages that survived a pure-text
+            # turn (no tool round occurred so drain_steering_queue_one was never
+            # called) MUST NOT carry over into the next unrelated turn. Merge any
+            # remaining steering_queue entries into the front of followup_queue so
+            # they run immediately as post-turn continuations, then clear
+            # steering_queue. This prevents stale steering context from bleeding
+            # into an unrelated later turn's tool-round boundary.
+            {merged_followup, cleared_steering} =
+              if :queue.is_empty(data.steering_queue) do
+                {data.followup_queue, data.steering_queue}
+              else
+                steering_list = :queue.to_list(data.steering_queue)
+
+                merged =
+                  Enum.reduce(
+                    Enum.reverse(steering_list),
+                    data.followup_queue,
+                    fn msg, q -> :queue.in_r(msg, q) end
+                  )
+
+                {merged, :queue.new()}
+              end
+
+            next_data = %{
+              data
+              | provider_task: nil,
+                assembler: nil,
+                cancel_flag: nil,
+                stream_ref: nil,
+                provider_span_ref: nil,
+                tool_iterations: 0,
+                tool_loop_state: %{},
+                tool_loop_call_lookups: %{},
+                provider_retry_state: %{count: 0},
+                followup_queue: merged_followup,
+                steering_queue: cleared_steering
+            }
+
+            # D-080 (#339 / SPEC-USER-TURN §6): drain follow-up queue on
+            # turn-completion :awaiting_user transition (normal end).
+            # The merged steering messages (if any) will drain first.
+            actions =
+              if :queue.is_empty(next_data.followup_queue),
+                do: [],
+                else: [{:next_event, :internal, :drain_followups}]
+
+            {:next_state, :awaiting_user, next_data, actions}
 
           true ->
             # D-005 / AC-6 (SPEC-USER-TURN [C24]): enforce the per-turn
@@ -2521,21 +2816,28 @@ defmodule Tau.Session do
 
               broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: abort_msg})
 
-              {:next_state, :awaiting_user,
-               %{
-                 data
-                 | provider_task: nil,
-                   assembler: nil,
-                   cancel_flag: nil,
-                   stream_ref: nil,
-                   provider_span_ref: nil,
-                   tool_iterations: 0,
-                   tool_loop_state: %{},
-                   tool_loop_call_lookups: %{},
-                   # D-061 / #303: provider-retry counter is per-turn; reset
-                   # on iteration-cap abort alongside the brake state.
-                   provider_retry_state: %{count: 0}
-               }}
+              next_data = %{
+                data
+                | provider_task: nil,
+                  assembler: nil,
+                  cancel_flag: nil,
+                  stream_ref: nil,
+                  provider_span_ref: nil,
+                  tool_iterations: 0,
+                  tool_loop_state: %{},
+                  tool_loop_call_lookups: %{},
+                  # D-061 / #303: provider-retry counter is per-turn; reset
+                  # on iteration-cap abort alongside the brake state.
+                  provider_retry_state: %{count: 0}
+              }
+
+              # D-080: drain follow-up queue on turn-abort :awaiting_user transition.
+              actions =
+                if :queue.is_empty(next_data.followup_queue),
+                  do: [],
+                  else: [{:next_event, :internal, :drain_followups}]
+
+              {:next_state, :awaiting_user, next_data, actions}
             else
               dispatch_tools(tool_calls, %{data | tool_iterations: data.tool_iterations + 1})
             end
@@ -3271,23 +3573,30 @@ defmodule Tau.Session do
 
     broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: abort_msg})
 
-    {:next_state, :awaiting_user,
-     %{
-       data
-       | provider_task: nil,
-         assembler: nil,
-         cancel_flag: nil,
-         stream_ref: nil,
-         provider_span_ref: nil,
-         tools_in_flight: tools,
-         tool_dispatcher: nil,
-         tool_iterations: 0,
-         tool_loop_state: %{},
-         tool_loop_call_lookups: %{},
-         # D-061 / #303: provider-retry counter is per-turn; reset on
-         # brake-abort alongside the brake state.
-         provider_retry_state: %{count: 0}
-     }}
+    next_data = %{
+      data
+      | provider_task: nil,
+        assembler: nil,
+        cancel_flag: nil,
+        stream_ref: nil,
+        provider_span_ref: nil,
+        tools_in_flight: tools,
+        tool_dispatcher: nil,
+        tool_iterations: 0,
+        tool_loop_state: %{},
+        tool_loop_call_lookups: %{},
+        # D-061 / #303: provider-retry counter is per-turn; reset on
+        # brake-abort alongside the brake state.
+        provider_retry_state: %{count: 0}
+    }
+
+    # D-080: drain follow-up queue on tool-loop-brake :awaiting_user transition.
+    actions =
+      if :queue.is_empty(next_data.followup_queue),
+        do: [],
+        else: [{:next_event, :internal, :drain_followups}]
+
+    {:next_state, :awaiting_user, next_data, actions}
   end
 
   defp deny_reason(name, %Tau.Skill{name: skill_name, allowed_tools: list})
@@ -5004,5 +5313,45 @@ defmodule Tau.Session do
       end,
       metadata: data.metadata
     )
+  end
+
+  # D-079 (#339 / SPEC-USER-TURN §6): steering drain helper.
+  # Called at the tool-round boundary (map_size(tools) == 0) before re-entering
+  # :start_provider. Dequeues one message from the steering queue (one-at-a-time
+  # mode, Pi's default), appends it to data.messages, persists it, and emits
+  # the :delivered telemetry. If the queue is empty, returns data unchanged.
+  #
+  # Ordering invariant (D-079, AC-8): the steering message is appended AFTER
+  # all tool_result blocks of the just-finished round and BEFORE the next
+  # provider call — so no tool_call is ever orphaned. This is enforced by the
+  # call site in the {:tool_done} handler, which calls this function only when
+  # map_size(tools) == 0 (all results received).
+  #
+  # Unlike follow-up drain (which routes through classify_slash_command via
+  # handle_event), steering drain appends the message directly to the transcript
+  # because the message has already passed the "user intent" gate at enqueue
+  # time and must land in the exact position between tool_results and the next
+  # provider call. Slash commands are not meaningful as steering messages
+  # (they would redirect to the model as text, which is the expected behaviour
+  # for a mid-turn steering intervention).
+  defp drain_steering_queue_one(data) do
+    case :queue.out(data.steering_queue) do
+      {:empty, _} ->
+        data
+
+      {{:value, msg}, rest} ->
+        :telemetry.execute(
+          [:tau, :session, :steering, :delivered],
+          %{system_time: System.system_time()},
+          %{session_id: data.id, from_state: :tool_executing}
+        )
+
+        emit_user_message_telemetry(:delivered, data, :tool_executing)
+
+        data
+        |> append_message(msg)
+        |> persist_event("user_message", message_to_data(msg))
+        |> Map.put(:steering_queue, rest)
+    end
   end
 end
