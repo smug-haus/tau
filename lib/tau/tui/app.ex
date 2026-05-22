@@ -412,7 +412,11 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       model
     end
 
-    defp quit_or_append(model), do: append_input(model, "q")
+    defp quit_or_append(model) do
+      model
+      |> append_input("q")
+      |> update_menu()
+    end
 
     defp append_input(model, ch), do: %{model | input: model.input <> ch}
 
@@ -449,14 +453,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         query = String.slice(trimmed, 1..-1//1)
         candidates = effective_catalog(model)
 
-        ranked =
-          case Fuzzy.match(query, candidates) do
-            [] when query == "" ->
-              Enum.map(candidates, fn e -> {0, e} end)
-
-            results ->
-              results
-          end
+        ranked = Fuzzy.match(query, candidates)
 
         selected = clamp(Map.get(model.menu || %{}, :selected, 0), length(ranked) - 1)
 

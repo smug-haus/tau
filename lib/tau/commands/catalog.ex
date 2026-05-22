@@ -16,10 +16,10 @@ defmodule Tau.Commands.Catalog do
   2. `Registry.select(Tau.Commands.Registry, ...)` — extension + file commands
      registered at runtime.
   3. `session_data.skills` — `/skill:name` entries from the session.
-  4. `Tau.PromptTemplates.discover/0` — discovered prompt templates.
-     Wrapped in a pluggable fold that no-ops if `Tau.PromptTemplates` is
-     absent or if `session_data.prompt_templates` is empty (C9-B3 /
-     SPEC-TUI-COMPLETION §3).
+  4. `session_data.prompt_templates` — the session-owned prompt-template list
+     (a `[{name, template}]` keyword list refreshed by `/reload`). Consistent
+     with `classify_slash_command/2` which reads the same field (C9-B3 /
+     SPEC-TUI-COMPLETION §3). No-ops cleanly when the field is absent or empty.
 
   ## Entry shape
 

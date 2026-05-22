@@ -96,10 +96,12 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
   line with whitespace (e.g. `/usr/bin is a path`) or a real prose line MUST
   still pass through to `{:sync, msg}` and reach the model. Intercepting prose
   would falsify AC-7.
-- **[C9-B3]** `Catalog.list/1` MUST no-op cleanly if `Tau.PromptTemplates` is
-  absent (e.g. if the module is not loaded). The template fold is pluggable: use
-  `Code.ensure_loaded?/1` or a `try/rescue` to detect absence. The other three
-  sources (builtins, registry, skills) are always present.
+- **[C9-B3]** `Catalog.list/1` reads prompt templates from
+  `session_data.prompt_templates` (the session-owned `[{name, template}]` list
+  kept in FSM `data`, consistent with `classify_slash_command/2`). The template
+  fold no-ops cleanly when the field is absent or empty — no call to
+  `Tau.PromptTemplates.discover/0` is made. The other three sources (builtins,
+  registry, skills) are always present.
 
 ### Q4: What invariants must hold across restarts?
 
@@ -230,15 +232,14 @@ With the menu open, pressing `Esc` closes the menu and does NOT cancel the
 session (no `Cancelled` notice appears; status stays idle). This requires the
 menu-dismiss `Esc` clause to precede the existing `Esc`→`cancel/1` clause.
 
-**Advances:** D-105 (D-106 is the invariant this AC enforces). **Test:**
-`test/tau/tui/app_test.exs`.
+**Advances:** D-105. **Test:** `test/tau/tui/app_test.exs`.
 
-### AC-7 (D-106) — Prose with `/` passes through
+### AC-7 (D-101) — Prose with `/` passes through
 
 `/usr/bin is a path` + Enter (a line with whitespace) is sent to the model as
 prose (status → `:streaming`). The unknown-command guard MUST NOT intercept it.
 
-**Advances:** D-106 (C8-B5). **Test:** `test/tau/session/unknown_command_test.exs`.
+**Advances:** D-101 (C8-B5). **Test:** `test/tau/session/unknown_command_test.exs`.
 
 ### AC-8 (D-107) — Catalog/dispatcher precedence parity (property test)
 
@@ -261,7 +262,8 @@ always-present compile-time floor) and does NOT crash. This guards C3-B1.
 
 A bare `/` followed by Enter (empty command with whitespace-free `/`-only
 input) does NOT crash, does NOT submit prose to the model, and produces a
-`SystemNotice`. Guards C7-B5.
+`SystemNotice`. Guards C8-B5 (the unknown-command guard) and D-109 (Fuzzy
+empty-query safety).
 
 **Advances:** D-109. **Test:** `test/tau/session/unknown_command_test.exs`.
 
