@@ -114,6 +114,50 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       |> App.update(@enter_event)
     end
 
+    # Stand in for the session FSM at a given `session_id`. The real
+    # `Tau.Session.decide_permission/3` resolves the id through
+    # `Tau.Sessions.Registry` (`:unique`) and then `:gen_statem.cast`s
+    # `{:permission_decision, tool_call_id, verdict}` to the registered pid
+    # (SPEC-PERMISSION-PROMPTS §4 B5 / D-096). `:gen_statem.cast/2` delivers
+    # the payload as a `{:"$gen_cast", msg}` message. This stub registers
+    # itself under that `session_id` and forwards every `:gen_statem` cast it
+    # receives to the test process, so the test can `assert_receive` the
+    # *actual verdict* that reached the session — not merely the popped queue.
+    #
+    # The stub's PID is registered as the session, so the cast genuinely
+    # traverses the registry-lookup + cast path the production code uses.
+    defp start_session_stub(session_id) do
+      test_pid = self()
+
+      stub =
+        spawn_link(fn ->
+          {:ok, _} = Registry.register(Tau.Sessions.Registry, session_id, nil)
+          send(test_pid, {:stub_registered, session_id})
+          stub_loop(test_pid)
+        end)
+
+      # Block until the stub has registered, so `decide_permission/3` cannot
+      # race ahead of the registration and observe `{:error, :not_found}`.
+      receive do
+        {:stub_registered, ^session_id} -> :ok
+      after
+        1_000 -> flunk("session stub failed to register under #{inspect(session_id)}")
+      end
+
+      stub
+    end
+
+    defp stub_loop(test_pid) do
+      receive do
+        {:"$gen_cast", payload} ->
+          send(test_pid, {:session_cast, payload})
+          stub_loop(test_pid)
+
+        _other ->
+          stub_loop(test_pid)
+      end
+    end
+
     # Render the App view tree to a flat list of all label content strings,
     # so a test can assert dialog text appears somewhere in the frame.
     defp render_texts(model) do
@@ -174,12 +218,24 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
     # ------------------------------------------------------------------
     # AC-B2 — `y` resolves the head request with :allow_once and pops it.
+    #
+    # The substantive half of this AC is the *verdict*: `y` MUST send
+    # `:allow_once` to the session. Popping the queue is necessary but not
+    # sufficient — a verdict-swapped implementation (`y` → `:deny_once`) also
+    # pops the head. To make the verdict observable, a `start_session_stub/1`
+    # process is registered under the model's `session_id`; the real
+    # `Tau.Session.decide_permission/3` then casts the verdict to that stub,
+    # which forwards it here. `assert_receive {:session_cast, ...}` therefore
+    # fails iff the implementation sends anything other than `:allow_once`.
     # ------------------------------------------------------------------
     describe "AC-B2 — `y` allows the head request" do
       @tag :ac_b2
-      test "AC-B2: `y` key with dialog open pops the head request (allow_once)" do
+      test "AC-B2: `y` key sends :allow_once to the session and pops the head request" do
+        session_id = "sess-ac-b2-#{System.unique_integer([:positive])}"
+        _stub = start_session_stub(session_id)
+
         m =
-          model()
+          model(%{session_id: session_id})
           |> App.update(permission_request("tc-allow", "Bash"))
 
         assert length(m.pending_permissions) == 1,
@@ -189,19 +245,38 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         next = App.update(m, key_event(%{ch: ?y}))
 
         assert next.pending_permissions == [],
-               "AC-B2: pressing `y` MUST resolve (allow_once) and pop the head request; " <>
+               "AC-B2: pressing `y` MUST resolve and pop the head request; " <>
                  "got: #{inspect(next.pending_permissions)}"
+
+        # The substantive assertion: the verdict that reached the session is
+        # `:allow_once`, carrying the head request's tool_call_id. This fails
+        # if the implementation sends `:deny_once` (verdict swap) instead.
+        assert_receive {:session_cast, {:permission_decision, "tc-allow", :allow_once}},
+                       1_000,
+                       "AC-B2: pressing `y` MUST send {:permission_decision, \"tc-allow\", " <>
+                         ":allow_once} to the session via decide_permission/3; no such cast " <>
+                         "was observed (a `:deny_once` verdict, or no cast at all, would " <>
+                         "fail this assertion)."
       end
     end
 
     # ------------------------------------------------------------------
     # AC-B3 — `n` resolves the head request with :deny_once and pops it.
+    #
+    # Mirror of AC-B2: the substantive half is the verdict. `n` MUST send
+    # `:deny_once` to the session. The `start_session_stub/1` process makes
+    # the cast observable; the `assert_receive` below fails iff the
+    # implementation sends anything other than `:deny_once` (in particular a
+    # verdict swap `n` → `:allow_once`).
     # ------------------------------------------------------------------
     describe "AC-B3 — `n` denies the head request" do
       @tag :ac_b3
-      test "AC-B3: `n` key with dialog open pops the head request (deny_once)" do
+      test "AC-B3: `n` key sends :deny_once to the session and pops the head request" do
+        session_id = "sess-ac-b3-#{System.unique_integer([:positive])}"
+        _stub = start_session_stub(session_id)
+
         m =
-          model()
+          model(%{session_id: session_id})
           |> App.update(permission_request("tc-deny", "Write"))
 
         assert length(m.pending_permissions) == 1,
@@ -210,8 +285,18 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         next = App.update(m, key_event(%{ch: ?n}))
 
         assert next.pending_permissions == [],
-               "AC-B3: pressing `n` MUST resolve (deny_once) and pop the head request; " <>
+               "AC-B3: pressing `n` MUST resolve and pop the head request; " <>
                  "got: #{inspect(next.pending_permissions)}"
+
+        # The substantive assertion: the verdict that reached the session is
+        # `:deny_once`, carrying the head request's tool_call_id. This fails
+        # if the implementation sends `:allow_once` (verdict swap) instead.
+        assert_receive {:session_cast, {:permission_decision, "tc-deny", :deny_once}},
+                       1_000,
+                       "AC-B3: pressing `n` MUST send {:permission_decision, \"tc-deny\", " <>
+                         ":deny_once} to the session via decide_permission/3; no such cast " <>
+                         "was observed (an `:allow_once` verdict, or no cast at all, would " <>
+                         "fail this assertion)."
       end
     end
 
