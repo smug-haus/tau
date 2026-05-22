@@ -12,4 +12,4 @@ Hook scripts are infrastructure, not task code. Apply these rules without except
 
 **Do not route around hooks.** If a hook blocks an action, treat the block as signal. Stop, read the reason, and address the underlying issue. Circumventing the kill cascade defeats its purpose.
 
-**Hook scripts use Python stdlib only.** No pip dependencies. `json`, `hashlib`, `pathlib`, `sys`, `os`, `collections` — that is the full allowed set.
+**Hook scripts use Python stdlib only.** No pip dependencies. Anything in the Python 3.10+ stdlib is allowed; the set in use today includes `json`, `hashlib`, `pathlib`, `sys`, `os`, `collections`, `re`, and `datetime`.

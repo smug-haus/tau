@@ -88,8 +88,7 @@ mix compile                        # ex_termbox waf finds .venv/bin/python
 `MIX_ENV=prod mix release` does not need Python — TUI is dev-only — so
 escript-shaped binary releases are unaffected when Python isn't available.
 
-See `CONTRIBUTING.md` § "Build prerequisites" for the full story; issue #136
-tracks the underlying waf incompatibility.
+See `CONTRIBUTING.md` § "Build prerequisites" for the full story.
 
 ## When you DON'T need this skill
 
@@ -122,10 +121,11 @@ install script honours `ERLANG_VERSION` / `ELIXIR_VERSION` /
 `.tool-versions` first and re-run the script.
 
 Zig version is pinned at `ZIG_VERSION=0.15.2` inside
-`scripts/install-toolchain.sh` (matches `mlugg/setup-zig@v1` pin in
-`release.yml` and `ci.yml`). To upgrade: change `ZIG_VERSION` in the
-script, update this skill's TL;DR and table, and update the version string
-in `release.yml` / `ci.yml`.
+`scripts/install-toolchain.sh`; CI downloads it directly from
+`https://ziglang.org/download/` (see `.github/workflows/ci.yml` and
+`release.yml`). To upgrade: change `ZIG_VERSION` in the script, update
+this skill's TL;DR and table, and update the version string in the
+two workflow files.
 
 `xz` is a distro package and is not pinned; any recent version of
 `xz-utils` (Ubuntu 20.04+) is sufficient.

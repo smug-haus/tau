@@ -10,8 +10,7 @@ Run the blocking PR gate against the step's **existing draft PR** — opened
 at factory-cycle step 4, before the implementer was spawned. `/pr` does
 **not** create the PR and does **not** merge it. Both `critic` and
 `reviewer` MUST return `{"ok": true}` before the PR may be marked ready and
-merged by the factory cycle. Either gate failing appends a
-`failed_evaluation` attempt to the solution tree and aborts — the
+merged by the factory cycle. Either gate failing aborts — the
 coordinator then chooses **refine** or **pivot**.
 
 Steps in order — **do not skip**.
@@ -81,19 +80,11 @@ use `ok` only.
 
 If `critic` returned `{"ok": false, ...}`:
 
-1. Append an attempt to `.claude/logs/solution-tree.json`:
-   ```json
-   {
-     "attempt_id": <n>,
-     "approach_summary": "<one-line summary of the diff>",
-     "outcome": "failed_evaluation",
-     "kill_reason": "critic_blocked: <reason from JSON>",
-     "files_modified": [<list>]
-   }
-   ```
-   Initialise the file with `{"task_id": "<branch-name>", "attempts": []}` if it does not exist.
-2. Print the full reason to the user.
-3. **Abort.** Do not proceed to step 6; do not mark the draft PR ready.
+1. Print the full reason to the user.
+2. **Abort.** Do not proceed to step 6; do not mark the draft PR ready.
+
+The veto and its evidence live in the conversation; refine attempts
+reference prior critic findings by recall, not by a separate log.
 
 ## Step 6 — Spawn `reviewer` (quality veto)
 
@@ -123,13 +114,11 @@ field — extract that for the solution tree and PR body.
 
 ## Step 7 — On `reviewer` veto
 
-Same as step 5, but with `kill_reason: "reviewer_blocked: <reason>"`.
+Same as step 5 — print the full reason and abort.
 
 ## Step 8 — Both passed
 
-Append to the solution tree with `outcome: "pr_gates_passed"` and the
-two verdicts. Then update the **existing draft PR body's Gate-verdicts
-section** in place — read the current body (`gh pr view <n> --json body`),
+Update the **existing draft PR body's Gate-verdicts section** in place — read the current body (`gh pr view <n> --json body`),
 fill the section, and write it back with `gh pr edit <n> --body-file <tmpfile>`:
 
 ```
@@ -145,11 +134,11 @@ Report the green verdict to the coordinator.
 
 ## Recovery
 
-`/pr` is idempotent across attempts — every invocation appends a new
-attempt to the solution tree. After **3 consecutive** veto-failures on
-the same task, the harness's mandatory meta-restart kicks in: compress
-all attempt history to ≤1000 tokens and restart the coordinator. This is
-not optional.
+`/pr` is idempotent across attempts — re-running it on a refined branch
+re-runs both gates from scratch. After **3 consecutive** veto-failures
+on the same task, the harness's mandatory meta-restart kicks in:
+compress all attempt history to ≤1000 tokens and restart the
+coordinator. This is not optional.
 
 The gate **cannot be bypassed.** If you find yourself wanting to skip
 `critic` or `reviewer`, that is the signal that something is wrong with

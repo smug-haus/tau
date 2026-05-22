@@ -38,19 +38,7 @@ Read `.claude/logs/kill-signal.json`:
     timestamp: 2026-02-22T14:32:01Z
   ```
 
-## 3. Solution Tree
-
-Read `.claude/logs/solution-tree.json`:
-- If absent: report "No active solution tree."
-- If present: display `task_id`, `attempt_count`, `current_strategy`, and `last_outcome`. Example:
-  ```
-  Solution tree: task-abc123
-    attempts: 3
-    strategy: refine
-    last outcome: FAIL — off-by-one in loop bounds
-  ```
-
-## 4. Recent Heuristic Triggers
+## 3. Recent Heuristic Triggers
 
 Grep `.claude/logs/observations.jsonl` for the last 20 observations that contain a `heuristic_id` field or a `confidence` value above 0.0. List each: heuristic ID, confidence, and trigger reason. Example:
   ```

@@ -35,7 +35,7 @@ UNTRACKED="$(git -C <worktree> ls-files --others --exclude-standard)"
 git worktree remove -f -f <worktree>
 ```
 
-A naïve `git diff` (without `HEAD`) silently omits staged work; omitting the untracked-tar step silently omits new files. Both are common end-states for a mid-task kill. (Empirically verified 2026-05-20: a killed implementer for #273 had an untracked new test file that the naïve sequence would have lost.) The capture is unconditional whenever the worktree may have changes — it is cheap and benign if the worktree is clean.
+A naïve `git diff` (without `HEAD`) silently omits staged work; omitting the untracked-tar step silently omits new files. Both are common end-states for a mid-task kill. The capture is unconditional whenever the worktree may have changes — it is cheap and benign if the worktree is clean.
 
 Replaying captured state into a fresh worktree:
 

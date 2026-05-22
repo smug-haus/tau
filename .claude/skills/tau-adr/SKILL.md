@@ -42,5 +42,4 @@ why a future change would need fresh justification.
 
 - **`docs/adr/README.md`** — full conventions (naming, status
   lifecycle, when to supersede, how to index).
-- **`docs/adr/`** — the existing ADRs (ADR-0001 through ADR-0017 at the
-  time of writing) for examples.
+- **`docs/adr/`** — the existing ADRs (numbered `0XXX-*.md`) for examples.

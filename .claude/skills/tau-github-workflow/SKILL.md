@@ -14,9 +14,9 @@ GitHub is the backlog. Three primitives carry the work:
 
 - **Issues** — the unit of work. One feature / bug / polish item /
   doc gap per issue.
-- **Milestones** — `M0` through `M8` plus named refactors (e.g.
-  "harness adoption"). The milestone **description** holds the
-  milestone plan; issues are filed against the milestone.
+- **Milestones** — see `gh api 'repos/{owner}/{repo}/milestones?state=all'`
+  for the current set. The milestone **description** holds the milestone
+  plan; issues are filed against the milestone.
 - **`Tau` project board** — columns `Todo` / `In Progress` /
   `In Review` / `Done`, spanning all milestones. Issues and PRs are
   added to the board on creation.

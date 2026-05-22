@@ -75,11 +75,11 @@ isolation — the parent and child can't race a single working tree.
 
 ## §Subagent Routing — project-local persona limitation
 
-The harness ships three persona definitions at `.claude/agents/{critic,reviewer,implementer}.md`.
-These files document persona invariants and are the source of truth for each role's
-allowed tools, model, and behaviour contract. They are load-bearing documentation.
+The harness ships persona definitions under `.claude/agents/`. Each file documents
+a role's allowed tools, model, and behaviour contract; they are load-bearing
+documentation.
 
-**Known limitation (issue #125):** Claude Code's Task tool dispatcher auto-registers
+**Known limitation:** Claude Code's Task tool dispatcher auto-registers
 agents only from `~/.claude/agents/` (user-level) and from installed plugin `agents/`
 directories. It does NOT auto-register agents from `<project>/.claude/agents/`. This
 means `Task({subagent_type: "critic", ...})` returns "Agent type 'critic' not found"
@@ -90,21 +90,18 @@ Instead, inline the persona's system prompt (from the `.claude/agents/<name>.md`
 directly in the Task tool's `prompt` argument. The persona files serve as the canonical
 source to copy from. This is how `/pr` and `/test-persona` work.
 
-**Future path (issue #125 follow-up):** If a proper fix is needed, two options exist:
-- Path A: Find and configure a `settings.json` key that adds project-local agent lookup
-  paths. Investigated 2026-05-14: Claude Code docs, plugin manifests under
-  `~/.claude/plugins/`, and the vendored hyperagents plugin were checked; no
-  `subagent_lookup_paths` or equivalent key exists in any settings schema at that
-  date. Re-investigate if a new Claude Code release lands.
+**Future path:** Two options exist for a proper fix:
+- Path A: Find and configure a `settings.json` key that adds project-local agent
+  lookup paths (no such key existed in Claude Code as of last investigation;
+  re-investigate when a release brings one).
 - Path B: Wire Tau's own `Tau.Tools.Builtin.Agent` to resolve personas from
-  `.claude/agents/*.md` and route to the right model+permissions, dogfooding Tau as
-  the harness's own agent dispatcher.
+  `.claude/agents/*.md` and route to the right model+permissions, dogfooding Tau
+  as the harness's own agent dispatcher.
 
 ## §4 Architectural decisions
 
 The non-negotiables (`.claude/rules/otp-non-negotiables.md`) tell you
 what's _forbidden_. ADRs in `docs/adr/` tell you what was _chosen_, and
 why a future change would need fresh justification. Read
-`docs/adr/README.md` first; index lists ADR-0001 through ADR-0017 at
-the time of writing. The `tau-adr` skill covers when and how to add a
-new one.
+`docs/adr/README.md` first; it indexes the existing ADRs. The
+`tau-adr` skill covers when and how to add a new one.
