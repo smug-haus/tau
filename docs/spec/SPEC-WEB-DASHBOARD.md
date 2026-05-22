@@ -57,8 +57,10 @@ node. The endpoint is configured with `pubsub_server: Tau.PubSub`; the
 `Application.get_env(:tau_web, TauWeb.Endpoint)[:pubsub_server]` returns
 `Tau.PubSub` (D-184, see §4 B4 and §6).
 
-**Endpoint.** `TauWebWeb.Endpoint` is the Phoenix endpoint module (following
-`phx.new --app tau_web` naming convention). It is supervised by
+**Endpoint.** `TauWeb.Endpoint` is the Phoenix endpoint module. The project
+uses a single collapsed `TauWeb` namespace — the `_web`-suffixed app
+deliberately does NOT take the double-`Web` (`TauWebWeb`) default that
+`phx.new --app tau_web` would otherwise generate. It is supervised by
 `TauWeb.Application`, not by `Tau.Application`.
 
 ## 3. Constraints (L0)
@@ -150,13 +152,13 @@ a derived atom name (D-186).
 ### B4 — PubSub reuse (no second Phoenix.PubSub)
 
 `:tau_web` MUST NOT start its own `Phoenix.PubSub` process. The invariant is
-enforced at two levels:
+enforced at two levels (both are sub-points of **D-184**):
 
-1. **Supervisor children (D-184a):** `TauWeb.Application.start/2` MUST NOT
+1. **Supervisor children:** `TauWeb.Application.start/2` MUST NOT
    include `{Phoenix.PubSub, …}` in its child list. `Supervisor.which_children/1`
    on `TauWeb.Supervisor` MUST return an empty list when filtered for
    `Phoenix.PubSub` children.
-2. **Endpoint configuration (D-184b):** `Application.get_env(:tau_web,
+2. **Endpoint configuration:** `Application.get_env(:tau_web,
    TauWeb.Endpoint)[:pubsub_server]` MUST equal `Tau.PubSub`.
 
 ### B5 — Telemetry namespace
@@ -176,7 +178,7 @@ or `[:tau_web, …]` prefixes at the application level (D-187).
 - **AC-3** `GET /health` returns HTTP 200, content-type `application/json`,
   body `{"status": "ok", "tau_version": "<v>"}` where `<v>` equals
   `to_string(Application.spec(:tau, :vsn))`. Exercised by `Phoenix.ConnTest`
-  through the real `TauWebWeb.Router` (not a hand-built conn).
+  through the real `TauWeb.Router` (not a hand-built conn).
 - **AC-4** `:tau_web` reuses `Tau.PubSub` and starts no second
   `Phoenix.PubSub`. Asserted by `Supervisor.which_children(TauWeb.Supervisor)`
   returning no `Phoenix.PubSub` child AND
@@ -192,8 +194,7 @@ or `[:tau_web, …]` prefixes at the application level (D-187).
 | D-181 | Replay-before-subscribe ordering: `Tau.Persistence.read/1` MUST complete and replay events MUST be applied to assigns BEFORE `Phoenix.PubSub.subscribe/2` is called in `mount/3`. |
 | D-182 | No direct gen_statem access: LiveView handlers MUST NOT call `:gen_statem.call/cast` on session PIDs. All session interaction goes through the public `Tau` module API. |
 | D-183 | No parallel event format: `handle_info/2` MUST consume `Tau.Session.Events` structs as-is. `:tau_web` MUST NOT define a parallel or shadow event struct for the same events. |
-| D-184a | No second PubSub child: `TauWeb.Application.start/2` MUST NOT include `{Phoenix.PubSub, …}` in its children. `Supervisor.which_children(TauWeb.Supervisor)` filtered for `Phoenix.PubSub` MUST return `[]`. |
-| D-184b | Endpoint PubSub config: `Application.get_env(:tau_web, TauWeb.Endpoint)[:pubsub_server]` MUST equal `Tau.PubSub`. |
+| D-184 | No second PubSub / correct endpoint config: (1) `TauWeb.Application.start/2` MUST NOT include `{Phoenix.PubSub, …}` in its children — `Supervisor.which_children(TauWeb.Supervisor)` filtered for `Phoenix.PubSub` MUST return `[]`; (2) `Application.get_env(:tau_web, TauWeb.Endpoint)[:pubsub_server]` MUST equal `Tau.PubSub`. |
 | D-185 | /health uses Application.spec: the `/health` controller MUST use `Application.spec(:tau, :vsn)` to obtain the `:tau` version, not a process call to `Tau.Sessions.Registry`. |
 | D-186 | Registry lookup via public API: `Tau.Sessions.Registry.lookup/1` is the only permitted session-liveness probe from LiveView. `Process.whereis/1` with a derived atom is forbidden. |
 | D-187 | Telemetry namespace: `:tau_web`-originated telemetry MUST use `[:tau, :web, …]` prefix. |
@@ -219,12 +220,12 @@ from this document):
 
 | File | Owner boundary |
 |---|---|
-| `web/lib/tau_web/application.ex` | B4, D-184a, D-188 |
-| `web/lib/tau_web_web/endpoint.ex` | B4, D-184b |
-| `web/lib/tau_web_web/router.ex` | AC-3 |
-| `web/lib/tau_web_web/controllers/health_controller.ex` | AC-3, D-185 |
-| `web/lib/tau_web_web/telemetry.ex` | B5, D-187 |
-| `web/config/config.exs` | B4, D-184b |
+| `web/lib/tau_web/application.ex` | B4, D-184, D-188 |
+| `web/lib/tau_web/endpoint.ex` | B4, D-184 |
+| `web/lib/tau_web/router.ex` | AC-3 |
+| `web/lib/tau_web/controllers/health_controller.ex` | AC-3, D-185 |
+| `web/lib/tau_web/telemetry.ex` | B5, D-187 |
+| `web/config/config.exs` | B4, D-184 |
 | `web/mix.exs` | AC-2, D-188 |
 | `web/test/tau_web/foundation_test.exs` | AC-3, AC-4 |
 | `web/test/support/conn_case.ex` | AC-3, AC-4 |
