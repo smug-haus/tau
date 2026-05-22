@@ -81,6 +81,24 @@ them concurrently. Never merge an ungated or stale diff.
    `gh pr create --draft` with the body set to the full work plan (see "The
    draft-PR body"). The draft PR is the durable plan-of-record and the single
    source of the implementer brief.
+4b. **Spawn the test-author** (oracle-separation phase). Skipped for a PR that
+    claims no `AC-N`/`D-NNN` (a typo fix, dep bump, or formatting-only PR —
+    mirroring `spec-before-code.md`'s out-of-scope exemption). When the PR
+    claims at least one `AC-N`/`D-NNN`:
+    a. Spawn one `test-author` agent with `isolation: worktree`, briefed on the
+       draft-PR body's `AC-N`/`D-NNN` set and the in-scope `SPEC-*.md` §4
+       boundary contracts.
+    b. The test-author writes one failing test per `AC-N`/`D-NNN` exercising
+       the user-facing path, commits them, and reports the exact `test/...` file
+       paths it owns.
+    c. Update the draft-PR body's **Gating-test paths** section with those exact
+       paths before spawning the implementer team. These paths (not commit
+       attribution) define the test/production boundary all subsequent gates key
+       on.
+    d. If the test-author surfaces a **SPEC gap** (a §4 interface detail missing
+       from the SPEC), land a §3 SPEC amendment in this PR via
+       `spec-before-code.md`'s existing amendment path before re-spawning the
+       test-author.
 5. **Spawn the implementer team.** One or more `implementer` agents, each with
    `isolation: worktree`, each briefed to check out the existing feature branch
    and work from the draft PR body. Briefs obey spawn-brief integrity
@@ -120,6 +138,11 @@ no brief/PR drift. It MUST state:
 - **Dependencies** — issues or PRs this is blocked-by or blocks.
 - **SPECs** — every `docs/spec/SPEC-*.md` in scope, whether this PR authors,
   amends, or merely conforms to each, and the `AC-N` / `D-NNN` it advances.
+- **Gating-test paths** — the exact `test/...` file paths the test-author owns
+  for this PR (filled in at cycle step 4b; absent for PRs claiming no
+  `AC-N`/`D-NNN`). This path set is the boundary the mechanical gates key on;
+  it is frozen once declared and MAY NOT be changed without re-running the
+  full gate.
 - **Gate verdicts** — a section filled in at gate time (`critic`, `reviewer`).
 
 A **refine** stays on the same draft PR. A **pivot** closes the draft PR and
@@ -160,7 +183,10 @@ Two or more issues may be worked concurrently only if ALL of these hold:
    tracking issue.
 2. **Disjoint files.** Their expected changed-file sets do not overlap — derive
    the sets from the issues' elaborations and the relevant `SPEC-*.md`
-   Appendix-B source-maps; grep the cited modules when unsure.
+   Appendix-B source-maps; grep the cited modules when unsure. The changed-file
+   set now also includes the **test-author's declared gating-test paths** (a new
+   shared-`test/support` collision surface): two steps that would write to the
+   same gating-test file or shared test-support module must serialize.
 3. **Disjoint codepoints.** They do not modify the same function. Elaboration
    briefs cite `file:line` — use them. The same file touched at clearly
    separate, stable regions MAY still parallelise, but the burden of proof is on
@@ -234,6 +260,58 @@ BOTH `critic` and `reviewer` on the actual PR diff before it is merged.
 step 4 — `/pr` does not create it). On green the cycle marks the PR ready and
 proceeds through step 8. Both verdicts are recorded in the solution tree and in
 the PR body's gate-verdicts section; a re-run gate replaces the prior verdicts.
+
+## Challenge protocol
+
+An implementer may challenge a gating test — only if the test contradicts a
+SPEC §4 contract, not merely because the test is hard to satisfy. The protocol:
+
+1. The implementer STOPS and reports a **challenge** to the coordinator: names
+   the test, the specific SPEC §4 clause it contradicts, and the contradiction.
+   It MUST NOT edit the gating test.
+2. The coordinator forwards the challenge to the `critic` (an independent
+   read-only oracle — NOT the coordinator's own judgement).
+3. The critic rules: **upheld** (the test contradicts the contract) or
+   **rejected** (the implementer must comply with the test as written).
+4. If upheld: the test-author corrects the test, the mutation check (gate 5.3)
+   re-runs against the corrected test.
+5. Every challenge is logged in the solution tree with the critic's verdict.
+6. **More than 2 upheld challenges on one PR** is a safety-circuit escalation
+   signal — the coordinator escalates (see "Stop / escalate conditions") rather
+   than continuing. This indicates a weak test-author or an underspecified SPEC.
+
+## The three mechanical gates *(pending PR-B / issue #370)*
+
+These gates are documented here as policy; PR-B implements them as CI. Until
+PR-B lands, the reviewer notes each gate as **pending** rather than failing the
+PR for its absence.
+
+**Gate 5.1 — AC-to-test linkage.** Every `AC-N`/`D-NNN` the draft-PR body
+claims MUST appear in a gating-test name or `@tag`. Verified by CI after PR-B;
+verified by reviewer inspection until then.
+
+**Gate 5.2 — Masking detection (detection-only).** The PR diff is scanned for
+deleted or weakened assertions: any `-  assert` / `-  refute` line, or any
+implementer edit to a declared gating-test path. There is **no self-authored
+bypass tag** — every flagged deletion is surfaced to the `critic` as a mandatory
+review item; the critic rules whether the deletion is legitimate or a weakening.
+Path-based (uses the declared gating-test path set, not commit attribution).
+
+**Gate 5.3 — Mutation check (path-based).** Using the declared gating-test path
+set: check out those paths at the test-author's committed state, revert every
+other path to its pre-implementer state, run the gating tests, and assert that
+≥1 test fails. Path-based rather than commit-based so it survives refine-cycle
+rebases.
+
+### Residual — what these gates do NOT close
+
+Oracle separation plus the mutation check (gate 5.3) closes the **vacuous test**
+hole: a test that passes against absent or un-implemented code. It does NOT
+mechanically catch an **under-asserting** test (e.g. checks `exit 0` but not
+output) or a **wrong-path** test (exercises a hand-built struct rather than the
+real entry point). Those remain covered only by the `critic`'s judgement (see
+"Gating-test review" in `critic.md`). The three mechanical gates do not create
+false confidence about under-asserting or wrong-path tests.
 
 ## Outcomes
 
@@ -321,6 +399,9 @@ forever — on any of:
    reports failing `mix compile --warnings-as-errors` or `mix test`. The loop
    halts with `main` left red and the failing check named, so the user can
    decide whether to revert the offending merge or fix forward.
+7. **More than 2 upheld implementer challenges on one PR** — indicates a weak
+   test-author output or an underspecified SPEC. Escalate rather than continuing
+   refine cycles; surface the challenge log to the user.
 
 On any condition, write the reason and current state to the solution tree and
 report to the user. Halting on a safety condition is correct behaviour.
@@ -409,6 +490,8 @@ detail and rationale.
 - MUST NOT spawn concurrent agents touching the same `$HOME`-namespace cache
   without per-agent isolation in their brief.
 - MUST NOT spawn an implementer before the step's draft PR is open.
+- MUST NOT spawn an implementer before phase 4b is complete (or confirmed
+  skipped) for a PR claiming `AC-N`/`D-NNN`.
 - MUST NOT grow a PR beyond the issue set declared in its draft-PR body.
 - MUST NOT reshape, split, or defer a filed issue to fit PR sizing.
 - MUST NOT treat a finding that falsifies a named `AC-N` / `D-NNN` as a
@@ -418,6 +501,16 @@ detail and rationale.
 - MUST NOT cite token or wall-time numbers without sourcing them from the task
   notification (`total_tokens` / `duration_ms`).
 - MUST NOT proceed when `.claude/STOP-FACTORY` is present.
+- MUST NOT allow the implementer to edit a declared gating-test path; that is a
+  challenge-protocol violation even if no deletion occurs.
+- MUST NOT allow an implementer challenge to be adjudicated by the coordinator's
+  own judgement; all challenges route to the `critic`.
+- MUST NOT continue a PR past 2 upheld implementer challenges; escalate per
+  safety-circuit condition 7.
+- MUST NOT treat a PR's gating-test path set as frozen before the draft-PR body
+  declares it (i.e. before phase 4b completes).
+- MUST NOT use commit attribution to determine the test/production boundary; use
+  the declared gating-test path set.
 
 ## When to update this rule
 

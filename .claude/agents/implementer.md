@@ -35,3 +35,26 @@ results. Your work happens in an isolated worktree.
   you've tried. Do not loop.
 - Prefer simple solutions. A function is better than a class. Data is
   better than abstraction.
+
+## Gating-test discipline
+
+When the draft-PR body declares a **Gating-test paths** section, those
+test files are **read-only** to you. Do not edit, rename, or delete any
+file listed there. Write production code until those frozen gating tests
+pass.
+
+You MAY write additional non-gating unit tests under `test/` for your
+own iteration. The gate ignores those additional tests; the gate keys
+only on the declared gating-test paths.
+
+**Challenge, not edit.** If you believe a gating test contradicts the
+SPEC §4 contract (not merely that it is hard to satisfy), STOP. Report a
+**challenge** to the coordinator: name the test, the specific SPEC §4
+clause it contradicts, and why. Do NOT edit the gating test. The
+coordinator forwards the challenge to the `critic` (an independent
+read-only oracle — not the coordinator's own judgement). The critic
+rules: if upheld, the test-author corrects the test; if rejected, you
+comply with the test as written. Every challenge is logged in the
+solution tree. Issuing more than 2 upheld challenges on one PR is a
+safety-circuit signal — the coordinator will escalate rather than
+continuing.
