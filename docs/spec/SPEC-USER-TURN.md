@@ -687,22 +687,24 @@ If a future PR touches the user-turn loop and surfaces a constraint not in §3:
 
 ## Appendix B — Source map
 
-For each constraint, the file:line where it lives in the current codebase:
+For each constraint, the file (and where useful, the module / function)
+where it lives. Line numbers are deliberately omitted — they drift; module
+and function names are stable.
 
 | Constraint | Source |
 |---|---|
-| C6 | `lib/tau/tui/app.ex:18-21` (init order) |
-| C7 | `lib/tau/tui/app.ex:76` (`quit_events`) |
+| C6 | `lib/tau/tui/app.ex` — `init/1` boot ordering |
+| C7 | `lib/tau/tui/app.ex` — `quit_events/0` |
 | C8 | `lib/tau/settings/watcher.ex` (on file_system absence) |
-| C12, C19 | `lib/tau/session.ex:650-654` (sync error branch) + `lib/tau/tui/app.ex:183-200` (on_message_end) |
+| C12, C19 | `lib/tau/session.ex` (sync error branch) + `lib/tau/tui/app.ex` (`on_message_end`) |
 | D-009 | `lib/tau/message/assembler.ex` (`ensure_visible_content/1` + `finalize/3` — the single source-agnostic terminal fold) |
-| C15 | `lib/tau/tui/app.ex:156-165` (submit ignores Tau.send return) |
-| C24 | `lib/tau/session.ex:1056-1066` (no iteration cap) |
-| C29 | `lib/tau/session.ex:362-363` (model: opts[:model], no default) |
+| C15 | `lib/tau/tui/app.ex` (submit ignores `Tau.send` return) |
+| C24 | `lib/tau/session.ex` (D-027 enforces the cap; see Appendix entry for D-027) |
+| C29 | `lib/tau/session.ex` — `init/1` model resolution |
 | C33 | `lib/tau/session.ex` queue path (ADR-0009) + TUI no-render |
-| C35 | `lib/tau/tui/app.ex:228-237` (on_session_end no unsubscribe) |
-| L1-C43 | `lib/tau/session.ex` :stopped transition |
-| L1-C45 | `lib/tau/tui/app.ex:18-21` (no monitor on FSM pid) |
+| C35 | `lib/tau/tui/app.ex` (`on_session_end`) |
+| L1-C43 | `lib/tau/session.ex` `:stopped` transition |
+| L1-C45 | `lib/tau/tui/app.ex` (no monitor on FSM pid) |
 
 | C50 | `lib/tau/session.ex` init/1 — `max_tool_iterations` resolution (opts → Settings.Cache → 100) |
 | C53 | `lib/tau/application.ex` — `cli_argv/0` (env-marker read → delete → decode); `test/support/tui_pty_helper.ex` — `start/2` plain-release branch; `test/tau/application/cli_argv_test.exs` |
@@ -716,6 +718,19 @@ For each constraint, the file:line where it lives in the current codebase:
 
 | C80 | `lib/tau/providers/azure_openai.ex` — `Tau.Providers.AzureOpenAI` (`@behaviour Tau.Provider`; `azure_headers/1` builds `api-key` header; `build_url/3` composes deployment URL); `lib/tau/providers/shared/tool_spec.ex` — `shape/2` clause for `Tau.Providers.AzureOpenAI`; `lib/tau/cli.ex` — `resolve_provider("azure")` + `resolve_provider("azure-openai")` + `doctor_cmd` Azure key/endpoint/deployment report; `docs/providers/azure_openai.md`; `test/tau/providers/azure_openai_test.exs` |
 | C81 | `lib/tau/providers/custom.ex` — `Tau.Providers.Custom` (`@behaviour Tau.Provider`; `build_headers/2` omits `Authorization` when `api_key` nil; `resolve_config/0` returns `{:error, :missing_base_url}` as sole synchronous hard-config error); `lib/tau/providers/shared/tool_spec.ex` — `shape/2` clause for `Tau.Providers.Custom`; `lib/tau/cli.ex` — `resolve_provider("custom")` + `doctor_cmd` Custom base_url/api_key report; `docs/providers/custom.md`; `docs/spec/SPEC-USER-TURN.md` — C81, this Appendix B entry; `test/tau/providers/custom_test.exs` |
+
+## Appendix C — Consuming surfaces (post-authoring)
+
+This SPEC was authored before the following surfaces existed. Each consumes
+or extends the user-turn contracts but does not amend them in this file —
+the contracts that bind them are documented in their own SPEC (or, where
+none exists, in the module's `@moduledoc`).
+
+| Surface | Source | Contract documented in |
+|---|---|---|
+| `:tau_web` poncho (LiveView dashboard) | `web/lib/tau_web/` | `docs/spec/SPEC-WEB-DASHBOARD.md` — reuses `Tau.PubSub`; reads sessions via `Tau.snapshot/1` only. |
+| Factory mechanical gates | `lib/tau/factory/gate.ex` + `lib/mix/tasks/tau.gate.*` | The module's `@moduledoc` (pure module; not coordination-heavy enough for a SPEC). |
+| Coding-agent adapter | `lib/tau/coding_agent/`, `lib/tau/coding_agents/` | `docs/spec/SPEC-CODING-AGENT.md`. |
 
 | C82 | `lib/tau/providers/copilot/auth.ex` — `Tau.Providers.Copilot.Auth` (`resolve_oauth/1`, `token/1`, `refresh/2`, `describe_error/1`); `lib/tau/providers/copilot/token_store.ex` — `Tau.Providers.Copilot.TokenStore` (supervised GenServer; `get/0`, `put/1`, `clear/0`); `lib/tau/application.ex` — `Tau.Providers.Copilot.TokenStore` child spec; `lib/tau/cli.ex` — `doctor_cmd` Copilot auth-status report; `docs/spec/SPEC-USER-TURN.md` — C82, D-056; `test/tau/providers/copilot/auth_test.exs` |
 

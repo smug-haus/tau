@@ -138,7 +138,7 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
     or fail-closed non-interactive deny). Metadata: `session_id`, `tool_call_id`,
     `tool_name`, `decision` (`:allow_once | :deny_once | :deny_non_interactive`).
   - The existing `[:tau, :permissions, :decision]` event for rule-set `:deny` is
-    unchanged (already present at `session.ex:2268`).
+    unchanged (already present in `session.ex`).
 
 ### Q7: What is the `:cancel`-in-`:awaiting_permission` contract?
 

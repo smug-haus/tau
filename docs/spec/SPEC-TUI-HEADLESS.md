@@ -896,9 +896,9 @@ Files this SPEC touches (or proposes touching) on landing:
 
 | Element | Source |
 |---|---|
-| `Tau.TUI.App.@tick_interval` | `lib/tau/tui/app.ex:16` |
-| `Tau.TUI.App.init/1` | `lib/tau/tui/app.ex:18-37` |
-| `Tau.TUI.App.run/0` quit_events | `lib/tau/tui/app.ex:115-119` |
+| `Tau.TUI.App` tick attributes | `lib/tau/tui/app.ex` |
+| `Tau.TUI.App.init/1` | `lib/tau/tui/app.ex` |
+| `Tau.TUI.App` quit-events handling | `lib/tau/tui/app.ex` |
 | `Tau.TUI.Editor` | `lib/tau/tui/editor.ex` |
 | `Tau.TUI.SubagentTree` | `lib/tau/tui/subagent_tree.ex` |
 | `Tau.TUI.App.subagents` model field | `lib/tau/tui/app.ex` |

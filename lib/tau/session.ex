@@ -114,6 +114,7 @@ defmodule Tau.Session do
 
   # --- Public API (delegated from Tau) -------------------------------------
 
+  @doc "Start a session under `Tau.Sessions.Supervisor`. See `Tau.start_session/1` for the option set."
   @spec start(keyword()) :: {:ok, id()} | {:error, term()}
   def start(opts) do
     id = opts[:session_id] || generate_id()
@@ -128,6 +129,7 @@ defmodule Tau.Session do
   # dropped with a %SystemNotice{} (D-083 / critic S3).
   @queue_cap 32
 
+  @doc "Send a user message; queued as `:followup`. See `Tau.send/2`."
   @spec send(id(), String.t() | Tau.Message.t()) :: :ok | {:error, term()}
   def send(id, message) do
     with {:ok, pid} <- whereis(id) do
@@ -169,6 +171,7 @@ defmodule Tau.Session do
     end
   end
 
+  @doc "Subscribe to a session's event stream. See `Tau.stream/2`."
   @spec stream(id(), keyword()) :: Enumerable.t()
   def stream(id, _opts \\ []) do
     Stream.resource(
@@ -188,6 +191,7 @@ defmodule Tau.Session do
     )
   end
 
+  @doc "Resume a persisted session by id. Replays the JSONL transcript."
   @spec resume(id()) :: {:ok, id()} | {:error, term()}
   def resume(id) do
     case whereis(id) do
@@ -227,6 +231,7 @@ defmodule Tau.Session do
     end
   end
 
+  @doc "Fork a session at `parent_event_id`, creating a new branch."
   @spec fork(id(), String.t()) :: {:ok, id()} | {:error, term()}
   def fork(parent_id, parent_event_id) do
     persistence = Tau.Persistence.impl()
@@ -276,6 +281,7 @@ defmodule Tau.Session do
     end
   end
 
+  @doc "Cancel in-flight work; the FSM returns to `:awaiting_user`."
   @spec cancel(id()) :: :ok
   def cancel(id) do
     with {:ok, pid} <- whereis(id) do
@@ -285,6 +291,7 @@ defmodule Tau.Session do
     :ok
   end
 
+  @doc "Stop a session. Runs `:stop` hooks, flushes persistence, removes the process."
   @spec stop(id()) :: :ok
   def stop(id) do
     with {:ok, pid} <- whereis(id) do
@@ -294,6 +301,7 @@ defmodule Tau.Session do
     :ok
   end
 
+  @doc "Reconfigure provider, model, or `provider_ctx` for the next turn."
   @spec update_provider(id(), keyword()) :: :ok | {:error, :not_found}
   def update_provider(id, opts) when is_list(opts) do
     case whereis(id) do
@@ -400,11 +408,11 @@ defmodule Tau.Session do
         }
 
   @doc """
-  Return a read-only snapshot of a live session's data (#58).
+  Return a read-only snapshot of a live session's data.
 
-  Tests and inspection tools should call this instead of reaching
-  into the FSM via `:sys.get_state/1` — it insulates callers from
-  internal data-shape refactors. Returns `{:error, :not_found}`
+  Callers (tests, inspection tools, TUI panels) should use this instead
+  of reaching into the FSM via `:sys.get_state/1` — it insulates them
+  from internal data-shape refactors. Returns `{:error, :not_found}`
   for a session id that isn't currently registered.
   """
   @spec snapshot(id()) :: {:ok, snapshot()} | {:error, :not_found}
