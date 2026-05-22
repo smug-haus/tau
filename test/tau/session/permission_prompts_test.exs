@@ -410,11 +410,111 @@ defmodule Tau.Session.PermissionPromptsTest do
       # Cancel the session while it's awaiting permission.
       Tau.cancel(sid)
 
+      # The cancel handler must emit a ToolEnd for the pending call BEFORE
+      # transitioning to :awaiting_user. Without this, the provider's next
+      # turn would receive an unpaired tool_use block and reject the request.
+      assert_receive %SE.ToolEnd{
+                       tool_call_id: ^call_id,
+                       result: %ToolResult{is_error: true}
+                     },
+                     5_000
+
       assert_receive %SE.Cancelled{session_id: ^sid}, 5_000
 
       # FSM must return to :awaiting_user.
       {:ok, snap} = Tau.snapshot(sid)
       assert snap.state == :awaiting_user
+
+      # Transcript well-formedness: the denial ToolResult must be in history.
+      # If the cancel handler used Process.send(self(), {:tool_done, ...}) instead
+      # of emitting directly, the message drops into the catch-all in :awaiting_user
+      # and this assertion fails.
+      tool_results =
+        Enum.filter(snap.messages, fn
+          %Tau.Message.ToolResult{} -> true
+          _ -> false
+        end)
+
+      result_ids = Enum.map(tool_results, & &1.tool_call_id) |> MapSet.new()
+
+      assert call_id in result_ids,
+             "cancellation denial ToolResult for #{call_id} missing from messages; got #{inspect(result_ids)}"
+    end
+
+    test "cancel after deny_once: both permission_pending_results and pending_permission_requests emitted" do
+      # This test verifies the two-path emit: accumulated permission_pending_results
+      # (from prior :deny_once decisions) AND still-pending :ask calls are both
+      # emitted directly to history when cancel fires in :awaiting_permission.
+      sid = "perm-cancel-two-#{System.unique_integer([:positive])}"
+      Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{sid}")
+
+      call_id_1 = "call-cancel-two-1"
+      call_id_2 = "call-cancel-two-2"
+
+      {:ok, ^sid} =
+        start_session_for_test(
+          session_id: sid,
+          provider: TwoToolProvider,
+          model: "two",
+          interactive: true,
+          provider_ctx: %{
+            call_id_1: call_id_1,
+            call_id_2: call_id_2,
+            tool_name_1: "ask_tool",
+            tool_name_2: "ask_tool_2"
+          }
+        )
+
+      Tau.send(sid, "go")
+
+      # Both PermissionRequests arrive.
+      assert_receive %SE.PermissionRequest{tool_call_id: ^call_id_1}, 5_000
+      assert_receive %SE.PermissionRequest{tool_call_id: ^call_id_2}, 5_000
+
+      # Deny the first call — accumulates into permission_pending_results.
+      :ok = Tau.Session.decide_permission(sid, call_id_1, :deny_once)
+
+      # snapshot/1 is serialized behind the cast; no sleep needed.
+      {:ok, snap_mid} = Tau.snapshot(sid)
+      assert snap_mid.state == :awaiting_permission
+
+      # Now cancel — must emit BOTH: the accumulated deny_once result for call_id_1
+      # (from permission_pending_results) and the denial for call_id_2 (still pending).
+      Tau.cancel(sid)
+
+      # Both ToolEnd events must arrive before :awaiting_user.
+      tool_end_ids =
+        for _ <- 1..2 do
+          assert_receive %SE.ToolEnd{tool_call_id: id, result: %ToolResult{is_error: true}}, 5_000
+          id
+        end
+        |> MapSet.new()
+
+      assert call_id_1 in tool_end_ids,
+             "ToolEnd for deny_once result #{call_id_1} not emitted on cancel"
+
+      assert call_id_2 in tool_end_ids,
+             "ToolEnd for pending #{call_id_2} not emitted on cancel"
+
+      assert_receive %SE.Cancelled{session_id: ^sid}, 5_000
+
+      {:ok, snap} = Tau.snapshot(sid)
+      assert snap.state == :awaiting_user
+
+      # Transcript well-formedness: every tool_call must have a paired tool_result.
+      tool_results =
+        Enum.filter(snap.messages, fn
+          %Tau.Message.ToolResult{} -> true
+          _ -> false
+        end)
+
+      result_ids = Enum.map(tool_results, & &1.tool_call_id) |> MapSet.new()
+
+      assert call_id_1 in result_ids,
+             "ToolResult for #{call_id_1} missing from messages after cancel; got #{inspect(result_ids)}"
+
+      assert call_id_2 in result_ids,
+             "ToolResult for #{call_id_2} missing from messages after cancel; got #{inspect(result_ids)}"
     end
   end
 
@@ -517,8 +617,8 @@ defmodule Tau.Session.PermissionPromptsTest do
       # Deny the first call — FSM must stay in :awaiting_permission.
       :ok = Tau.Session.decide_permission(sid, call_id_1, :deny_once)
 
-      # Small yield; FSM must NOT have left :awaiting_permission.
-      Process.sleep(50)
+      # snapshot/1 is serialized behind the cast on the FSM mailbox, so it
+      # observes the post-deny_once state without a sleep (deterministic).
       {:ok, snap2} = Tau.snapshot(sid)
       assert snap2.state == :awaiting_permission
 

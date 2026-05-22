@@ -1507,25 +1507,71 @@ defmodule Tau.Session do
   # :cancel handler (which uses `_state`) so this more-specific clause fires
   # first. Source order is LOAD-BEARING in :handle_event_function mode.
   def handle_event(:cast, :cancel, :awaiting_permission, data) do
-    # Synthesise is_error ToolResults for all pending requests so the FSM's
-    # tools_in_flight accounting sees the results arrive and eventually
-    # transitions cleanly. We send them to self() so the :tool_done handler
-    # processes them after the state transition.
-    Enum.each(data.pending_permission_requests, fn {tool_call_id, %{name: name}} ->
-      result =
-        ToolResult.new(
-          tool_call_id: tool_call_id,
-          tool_name: name,
-          content: "Session cancelled while awaiting permission for #{name}.",
-          is_error: true
-        )
+    # Emit all accumulated instant-resolve results (prior :deny_once decisions
+    # stored in permission_pending_results) directly — no {:tool_done} routing.
+    # Mirrors the emit sequence in finish_permission_round/1.
+    data =
+      Enum.reduce(
+        Enum.reverse(data.permission_pending_results),
+        data,
+        fn {call_id, result_msg}, acc ->
+          {_lookup, call_lookups_rest} = Map.pop(acc.tool_loop_call_lookups, call_id)
 
-      Process.send(self(), {:tool_done, tool_call_id, result}, [])
-    end)
+          acc =
+            acc
+            |> append_message(result_msg)
+            |> persist_event("tool_result", tool_result_to_data(result_msg))
+            |> Map.put(:tool_loop_call_lookups, call_lookups_rest)
+
+          broadcast(acc.id, %Events.ToolEnd{
+            session_id: acc.id,
+            tool_call_id: call_id,
+            result: result_msg
+          })
+
+          acc
+        end
+      )
+
+    # Synthesise and emit is_error ToolResults for all still-pending :ask calls
+    # directly into history and PubSub — no {:tool_done} self-send. The only
+    # handler for {:tool_done} in :awaiting_user is the catch-all, which would
+    # drop these messages. Emitting directly keeps history well-formed (every
+    # tool_call block has a paired tool_result) so the next provider turn succeeds.
+    data =
+      Enum.reduce(
+        data.pending_permission_requests,
+        data,
+        fn {tool_call_id, %{name: name}}, acc ->
+          result =
+            ToolResult.new(
+              tool_call_id: tool_call_id,
+              tool_name: name,
+              content: "Session cancelled while awaiting permission for #{name}.",
+              is_error: true
+            )
+
+          {_lookup, call_lookups_rest} = Map.pop(acc.tool_loop_call_lookups, tool_call_id)
+
+          acc =
+            acc
+            |> append_message(result)
+            |> persist_event("tool_result", tool_result_to_data(result))
+            |> Map.put(:tool_loop_call_lookups, call_lookups_rest)
+
+          broadcast(acc.id, %Events.ToolEnd{
+            session_id: acc.id,
+            tool_call_id: tool_call_id,
+            result: result
+          })
+
+          acc
+        end
+      )
 
     broadcast(data.id, %Events.Cancelled{session_id: data.id, reason: :user})
 
-    persist_event(data, "cancellation", %{cause: "user", reason: "awaiting_permission"})
+    data = persist_event(data, "cancellation", %{cause: "user", reason: "awaiting_permission"})
 
     {:next_state, :awaiting_user,
      %{
@@ -2569,7 +2615,6 @@ defmodule Tau.Session do
   end
 
   defp dispatch_tools(tool_calls, data) do
-    transition(data.id, data, :tool_executing)
     parent = self()
 
     # D-060 / #293: build per-turn lookup table mapping call_id ->
@@ -2758,6 +2803,8 @@ defmodule Tau.Session do
         |> Map.merge(Enum.into(whitelisted_out, %{}, fn %{id: id} -> {id, :whitelist_filtered} end))
         |> Map.merge(activated_in_flight)
 
+      transition(data.id, data, :awaiting_permission)
+
       {:next_state, :awaiting_permission,
        %{
          data
@@ -2843,6 +2890,8 @@ defmodule Tau.Session do
         |> Map.merge(Enum.into(gated, %{}, fn %{id: id} -> {id, :denied} end))
         |> Map.merge(Enum.into(whitelisted_out, %{}, fn %{id: id} -> {id, :whitelist_filtered} end))
         |> Map.merge(activated_in_flight)
+
+      transition(data.id, data, :tool_executing)
 
       {:next_state, :tool_executing,
        %{
