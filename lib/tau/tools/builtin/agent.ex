@@ -82,7 +82,14 @@ defmodule Tau.Tools.Builtin.Agent do
   # turns; their unbounded counterpart is the parent's. We use a
   # generous default and let the parent FSM cascade `:cancel` if the
   # parent itself is cancelled or crashes.
+  #
+  # Test override: set `Application.put_env(:tau, :subagent_await_timeout_ms, N)`
+  # to inject a short timeout in unit tests exercising the timeout branch.
   @await_timeout_ms 10 * 60 * 1000
+
+  defp await_timeout_ms do
+    Application.get_env(:tau, :subagent_await_timeout_ms, @await_timeout_ms)
+  end
 
   @impl Tau.Tool
   def name, do: "Agent"
@@ -528,14 +535,6 @@ defmodule Tau.Tools.Builtin.Agent do
       %SE.MessageUpdate{session_id: ^child_id} ->
         await_child(child_id, ctx, parent_ref, started)
 
-      # B2 (FIX-4): discard any other child-session event not explicitly
-      # matched above — SystemNotice, ProviderFallback, QueueRestored,
-      # CommandCatalog, etc. Without this catch-all they accumulate in the
-      # tool-task mailbox and the "B2 any non-forwarded child event is
-      # discarded" guarantee only partially holds.
-      %{session_id: ^child_id} ->
-        await_child(child_id, ctx, parent_ref, started)
-
       # Terminal branch 3: SessionEnd.
       %SE.SessionEnd{session_id: ^child_id, reason: reason} ->
         duration = System.monotonic_time(:millisecond) - started
@@ -578,25 +577,37 @@ defmodule Tau.Tools.Builtin.Agent do
           "Sub-agent aborted: parent session terminated",
           details: %{kind: :parent_down, child_session_id: child_id}
         )
+
+      # B2 (FIX-4): discard any other child-session event not explicitly
+      # matched above — SystemNotice, ProviderFallback, QueueRestored,
+      # CommandCatalog, etc. Without this catch-all they accumulate in the
+      # tool-task mailbox and the "B2 any non-forwarded child event is
+      # discarded" guarantee only partially holds.
+      # MUST be the LAST receive clause so specific terminal/relay clauses
+      # (MessageEnd/ToolStart/ToolEnd/MessageUpdate/SessionEnd/Cancelled/DOWN)
+      # always match first.
+      %{session_id: ^child_id} ->
+        await_child(child_id, ctx, parent_ref, started)
     after
       # Terminal branch 5: timeout.
-      @await_timeout_ms ->
+      await_timeout_ms() ->
+        timeout = await_timeout_ms()
         Tau.cancel(child_id)
 
         broadcast_subagent_end(
           ctx.session_id,
           child_id,
           :cancelled,
-          @await_timeout_ms,
-          "timed out after #{div(@await_timeout_ms, 1000)}s"
+          timeout,
+          "timed out after #{div(timeout, 1000)}s"
         )
 
         Result.error(
-          "Sub-agent timed out after #{@await_timeout_ms}ms",
+          "Sub-agent timed out after #{timeout}ms",
           details: %{
             kind: :subagent_timeout,
             child_session_id: child_id,
-            timeout_ms: @await_timeout_ms
+            timeout_ms: timeout
           }
         )
     end

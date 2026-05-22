@@ -1284,7 +1284,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         node_after = next.subagents["child-2"]
         live_after = SubagentTree.format_live_line(node_after)
 
-        assert String.contains?(live_after, "1 tool calls"),
+        assert String.contains?(live_after, "1 tool call"),
                "live region MUST show 1 tool call after SubagentProgress; got: #{inspect(live_after)}"
 
         assert String.contains?(live_after, "Bash"),

@@ -190,7 +190,7 @@ defmodule Tau.TUI.SubagentTree do
   """
   @spec format_live_line(SubagentNode.t()) :: String.t()
   def format_live_line(%SubagentNode{label: label, tool_calls: n, last_activity: act}) do
-    base = "▶ sub-agent: #{label} · #{n} tool calls"
+    base = "▶ sub-agent: #{label} · #{n} #{if n == 1, do: "tool call", else: "tool calls"}"
 
     case act do
       nil ->
@@ -232,7 +232,10 @@ defmodule Tau.TUI.SubagentTree do
         _ -> "ended"
       end
 
-    parts = [state_str, "#{node.tool_calls} tool calls"]
+    tool_call_str =
+      "#{node.tool_calls} #{if node.tool_calls == 1, do: "tool call", else: "tool calls"}"
+
+    parts = [state_str, tool_call_str]
 
     parts =
       if node.duration_ms do
