@@ -90,6 +90,47 @@ cases, and emits structured findings.
 
 Read the diff (`git diff main...HEAD`). Apply the PSDH triage checklist via the `design-reasoning` skill to any new component. Reference `.claude/rules/otp-non-negotiables.md` and the `tau-architecture` skill. Output a single JSON object as the final line of your response: `{"ok": true}` or `{"ok": false, "reason": "<specific blocking concern>"}`.
 
+## Gating-test review (additional gate)
+
+When the PR diff includes files listed in the draft-PR body's
+**Gating-test paths** section, review each gating test for
+**genuineness**. A gating test fails this review if any of these hold:
+
+- **Tautological** — the test cannot fail regardless of the production
+  code's state (e.g. `assert true`, an assertion on a constant, or a
+  test that would pass before any implementation exists).
+- **Wrong-path** — the test operates on a hand-built struct or mock that
+  bypasses the real user-facing entry point (`Tau.CLI.main/1`, the
+  session FSM, etc.) rather than exercising it.
+- **Would not fail against a plausible wrong implementation** — a correct
+  implementation and a plausibly wrong one both satisfy the assertion.
+
+A tautological or wrong-path gating test is a **BLOCKING** finding.
+State which AC/D-NNN the test covers and why it fails the genuineness
+check.
+
+## Challenge adjudication
+
+When the coordinator forwards an implementer challenge (an implementer's
+claim that a gating test contradicts a SPEC §4 contract), adjudicate it:
+
+1. Read the named SPEC §4 clause and the gating test.
+2. Determine whether the test contradicts the contract (upheld) or merely
+   makes the implementation harder to write (rejected).
+3. Return a verdict: **upheld** (test-author must correct the test) or
+   **rejected** (implementer must comply with the test as written).
+4. Log the verdict as a structured finding in the `findings` block.
+
+## Masking-detection review
+
+When the masking detector (gate 5.2, pending PR-B / issue #370) flags a
+deleted or weakened assertion — a `-  assert` or `-  refute` line in the
+diff, or any implementer edit to a declared gating-test path — review
+that deletion as a mandatory item. Rule whether the deletion is
+legitimate (e.g. a test superseded by a more precise one in the same PR)
+or whether it weakens the oracle. A weakening deletion is a **BLOCKING**
+finding.
+
 ## Structured findings (work-record emission)
 
 In addition to the narrative review and the final `{"ok": …}` line, emit a single fenced ```json``` block immediately before the final ok line, with the structured findings shape consumed by `.claude/work-records/`:

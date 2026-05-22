@@ -77,6 +77,27 @@ Do NOT re-run `mix test`, `mix format`, `mix credo`, or
 - **Spec deviations?** Compare each requirement against implementation.
   Flag anything missing, changed, or added beyond spec.
 
+## Mechanical gates confirmation (pending PR-B / issue #370)
+
+When the PR includes a **Gating-test paths** section in its draft-PR
+body, confirm whether the three mechanical gates ran and passed. Until
+PR-B lands, these gates are **pending** — note each as pending rather
+than failing the PR for their absence:
+
+- **Gate 5.1 — AC-to-test linkage** *(pending PR-B)*: every `AC-N`/
+  `D-NNN` the draft-PR body claims MUST appear in a gating-test name or
+  `@tag`. Verify by inspection; note pending.
+- **Gate 5.2 — Masking detection** *(pending PR-B)*: the PR diff has
+  been scanned for deleted/weakened assertions in the declared gating-
+  test paths. Note pending; flag any such deletions you observe by
+  inspection.
+- **Gate 5.3 — Mutation check** *(pending PR-B)*: the gating tests at
+  the test-author's declared paths fail against the pre-implementer
+  production state. Note pending.
+
+Record the status of each gate (pending or confirmed) in the structured
+verdict block.
+
 ## When invoked by `/pr`
 
 After running the steps above, the **last line of your response** must be a
