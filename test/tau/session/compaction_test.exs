@@ -166,11 +166,17 @@ defmodule Tau.Session.CompactionTest do
 
     Tau.send(sid, "/compact")
 
+    # D-163: CompactionStarted fires before entering :compacting.
+    assert_receive %SE.CompactionStarted{session_id: ^sid}, 3_000
+
     # Notice broadcast
     assert_receive %SE.SystemNotice{session_id: ^sid, text: "Compacting conversation…"}, 3_000
 
     # Completion notice
     assert_receive %SE.SystemNotice{session_id: ^sid, text: "Compaction complete."}, 5_000
+
+    # D-164 (Clause 1 / {:ok,_,_}): CompactionFinished fires with {:ok, :compacted}.
+    assert_receive %SE.CompactionFinished{session_id: ^sid, outcome: {:ok, :compacted}}, 3_000
 
     # Back in :awaiting_user
     {:ok, snap} = Tau.snapshot(sid)
@@ -262,9 +268,14 @@ defmodule Tau.Session.CompactionTest do
     sid = start_compact_session(CrashCompactor)
     Tau.send(sid, "/compact")
 
+    assert_receive %SE.CompactionStarted{session_id: ^sid}, 3_000
     assert_receive %SE.SystemNotice{session_id: ^sid, text: "Compacting conversation…"}, 3_000
     assert_receive %SE.SystemNotice{session_id: ^sid, text: notice}, 5_000
     assert notice =~ "crashed"
+
+    # D-164 / S-2 (Clause 2b): CompactionFinished MUST fire on worker crash.
+    # The outcome is {:error, reason} where reason is the crash reason.
+    assert_receive %SE.CompactionFinished{session_id: ^sid, outcome: {:error, _reason}}, 3_000
 
     {:ok, snap} = Tau.snapshot(sid)
     assert snap.state == :awaiting_user
@@ -370,9 +381,13 @@ defmodule Tau.Session.CompactionTest do
     sid = start_compact_session(SlowCompactor)
 
     Tau.send(sid, "/compact")
+    assert_receive %SE.CompactionStarted{session_id: ^sid}, 3_000
     assert_receive %SE.SystemNotice{session_id: ^sid, text: "Compacting conversation…"}, 3_000
     assert_receive %SE.SystemNotice{session_id: ^sid, text: notice}, 3_000
     assert notice =~ "timed out"
+
+    # D-164 / S-2 (Clause 3): CompactionFinished MUST fire on timeout with {:error, :timeout}.
+    assert_receive %SE.CompactionFinished{session_id: ^sid, outcome: {:error, :timeout}}, 3_000
 
     {:ok, snap} = Tau.snapshot(sid)
     assert snap.state == :awaiting_user
@@ -495,9 +510,12 @@ defmodule Tau.Session.CompactionTest do
 
     # Async failure 1: /compact with ErrorCompactor
     Tau.send(sid, "/compact")
+    assert_receive %SE.CompactionStarted{session_id: ^sid}, 3_000
     assert_receive %SE.SystemNotice{session_id: ^sid, text: "Compacting conversation…"}, 3_000
     assert_receive %SE.SystemNotice{session_id: ^sid, text: notice1}, 5_000
     assert notice1 =~ "failed"
+    # D-164 (Clause 1 / {:error,_}): CompactionFinished fires with {:error, reason}.
+    assert_receive %SE.CompactionFinished{session_id: ^sid, outcome: {:error, _}}, 3_000
 
     # Now switch to a compactor that also fires should_compact? = true
     Application.put_env(:tau, :compactor, ErrorCompactorWithSync)

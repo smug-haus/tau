@@ -12,6 +12,7 @@ defmodule Tau.Providers.Gemini do
   @behaviour Tau.Provider
 
   alias Tau.Message.{Assistant, ToolResult, User}
+  alias Tau.Provider.ContextWindows
   alias Tau.Provider.Event
   alias Tau.Providers.Shared.{FinchStream, ToolSpec}
 
@@ -20,6 +21,9 @@ defmodule Tau.Providers.Gemini do
 
   @impl Tau.Provider
   def default_model, do: @default_model
+
+  @impl Tau.Provider
+  def context_window(model), do: ContextWindows.lookup(__MODULE__, model)
 
   @impl Tau.Provider
   def capabilities do

@@ -18,6 +18,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     alias Tau.TUI.History
     alias Tau.TUI.History.Store
     alias Tau.TUI.SubagentTree
+    alias Tau.TUI.StatusBar
     alias Tau.Commands.Builtin
 
     # Adaptive tick: 16 ms while a turn is streaming (last_assistant non-nil);
@@ -109,12 +110,57 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         catalog: nil,
         # SPEC-TUI-COMPLETION §4 B2 (D-102): MVU menu sub-state.
         # nil = closed; non-nil = open with query/entries/selected.
-        menu: nil
+        menu: nil,
+        # D-160..D-169 (#340 / SPEC-TUI-HEADLESS §5d): status surface fields.
+        # AC-1: seed provider and model at init so the status bar shows the
+        # active model on the FIRST rendered frame (not only after the first
+        # SessionStart tick drain). Fall back to Tau.Provider.default/0 and
+        # provider.default_model/0 so "no model" never appears at launch.
+        provider: init_provider(runtime_opts),
+        model: init_model(runtime_opts),
+        # Accumulated token usage from the session (folded from Tau.Cost ETS).
+        usage: %{input_tokens: 0, output_tokens: 0, cache_read: 0, cache_write: 0},
+        # context_tokens: latest completed turn's input_tokens (overwrite, not sum —
+        # S-4 / D-169: avoids >100% bug). Pre-first-turn reads 0.
+        context_tokens: 0,
+        # context_window: resolved via context_window/1 optional callback.
+        # nil = unknown (fall back to compaction_threshold_tokens, render ~NN%).
+        context_window: nil,
+        # compaction: :idle | :running. Driven by CompactionStarted/Finished events.
+        compaction: :idle,
+        # warn_level: prior level for transition-only telemetry (D-168).
+        warn_level: :ok
       }
     end
 
     defp put_if(opts, _key, nil), do: opts
     defp put_if(opts, key, value), do: Keyword.put(opts, key, value)
+
+    # AC-1 (D-160): resolve the active provider at init time so the status bar
+    # shows the real provider on the first rendered frame. Falls back to the
+    # application default when none is specified via CLI.
+    defp init_provider(runtime_opts) do
+      Map.get(runtime_opts, :provider) || Tau.Provider.default()
+    end
+
+    # AC-1 (D-160): resolve the active model at init time so the status bar
+    # shows the real model id on the first rendered frame. Falls back to the
+    # provider's default_model/0 when none is specified via CLI.
+    defp init_model(runtime_opts) do
+      case Map.get(runtime_opts, :model) do
+        nil ->
+          provider = init_provider(runtime_opts)
+
+          if is_atom(provider) and function_exported?(provider, :default_model, 0) do
+            provider.default_model()
+          else
+            nil
+          end
+
+        model ->
+          model
+      end
+    end
 
     # Derive the transcript pane's usable wrap width from the terminal
     # width. Ratatouille's `column(size: 12)` uses a 12/12 grid so the
@@ -164,6 +210,25 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
         %Tau.Session.Events.SystemNotice{text: t} ->
           %{model | transcript: bounded_append(model.transcript, {t, []})}
+
+        # D-160 (#340 / SPEC-TUI-HEADLESS §5d): seed model/provider/context_window
+        # from SessionStart. context_window resolved via optional callback.
+        %Tau.Session.Events.SessionStart{model: m, provider: p} = e ->
+          on_session_start_status(model, e, m, p)
+
+        # D-160 (#340): ModelSwapped — update model segment in the status bar.
+        # Do NOT string-scrape the accompanying SystemNotice (D-160 rationale).
+        %Tau.Session.Events.ModelSwapped{} = e ->
+          on_model_swapped(model, e)
+
+        # D-163 (#340): CompactionStarted — transition compaction to :running.
+        %Tau.Session.Events.CompactionStarted{} ->
+          on_compaction_started(model)
+
+        # D-164 (#340): CompactionFinished — clear compaction indicator regardless
+        # of outcome (S-2: MUST fire on every :compacting exit, incl. abort/error).
+        %Tau.Session.Events.CompactionFinished{} ->
+          on_compaction_finished(model)
 
         # D-103 (SPEC-TUI-COMPLETION §4 B1): store the catalog and re-filter
         # the menu if it is currently open. Broadcast arrives at SessionStart
@@ -623,54 +688,37 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
     # --- Helpers --------------------------------------------------------
 
-    # D-078 (#339 / AC-7): honest status-bar keybinding hint. The hint changes
-    # based on whether the session is busy or idle. Claude Code's dishonest hint
-    # (claiming "esc to interrupt" when Esc only moves queued prompts) is exactly
-    # the bug #339 exists to beat.
+    # D-162 (#340 / SPEC-TUI-HEADLESS §5d): delegate to the pure StatusBar module.
+    # The coding-agent segment is included when model.coding_agent is set, as before
+    # (AC-9 regression: SPEC-CODING-AGENT §4 B1 must still render).
     defp status_bar(model) do
-      hint = status_bar_hint(model.status)
+      StatusBar.render(status_bar_model(model))
+    end
 
-      bar do
-        label(
-          content:
-            "session: " <>
-              model.session_id <>
-              status_bar_coding_agent(model) <>
-              " | status: " <>
-              to_string(model.status) <>
-              " | " <>
-              hint
-        )
+    # Build the status-bar model map for StatusBar.render/1, mixing in the
+    # session_id, session status, and coding-agent info that StatusBar needs.
+    # D-162 (AC-H1): session_id MUST be passed so render_text/1 can emit
+    # "session: <id>" as the first segment (smoke-gate ~r/session:/ assertion).
+    defp status_bar_model(model) do
+      base = %{
+        session_id: Map.get(model, :session_id),
+        model: Map.get(model, :model),
+        provider: Map.get(model, :provider),
+        usage:
+          Map.get(model, :usage, %{input_tokens: 0, output_tokens: 0, cache_read: 0, cache_write: 0}),
+        context_tokens: Map.get(model, :context_tokens, 0),
+        context_window: Map.get(model, :context_window),
+        compaction: Map.get(model, :compaction, :idle),
+        status: model.status
+      }
+
+      # SPEC-CODING-AGENT §4 B1: append coding-agent segment when present (AC-9 regression).
+      if model.coding_agent do
+        Map.put(base, :coding_agent_label, inspect(model.coding_agent))
+      else
+        base
       end
     end
-
-    # Busy states: streaming/sending/cancelled status strings.
-    defp status_bar_hint(:idle) do
-      "<Enter> submit · <Esc> clear · <Ctrl-C> quit"
-    end
-
-    defp status_bar_hint(:streaming), do: status_bar_hint_busy()
-    defp status_bar_hint(:sending), do: status_bar_hint_busy()
-
-    defp status_bar_hint(status) when is_binary(status) do
-      # Covers cancelled/ended status strings — session is not actively busy
-      # but also not cleanly idle; show idle hint so user can type.
-      "<Enter> submit · <Esc> clear · <Ctrl-C> quit"
-    end
-
-    defp status_bar_hint(_), do: status_bar_hint_busy()
-
-    defp status_bar_hint_busy do
-      "<Enter> steer · <Alt+Enter> follow-up · <Esc> interrupt"
-    end
-
-    # SPEC-CODING-AGENT §4 B1: when the TUI was launched with
-    # `--coding-agent`, surface the adapter in the status bar so the
-    # user can tell at a glance that "Send" is routed through a
-    # subprocess agent rather than the configured `Tau.Provider`.
-    defp status_bar_coding_agent(%{coding_agent: nil}), do: ""
-    defp status_bar_coding_agent(%{coding_agent: mod}), do: " | agent: " <> inspect(mod)
-    defp status_bar_coding_agent(_), do: ""
 
     # D-026 ([C51-B3]): a solid block cursor (U+2588 "█") MUST be appended
     # after the current input so the user can see the insertion point.
@@ -1106,7 +1154,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       %{model | last_assistant: text}
     end
 
-    defp on_message_end(model, %{message: msg}) do
+    defp on_message_end(model, %{message: msg} = e) do
       transcript_lines =
         msg.content
         |> Enum.flat_map(fn block ->
@@ -1145,12 +1193,54 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
           end
         end)
 
-      %{
-        model
-        | status: :idle,
-          transcript: bounded_append_many(model.transcript, transcript_lines),
-          last_assistant: nil
-      }
+      # D-169 (S-4 / #340): context_tokens is OVERWRITTEN with the latest turn's
+      # input_tokens (not cumulative). Pre-first-turn reads 0. This avoids the
+      # >100% context-bar bug. Source: Tau.Cost.for_session/1 ETS table.
+      session_counters = cost_for_session(model.session_id)
+      session_msg = e.message
+      # Extract this turn's input_tokens directly from the message usage field.
+      turn_input_tokens = get_in(session_msg, [Access.key(:usage, %{}), :input_tokens]) || 0
+
+      # D-169: context_tokens = latest turn's input_tokens (overwrite, never sum).
+      new_context_tokens = turn_input_tokens
+
+      # Telemetry: emit only on warn_level transition (D-168).
+      pct =
+        StatusBar.context_pct(
+          new_context_tokens,
+          Map.get(model, :context_window) ||
+            Application.get_env(:tau, :compaction_threshold_tokens, 120_000)
+        )
+
+      new_warn = StatusBar.warn_level(pct)
+      prior_warn = Map.get(model, :warn_level, :ok)
+
+      if new_warn != prior_warn do
+        :telemetry.execute(
+          [:tau, :tui, :status, :update],
+          %{system_time: System.system_time()},
+          %{context_pct: pct, warn_level: new_warn, session_id: model.session_id}
+        )
+      end
+
+      model
+      |> Map.put(:status, :idle)
+      |> Map.put(:transcript, bounded_append_many(model.transcript, transcript_lines))
+      |> Map.put(:last_assistant, nil)
+      |> Map.put(:usage, session_counters)
+      |> Map.put(:context_tokens, new_context_tokens)
+      |> Map.put(:warn_level, new_warn)
+    end
+
+    # Read session counters from the Tau.Cost ETS table (the source of truth).
+    # Tolerates the table being unavailable (test isolation without Tracker running).
+    defp cost_for_session(session_id) do
+      try do
+        Tau.Cost.for_session(session_id)
+      rescue
+        ArgumentError ->
+          %{input_tokens: 0, output_tokens: 0, cache_read: 0, cache_write: 0}
+      end
     end
 
     # B1 rule (D-151): ToolStart/ToolEnd on the parent topic are no-ops.
@@ -1183,6 +1273,47 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
           last_assistant: nil
       }
     end
+
+    # D-160 (#340 / SPEC-TUI-HEADLESS §5d): seed model/provider fields from the
+    # SessionStart event. The context_window is resolved once via the optional
+    # context_window/1 callback; nil means use the fallback (~NN%).
+    defp on_session_start_status(model, _e, m, p) do
+      context_window = resolve_context_window(p, m)
+      %{model | model: m, provider: p, context_window: context_window}
+    end
+
+    # D-160 (#340): update the model segment when the user does /model <id>.
+    # Resolves the new context_window for the swapped model.
+    defp on_model_swapped(model, %{to: new_model}) do
+      provider = Map.get(model, :provider)
+      context_window = resolve_context_window(provider, new_model)
+      %{model | model: new_model, context_window: context_window}
+    end
+
+    # Resolve context_window via the optional context_window/1 callback.
+    # Ensures the module is loaded first (function_exported?/3 only works on
+    # loaded modules; in production all provider modules are loaded at startup;
+    # in tests we must load explicitly to avoid false negatives).
+    defp resolve_context_window(provider, model_id)
+         when is_atom(provider) and is_binary(model_id) do
+      _ = Code.ensure_loaded(provider)
+
+      if function_exported?(provider, :context_window, 1) do
+        provider.context_window(model_id)
+      else
+        nil
+      end
+    end
+
+    defp resolve_context_window(_provider, _model_id), do: nil
+
+    # D-163 (#340): CompactionStarted — transition to :running.
+    defp on_compaction_started(model), do: %{model | compaction: :running}
+
+    # D-164 (#340 / S-2): CompactionFinished — clear to :idle regardless of outcome.
+    # This MUST fire on every exit from the :compacting FSM state, including abort/error,
+    # so the "compacting…" indicator never sticks in the status bar.
+    defp on_compaction_finished(model), do: %{model | compaction: :idle}
 
     # Bounded ring-buffer helpers: keep at most @transcript_cap entries.
     # Each entry is a {text, attrs} tuple. Drop oldest entries from the head

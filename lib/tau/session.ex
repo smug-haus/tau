@@ -2100,6 +2100,16 @@ defmodule Tau.Session do
 
     broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: notice})
 
+    # D-164 (S-2): CompactionFinished MUST fire on every exit from :compacting,
+    # including error paths, so the TUI status bar never sticks on "compacting…".
+    outcome =
+      case result do
+        {:ok, _, _} -> {:ok, :compacted}
+        {:error, reason} -> {:error, reason}
+      end
+
+    broadcast(data.id, %Events.CompactionFinished{session_id: data.id, outcome: outcome})
+
     # D-080: drain follow-up queue on :awaiting_user transition.
     actions =
       if :queue.is_empty(data.followup_queue),
@@ -2152,6 +2162,8 @@ defmodule Tau.Session do
     }
 
     broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: notice})
+    # D-164: fire on every :compacting exit, including worker crash.
+    broadcast(data.id, %Events.CompactionFinished{session_id: data.id, outcome: {:error, reason}})
 
     # D-080: drain follow-up queue on :awaiting_user transition.
     actions =
@@ -2194,6 +2206,8 @@ defmodule Tau.Session do
     }
 
     broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: notice})
+    # D-164: fire on every :compacting exit, including timeout.
+    broadcast(data.id, %Events.CompactionFinished{session_id: data.id, outcome: {:error, :timeout}})
 
     # D-080: drain follow-up queue on :awaiting_user transition.
     actions =
@@ -3745,6 +3759,7 @@ defmodule Tau.Session do
         )
 
         data2 = persist_event(data2, "model_swap", %{"from" => from_model, "to" => model})
+        broadcast(data2.id, %Events.ModelSwapped{session_id: data2.id, from: from_model, to: model})
         {:ok, data2, %{from: from_model, to: model}}
     end
   end
@@ -5313,6 +5328,9 @@ defmodule Tau.Session do
         # C67-B4: the only outcome that changes FSM state (to :compacting).
         # Does NOT call process_user_message/2 (D-042).
         broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: notice})
+        # D-163: broadcast CompactionStarted before entering :compacting so the
+        # TUI status bar transitions to :running before the task is spawned.
+        broadcast(data.id, %Events.CompactionStarted{session_id: data.id})
 
         ctx = %{provider: data.provider, model: data.model}
         timeout_ms = Application.get_env(:tau, :compaction_timeout_ms, 60_000)

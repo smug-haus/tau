@@ -121,6 +121,48 @@ defmodule Tau.Session.Events do
     @type t :: %__MODULE__{}
   end
 
+  defmodule ModelSwapped do
+    @moduledoc """
+    Broadcast when the active model changes via `/model <id>` or
+    `Tau.swap_model/2`. Distinct from the `SystemNotice` that carries the
+    human-readable notice line — this event is typed for machine consumers
+    such as the TUI status bar (D-160).
+
+    Receivers MUST pattern-match on this struct; do NOT string-scrape the
+    accompanying `SystemNotice` to detect model changes.
+    """
+    @enforce_keys [:session_id, :from, :to]
+    defstruct [:session_id, :from, :to]
+    @type t :: %__MODULE__{}
+  end
+
+  defmodule CompactionStarted do
+    @moduledoc """
+    Broadcast immediately before the async compaction task is spawned
+    (D-163). The TUI status bar transitions `model.compaction` from
+    `:idle` to `:running` on receipt so the user sees a live
+    `compacting…` indicator.
+    """
+    @enforce_keys [:session_id]
+    defstruct [:session_id]
+    @type t :: %__MODULE__{}
+  end
+
+  defmodule CompactionFinished do
+    @moduledoc """
+    Broadcast on **every** exit from the `:compacting` FSM state —
+    success, error, worker crash, and timeout (D-164 / S-2).
+
+    `outcome` is `{:ok, :compacted}` on success or `{:error, reason}`
+    on any failure path. The TUI status bar transitions `model.compaction`
+    back to `:idle` on receipt regardless of outcome so `compacting…` never
+    sticks.
+    """
+    @enforce_keys [:session_id, :outcome]
+    defstruct [:session_id, :outcome]
+    @type t :: %__MODULE__{}
+  end
+
   defmodule QueueRestored do
     @moduledoc """
     Broadcast by the session FSM when a `:cancel` drains the steering queue

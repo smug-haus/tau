@@ -21,8 +21,10 @@ The current spec catalog:
   `lib/tau/tui/sub_agent_panel.ex`, `lib/tau/tui/status_bar.ex`,
   `lib/tau/tui/theme.ex`, `lib/tau/tui/keybindings.ex`,
   `lib/tau/provider.ex` (the `context_window/1` callback),
+  `lib/tau/provider/context_windows.ex` (the `ContextWindows` lookup table),
   `test/support/tui_pty_helper.ex`, or `test/tau/cli/tui_smoke_test.exs` /
   `test/tau/cli/tui_ux_test.exs`. Triage score 5/5; D-066..D-075 live here.
+  D-160..D-169 (status surface, #340) also live here.
   Spec home for M1.1 child issues #335, #338, #340, #345.
 
 - `docs/spec/SPEC-USER-TURN.md` — the binary launch → TUI → session FSM →
