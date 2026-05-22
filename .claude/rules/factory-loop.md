@@ -138,6 +138,11 @@ no brief/PR drift. It MUST state:
 - **Dependencies** — issues or PRs this is blocked-by or blocks.
 - **SPECs** — every `docs/spec/SPEC-*.md` in scope, whether this PR authors,
   amends, or merely conforms to each, and the `AC-N` / `D-NNN` it advances.
+- **Acceptance criteria** — list each `AC-N` the PR advances. An AC verified
+  by CI wiring or inspection (not a unit gating test) MUST be marked
+  `AC-N (meta)` immediately after its identifier (e.g. `**AC-4 (meta)**`).
+  Gate 5.1 exempts meta-ACs from the test-linkage check; non-meta ACs MUST
+  have a matching gating-test name or `@tag`.
 - **Gating-test paths** — the exact `test/...` file paths the test-author owns
   for this PR (filled in at cycle step 4b; absent for PRs claiming no
   `AC-N`/`D-NNN`). This path set is the boundary the mechanical gates key on;
@@ -280,15 +285,22 @@ SPEC §4 contract, not merely because the test is hard to satisfy. The protocol:
    signal — the coordinator escalates (see "Stop / escalate conditions") rather
    than continuing. This indicates a weak test-author or an underspecified SPEC.
 
-## The three mechanical gates *(pending PR-B / issue #370)*
+## The three mechanical gates
 
-These gates are documented here as policy; PR-B implements them as CI. Until
-PR-B lands, the reviewer notes each gate as **pending** rather than failing the
-PR for its absence.
+These gates are implemented as CI (PR-B / issue #370). `Tau.Factory.Gate`
+provides the three pure functions; `mix tau.gate.ac_linkage`,
+`mix tau.gate.masking`, and `mix tau.gate.mutation` are the CLI wrappers;
+`.github/workflows/ci.yml` wires them into the `lint` and `mutation-check` jobs.
 
 **Gate 5.1 — AC-to-test linkage.** Every `AC-N`/`D-NNN` the draft-PR body
-claims MUST appear in a gating-test name or `@tag`. Verified by CI after PR-B;
-verified by reviewer inspection until then.
+claims MUST appear in a gating-test name or `@tag`. Verified by CI via
+`mix tau.gate.ac_linkage` in the `lint` job (blocking).
+
+*Meta-AC exemption:* an AC whose identifier is immediately followed by the
+marker `(meta)` (e.g. `AC-4 (meta)` or `**AC-4 (meta)**`) is a *meta-AC*
+— verified by CI wiring or inspection rather than a unit gating test. Gate
+5.1 exempts meta-ACs: they are never reported missing. Use this for ACs
+that are self-evidently satisfied by the CI configuration itself.
 
 **Gate 5.2 — Masking detection (detection-only).** The PR diff is scanned for
 deleted or weakened assertions: any `-  assert` / `-  refute` line, or any
@@ -296,12 +308,19 @@ implementer edit to a declared gating-test path. There is **no self-authored
 bypass tag** — every flagged deletion is surfaced to the `critic` as a mandatory
 review item; the critic rules whether the deletion is legitimate or a weakening.
 Path-based (uses the declared gating-test path set, not commit attribution).
+Verified by CI via `mix tau.gate.masking` in the `lint` job (detection-only,
+never hard-fails).
 
 **Gate 5.3 — Mutation check (path-based).** Using the declared gating-test path
-set: check out those paths at the test-author's committed state, revert every
-other path to its pre-implementer state, run the gating tests, and assert that
-≥1 test fails. Path-based rather than commit-based so it survives refine-cycle
-rebases.
+set: keep those paths at the test-author's committed state, revert every other
+path to the PR's merge-base with `main` (`git merge-base origin/main HEAD`),
+run the gating tests via `mix test`, and assert that ≥1 test fails. This
+merge-base equals the conceptual "pre-implementer" state: the test-author
+touches only the declared gating-test paths, which are snapshotted and
+restored separately, so reverting "everything else" to the merge-base reverts
+no test-author work. Path-based rather than commit-based so it survives
+refine-cycle rebases. Verified by CI via `mix tau.gate.mutation` in the
+dedicated `mutation-check` job (blocking).
 
 ### Residual — what these gates do NOT close
 

@@ -77,26 +77,27 @@ Do NOT re-run `mix test`, `mix format`, `mix credo`, or
 - **Spec deviations?** Compare each requirement against implementation.
   Flag anything missing, changed, or added beyond spec.
 
-## Mechanical gates confirmation (pending PR-B / issue #370)
+## Mechanical gates confirmation
 
 When the PR includes a **Gating-test paths** section in its draft-PR
-body, confirm whether the three mechanical gates ran and passed. Until
-PR-B lands, these gates are **pending** — note each as pending rather
-than failing the PR for their absence:
+body, confirm whether the three mechanical gates ran and passed. These
+gates are now implemented as CI (PR-B / issue #370):
 
-- **Gate 5.1 — AC-to-test linkage** *(pending PR-B)*: every `AC-N`/
-  `D-NNN` the draft-PR body claims MUST appear in a gating-test name or
-  `@tag`. Verify by inspection; note pending.
-- **Gate 5.2 — Masking detection** *(pending PR-B)*: the PR diff has
-  been scanned for deleted/weakened assertions in the declared gating-
-  test paths. Note pending; flag any such deletions you observe by
-  inspection.
-- **Gate 5.3 — Mutation check** *(pending PR-B)*: the gating tests at
-  the test-author's declared paths fail against the pre-implementer
-  production state. Note pending.
+- **Gate 5.1 — AC-to-test linkage**: every `AC-N`/`D-NNN` the draft-PR
+  body claims MUST appear in a gating-test name or `@tag`. Verified by CI
+  via `mix tau.gate.ac_linkage` in the `lint` job (blocking). Review CI
+  status; also verify by inspection that the coverage is complete.
+- **Gate 5.2 — Masking detection**: the PR diff has been scanned for
+  deleted/weakened assertions in the declared gating-test paths. Detection-
+  only in CI (never hard-fails); flag any such deletions observed in the
+  diff as a mandatory review item for the critic.
+- **Gate 5.3 — Mutation check**: the gating tests at the test-author's
+  declared paths fail against the pre-implementer production state.
+  Verified by CI via `mix tau.gate.mutation` in the `mutation-check` job
+  (blocking). Review CI status.
 
-Record the status of each gate (pending or confirmed) in the structured
-verdict block.
+Record the CI status of each gate (green/red/not-triggered) and any
+inspection findings in the structured verdict block.
 
 ## When invoked by `/pr`
 
