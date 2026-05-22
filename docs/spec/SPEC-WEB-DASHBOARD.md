@@ -2,7 +2,6 @@
 
 | | |
 |---|---|
-| **Status** | Draft — #374 (M7 foundation) implementation PR open. |
 | **Date** | 2026-05-22 |
 | **Scope** | The `:tau_web` Phoenix poncho package: endpoint lifecycle, LiveView → PubSub → session FSM boundary, `/health` liveness probe, and the D-180..D-189 runtime invariants. |
 | **Method** | PSDH (`.claude/skills/design-reasoning`); triage score 4/5. |

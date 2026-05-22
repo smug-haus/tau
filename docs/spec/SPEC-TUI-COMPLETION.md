@@ -2,7 +2,6 @@
 
 | | |
 |---|---|
-| **Status** | Draft — #333 (slash-command surface) implementation PR open. |
 | **Date** | 2026-05-21 |
 | **Scope** | The MVU completion sub-state machine shared by slash-command autocomplete (#333) and `@`-mention autocomplete (#344): fuzzy filtering, open/filter/navigate/accept/dismiss lifecycle, catalog delivery, and the unknown-command guard. |
 | **Method** | PSDH (`.claude/skills/design-reasoning`); triage score 2/5. |

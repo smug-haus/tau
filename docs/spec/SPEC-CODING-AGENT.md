@@ -2,7 +2,6 @@
 
 | | |
 |---|---|
-| **Status** | Approved (Phase 1A landed; Phase 1B/Phase 2 implementation pending). |
 | **Date** | 2026-05-15 |
 | **Scope** | A behaviour-shaped adapter that lets tau drive external coding assistants (Claude Code, Aider, Codex CLI, Gemini CLI, …) as sub-agents over a subprocess + structured-event transport. |
 | **Method** | PSDH (`.claude/skills/design-reasoning`); L0 + boundary contracts. L2 deferred until first impl lands. |

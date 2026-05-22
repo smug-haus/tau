@@ -30,9 +30,10 @@ get rewritten away by the next refactor. ADRs survive.
 
 - Files are named `NNNN-kebab-case-title.md` where `NNNN` is the
   next four-digit number. Numbers are never reused.
-- Every ADR has a **Status** (`Proposed | Accepted | Deprecated |
-  Superseded by NNNN`). Once accepted, the body should not be
-  rewritten — supersede with a new ADR instead.
+- Every ADR has a **Status** (`Accepted | Deprecated | Superseded by
+  NNNN`). ADRs land when accepted; proposed decisions live in PRs
+  until then. Once accepted, the body should not be rewritten —
+  supersede with a new ADR instead.
 - ADRs are short. Two pages is a long ADR. If you need more, write
   the design doc and link it from a short ADR.
 - Use `0000-template.md` as the starting point.
@@ -67,14 +68,16 @@ get rewritten away by the next refactor. ADRs survive.
 | [0011](0011-per-provider-rate-limiter-is-stateful-genserver.md) | Per-provider rate limiter is a stateful GenServer (not an ETS-owner) | Accepted |
 | [0012](0012-provider-fallback-is-fsm-internal-retry.md) | Provider fallback is an FSM-internal retry, not a wrapper provider | Accepted |
 | [0013](0013-skill-activation-is-fsm-scoped.md) | Skill activation lives on the session FSM, scoped to one turn | Accepted |
-| [0014](0014-subagents-are-sessions.md) | Subagents are sessions, spawned by the `Agent` tool | Proposed |
-| [0015](0015-subagent-persona-is-a-skill.md) | Subagent persona is a `Tau.Skill`; permissions inherit and may only tighten | Proposed |
+| [0014](0014-subagents-are-sessions.md) | Subagents are sessions, spawned by the `Agent` tool | Accepted |
+| [0015](0015-subagent-persona-is-a-skill.md) | Subagent persona is a `Tau.Skill`; permissions inherit and may only tighten | Accepted |
 | [0016](0016-credential-custody-is-the-os-not-tau.md) | Credential custody is the OS, not Tau | Accepted |
 | [0017](0017-cooperative-provider-cancellation.md) | Cooperative cancellation of in-flight provider streams | Accepted |
 | [0018](0018-tui-supervised-subtree.md) | TUI runs as a transient child of Tau.TUI.Supervisor | Accepted |
 | [0019](0019-circuit-breaker-is-ets-state-with-lifecycle-anchor.md) | Circuit-breaker state lives in ETS with a supervised lifecycle anchor | Accepted |
 | [0020](0020-memory-store-sqlite-driver.md) | Memory store uses SQLite via Exqlite | Accepted |
 | [0021](0021-two-tier-message-queue.md) | Two-tier message queue (steering / follow-up) partially supersedes ADR-0009 | Accepted |
+| [0022](0022-extension-api.md) | Tau Extension API — DSL host, Loader, slash commands & skills | Accepted |
+| [0023](0023-documentation-taxonomy.md) | Documentation taxonomy: durable docs describe intent, never state | Accepted |
 
 (New ADRs append here. Keep the table sorted by ADR number.)
 

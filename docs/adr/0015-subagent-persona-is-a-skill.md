@@ -1,6 +1,6 @@
 # ADR-0015: Subagent persona is a `Tau.Skill`; the spawn never loosens parent permissions
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-05-01
 - **Deciders:** the agent loop, with no objection from @smug-haus
 - **Related:**

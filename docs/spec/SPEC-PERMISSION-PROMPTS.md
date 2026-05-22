@@ -2,7 +2,6 @@
 
 | | |
 |---|---|
-| **Status** | PR-A merged. PR-B (#373) implemented — gate pending. |
 | **Date** | 2026-05-21 |
 | **Scope** | Interactive permission prompts for `:ask`-verdict tool calls; the `:awaiting_permission` FSM state; non-interactive fail-closed `:deny` resolution; the `interactive?` session property; the `decide_permission/3` and `set_permissions_mode/2` public API. |
 | **Method** | PSDH (`.claude/skills/design-reasoning`); L0 + boundary contracts. |

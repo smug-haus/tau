@@ -1,6 +1,6 @@
 # ADR-0014: Subagents are sessions, spawned by the `Agent` tool
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-05-01
 - **Deciders:** the agent loop, with no objection from @smug-haus
 - **Related:**
