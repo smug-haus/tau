@@ -92,23 +92,78 @@ defmodule Tau.Factory.GatePrecisionTest do
     end
 
     test "AC-2: returns :not_applicable when gating tests are in a PR-created Mix project",
-         %{tmp_dir: tmp_dir, base_ref: base_ref} do
+         %{base_ref: base_ref} do
       # The gating test lives in sub/test/sub_gate_test.exs. The nearest-
       # ancestor mix.exs for that path is sub/mix.exs, which does NOT exist at
       # base_ref (the sub/ project is PR-created). The fix should detect this
       # and return :not_applicable without attempting to run the tests.
       #
+      # No File.cd! — the repo-locator fallback (locate_repo_for_gating_tests →
+      # find_repo_containing_path_and_ref) searches under File.cwd!() for the
+      # synthetic :tmp_dir repo, exactly as gate_test.exs AC-3 already does.
+      #
       # Fail-before: current implementation returns {:error, {:runner_crashed, _}}
       # or similar — NOT :not_applicable.
-      original_dir = File.cwd!()
+      result = Gate.mutation_check(["sub/test/sub_gate_test.exs"], base_ref)
+      assert result == :not_applicable
+    end
 
-      try do
-        File.cd!(tmp_dir)
-        result = Gate.mutation_check(["sub/test/sub_gate_test.exs"], base_ref)
-        assert result == :not_applicable
-      after
-        File.cd!(original_dir)
+    @tag :ac_2
+    test "AC-2: negative control — does NOT return :not_applicable for a non-project-creation PR",
+         %{tmp_dir: tmp_dir, base_ref: _base_ref} do
+      # Build a SEPARATE synthetic repo with NO mix.exs anywhere.
+      # The project-creation detection walks up the directory tree looking for
+      # mix.exs — when none is found, the check does NOT classify this as a
+      # project-creation PR and must return a real verdict, not :not_applicable.
+      #
+      # Repo shape:
+      #   base commit: lib/widget.ex  → returns :wrong  (gating test would FAIL)
+      #   HEAD commit: lib/widget.ex  → returns :ok     (gating test PASSES)
+      #                test/widget_gate_test.exs added at HEAD
+      #
+      # No mix.exs at any level — kills the over-broad-fix class (a fix that
+      # returns :not_applicable too eagerly, e.g. for any PR with added files).
+      nc_dir = Path.join(tmp_dir, "no_mix_project")
+      File.mkdir_p!(Path.join(nc_dir, "lib"))
+      File.mkdir_p!(Path.join(nc_dir, "test"))
+
+      run = fn args -> {_, 0} = System.cmd("git", args, cd: nc_dir) end
+      run.(["init", "-q"])
+      run.(["config", "user.email", "test@example.com"])
+      run.(["config", "user.name", "Test"])
+
+      prod = Path.join(nc_dir, "lib/widget.ex")
+
+      # base commit: no mix.exs, production code returns :wrong
+      File.write!(prod, "defmodule Widget do\n  def run, do: :wrong\nend\n")
+      run.(["add", "-A"])
+      run.(["commit", "-q", "-m", "base"])
+      {nc_base_ref, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: nc_dir)
+      nc_base_ref = String.trim(nc_base_ref)
+
+      # HEAD commit: production code fixed + gating test added (still no mix.exs)
+      File.write!(prod, "defmodule Widget do\n  def run, do: :ok\nend\n")
+
+      gating = Path.join(nc_dir, "test/widget_gate_test.exs")
+
+      File.write!(gating, """
+      defmodule WidgetGateTest do
+        use ExUnit.Case
+        @tag :ac_2
+        test "AC-2: widget runs ok" do
+          assert Widget.run() == :ok
+        end
       end
+      """)
+
+      run.(["add", "-A"])
+      run.(["commit", "-q", "-m", "head: fix widget, add gating test"])
+
+      # No mix.exs → NOT a project-creation PR → must NOT return :not_applicable.
+      # The gating test fails against the reverted base tree (run() == :wrong),
+      # so the gate returns :ok — a real discriminating verdict.
+      result = Gate.mutation_check(["test/widget_gate_test.exs"], nc_base_ref)
+      assert result == :ok
     end
   end
 
