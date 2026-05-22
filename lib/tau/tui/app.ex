@@ -33,6 +33,9 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     # prevents unbounded memory growth across long sessions.
     @transcript_cap 500
 
+    # Valid permissions modes for /perms command (AC-B6, D-170).
+    @valid_perms_modes [:default, :accept_edits, :plan]
+
     @impl true
     def init(context) do
       # D-004 (SPEC-USER-TURN [C6]): the bridge MUST subscribe to PubSub
@@ -111,6 +114,13 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         # SPEC-TUI-COMPLETION §4 B2 (D-102): MVU menu sub-state.
         # nil = closed; non-nil = open with query/entries/selected.
         menu: nil,
+        # D-170 (#341 PR-B / SPEC-PERMISSION-PROMPTS §7): permission approval dialog.
+        # Queue of %PermissionRequest{} structs pending user decision.
+        # The dialog renders the head request as a modal; y/n resolve it.
+        pending_permissions: [],
+        # D-171 (#341 PR-B): active permissions mode — :default | :accept_edits | :plan.
+        # Seeded from RuntimeOpts at init; changed via /perms <mode> command.
+        permissions_mode: Map.get(runtime_opts, :permissions_mode, :default),
         # D-160..D-169 (#340 / SPEC-TUI-HEADLESS §5d): status surface fields.
         # AC-1: seed provider and model at init so the status bar shows the
         # active model on the FIRST rendered frame (not only after the first
@@ -211,6 +221,18 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         %Tau.Session.Events.SystemNotice{text: t} ->
           %{model | transcript: bounded_append(model.transcript, {t, []})}
 
+        # Delegate the remaining session-state events to a sub-handler to
+        # keep update/2 cyclomatic complexity within the Credo limit (≤ 25).
+        event ->
+          update_session_event(model, event)
+      end
+    end
+
+    # Sub-handler for session-state events that do not fit the primary
+    # update/2 case without exceeding the complexity budget.
+    # D-160, D-103, D-170, D-082, D-150..D-154 all live here.
+    defp update_session_event(model, event) do
+      case event do
         # D-160 (#340 / SPEC-TUI-HEADLESS §5d): seed model/provider/context_window
         # from SessionStart. context_window resolved via optional callback.
         %Tau.Session.Events.SessionStart{model: m, provider: p} = e ->
@@ -238,6 +260,13 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
           |> Map.put(:catalog, entries)
           |> update_menu()
 
+        # D-170 (#341 PR-B / SPEC-PERMISSION-PROMPTS §7 AC-B1, AC-B8):
+        # Push a PermissionRequest onto the pending_permissions queue.
+        # The dialog renders the head; resolving it pops the head (AC-B2/B3).
+        # Pure MVU state — no new process (OTP non-negotiables #3/#8).
+        %Tau.Session.Events.PermissionRequest{} = req ->
+          on_permission_request(model, req)
+
         # D-082 (#339 / SPEC-USER-TURN §6): restore queued steering messages to
         # the input editor when a cancel is issued mid-turn. The FSM drains the
         # steering queue back to the user via this event. The TUI repopulates the
@@ -246,25 +275,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         # handles multi-line content natively). Idempotent: re-delivery of the
         # same event replaces the editor with the same content.
         %Tau.Session.Events.QueueRestored{messages: msgs} when msgs != [] ->
-          text =
-            msgs
-            |> Enum.map(fn
-              %Tau.Message.User{content: content} ->
-                content
-                |> Enum.filter(&match?(%{type: :text}, &1))
-                |> Enum.map_join("\n", & &1.text)
-
-              s when is_binary(s) ->
-                s
-
-              _ ->
-                ""
-            end)
-            |> Enum.reject(&(&1 == ""))
-            |> Enum.join("\n")
-
-          new_editor = restore_editor_from_text(text)
-          %{model | editor: new_editor}
+          on_queue_restored(model, msgs)
 
         %Tau.Session.Events.QueueRestored{} ->
           model
@@ -306,15 +317,51 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     # to clause 3 (key handler). Without the guard, key=0 printable events
     # match the `%{key: key}` clause and are silently dropped in
     # handle_readline_key's catch-all, breaking typed character input (AC-H2).
-    defp handle_event(model, %{mod: mod} = event) when mod != 0 do
+    #
+    # D-172 (#341 PR-B / SPEC-PERMISSION-PROMPTS §7 AC-B4): when the permission
+    # dialog is open (pending_permissions non-empty), ALL input is captured by
+    # the dialog. Only y/n resolve the head; every other keystroke is swallowed.
+    # This check MUST precede the normal event routing (load-bearing clause order).
+    defp handle_event(model, event) when is_map(model) do
+      case Map.get(model, :pending_permissions, []) do
+        [_ | _] -> handle_permission_dialog_event(model, event)
+        _ -> handle_event_normal(model, event)
+      end
+    end
+
+    defp handle_event_normal(model, %{mod: mod} = event) when mod != 0 do
       ch = Map.get(event, :ch, 0)
       key = Map.get(event, :key, 0)
       handle_alt(model, ch, key)
     end
 
-    defp handle_event(model, %{ch: ch}) when ch != 0, do: handle_char(model, ch)
-    defp handle_event(model, %{key: key} = event), do: handle_key(model, key, event)
-    defp handle_event(model, _), do: model
+    defp handle_event_normal(model, %{ch: ch}) when ch != 0, do: handle_char(model, ch)
+    defp handle_event_normal(model, %{key: key} = event), do: handle_key(model, key, event)
+    defp handle_event_normal(model, _), do: model
+
+    # D-172 (AC-B2 / AC-B3 / AC-B4): permission dialog input handler.
+    # y → allow_once and pop head; n → deny_once and pop head;
+    # any other keystroke is swallowed (modal capture, AC-B4).
+    defp handle_permission_dialog_event(model, %{ch: ?y}) do
+      resolve_permission(model, :allow_once)
+    end
+
+    defp handle_permission_dialog_event(model, %{ch: ?n}) do
+      resolve_permission(model, :deny_once)
+    end
+
+    # All other events are swallowed while the dialog is open (AC-B4).
+    defp handle_permission_dialog_event(model, _event), do: model
+
+    # Resolve the head permission request with `verdict`, pop it from the queue,
+    # and (when a real session is running) call decide_permission/3.
+    defp resolve_permission(%{pending_permissions: [head | rest]} = model, verdict) do
+      # decide_permission/3 is a cast (non-blocking); call directly like Tau.send/2.
+      Tau.Session.decide_permission(model.session_id, head.tool_call_id, verdict)
+      %{model | pending_permissions: rest}
+    end
+
+    defp resolve_permission(model, _verdict), do: model
 
     # Handle events with a `key:` code. Dispatches to sub-handlers to keep
     # cyclomatic complexity within bounds. Clause ordering is load-bearing.
@@ -573,6 +620,14 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
           end
         end
 
+        # D-172 (#341 PR-B / SPEC-PERMISSION-PROMPTS §7 AC-B1): render the
+        # permission approval dialog when the queue is non-empty. Renders as
+        # an inline panel below the transcript (Ratatouille has no overlay
+        # primitive). Captures all input while open (AC-B4).
+        if Map.get(model, :pending_permissions, []) != [] do
+          render_permission_dialog(model)
+        end
+
         # SPEC-TUI-COMPLETION §4 B2 (D-102): render the slash-command menu
         # inline above the prompt bar when the menu is open. Ratatouille has
         # no overlay primitive; a second row renders below the transcript.
@@ -608,6 +663,35 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         end
       end
     end
+
+    # D-172 (#341 PR-B / SPEC-PERMISSION-PROMPTS §7 AC-B1):
+    # Render the permission approval dialog for the head of the queue.
+    # Shows tool name, one-line argument summary, decision_reason, and options.
+    defp render_permission_dialog(%{pending_permissions: [req | _]}) do
+      args_summary =
+        case req.arguments do
+          args when map_size(args) == 0 -> ""
+          args -> Enum.map_join(args, ", ", fn {k, v} -> "#{k}: #{inspect(v)}" end)
+        end
+
+      row do
+        column(size: 12) do
+          panel title: "Permission required — [y] allow once  [n] deny" do
+            label(content: "tool: " <> req.name)
+
+            if args_summary != "" do
+              label(content: "args: " <> args_summary)
+            end
+
+            label(content: "reason: " <> req.decision_reason)
+            label(content: "")
+            label(content: "[y] allow once    [n] deny")
+          end
+        end
+      end
+    end
+
+    defp render_permission_dialog(_model), do: nil
 
     defp menu_entry_text(%{name: name, description: desc, origin: origin}) do
       origin_tag = "[" <> to_string(origin) <> "]"
@@ -699,6 +783,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     # session_id, session status, and coding-agent info that StatusBar needs.
     # D-162 (AC-H1): session_id MUST be passed so render_text/1 can emit
     # "session: <id>" as the first segment (smoke-gate ~r/session:/ assertion).
+    # D-171 (#341 PR-B): permissions_mode passed to StatusBar for the mode indicator.
     defp status_bar_model(model) do
       base = %{
         session_id: Map.get(model, :session_id),
@@ -709,7 +794,8 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         context_tokens: Map.get(model, :context_tokens, 0),
         context_window: Map.get(model, :context_window),
         compaction: Map.get(model, :compaction, :idle),
-        status: model.status
+        status: model.status,
+        permissions_mode: Map.get(model, :permissions_mode, :default)
       }
 
       # SPEC-CODING-AGENT §4 B1: append coding-agent segment when present (AC-9 regression).
@@ -973,8 +1059,12 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     # D-106: MUST NOT submit the turn.
     defp menu_accept(%{menu: nil} = model), do: model
 
+    # D-173 (#341 PR-B): when the menu is open but has no entries (e.g. user
+    # typed a complete command not in the autocomplete set like /perms), Enter
+    # closes the menu and submits — the command is unambiguous and unambiguous
+    # submission is the expected UX (no matches = no autocomplete needed).
     defp menu_accept(%{menu: %{entries: [], selected: _}} = model) do
-      %{model | menu: nil}
+      %{model | menu: nil} |> submit_or_continue()
     end
 
     defp menu_accept(%{menu: %{entries: entries, selected: selected}} = model) do
@@ -1015,19 +1105,74 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       if Editor.empty?(model.editor) do
         model
       else
-        # Normal submit
-        Tau.send(model.session_id, text)
-        new_hist = History.push(model.history, text)
-        Store.append(model.history_data_dir, model.history_cwd, text)
+        # D-173 (#341 PR-B / SPEC-PERMISSION-PROMPTS §7 AC-B6):
+        # Intercept /perms <mode> in the TUI layer before sending to the session.
+        # The mode is changed locally in the model; if a session is running,
+        # set_permissions_mode/2 is called asynchronously (D-096: busy when not
+        # :awaiting_user). AC-B7: when status != :idle the FSM rejects the call
+        # and the local model update is also suppressed.
+        if String.starts_with?(text, "/perms") do
+          handle_perms_command(model, text)
+        else
+          # Normal submit
+          Tau.send(model.session_id, text)
+          new_hist = History.push(model.history, text)
+          Store.append(model.history_data_dir, model.history_cwd, text)
 
-        %{
-          model
-          | editor: Editor.new(),
-            history: new_hist,
-            search: nil,
-            transcript: bounded_append(model.transcript, {"> " <> text, []}),
-            status: :sending
-        }
+          %{
+            model
+            | editor: Editor.new(),
+              history: new_hist,
+              search: nil,
+              transcript: bounded_append(model.transcript, {"> " <> text, []}),
+              status: :sending
+          }
+        end
+      end
+    end
+
+    # D-173 (#341 PR-B / SPEC-PERMISSION-PROMPTS §7 AC-B6/AC-B7):
+    # Handle the /perms <mode> slash command in the TUI layer.
+    # mode ∈ {:default, :accept_edits, :plan}.
+    # AC-B7: while :streaming/:sending the mode does not change (FSM rejects).
+    # No/invalid argument: no-op that reports current mode + valid set.
+    defp handle_perms_command(model, text) do
+      arg =
+        case String.split(text, " ", parts: 2) do
+          ["/perms", rest] -> String.trim(rest)
+          _ -> ""
+        end
+
+      mode =
+        case arg do
+          "default" -> :default
+          "accept_edits" -> :accept_edits
+          "plan" -> :plan
+          _ -> nil
+        end
+
+      model_cleared = %{model | editor: Editor.new(), search: nil}
+
+      cond do
+        mode == nil ->
+          # No/invalid argument: report current mode + valid set (AC-B6).
+          valid_set = Enum.map_join(@valid_perms_modes, ", ", &to_string/1)
+
+          notice =
+            "permissions_mode is #{model.permissions_mode}. " <>
+              "Valid modes: #{valid_set}"
+
+          %{model_cleared | transcript: bounded_append(model_cleared.transcript, {notice, []})}
+
+        model.status in [:streaming, :sending] or is_binary(model.status) ->
+          # AC-B7: mid-turn, do not change mode (FSM rejects :busy per D-096).
+          model_cleared
+
+        true ->
+          # AC-B6: set mode locally and call FSM; set_permissions_mode/2 is a
+          # cast (non-blocking), called directly like Tau.send/2.
+          Tau.Session.set_permissions_mode(model.session_id, mode)
+          %{model_cleared | permissions_mode: mode}
       end
     end
 
@@ -1141,6 +1286,38 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
               transcript: bounded_append(model.transcript, {marker, []})
           }
       end
+    end
+
+    # D-170 (#341 PR-B / SPEC-PERMISSION-PROMPTS §7 AC-B1, AC-B8):
+    # Enqueue a PermissionRequest. Pure MVU — no process (OTP non-negotiables #3/#8).
+    defp on_permission_request(model, req) do
+      queue = Map.get(model, :pending_permissions, [])
+      Map.put(model, :pending_permissions, queue ++ [req])
+    end
+
+    # D-082 (#339 / SPEC-USER-TURN §6): restore queued steering messages to the
+    # editor from a %QueueRestored{} event. Extracted from update/2 to keep
+    # cyclomatic complexity within bounds.
+    defp on_queue_restored(model, msgs) do
+      text =
+        msgs
+        |> Enum.map(fn
+          %Tau.Message.User{content: content} ->
+            content
+            |> Enum.filter(&match?(%{type: :text}, &1))
+            |> Enum.map_join("\n", & &1.text)
+
+          s when is_binary(s) ->
+            s
+
+          _ ->
+            ""
+        end)
+        |> Enum.reject(&(&1 == ""))
+        |> Enum.join("\n")
+
+      new_editor = restore_editor_from_text(text)
+      %{model | editor: new_editor}
     end
 
     defp on_message_start(model, _e), do: %{model | status: :streaming, last_assistant: ""}

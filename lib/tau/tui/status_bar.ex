@@ -65,10 +65,13 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       token_seg = cost_summary(usage_from(model))
       ctx_seg = context_segment(model)
       compaction_seg = compaction_segment(model)
+      # D-171 (#341 PR-B / SPEC-PERMISSION-PROMPTS §7 AC-B5): always-visible
+      # permissions-mode indicator. Shows the active mode (default/accept_edits/plan).
+      mode_seg = permissions_mode_segment(model)
       hint_seg = hint_segment(model)
 
       segments =
-        [session_seg, model_seg, token_seg, ctx_seg, compaction_seg, hint_seg]
+        [session_seg, model_seg, token_seg, ctx_seg, compaction_seg, mode_seg, hint_seg]
         |> Enum.reject(&(is_nil(&1) or &1 == ""))
 
       # SPEC-CODING-AGENT §4 B1 (AC-9 regression): append agent segment when present.
@@ -231,6 +234,14 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
     defp compaction_segment(%{compaction: :running}), do: "compacting…"
     defp compaction_segment(_), do: ""
+
+    # D-171 (#341 PR-B / SPEC-PERMISSION-PROMPTS §7 AC-B5):
+    # Always-visible permissions mode indicator. Renders "mode: <mode>".
+    defp permissions_mode_segment(%{permissions_mode: mode}) when is_atom(mode) do
+      "mode: " <> to_string(mode)
+    end
+
+    defp permissions_mode_segment(_), do: "mode: default"
 
     defp hint_segment(%{status: :idle}),
       do: "<Enter> submit · <Esc> clear · <Ctrl-C> quit"

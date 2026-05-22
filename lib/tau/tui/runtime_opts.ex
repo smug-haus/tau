@@ -23,6 +23,10 @@ defmodule Tau.TUI.RuntimeOpts do
       `Tau.CodingAgents.ClaudeCode`). When set, the TUI's user-message
       path routes through `Tau.CodingAgent.Dispatcher` instead of the
       provider stream (SPEC-CODING-AGENT §4 B1).
+    * `:permissions_mode` — initial permissions mode atom
+      (`default | accept_edits | plan`). Seeds `model.permissions_mode`
+      at `init/1` so the status-bar indicator reflects the CLI-supplied
+      mode on the first rendered frame (D-171 / SPEC-PERMISSION-PROMPTS §7 AC-B9).
   """
 
   @key {Tau.TUI, :runtime_opts}
