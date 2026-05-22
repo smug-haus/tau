@@ -112,9 +112,12 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         # nil = closed; non-nil = open with query/entries/selected.
         menu: nil,
         # D-160..D-169 (#340 / SPEC-TUI-HEADLESS §5d): status surface fields.
-        # Seeded here; updated by event handlers below.
-        model: Map.get(runtime_opts, :model),
-        provider: Map.get(runtime_opts, :provider),
+        # AC-1: seed provider and model at init so the status bar shows the
+        # active model on the FIRST rendered frame (not only after the first
+        # SessionStart tick drain). Fall back to Tau.Provider.default/0 and
+        # provider.default_model/0 so "no model" never appears at launch.
+        provider: init_provider(runtime_opts),
+        model: init_model(runtime_opts),
         # Accumulated token usage from the session (folded from Tau.Cost ETS).
         usage: %{input_tokens: 0, output_tokens: 0, cache_read: 0, cache_write: 0},
         # context_tokens: latest completed turn's input_tokens (overwrite, not sum —
@@ -132,6 +135,32 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
     defp put_if(opts, _key, nil), do: opts
     defp put_if(opts, key, value), do: Keyword.put(opts, key, value)
+
+    # AC-1 (D-160): resolve the active provider at init time so the status bar
+    # shows the real provider on the first rendered frame. Falls back to the
+    # application default when none is specified via CLI.
+    defp init_provider(runtime_opts) do
+      Map.get(runtime_opts, :provider) || Tau.Provider.default()
+    end
+
+    # AC-1 (D-160): resolve the active model at init time so the status bar
+    # shows the real model id on the first rendered frame. Falls back to the
+    # provider's default_model/0 when none is specified via CLI.
+    defp init_model(runtime_opts) do
+      case Map.get(runtime_opts, :model) do
+        nil ->
+          provider = init_provider(runtime_opts)
+
+          if is_atom(provider) and function_exported?(provider, :default_model, 0) do
+            provider.default_model()
+          else
+            nil
+          end
+
+        model ->
+          model
+      end
+    end
 
     # Derive the transcript pane's usable wrap width from the terminal
     # width. Ratatouille's `column(size: 12)` uses a 12/12 grid so the
@@ -667,9 +696,12 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     end
 
     # Build the status-bar model map for StatusBar.render/1, mixing in the
-    # session status and coding-agent info that StatusBar needs.
+    # session_id, session status, and coding-agent info that StatusBar needs.
+    # D-162 (AC-H1): session_id MUST be passed so render_text/1 can emit
+    # "session: <id>" as the first segment (smoke-gate ~r/session:/ assertion).
     defp status_bar_model(model) do
       base = %{
+        session_id: Map.get(model, :session_id),
         model: Map.get(model, :model),
         provider: Map.get(model, :provider),
         usage:

@@ -52,6 +52,15 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     """
     @spec render_text(model()) :: String.t()
     def render_text(model) do
+      # D-162 (AC-H1 / SPEC-TUI-HEADLESS §5d): session_id segment MUST be first
+      # so ~r/session:/ smoke-gate assertion matches. Mirrors the pre-rewrite
+      # `"session: " <> model.session_id <> ...` rendering in app.ex.
+      session_seg =
+        case Map.get(model, :session_id) do
+          nil -> nil
+          sid -> "session: " <> sid
+        end
+
       model_seg = model_segment(model)
       token_seg = cost_summary(usage_from(model))
       ctx_seg = context_segment(model)
@@ -59,8 +68,8 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       hint_seg = hint_segment(model)
 
       segments =
-        [model_seg, token_seg, ctx_seg, compaction_seg, hint_seg]
-        |> Enum.reject(&(&1 == ""))
+        [session_seg, model_seg, token_seg, ctx_seg, compaction_seg, hint_seg]
+        |> Enum.reject(&(is_nil(&1) or &1 == ""))
 
       # SPEC-CODING-AGENT §4 B1 (AC-9 regression): append agent segment when present.
       segments =
