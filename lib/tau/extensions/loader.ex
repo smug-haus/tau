@@ -26,6 +26,8 @@ defmodule Tau.Extensions.Loader do
   use GenServer
   require Logger
 
+  alias Tau.Settings.Cache
+
   # ---------------------------------------------------------------------------
   # Public API
   # ---------------------------------------------------------------------------
@@ -90,7 +92,7 @@ defmodule Tau.Extensions.Loader do
       if Keyword.has_key?(opts, :entries) do
         {Keyword.fetch!(opts, :entries), []}
       else
-        settings = Tau.Settings.Cache.get()
+        settings = Cache.get()
         {Map.get(settings, :extensions, []), discover_extension_dirs()}
       end
 
@@ -130,7 +132,7 @@ defmodule Tau.Extensions.Loader do
   end
 
   def handle_cast(:reload_all, state) do
-    settings = Tau.Settings.Cache.get()
+    settings = Cache.get()
     explicit_entries = Map.get(settings, :extensions, [])
     discovered_entries = discover_extension_dirs()
     all_entries = explicit_entries ++ Enum.reject(discovered_entries, &(&1 in explicit_entries))
