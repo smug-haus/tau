@@ -81,6 +81,61 @@ defmodule Tau.Factory.GateTest do
 
       assert :ok = Gate.ac_linkage(@pr_body, sources)
     end
+
+    # Meta-AC convention (PR #371): an AC whose identifier is immediately
+    # followed by the marker `(meta)` is verified by CI wiring / inspection,
+    # not by a unit gating test, and is EXEMPT from the linkage gate — it
+    # MUST NOT be reported as missing even with no matching test tag. The
+    # exemption is specific to the `(meta)` marker: a non-meta AC with no
+    # test is still reported missing.
+    @meta_pr_body """
+    ## Acceptance criteria
+
+    - **AC-1** the linkage gate parses claimed ACs.
+    - **AC-2** the masking gate scans diffs.
+    - **AC-3 (meta)** the gates are wired into CI; verified by CI, not a unit test.
+
+    ## Test plan
+    fixture-driven fail-before/pass-after cases.
+    """
+
+    test "AC-1: exempts a (meta)-marked AC from the linkage gate while still flagging a non-meta gap" do
+      # Sources cover AC-1 and AC-2, but NOT AC-3. AC-3 carries the `(meta)`
+      # marker in @meta_pr_body, so it must be exempt — never reported missing.
+      meta_covered_sources = [
+        """
+        defmodule MetaCoverageTest do
+          @tag :ac_1
+          test "AC-1: linkage" do
+          end
+
+          @tag :ac_2
+          test "AC-2: masking" do
+          end
+        end
+        """
+      ]
+
+      assert :ok = Gate.ac_linkage(@meta_pr_body, meta_covered_sources)
+
+      # Negative control: drop AC-2's coverage too. AC-2 is NOT meta-marked,
+      # so it MUST still be reported missing — proving the exemption is
+      # specific to the `(meta)` marker, not a blanket skip. AC-3 stays exempt.
+      non_meta_gap_sources = [
+        """
+        defmodule PartialCoverageTest do
+          @tag :ac_1
+          test "AC-1: linkage" do
+          end
+        end
+        """
+      ]
+
+      assert {:error, missing} = Gate.ac_linkage(@meta_pr_body, non_meta_gap_sources)
+      assert "AC-2" in missing
+      refute "AC-3" in missing
+      refute "AC-1" in missing
+    end
   end
 
   # ---------------------------------------------------------------------------
