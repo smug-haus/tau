@@ -15,6 +15,8 @@ defmodule Tau.Session.PermissionPromptsTest do
 
   import Tau.Test.SessionHelper, only: [start_session_for_test: 1]
 
+  alias Tau.Permissions.Parser, as: PermParser
+  alias Tau.Permissions.RuleSet
   alias Tau.Provider.Event
   alias Tau.Session.Events, as: SE
   alias Tau.Message.ToolResult
@@ -98,6 +100,106 @@ defmodule Tau.Session.PermissionPromptsTest do
     def streams_updates?, do: false
   end
 
+  # A second ask tool for multi-call tests.
+  defmodule AskTool2 do
+    @moduledoc false
+    @behaviour Tau.Tool
+
+    @impl true
+    def name, do: "ask_tool_2"
+
+    @impl true
+    def description, do: "A second tool that requires permission in default mode."
+
+    @impl true
+    def parameters, do: %{"type" => "object", "properties" => %{}, "required" => []}
+
+    @impl true
+    def execute(_args, _ctx),
+      do: {:ok, %Tau.Tool.Result{content: "executed_2!", details: %{}, is_error: false}}
+
+    @impl true
+    def execution_mode, do: :parallel
+
+    @impl true
+    def streams_updates?, do: false
+  end
+
+  # A pre-allowed tool (allow rule set up in tests that need it).
+  defmodule AllowTool do
+    @moduledoc false
+    @behaviour Tau.Tool
+
+    @impl true
+    def name, do: "allow_tool"
+
+    @impl true
+    def description, do: "A tool that is pre-allowed by rule."
+
+    @impl true
+    def parameters, do: %{"type" => "object", "properties" => %{}, "required" => []}
+
+    @impl true
+    def execute(_args, _ctx),
+      do: {:ok, %Tau.Tool.Result{content: "allow_executed!", details: %{}, is_error: false}}
+
+    @impl true
+    def execution_mode, do: :parallel
+
+    @impl true
+    def streams_updates?, do: false
+  end
+
+  # Provider that emits two tool calls in one round (for multi-call tests).
+  defmodule TwoToolProvider do
+    @moduledoc false
+    @behaviour Tau.Provider
+
+    @impl true
+    def stream(messages, _opts, ctx) do
+      has_tool_result? = Enum.any?(messages, &match?(%Tau.Message.ToolResult{}, &1))
+      call_id_1 = Map.get(ctx, :call_id_1, "call-two-1")
+      call_id_2 = Map.get(ctx, :call_id_2, "call-two-2")
+      tool_name_1 = Map.get(ctx, :tool_name_1, "ask_tool")
+      tool_name_2 = Map.get(ctx, :tool_name_2, "ask_tool_2")
+
+      events =
+        if has_tool_result? do
+          [
+            %Event.Start{request_id: "r2", model: "two"},
+            %Event.TextStart{block_id: "t1"},
+            %Event.TextDelta{block_id: "t1", text: "done"},
+            %Event.TextEnd{block_id: "t1"},
+            %Event.Done{stop_reason: :end_turn, usage: %{}}
+          ]
+        else
+          [
+            %Event.Start{request_id: "r1", model: "two"},
+            %Event.ToolCallStart{tool_call_id: call_id_1, name: tool_name_1},
+            %Event.ToolCallEnd{tool_call_id: call_id_1, params: %{}},
+            %Event.ToolCallStart{tool_call_id: call_id_2, name: tool_name_2},
+            %Event.ToolCallEnd{tool_call_id: call_id_2, params: %{}},
+            %Event.Done{stop_reason: :tool_use, usage: %{}}
+          ]
+        end
+
+      {:ok, events}
+    end
+
+    @impl true
+    def capabilities,
+      do: %{
+        thinking: false,
+        tools: true,
+        vision: false,
+        prompt_caching: false,
+        parallel_tools: true
+      }
+
+    @impl true
+    def default_model, do: "two"
+  end
+
   # ---------------------------------------------------------------------------
   # Setup
   # ---------------------------------------------------------------------------
@@ -113,10 +215,19 @@ defmodule Tau.Session.PermissionPromptsTest do
     Application.put_env(:tau, :data_dir, tmp)
 
     prior_builtins = Application.get_env(:tau, :builtin_tools, [])
-    Application.put_env(:tau, :builtin_tools, [AskTool | prior_builtins])
+
+    Application.put_env(:tau, :builtin_tools, [
+      AskTool,
+      AskTool2,
+      AllowTool | prior_builtins
+    ])
+
+    # Capture the current rule set so we can restore it after tests that mutate it.
+    prior_rule_set = RuleSet.get()
 
     on_exit(fn ->
       Application.put_env(:tau, :builtin_tools, prior_builtins)
+      :persistent_term.put({Tau.Permissions, :rule_set}, prior_rule_set)
       File.rm_rf!(tmp)
       Application.delete_env(:tau, :data_dir)
     end)
@@ -356,6 +467,178 @@ defmodule Tau.Session.PermissionPromptsTest do
       # Clean up.
       Tau.cancel(sid)
       assert_receive %SE.Cancelled{}, 5_000
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # AC-A2 (multi-call): multi-:ask round — deny first, allow second.
+  # Verifies that:
+  #   - Both calls enter :awaiting_permission together (no partial dispatch).
+  #   - :deny_once on the first call does NOT complete the round.
+  #   - :allow_once on the second call completes the round.
+  #   - The denied call's is_error ToolResult appears in history (AC-A2 falsify check).
+  #   - The allowed call executes and its ToolResult is in history.
+  #   - Transcript is well-formed: every tool_call paired with a tool_result.
+  #   - Turn completes (does not hang).
+  # ---------------------------------------------------------------------------
+
+  describe "AC-A2 (multi-call): multi-:ask round with deny_once + allow_once" do
+    test "deny first :ask then allow second :ask: both results in history, turn completes" do
+      sid = "perm-multi-ask-#{System.unique_integer([:positive])}"
+      Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{sid}")
+
+      call_id_1 = "call-multi-1"
+      call_id_2 = "call-multi-2"
+
+      {:ok, ^sid} =
+        start_session_for_test(
+          session_id: sid,
+          provider: TwoToolProvider,
+          model: "two",
+          interactive: true,
+          provider_ctx: %{
+            call_id_1: call_id_1,
+            call_id_2: call_id_2,
+            tool_name_1: "ask_tool",
+            tool_name_2: "ask_tool_2"
+          }
+        )
+
+      Tau.send(sid, "go")
+
+      # Both PermissionRequest events must arrive (FSM defers the whole round).
+      assert_receive %SE.PermissionRequest{tool_call_id: ^call_id_1}, 5_000
+      assert_receive %SE.PermissionRequest{tool_call_id: ^call_id_2}, 5_000
+
+      # FSM must be in :awaiting_permission with both pending.
+      {:ok, snap} = Tau.snapshot(sid)
+      assert snap.state == :awaiting_permission
+
+      # Deny the first call — FSM must stay in :awaiting_permission.
+      :ok = Tau.Session.decide_permission(sid, call_id_1, :deny_once)
+
+      # Small yield; FSM must NOT have left :awaiting_permission.
+      Process.sleep(50)
+      {:ok, snap2} = Tau.snapshot(sid)
+      assert snap2.state == :awaiting_permission
+
+      # Allow the second call — round completes.
+      :ok = Tau.Session.decide_permission(sid, call_id_2, :allow_once)
+
+      # Denied call yields is_error ToolResult; allowed call executes.
+      assert_receive %SE.ToolEnd{
+                       tool_call_id: ^call_id_1,
+                       result: %ToolResult{is_error: true, content: content1}
+                     },
+                     5_000
+
+      assert content1 =~ "denied"
+
+      assert_receive %SE.ToolEnd{
+                       tool_call_id: ^call_id_2,
+                       result: %ToolResult{is_error: false, content: "executed_2!"}
+                     },
+                     5_000
+
+      # Turn completes; FSM returns to :awaiting_user.
+      assert drain_until_end_turn() == :end_turn
+
+      {:ok, snap3} = Tau.snapshot(sid)
+      assert snap3.state == :awaiting_user
+
+      # Transcript well-formedness: every tool_result must be in messages.
+      # Tool results are %Tau.Message.ToolResult{} structs in the messages list.
+      tool_results =
+        Enum.filter(snap3.messages, fn
+          %Tau.Message.ToolResult{} -> true
+          _ -> false
+        end)
+
+      result_ids = Enum.map(tool_results, & &1.tool_call_id) |> MapSet.new()
+
+      assert call_id_1 in result_ids,
+             "denied tool_result #{call_id_1} missing from messages; got #{inspect(result_ids)}"
+
+      assert call_id_2 in result_ids,
+             "allowed tool_result #{call_id_2} missing from messages; got #{inspect(result_ids)}"
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # AC-A2 (mixed round): mixed :allow + :ask round.
+  # Verifies that:
+  #   - When a round has one :allow call and one :ask call, no calls are
+  #     dispatched until the :ask is resolved (whole-round deferral, D-091).
+  #   - After :allow_once resolves the :ask, BOTH calls execute.
+  #   - Turn completes without hanging.
+  # ---------------------------------------------------------------------------
+
+  describe "AC-A2 (mixed round): mixed :allow + :ask round defers whole round" do
+    test "allow call does not execute until :ask is resolved; both complete after allow_once" do
+      sid = "perm-mixed-#{System.unique_integer([:positive])}"
+      Phoenix.PubSub.subscribe(Tau.PubSub, "session:#{sid}")
+
+      call_id_allow = "call-mixed-allow"
+      call_id_ask = "call-mixed-ask"
+
+      # Set up an allow rule for "allow_tool" so it gets :allow verdict.
+      # "ask_tool" falls through to :ask (the default for :default mode).
+      allow_rules =
+        PermParser.compile(%{
+          "allow" => ["allow_tool"],
+          "deny" => [],
+          "ask" => []
+        })
+
+      :persistent_term.put({Tau.Permissions, :rule_set}, List.to_tuple(allow_rules))
+
+      {:ok, ^sid} =
+        start_session_for_test(
+          session_id: sid,
+          provider: TwoToolProvider,
+          model: "two",
+          interactive: true,
+          provider_ctx: %{
+            call_id_1: call_id_allow,
+            call_id_2: call_id_ask,
+            tool_name_1: "allow_tool",
+            tool_name_2: "ask_tool"
+          }
+        )
+
+      Tau.send(sid, "go")
+
+      # Only the :ask tool emits a PermissionRequest; the :allow tool is deferred.
+      assert_receive %SE.PermissionRequest{tool_call_id: ^call_id_ask}, 5_000
+
+      # No ToolEnd for the allow call yet — it must not have dispatched.
+      refute_receive %SE.ToolEnd{tool_call_id: ^call_id_allow}, 200
+
+      # FSM must be in :awaiting_permission.
+      {:ok, snap} = Tau.snapshot(sid)
+      assert snap.state == :awaiting_permission
+
+      # Allow the :ask call. Both calls should now dispatch.
+      :ok = Tau.Session.decide_permission(sid, call_id_ask, :allow_once)
+
+      # Both ToolEnd events must arrive.
+      assert_receive %SE.ToolEnd{
+                       tool_call_id: ^call_id_allow,
+                       result: %ToolResult{is_error: false, content: "allow_executed!"}
+                     },
+                     5_000
+
+      assert_receive %SE.ToolEnd{
+                       tool_call_id: ^call_id_ask,
+                       result: %ToolResult{is_error: false, content: "executed!"}
+                     },
+                     5_000
+
+      # Turn completes.
+      assert drain_until_end_turn() == :end_turn
+
+      {:ok, snap2} = Tau.snapshot(sid)
+      assert snap2.state == :awaiting_user
     end
   end
 
