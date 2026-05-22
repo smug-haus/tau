@@ -66,6 +66,32 @@ defmodule Tau.Tools.Builtin.DelegateTest do
     )
   end
 
+  # Wait until the CodingAgent.Supervisor has no active children.
+  #
+  # The Dispatcher sends %Event.Done{} to its subscriber and then returns
+  # {:stop, :normal} from handle_info. The subscriber (Delegate.execute's
+  # drain loop) unblocks immediately on receiving Done, but the
+  # DynamicSupervisor's decrement of count_children is asynchronous — it
+  # happens after the process actually exits and the supervisor processes
+  # the EXIT signal. This leaves a window where count() > 0 even though
+  # Delegate.execute has already returned.
+  #
+  # We close this window by monitoring each currently-running child and
+  # awaiting its :DOWN. :DOWN is sent synchronously when the process dies,
+  # so after all :DOWNs are received, count() is guaranteed to be 0.
+  defp wait_dispatchers_idle do
+    Tau.CodingAgent.Supervisor.which_children()
+    |> Enum.each(fn {_, pid, _, _} when is_pid(pid) ->
+      ref = Process.monitor(pid)
+
+      receive do
+        {:DOWN, ^ref, :process, ^pid, _} -> :ok
+      after
+        5_000 -> Process.demonitor(ref, [:flush])
+      end
+    end)
+  end
+
   # ---------------------------------------------------------------------------
   # Happy path
   # ---------------------------------------------------------------------------
@@ -115,6 +141,17 @@ defmodule Tau.Tools.Builtin.DelegateTest do
   # Unknown agent
   # ---------------------------------------------------------------------------
   describe "unknown agent" do
+    # Await teardown of any dispatchers started by previous tests before
+    # recording the baseline count. The dispatcher sends Done to the drain
+    # loop and then calls {:stop, :normal} — but {:stop, :normal} is
+    # processed asynchronously by the DynamicSupervisor, so count() can
+    # still be 1 when the next test starts. Monitoring each child and
+    # awaiting :DOWN gives us a real terminal signal rather than a sleep.
+    setup do
+      wait_dispatchers_idle()
+      :ok
+    end
+
     test "returns is_error without spawning a dispatcher" do
       before = Tau.CodingAgent.Supervisor.count()
 
@@ -140,6 +177,13 @@ defmodule Tau.Tools.Builtin.DelegateTest do
   # Recursion limit
   # ---------------------------------------------------------------------------
   describe "recursion limit" do
+    # Same rationale as "unknown agent": await previous-test dispatcher
+    # teardown before recording the baseline count.
+    setup do
+      wait_dispatchers_idle()
+      :ok
+    end
+
     test "depth >= max_depth is rejected before any dispatcher runs" do
       before = Tau.CodingAgent.Supervisor.count()
 
