@@ -280,15 +280,16 @@ SPEC §4 contract, not merely because the test is hard to satisfy. The protocol:
    signal — the coordinator escalates (see "Stop / escalate conditions") rather
    than continuing. This indicates a weak test-author or an underspecified SPEC.
 
-## The three mechanical gates *(pending PR-B / issue #370)*
+## The three mechanical gates
 
-These gates are documented here as policy; PR-B implements them as CI. Until
-PR-B lands, the reviewer notes each gate as **pending** rather than failing the
-PR for its absence.
+These gates are implemented as CI (PR-B / issue #370). `Tau.Factory.Gate`
+provides the three pure functions; `mix tau.gate.ac_linkage`,
+`mix tau.gate.masking`, and `mix tau.gate.mutation` are the CLI wrappers;
+`.github/workflows/ci.yml` wires them into the `lint` and `mutation-check` jobs.
 
 **Gate 5.1 — AC-to-test linkage.** Every `AC-N`/`D-NNN` the draft-PR body
-claims MUST appear in a gating-test name or `@tag`. Verified by CI after PR-B;
-verified by reviewer inspection until then.
+claims MUST appear in a gating-test name or `@tag`. Verified by CI via
+`mix tau.gate.ac_linkage` in the `lint` job (blocking).
 
 **Gate 5.2 — Masking detection (detection-only).** The PR diff is scanned for
 deleted or weakened assertions: any `-  assert` / `-  refute` line, or any
@@ -296,12 +297,15 @@ implementer edit to a declared gating-test path. There is **no self-authored
 bypass tag** — every flagged deletion is surfaced to the `critic` as a mandatory
 review item; the critic rules whether the deletion is legitimate or a weakening.
 Path-based (uses the declared gating-test path set, not commit attribution).
+Verified by CI via `mix tau.gate.masking` in the `lint` job (detection-only,
+never hard-fails).
 
 **Gate 5.3 — Mutation check (path-based).** Using the declared gating-test path
 set: check out those paths at the test-author's committed state, revert every
 other path to its pre-implementer state, run the gating tests, and assert that
 ≥1 test fails. Path-based rather than commit-based so it survives refine-cycle
-rebases.
+rebases. Verified by CI via `mix tau.gate.mutation` in the dedicated
+`mutation-check` job (blocking).
 
 ### Residual — what these gates do NOT close
 

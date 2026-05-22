@@ -68,6 +68,51 @@ jobs:
       - run: mix credo --strict 2>&1 | tee /tmp/credo.log
         id: credo_step
         continue-on-error: true
+
+      # -----------------------------------------------------------------------
+      # Gate 5.1 — AC-to-test linkage (blocking, PR events only)
+      # Verifies every AC-N/D-NNN claimed in the PR body appears in a gating
+      # test name or @tag. Skipped on push events (no PR body available).
+      # -----------------------------------------------------------------------
+      - name: Gate 5.1 — AC-to-test linkage
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Write PR body to a temp file
+          gh pr view ${{ github.event.pull_request.number }} --json body --jq .body \
+            > /tmp/pr-body.txt
+          # Extract gating-test paths from the "Gating-test paths" section of the
+          # PR body. Paths are listed as backtick-quoted items (e.g. `test/foo.exs`).
+          GATING_FILES=$(grep -oP '(?<=`)[^`]+\.exs(?=`)' /tmp/pr-body.txt | sort -u || true)
+          if [ -z "$GATING_FILES" ]; then
+            echo "Gate 5.1: no gating-test paths declared in PR body — skipping."
+            exit 0
+          fi
+          echo "Gating test paths: $GATING_FILES"
+          # Verify each file exists
+          for f in $GATING_FILES; do
+            if [ ! -f "$f" ]; then
+              echo "WARNING: declared gating test path '$f' not found — skipping gate."
+              exit 0
+            fi
+          done
+          mix tau.gate.ac_linkage /tmp/pr-body.txt $GATING_FILES
+
+      # -----------------------------------------------------------------------
+      # Gate 5.2 — Masking detection (detection-only, PR events only)
+      # Scans the PR diff for removed assertions. Surfaces findings; never fails.
+      # -----------------------------------------------------------------------
+      - name: Gate 5.2 — Masking detection (detection-only)
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          BASE_SHA=$(git merge-base origin/main HEAD)
+          git diff "$BASE_SHA"..HEAD > /tmp/pr-diff.txt
+          mix tau.gate.masking /tmp/pr-diff.txt || true
       - name: Push lint logs to ci-log branch on failure
         if: steps.compile_step.outcome == 'failure' || steps.credo_step.outcome == 'failure'
         env:
@@ -117,6 +162,70 @@ jobs:
       - name: Fail the job if credo failed
         if: steps.credo_step.outcome == 'failure'
         run: exit 1
+
+  # ---------------------------------------------------------------------------
+  # Gate 5.3 — Mutation check (blocking, PR events only)
+  # Keeps the declared gating-test paths at HEAD, reverts every other tracked
+  # file to the merge-base, runs the gating tests, and asserts ≥1 fails.
+  # A vacuous gating-test suite (all pass against base) fails CI.
+  # ---------------------------------------------------------------------------
+  mutation-check:
+    name: mutation-check (Gate 5.3)
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'pull_request'
+    needs: [lint]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python (3.10 for ex_termbox waf)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Setup BEAM
+        id: beam
+        uses: erlef/setup-beam@v1
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
+      - name: Cache deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-mutation-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-${{ hashFiles('**/mix.lock', 'mix.exs') }}
+
+      - run: mix deps.get
+      - run: mix compile
+
+      - name: Gate 5.3 — Mutation check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Write PR body to a temp file and extract gating-test paths.
+          gh pr view ${{ github.event.pull_request.number }} --json body --jq .body \
+            > /tmp/pr-body.txt
+          GATING_FILES=$(grep -oP '(?<=`)[^`]+\.exs(?=`)' /tmp/pr-body.txt | sort -u || true)
+          if [ -z "$GATING_FILES" ]; then
+            echo "Gate 5.3: no gating-test paths declared in PR body — skipping."
+            exit 0
+          fi
+          echo "Gating test paths: $GATING_FILES"
+          for f in $GATING_FILES; do
+            if [ ! -f "$f" ]; then
+              echo "WARNING: declared gating test path '$f' not found — skipping gate."
+              exit 0
+            fi
+          done
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          BASE_REF=$(git merge-base origin/main HEAD)
+          echo "Base ref (pre-implementer): $BASE_REF"
+          mix tau.gate.mutation "$BASE_REF" $GATING_FILES
 
   test:
     name: test (Elixir ${{ matrix.elixir }} · OTP ${{ matrix.otp }})
