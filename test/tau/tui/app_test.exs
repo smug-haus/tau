@@ -583,6 +583,95 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         m3 = App.update(m2, {:event, %{key: 18}})
         assert m3.search.search_index == 1
       end
+
+      # FIX-C1 (BLOCKING): displayed match MUST advance with search_index.
+      # These tests verify the live prompt shows the Nth-oldest match after
+      # N Ctrl+R presses, not always match 0.
+      test "displayed prompt shows match-0 entry at search_index 0" do
+        # Two entries matching "foo": foo bar (older), foo baz (newer/index-0)
+        hist = History.new() |> History.push("foo bar") |> History.push("foo baz")
+        m = %{model() | history: hist}
+        # Enter search and type query "foo"
+        m2 = App.update(m, {:event, %{key: 18}})
+        m3 = App.update(m2, {:event, %{ch: ?f}})
+        m4 = App.update(m3, {:event, %{ch: ?o}})
+        m5 = App.update(m4, {:event, %{ch: ?o}})
+        assert m5.search.search_index == 0
+
+        # Render and extract the prompt bar label content
+        rendered = App.render(m5)
+        [label | _] = rendered.attributes.bottom_bar.children
+        content = label.attributes.content
+
+        assert String.contains?(content, "foo baz"),
+               "at search_index 0, prompt MUST show the most-recent match (foo baz); got: #{inspect(content)}"
+
+        refute String.contains?(content, "foo bar"),
+               "at search_index 0, prompt MUST NOT show the older match (foo bar); got: #{inspect(content)}"
+      end
+
+      test "displayed prompt advances to next-older match after Ctrl+R cycle (FIX-C1)" do
+        # This test MUST fail against pre-fix code where build_prompt_labels
+        # calls History.search/2 (always match 0) instead of search_nth_match/3.
+        hist = History.new() |> History.push("foo bar") |> History.push("foo baz")
+        m = %{model() | history: hist}
+        # Enter search and type query "foo"
+        m2 = App.update(m, {:event, %{key: 18}})
+        m3 = App.update(m2, {:event, %{ch: ?f}})
+        m4 = App.update(m3, {:event, %{ch: ?o}})
+        m5 = App.update(m4, {:event, %{ch: ?o}})
+        # Press Ctrl+R again to cycle to match index 1
+        m6 = App.update(m5, {:event, %{key: 18}})
+        assert m6.search.search_index == 1
+
+        # Render and extract the prompt bar label content
+        rendered = App.render(m6)
+        [label | _] = rendered.attributes.bottom_bar.children
+        content = label.attributes.content
+
+        assert String.contains?(content, "foo bar"),
+               "at search_index 1, prompt MUST show the next-older match (foo bar); got: #{inspect(content)}"
+
+        refute String.contains?(content, "foo baz"),
+               "at search_index 1, prompt MUST NOT show the most-recent match (foo baz); got: #{inspect(content)}"
+      end
+
+      # FIX-C2 (SUGGESTION): search_index MUST reset to 0 on query mutation.
+      test "Backspace in search mode resets search_index to 0" do
+        hist = History.new() |> History.push("foo bar") |> History.push("foo baz")
+        m = %{model() | history: hist}
+        # Enter search, type "foo", cycle to index 1
+        m2 = App.update(m, {:event, %{key: 18}})
+        m3 = App.update(m2, {:event, %{ch: ?f}})
+        m4 = App.update(m3, {:event, %{ch: ?o}})
+        m5 = App.update(m4, {:event, %{ch: ?o}})
+        m6 = App.update(m5, {:event, %{key: 18}})
+        assert m6.search.search_index == 1
+
+        # Now Backspace — mutates query, MUST reset search_index
+        m7 = App.update(m6, {:event, %{key: 127}})
+
+        assert m7.search.search_index == 0,
+               "Backspace in search mode MUST reset search_index to 0; got: #{m7.search.search_index}"
+      end
+
+      test "Space in search mode resets search_index to 0" do
+        hist = History.new() |> History.push("foo bar") |> History.push("foo baz")
+        m = %{model() | history: hist}
+        # Enter search, type "foo", cycle to index 1
+        m2 = App.update(m, {:event, %{key: 18}})
+        m3 = App.update(m2, {:event, %{ch: ?f}})
+        m4 = App.update(m3, {:event, %{ch: ?o}})
+        m5 = App.update(m4, {:event, %{ch: ?o}})
+        m6 = App.update(m5, {:event, %{key: 18}})
+        assert m6.search.search_index == 1
+
+        # Now Space — mutates query, MUST reset search_index
+        m7 = App.update(m6, {:event, %{key: 32}})
+
+        assert m7.search.search_index == 0,
+               "Space in search mode MUST reset search_index to 0; got: #{m7.search.search_index}"
+      end
     end
 
     describe "update/2 — Alt+Y yank-pop wiring (AC-6)" do

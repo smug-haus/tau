@@ -218,14 +218,21 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
         # Space (termbox quirk: key 32, not ch 32)
         32 when model.search != nil ->
-          %{model | search: %{model.search | query: model.search.query <> " "}}
+          %{model | search: %{model.search | query: model.search.query <> " ", search_index: 0}}
 
         32 ->
           model |> editor_insert(" ") |> close_menu_if_whitespace()
 
         # Backspace (key 127 and 8)
         bsp when bsp in [127, 8] and model.search != nil ->
-          %{model | search: %{model.search | query: String.slice(model.search.query, 0..-2//1)}}
+          %{
+            model
+            | search: %{
+                model.search
+                | query: String.slice(model.search.query, 0..-2//1),
+                  search_index: 0
+              }
+          }
 
         bsp when bsp in [127, 8] ->
           model |> editor_backspace() |> update_menu()
@@ -554,9 +561,11 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
       prefix =
         if model.search != nil do
-          # FIX-3: show live match in the prompt when in search mode.
+          # FIX-3 / FIX-C1: show the live match in the prompt, honouring the
+          # current search_index so the displayed entry matches what
+          # search_accept/1 would accept at the current cycle position (D-147).
           match_text =
-            case History.search(model.history, model.search.query) do
+            case search_nth_match(model.history, model.search.query, model.search.search_index) do
               {:match, t} -> t
               :no_match -> ""
             end
