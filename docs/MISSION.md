@@ -131,6 +131,7 @@ elaboration briefs independently claimed D-066.
 | D-140–D-149 | SPEC-TUI-HEADLESS extension — input editor invariants (#338) |
 | D-150–D-159 | SPEC-TUI-HEADLESS extension — sub-agent visibility invariants (#335) |
 | D-160–D-169 | SPEC-TUI-HEADLESS extension — status surface invariants (#340) |
+| D-170–D-179 | SPEC-WEB-DASHBOARD (new, #374 M7 foundation) |
 
 A SPEC author who needs a D-NNN outside their block MUST update this
 registry and SPEC-TUI-HEADLESS §5 note before using the new identifier.
