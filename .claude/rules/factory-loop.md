@@ -138,6 +138,11 @@ no brief/PR drift. It MUST state:
 - **Dependencies** — issues or PRs this is blocked-by or blocks.
 - **SPECs** — every `docs/spec/SPEC-*.md` in scope, whether this PR authors,
   amends, or merely conforms to each, and the `AC-N` / `D-NNN` it advances.
+- **Acceptance criteria** — list each `AC-N` the PR advances. An AC verified
+  by CI wiring or inspection (not a unit gating test) MUST be marked
+  `AC-N (meta)` immediately after its identifier (e.g. `**AC-4 (meta)**`).
+  Gate 5.1 exempts meta-ACs from the test-linkage check; non-meta ACs MUST
+  have a matching gating-test name or `@tag`.
 - **Gating-test paths** — the exact `test/...` file paths the test-author owns
   for this PR (filled in at cycle step 4b; absent for PRs claiming no
   `AC-N`/`D-NNN`). This path set is the boundary the mechanical gates key on;
@@ -290,6 +295,12 @@ provides the three pure functions; `mix tau.gate.ac_linkage`,
 **Gate 5.1 — AC-to-test linkage.** Every `AC-N`/`D-NNN` the draft-PR body
 claims MUST appear in a gating-test name or `@tag`. Verified by CI via
 `mix tau.gate.ac_linkage` in the `lint` job (blocking).
+
+*Meta-AC exemption:* an AC whose identifier is immediately followed by the
+marker `(meta)` (e.g. `AC-4 (meta)` or `**AC-4 (meta)**`) is a *meta-AC*
+— verified by CI wiring or inspection rather than a unit gating test. Gate
+5.1 exempts meta-ACs: they are never reported missing. Use this for ACs
+that are self-evidently satisfied by the CI configuration itself.
 
 **Gate 5.2 — Masking detection (detection-only).** The PR diff is scanned for
 deleted or weakened assertions: any `-  assert` / `-  refute` line, or any

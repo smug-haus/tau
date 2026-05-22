@@ -55,17 +55,46 @@ defmodule Tau.Factory.Gate do
 
   Matching is case-insensitive on the tag side (`:ac_1`, `:d_200`) and
   substring on the test-name side (`"AC-1: ..."`, `"D-200: ..."`).
+
+  ## Meta-AC exemption
+
+  An AC whose identifier is immediately followed by the marker `(meta)`
+  (with optional surrounding `**` markdown bold) is a *meta-AC* — it is
+  verified by CI wiring or inspection, not a unit gating test. Meta-ACs
+  are exempt from the linkage check: they are never reported as missing.
+  An AC is considered meta if ANY occurrence of `AC-N (meta)` exists in
+  `pr_body` (allowing optional whitespace between the token and the marker).
+
+  Examples of meta-AC forms recognised in a PR body:
+  - `AC-4 (meta)` — plain
+  - `**AC-4 (meta)**` — markdown bold
   """
   @spec ac_linkage(String.t(), [String.t()]) :: :ok | {:error, [String.t()]}
   def ac_linkage(pr_body, gating_test_sources)
       when is_binary(pr_body) and is_list(gating_test_sources) do
+    meta_acs = parse_meta_ac_tokens(pr_body)
     claimed = parse_ac_tokens(pr_body)
-    missing = Enum.reject(claimed, &token_covered?(&1, gating_test_sources))
+    non_meta = Enum.reject(claimed, &MapSet.member?(meta_acs, &1))
+    missing = Enum.reject(non_meta, &token_covered?(&1, gating_test_sources))
 
     case missing do
       [] -> :ok
       _ -> {:error, missing}
     end
+  end
+
+  # Parse AC-N tokens that are marked as meta (exempt from the linkage gate).
+  # An AC is meta if ANY occurrence in pr_body is immediately followed by
+  # "(meta)" (optionally with surrounding ** bold markers and optional
+  # whitespace between the token and the marker).
+  defp parse_meta_ac_tokens(pr_body) do
+    # Matches forms like: AC-4 (meta), **AC-4 (meta)**, AC-4  (meta)
+    meta_pattern = ~r/\bAC-(\d+)\s*\(meta\)/
+
+    Regex.scan(meta_pattern, pr_body, capture: :all_but_first)
+    |> List.flatten()
+    |> Enum.map(&"AC-#{&1}")
+    |> MapSet.new()
   end
 
   # Parse all AC-N and D-NNN tokens from the PR body.
