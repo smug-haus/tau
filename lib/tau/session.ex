@@ -2732,6 +2732,30 @@ defmodule Tau.Session do
             # iteration counter — a fresh turn starts with no history.
             # D-061 / #303: provider-retry counter reset on successful
             # Done — a fresh turn starts with the full retry budget.
+            #
+            # D-079 / FIX-4 (#339): steering messages that survived a pure-text
+            # turn (no tool round occurred so drain_steering_queue_one was never
+            # called) MUST NOT carry over into the next unrelated turn. Merge any
+            # remaining steering_queue entries into the front of followup_queue so
+            # they run immediately as post-turn continuations, then clear
+            # steering_queue. This prevents stale steering context from bleeding
+            # into an unrelated later turn's tool-round boundary.
+            {merged_followup, cleared_steering} =
+              if :queue.is_empty(data.steering_queue) do
+                {data.followup_queue, data.steering_queue}
+              else
+                steering_list = :queue.to_list(data.steering_queue)
+
+                merged =
+                  Enum.reduce(
+                    Enum.reverse(steering_list),
+                    data.followup_queue,
+                    fn msg, q -> :queue.in_r(msg, q) end
+                  )
+
+                {merged, :queue.new()}
+              end
+
             next_data = %{
               data
               | provider_task: nil,
@@ -2742,11 +2766,14 @@ defmodule Tau.Session do
                 tool_iterations: 0,
                 tool_loop_state: %{},
                 tool_loop_call_lookups: %{},
-                provider_retry_state: %{count: 0}
+                provider_retry_state: %{count: 0},
+                followup_queue: merged_followup,
+                steering_queue: cleared_steering
             }
 
             # D-080 (#339 / SPEC-USER-TURN §6): drain follow-up queue on
             # turn-completion :awaiting_user transition (normal end).
+            # The merged steering messages (if any) will drain first.
             actions =
               if :queue.is_empty(next_data.followup_queue),
                 do: [],

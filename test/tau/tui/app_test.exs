@@ -775,6 +775,85 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       end
     end
 
+    # ---------------------------------------------------------------------------
+    # D-078 / AC-7: status-bar keybinding hint is honest — busy vs idle (FIX-1)
+    # ---------------------------------------------------------------------------
+
+    describe "render/1 — status-bar hint per state (D-078 / AC-7)" do
+      # The hint is embedded in the top_bar label content. We exercise render/1
+      # directly (it returns a Ratatouille Element tree, no TTY needed) and
+      # extract the top-bar children to assert the correct hint text.
+
+      defp extract_top_bar_hint(model) do
+        rendered = App.render(model)
+        top_bar = rendered.attributes.top_bar
+        [label | _] = top_bar.children
+        label.attributes.content
+      end
+
+      test "idle state shows submit/clear/quit hints" do
+        m = %{model() | status: :idle}
+        hint = extract_top_bar_hint(m)
+
+        assert String.contains?(hint, "submit"),
+               "idle hint MUST contain 'submit'; got: #{inspect(hint)}"
+
+        assert String.contains?(hint, "clear"),
+               "idle hint MUST contain 'clear'; got: #{inspect(hint)}"
+
+        assert String.contains?(hint, "quit"),
+               "idle hint MUST contain 'quit'; got: #{inspect(hint)}"
+
+        refute String.contains?(hint, "steer"),
+               "idle hint MUST NOT contain 'steer'; got: #{inspect(hint)}"
+
+        refute String.contains?(hint, "interrupt"),
+               "idle hint MUST NOT contain 'interrupt'; got: #{inspect(hint)}"
+      end
+
+      test "streaming state shows steer/follow-up/interrupt hints" do
+        m = %{model() | status: :streaming}
+        hint = extract_top_bar_hint(m)
+
+        assert String.contains?(hint, "steer"),
+               "busy hint MUST contain 'steer'; got: #{inspect(hint)}"
+
+        assert String.contains?(hint, "follow-up"),
+               "busy hint MUST contain 'follow-up'; got: #{inspect(hint)}"
+
+        assert String.contains?(hint, "interrupt"),
+               "busy hint MUST contain 'interrupt'; got: #{inspect(hint)}"
+
+        refute String.contains?(hint, "submit"),
+               "busy hint MUST NOT contain 'submit'; got: #{inspect(hint)}"
+      end
+
+      test "sending state shows steer/follow-up/interrupt hints" do
+        m = %{model() | status: :sending}
+        hint = extract_top_bar_hint(m)
+
+        assert String.contains?(hint, "steer"),
+               "sending hint MUST contain 'steer'; got: #{inspect(hint)}"
+
+        assert String.contains?(hint, "interrupt"),
+               "sending hint MUST contain 'interrupt'; got: #{inspect(hint)}"
+
+        refute String.contains?(hint, "submit"),
+               "sending hint MUST NOT contain 'submit'; got: #{inspect(hint)}"
+      end
+
+      test "cancelled status string falls back to idle hints" do
+        m = %{model() | status: "cancelled: :user_request"}
+        hint = extract_top_bar_hint(m)
+
+        assert String.contains?(hint, "submit"),
+               "cancelled hint MUST contain 'submit'; got: #{inspect(hint)}"
+
+        refute String.contains?(hint, "steer"),
+               "cancelled hint MUST NOT contain 'steer'; got: #{inspect(hint)}"
+      end
+    end
+
     describe "run/0 — supervised Ratatouille subtree" do
       test "emits [:tau, :tui, :start] with Ratatouille.Runtime.Supervisor metadata" do
         parent = self()
