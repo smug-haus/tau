@@ -113,6 +113,19 @@ defmodule Tau.Permissions.EvaluatorTest do
       assert Evaluator.evaluate(rs, "Bash", %{"command" => "npm test"}, %{}, :accept_edits) ==
                :deny
     end
+
+    test ":auto mode allows Agent (dispatch infrastructure, issue #354)" do
+      # "Agent" is dispatch infrastructure — :auto must not gate sub-agent
+      # delegation. This test will fail if "Agent" is removed from the
+      # :auto allow-set in default_for_mode/3.
+      assert Evaluator.evaluate({}, "Agent", %{}, %{}, :auto) == :allow
+    end
+
+    test ":auto mode falls through to :ask for non-exempt tools" do
+      # Baseline: tools not in the :auto allow-set still produce :ask,
+      # confirming the allow above is not a blanket-allow.
+      assert Evaluator.evaluate({}, "Write", %{}, %{}, :auto) == :ask
+    end
   end
 
   describe "matchers" do
