@@ -49,11 +49,10 @@ defmodule Tau.Providers.Anthropic do
 
   @api_url "https://api.anthropic.com"
   @api_version "2023-06-01"
-  # SPEC-PROMPT-CACHING C7: 5-min ephemeral TTL only in this PR. The
-  # `extended-cache-ttl-2025-04-11` beta header is removed (it enabled
-  # the 1h tier, which costs 2x write and offers no benefit for active
-  # coordinator sessions). The base `prompt-caching-2024-07-31` header
-  # stays — it is GA-equivalent and harmless.
+  # SPEC-PROMPT-CACHING: 5-min ephemeral TTL only. The
+  # `extended-cache-ttl-2025-04-11` beta header (1h tier, 2x write cost)
+  # is omitted. The base `prompt-caching-2024-07-31` header is
+  # GA-equivalent and stays.
   @beta_headers "prompt-caching-2024-07-31"
   @default_model "claude-opus-4-7"
   @default_max_tokens 8192
@@ -271,26 +270,17 @@ defmodule Tau.Providers.Anthropic do
   defp normalise_stop(nil), do: :stop
   defp normalise_stop(_), do: :stop
 
-  # Normalises Anthropic's `usage` payloads into the canonical Tau
-  # usage-map keys (SPEC-PROMPT-CACHING §4 B3 hop 1 / D-065).
-  #
-  # `merge_usage/2` folds the `usage` block from `message_start` (the
-  # cumulative input / cache counters) with the `usage` block from
-  # `message_delta` (the output count) into the canonical map the cost
-  # ledger reads:
-  #
+  # Folds the `usage` blocks from `message_start` (cumulative input /
+  # cache) and `message_delta` (output) into canonical Tau usage keys
+  # (SPEC-PROMPT-CACHING §4 B3 / D-065):
   #   * `cache_creation_input_tokens` -> `:cache_write`
   #   * `cache_read_input_tokens`     -> `:cache_read`
-  #   * `cache_breakdown` carries the Anthropic 5m / 1h ephemeral split
-  #     (`ephemeral_5m_input_tokens` / `ephemeral_1h_input_tokens`)
-  #     under `:ephemeral_5m` / `:ephemeral_1h`, when the response
-  #     includes the `cache_creation` sub-object.
+  #   * `cache_creation` sub-object   -> `:cache_breakdown`
+  #     (`:ephemeral_5m` / `:ephemeral_1h`)
   #
-  # Tau never opts into the 1h tier (C7 — the adapter never emits
-  # `ttl: "1h"`). If the server promotes anyway, the 1h tokens still
-  # appear in `cache_breakdown.ephemeral_1h` for diagnostics AND are
-  # already summed into `cache_write` because `cache_creation_input_tokens`
-  # is Anthropic's total of both tiers.
+  # Tau never emits `ttl: "1h"`; the 1h tokens (if the server promotes
+  # anyway) are already summed into `cache_write` since
+  # `cache_creation_input_tokens` is Anthropic's total of both tiers.
   @doc false
   @spec merge_usage(map(), map()) :: map()
   def merge_usage(start_u, delta_u) do
@@ -352,21 +342,14 @@ defmodule Tau.Providers.Anthropic do
   end
 
   # Builds the Anthropic Messages API request body for a turn.
-  #
-  # Made `@doc false`-public (SPEC-PROMPT-CACHING AC-1) so the
-  # cache-policy test can assert marker placement directly on the wire
-  # body without driving a full stream.
-  #
-  # `system` is the block-array (or `nil`) from `split_system/1`;
-  # `messages` is the non-system conversation list; `opts` is the
-  # `t:Tau.Provider.stream_opts/0` map.
+  # Public-but-`@doc false` (SPEC-PROMPT-CACHING AC-1) so cache-policy
+  # tests can assert marker placement on the wire body directly.
   #
   # When `cache_regions/2` returns `:explicit`, up to three ephemeral
-  # `cache_control` markers are injected per D-064. The body is
-  # validated by `Tau.Providers.Shared.OrderingCheck.validate!/1` as
-  # the last step (C2 / AC-3). Marker derivation is a pure function of
-  # `(system, tools, messages, opts)` — it reads no ambient state
-  # (C4 / D-064).
+  # `cache_control` markers are injected (D-064). The result is
+  # validated by `Tau.Providers.Shared.OrderingCheck.validate!/1`.
+  # Marker derivation is a pure function of (system, tools, messages,
+  # opts) — no ambient state.
   @doc false
   @spec build_body(nil | [map()], [Tau.Message.t()], map()) :: map()
   def build_body(system, messages, opts) do
@@ -398,7 +381,7 @@ defmodule Tau.Providers.Anthropic do
       |> maybe_put(:thinking, thinking(opts))
       |> maybe_put(:stop_sequences, opts[:stop_sequences])
 
-    # C2 / AC-3: canonical-ordering guard, last step.
+    # AC-3: canonical-ordering guard, last step.
     OrderingCheck.validate!(%{
       system: body[:system],
       tools: body[:tools],

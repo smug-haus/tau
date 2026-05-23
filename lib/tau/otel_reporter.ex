@@ -1,6 +1,6 @@
 defmodule Tau.OtelReporter do
   @moduledoc """
-  OpenTelemetry reporter (C1).
+  OpenTelemetry reporter.
 
   Supervised GenServer. Attaches telemetry handlers on `init/1`, holds the
   open-span map, implements the stale-span sweep timer, and detaches handlers
@@ -98,7 +98,7 @@ defmodule Tau.OtelReporter do
   def handle_cast({:span_close, key, duration_native, outcome}, state) do
     case Map.pop(state.open_spans, key) do
       {nil, _} ->
-        # C71: no open span for this key — discard silently.
+        # No open span for this key — discard silently.
         {:noreply, state}
 
       {{span_ctx, _opened_at}, remaining} ->
@@ -208,7 +208,7 @@ defmodule Tau.OtelReporter do
   defp handler_id, do: __MODULE__
 
   defp attach_handlers(config) do
-    # C70: detach any stale handler from a prior instance before attaching.
+    # Detach any stale handler from a prior instance before attaching.
     :telemetry.detach(handler_id())
 
     events = build_event_list(config)
@@ -226,18 +226,13 @@ defmodule Tau.OtelReporter do
   end
 
   defp build_event_list(config) do
-    # Mandatory set: event families whose *.start/*.stop emit sites carry a
-    # correlating key. PR3 adds provider.request after the C76 emit-site
-    # amendment in session.ex echoes span_ref through all terminal events.
-    #
-    # - provider.request: C76 emit-site fix landed in PR3 (session.ex adds
-    #   span_ref to *.start and echoes it through *.stop / *.cancelled /
-    #   *.brutal_kill). Handler uses composite key {:provider_request, session_id,
-    #   provider, ref} and discards *.stop when span_ref is absent (C71). ✓
-    # - tool.execute: correlates on tool_call_id (D-052 / C78 fix in PR2). ✓
-    # - hook.run: correlates on span_ref discriminator (C77 fix in PR2). ✓
-    # - session.stop: point event (open+close immediately). ✓
-    # - circuit_breaker.transition: point event. ✓
+    # Mandatory set: event families whose *.start/*.stop emit sites carry
+    # a correlating key.
+    # - provider.request: composite key {:provider_request, session_id,
+    #   provider, span_ref}; *.stop without span_ref is discarded.
+    # - tool.execute: correlates on tool_call_id (D-052).
+    # - hook.run: correlates on span_ref discriminator.
+    # - session.stop, circuit_breaker.transition: point events.
     mandatory = [
       [:tau, :provider, :request, :start],
       [:tau, :provider, :request, :stop],

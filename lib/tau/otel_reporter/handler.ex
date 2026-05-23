@@ -1,12 +1,12 @@
 defmodule Tau.OtelReporter.Handler do
   @moduledoc """
-  Pure-function telemetry handler module (C2).
+  Pure-function telemetry handler module.
 
   Each `handle_event/4` runs in the emitter's process. It MUST be fast
-  and non-blocking. It casts a structured message to `Tau.OtelReporter`
-  (C1), which serialises all span-map mutations through its mailbox.
+  and non-blocking. It casts a structured message to `Tau.OtelReporter`,
+  which serialises all span-map mutations through its mailbox.
 
-  SPEC-OTEL-REPORTER §2 C2, §3, §4 B1/B2, D-051.
+  SPEC-OTEL-REPORTER §2, §3, §4 B1/B2, D-051.
 
   No state. No OTel SDK calls. Only `GenServer.cast/2` to the reporter.
   """
@@ -46,8 +46,7 @@ defmodule Tau.OtelReporter.Handler do
        }) do
     session_id = Map.get(metadata, :session_id)
     provider = Map.get(metadata, :provider)
-    # C76: use span_ref if echoed by emit site; fall back to make_ref() for
-    # backward compat during the transition period.
+    # Use span_ref if echoed by emit site; fall back to make_ref().
     ref = Map.get(metadata, :span_ref, make_ref())
     key = {:provider_request, session_id, provider, ref}
 
@@ -70,7 +69,7 @@ defmodule Tau.OtelReporter.Handler do
 
     case Map.get(metadata, :span_ref) do
       nil ->
-        # No span_ref in metadata — cannot correlate. Discard per C71.
+        # No span_ref in metadata — cannot correlate. Discard.
         :ok
 
       ref ->
@@ -116,7 +115,7 @@ defmodule Tau.OtelReporter.Handler do
   defp do_handle([:tau, :tool, :execute, :exception], measurements, metadata, %{
          reporter: reporter
        }) do
-    # D-052 / C78: tool_call_id MUST be present after the session.ex emit-site fix.
+    # D-052: tool_call_id MUST be present.
     tool_call_id = Map.get(metadata, :tool_call_id)
     key = {:tool_execute, tool_call_id}
     duration = Map.get(measurements, :duration, 0)
@@ -130,7 +129,7 @@ defmodule Tau.OtelReporter.Handler do
   defp do_handle([:tau, :hook, :run, :start], _measurements, metadata, %{reporter: reporter}) do
     hook = Map.get(metadata, :hook)
     event = Map.get(metadata, :event)
-    # C77: discriminator ref generated here; MUST be echoed by dispatcher in stop/exception.
+    # Discriminator ref MUST be echoed by dispatcher in stop/exception.
     ref = Map.get(metadata, :span_ref, make_ref())
     key = {:hook_run, hook, event, ref}
 
@@ -150,7 +149,7 @@ defmodule Tau.OtelReporter.Handler do
 
     case Map.get(metadata, :span_ref) do
       nil ->
-        # No discriminator — cannot correlate. Discard per C71.
+        # No discriminator — cannot correlate. Discard.
         :ok
 
       ref ->
@@ -274,7 +273,7 @@ defmodule Tau.OtelReporter.Handler do
   # Helpers
   # ---------------------------------------------------------------------------
 
-  # Converts a map to a primitive-only map (C79). Non-primitive values are
+  # Converts a map to a primitive-only map. Non-primitive values are
   # serialised to strings via inspect/1.
   @spec primitive_map(map()) :: map()
   def primitive_map(m) do

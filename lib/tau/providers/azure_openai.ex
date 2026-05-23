@@ -109,7 +109,7 @@ defmodule Tau.Providers.AzureOpenAI do
 
   # --- Private helpers -------------------------------------------------------
 
-  # C80: Azure MUST use `api-key` header, not `Authorization: Bearer`.
+  # Azure MUST use `api-key` header, not `Authorization: Bearer`.
   defp azure_headers(api_key) do
     [
       {"api-key", api_key},
@@ -118,7 +118,7 @@ defmodule Tau.Providers.AzureOpenAI do
     ]
   end
 
-  # C80: Azure URL is deployment-based, composed at request time.
+  # Azure URL is deployment-based, composed at request time.
   defp build_url(endpoint, deployment, api_version) do
     endpoint = String.trim_trailing(endpoint, "/")
     "#{endpoint}/openai/deployments/#{deployment}/chat/completions?api-version=#{api_version}"

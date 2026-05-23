@@ -1,6 +1,6 @@
 defmodule Tau.CircuitBreaker.Store do
   @moduledoc """
-  ETS-owner lifecycle anchor for the circuit-breaker table (SPEC-CIRCUIT-BREAKER §4 B2, C2).
+  ETS-owner lifecycle anchor for the circuit-breaker table (SPEC-CIRCUIT-BREAKER §4 B2).
 
   This GenServer's ONLY job is to own the `:tau_circuit_breakers` ETS table —
   it creates the table in `init/1` and holds it alive. All reads and writes,

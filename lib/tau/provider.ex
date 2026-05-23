@@ -99,7 +99,7 @@ defmodule Tau.Provider do
       marker placement; this callback is only the policy switch.
     * `:automatic` — the adapter relies on provider-side automatic prefix
       caching (Families B and C). No body changes, but the adapter MUST honour
-      the canonical request ordering (C2).
+      the canonical request ordering (SPEC-PROMPT-CACHING §4).
     * `:none`      — caching disabled for this turn. Default when the callback
       is absent.
 

@@ -1508,7 +1508,7 @@ defmodule Tau.Session do
     {:keep_state, %{data | child_session_ids: MapSet.delete(data.child_session_ids, child_id)}}
   end
 
-  # SPEC-PERMISSION-PROMPTS §3 C9 / D-098: :cancel in :awaiting_permission →
+  # SPEC-PERMISSION-PROMPTS §3 / D-098: :cancel in :awaiting_permission →
   # deny all pending requests → :awaiting_user. MUST precede the cross-cutting
   # :cancel handler (which uses `_state`) so this more-specific clause fires
   # first. Source order is LOAD-BEARING in :handle_event_function mode.
@@ -1702,7 +1702,7 @@ defmodule Tau.Session do
       | provider_task: nil,
         cancel_flag: nil,
         stream_ref: nil,
-        # C76 (SPEC-OTEL-REPORTER): clear discriminator; the OTel reporter
+        # SPEC-OTEL-REPORTER: clear discriminator; the OTel reporter
         # consumed it at the *.cancelled / *.brutal_kill emit site above.
         provider_span_ref: nil,
         tools_in_flight: %{},
@@ -2387,7 +2387,7 @@ defmodule Tau.Session do
           provider: data.provider,
           model: data.model,
           session_id: data.id,
-          # C76 (SPEC-OTEL-REPORTER): echo the per-request discriminator so
+          # SPEC-OTEL-REPORTER: echo the per-request discriminator so
           # the OTel reporter can close the span opened at *.start.
           span_ref: data.provider_span_ref
         }
@@ -2457,13 +2457,13 @@ defmodule Tau.Session do
         model: data.model,
         session_id: data.id,
         stop_reason: msg.stop_reason,
-        # C76 (SPEC-OTEL-REPORTER): echo the per-request discriminator so the
+        # SPEC-OTEL-REPORTER: echo the per-request discriminator so the
         # OTel reporter can close the span opened at *.start.
         span_ref: data.provider_span_ref
       }
     )
 
-    # SPEC-PROMPT-CACHING AC-4 / C3: surface the per-turn prompt-cache
+    # SPEC-PROMPT-CACHING AC-4: surface the per-turn prompt-cache
     # hit/write signal so a silent cache miss (a cost regression) is
     # observable. The OTel reporter consumes this. Reads the canonical
     # usage-map keys (B3) directly off the assistant message — no
@@ -2674,7 +2674,7 @@ defmodule Tau.Session do
     end
   end
 
-  # SPEC-PROMPT-CACHING AC-4 / C3: emit the per-turn prompt-cache
+  # SPEC-PROMPT-CACHING AC-4: emit the per-turn prompt-cache
   # hit/write telemetry at the `:provider_done` boundary. Measurements
   # carry the raw token splits; metadata carries the routing context
   # and the adapter-specific breakdown. Reads the canonical B3
@@ -2964,7 +2964,7 @@ defmodule Tau.Session do
            provider_task: nil,
            assembler: nil,
            stream_ref: nil,
-           # C76 (SPEC-OTEL-REPORTER): clear span discriminator.
+           # SPEC-OTEL-REPORTER: clear span discriminator.
            provider_span_ref: nil,
            # D-060: merge this round's lookups.
            tool_loop_call_lookups: Map.merge(data.tool_loop_call_lookups, call_lookups)
@@ -3049,7 +3049,7 @@ defmodule Tau.Session do
            provider_task: nil,
            assembler: nil,
            stream_ref: nil,
-           # C76 (SPEC-OTEL-REPORTER): the provider.request span was closed in
+           # SPEC-OTEL-REPORTER: the provider.request span was closed in
            # finalize_assistant/2 before dispatch_tools/2 is called. Clear the
            # ref so it doesn't linger stale across the tool-execution phase.
            provider_span_ref: nil,
@@ -3524,7 +3524,7 @@ defmodule Tau.Session do
           :telemetry.execute(
             [:tau, :tool, :execute, :exception],
             %{duration: System.monotonic_time(:millisecond) - started},
-            # D-052 / C78 (SPEC-OTEL-REPORTER): tool_call_id MUST be present so
+            # D-052 / SPEC-OTEL-REPORTER: tool_call_id MUST be present so
             # the OTel reporter can correlate this exception span to its *.start span.
             %{tool: name, tool_call_id: call_id, error: Exception.message(e)}
           )

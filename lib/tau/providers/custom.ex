@@ -110,7 +110,7 @@ defmodule Tau.Providers.Custom do
 
   # --- Private helpers -------------------------------------------------------
 
-  # C81: Authorization header is omitted when api_key is nil.
+  # Authorization header is omitted when api_key is nil.
   defp build_headers(api_key, extra_headers) do
     base = [
       {"content-type", "application/json"},

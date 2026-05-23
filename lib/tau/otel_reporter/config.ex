@@ -3,7 +3,7 @@ defmodule Tau.OtelReporter.Config do
   Pure-function module. Reads the `:tau, :otel` application env and returns
   a validated config struct.
 
-  SPEC-OTEL-REPORTER §2 C3 / D-055.
+  SPEC-OTEL-REPORTER §2 / D-055.
   No process. No side effects.
   """
 

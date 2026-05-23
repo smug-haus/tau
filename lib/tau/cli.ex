@@ -696,7 +696,7 @@ defmodule Tau.CLI do
         )
     end
 
-    # D-056 / C82: report Copilot auth state alongside Anthropic.
+    # D-056: report Copilot auth state alongside Anthropic.
     copilot_status =
       case Tau.Providers.Copilot.Auth.resolve_oauth(%{}) do
         {:ok, _oauth_token} ->

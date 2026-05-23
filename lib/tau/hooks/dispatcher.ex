@@ -30,11 +30,9 @@ defmodule Tau.Hooks.Dispatcher do
 
   defp run_one(mod, event, payload) do
     started = System.monotonic_time()
-    # C77 (SPEC-OTEL-REPORTER): per-invocation discriminator ref so the OTel
-    # reporter can correlate *.start to *.stop / *.exception even when the same
-    # hook fires concurrently for the same event (parallel sessions, parallel
-    # tool dispatches). The ref is generated here and echoed in all follow-on
-    # events for this invocation.
+    # SPEC-OTEL-REPORTER: per-invocation discriminator ref so the OTel
+    # reporter can correlate *.start to *.stop / *.exception even when
+    # the same hook fires concurrently for the same event.
     span_ref = make_ref()
 
     :telemetry.execute([:tau, :hook, :run, :start], %{system_time: System.system_time()}, %{

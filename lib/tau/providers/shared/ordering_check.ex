@@ -1,7 +1,7 @@
 defmodule Tau.Providers.Shared.OrderingCheck do
   @moduledoc """
   Runtime guard for the canonical request ordering contract
-  (SPEC-PROMPT-CACHING §4 B2 / constraint C2 / AC-3).
+  (SPEC-PROMPT-CACHING §4 B2 / AC-3).
 
   Provider prefix caching — explicit (Family A) or automatic
   (Families B/C) — only hits when stable content appears at the

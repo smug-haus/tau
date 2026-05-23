@@ -1,6 +1,6 @@
 defmodule Tau.CircuitBreaker do
   @moduledoc """
-  Public façade for the per-provider circuit breaker (SPEC-CIRCUIT-BREAKER §4 B3, C3).
+  Public façade for the per-provider circuit breaker (SPEC-CIRCUIT-BREAKER §4 B3).
 
   Wraps a provider-call thunk with the circuit-breaker lifecycle:
 
