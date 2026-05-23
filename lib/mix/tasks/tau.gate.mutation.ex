@@ -33,13 +33,13 @@ defmodule Mix.Tasks.Tau.Gate.Mutation do
 
   use Mix.Task
 
-  alias Tau.Factory.Gate
+  alias Mix.Gate.Mutation
 
   @impl Mix.Task
   def run(argv) do
     case argv do
       [base_ref | gating_files] when gating_files != [] ->
-        case Gate.mutation_check(gating_files, base_ref) do
+        case Mutation.mutation_check(gating_files, base_ref) do
           :ok ->
             Mix.shell().info(
               "tau.gate.mutation: OK — ≥1 gating test failed against reverted tree (suite is discriminating)"

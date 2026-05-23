@@ -11,7 +11,8 @@ defmodule Tau.Factory.GatePrecisionTest do
   """
   use ExUnit.Case, async: true
 
-  alias Tau.Factory.Gate
+  alias Mix.Gate.AcLinkage
+  alias Mix.Gate.Mutation
 
   # ---------------------------------------------------------------------------
   # AC-2 — mutation_check/2 returns :not_applicable for a project-creation PR
@@ -92,19 +93,22 @@ defmodule Tau.Factory.GatePrecisionTest do
     end
 
     test "AC-2: returns :not_applicable when gating tests are in a PR-created Mix project",
-         %{base_ref: base_ref} do
+         %{tmp_dir: tmp_dir, base_ref: base_ref} do
       # The gating test lives in sub/test/sub_gate_test.exs. The nearest-
       # ancestor mix.exs for that path is sub/mix.exs, which does NOT exist at
       # base_ref (the sub/ project is PR-created). The fix should detect this
       # and return :not_applicable without attempting to run the tests.
       #
-      # No File.cd! — the repo-locator fallback (locate_repo_for_gating_tests →
-      # find_repo_containing_path_and_ref) searches under File.cwd!() for the
-      # synthetic :tmp_dir repo, exactly as gate_test.exs AC-3 already does.
+      # File.cd! ensures locate_repo_for_gating_tests resolves the path under
+      # the synthetic repo directly, without the recursive fallback search.
       #
       # Fail-before: current implementation returns {:error, {:runner_crashed, _}}
       # or similar — NOT :not_applicable.
-      result = Gate.mutation_check(["sub/test/sub_gate_test.exs"], base_ref)
+      result =
+        File.cd!(tmp_dir, fn ->
+          Mutation.mutation_check(["sub/test/sub_gate_test.exs"], base_ref)
+        end)
+
       assert result == :not_applicable
     end
 
@@ -162,7 +166,11 @@ defmodule Tau.Factory.GatePrecisionTest do
       # No mix.exs → NOT a project-creation PR → must NOT return :not_applicable.
       # The gating test fails against the reverted base tree (run() == :wrong),
       # so the gate returns :ok — a real discriminating verdict.
-      result = Gate.mutation_check(["test/widget_gate_test.exs"], nc_base_ref)
+      result =
+        File.cd!(nc_dir, fn ->
+          Mutation.mutation_check(["test/widget_gate_test.exs"], nc_base_ref)
+        end)
+
       assert result == :ok
     end
   end
@@ -216,7 +224,7 @@ defmodule Tau.Factory.GatePrecisionTest do
       end
       """
 
-      result = Gate.ac_linkage(@pr_body_with_background_prose, [covering_source])
+      result = AcLinkage.ac_linkage(@pr_body_with_background_prose, [covering_source])
       assert result == :ok
     end
   end
@@ -250,7 +258,7 @@ defmodule Tau.Factory.GatePrecisionTest do
     test "AC-5: still flags a genuinely claimed AC-9 that has no gating test coverage" do
       # AC-9 is in the Acceptance criteria section with no covering source.
       # The gate MUST still return {:error, missing} with "AC-9" in missing.
-      result = Gate.ac_linkage(@pr_body_with_uncovered_ac, [])
+      result = AcLinkage.ac_linkage(@pr_body_with_uncovered_ac, [])
       assert {:error, missing} = result
       assert "AC-9" in missing
     end
