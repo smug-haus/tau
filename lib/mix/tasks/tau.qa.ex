@@ -168,21 +168,14 @@ defmodule Mix.Tasks.Tau.Qa do
   defp layer_a do
     Mix.shell().info("tau.qa: (A) source quality")
 
-    # `mix test --seed 0 --max-cases 1` is intentional: the suite has two
-    # known load-race flakes (Tau.BurritoSteps.RelinkSqliteNifTest module-load
-    # vs parallel compile; Tau.CodingAgent.DispatcherTest inactivity timing)
-    # that fail intermittently on parallel runs but pass deterministically
-    # serialised. Serialised + seed-0 is the operational choice; runtime
-    # impact ~60s → ~80s is acceptable.
+    # `mix test --seed 0 --max-cases 1` is intentional: known load-race
+    # flakes in `RelinkSqliteNifTest` and `CodingAgent.DispatcherTest`
+    # pass deterministically when serialised. Runtime ~60s → ~80s.
     #
-    # `mix credo --strict` is INTENTIONALLY OMITTED from this blocking gate:
-    # the codebase has ~130 pre-existing strict-mode findings (refactor /
-    # readability / design suggestions, no warnings). Adding it as a blocking
-    # gate would block every PR on style debt unrelated to the change. The
-    # existing CI `lint` job runs credo with `continue-on-error` so the
-    # findings are recorded but not blocking; mirrored here by inclusion in
-    # the `informational` set below. When the codebase is credo-clean
-    # (or a baseline mechanism is in place), promote it back.
+    # `mix credo --strict` is INTENTIONALLY OMITTED from the blocking
+    # gate — the codebase has pre-existing strict-mode findings unrelated
+    # to in-flight changes. Runs as informational only (mirrors the CI
+    # `lint` job's `continue-on-error`); promote when credo-clean.
     steps = [
       {"mix compile --warnings-as-errors", ["compile", "--warnings-as-errors"]},
       {"mix test --seed 0 --max-cases 1", ["test", "--seed", "0", "--max-cases", "1"]},
