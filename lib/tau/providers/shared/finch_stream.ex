@@ -150,19 +150,12 @@ defmodule Tau.Providers.Shared.FinchStream do
     end
   end
 
-  # If we hit the 250ms cancel-poll window without a cancel and without
-  # a chunk message, fall through to the receive that yields a retryable
-  # timeout error. We've already burned 250ms; budget the remainder.
-  #
-  # The per-chunk timeout is 300s. Opus on a deep-deliberation turn can
-  # legitimately pause for 60-180s between chunks while it reasons about
-  # a complex tool call. A shorter budget misreads that thinking time as
-  # transport failure; D-061 retry then re-issues the same prompt, which
-  # incurs the same thinking time, and the session dies after exhausting
-  # retries.
-  # HTTP transport failures still fail fast at the OS / Mint level
-  # (RST, connection close, etc.); only the legitimate "silent
-  # connection, model is thinking" case is held open longer here.
+  # Per-chunk timeout is 300s. Opus on a deep-deliberation turn can
+  # legitimately pause 60-180s between chunks while it reasons about a
+  # complex tool call; a shorter budget misreads thinking time as
+  # transport failure and the D-061 retry just incurs the same delay.
+  # Real HTTP failures still fail fast at the OS / Mint level (RST,
+  # connection close); only the silent-thinking case is held open.
   defp wait_remainder(s, decoder) do
     receive do
       {ref, msg} when ref == s.ref -> handle(msg, s, decoder) |> recur(decoder)

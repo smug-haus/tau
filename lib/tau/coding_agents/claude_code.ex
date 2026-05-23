@@ -99,20 +99,10 @@ defmodule Tau.CodingAgents.ClaudeCode do
 
   @impl Tau.CodingAgent
   def cancel(_handle) do
-    # The dispatcher passes the drainer pid here. Real cleanup
-    # happens in two places, both unaware of the dispatcher:
-    #
-    #   1. Port: opened inside `Stream.resource`'s start_fun (in the
-    #      drainer process). When the dispatcher kills the drainer
-    #      via `Process.exit(:shutdown)`, BEAM closes the Port and
-    #      the OS subprocess receives EOF on stdin.
-    #   2. MCP tempfile: a janitor process spawned at start time
-    #      `Process.monitor`s the drainer and unlinks the tempfile
-    #      on `:DOWN`. This survives `Process.exit(:shutdown)`
-    #      which would otherwise bypass `Stream.resource`'s
-    #      after_fun.
-    #
-    # So `cancel/1` is informational only; do nothing.
+    # Cleanup happens elsewhere: BEAM closes the Port when the
+    # dispatcher exits the drainer (subprocess gets EOF), and a janitor
+    # `Process.monitor`s the drainer to unlink the MCP tempfile on
+    # `:DOWN`. `cancel/1` is informational only.
     :ok
   end
 

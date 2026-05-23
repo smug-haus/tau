@@ -168,17 +168,13 @@ defmodule Tau.Message.Assembler do
   defp format_reason({type, msg}) when is_binary(type), do: "#{type}: #{msg}"
   defp format_reason(other), do: inspect(other)
 
-  # SPEC-USER-TURN / D-009: render paths that iterate
-  # `msg.content` (Tau.TUI.App.on_message_end/2) silently drop a
-  # message with empty content. When a stream errors before emitting
-  # any TextDelta — e.g. Anthropic auth failure, network error, OAuth
-  # expiry — `build_content/1` returns []. This guard synthesizes a
-  # single text block carrying the error so the TUI, CLI streamer, and
-  # any other consumer surface SOMETHING instead of going silent.
-  #
-  # This is the single source-agnostic D-009 implementation: both the
-  # provider and coding-agent finalize paths route through it via
-  # `finalize/3`. No path may carry a parallel copy.
+  # SPEC-USER-TURN / D-009: render paths iterating `msg.content`
+  # silently drop empty-content messages. When a stream errors before
+  # any TextDelta (auth failure, network error, OAuth expiry),
+  # `build_content/1` returns `[]`; this guard synthesises a text block
+  # so consumers surface SOMETHING. Single source-agnostic
+  # implementation — both provider and coding-agent finalize paths route
+  # through `finalize/3`.
   @doc """
   D-009 guarantee: ensure a finalized `%Assistant{}` has non-empty
   `content` so no render path drops it silently. Source-agnostic.
