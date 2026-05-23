@@ -290,20 +290,13 @@ defmodule Tau.CLI do
     )
   end
 
-  # D-058 / AC-10 (SPEC-USER-TURN §4 B2): headless FSM-backed session run.
+  # D-058 / AC-10 / SPEC-USER-TURN §4 B2: headless FSM-backed run.
+  # Drives a full `Tau.Session` FSM, lifecycle-identical to a TUI session.
   #
-  # Drives a full Tau.Session FSM so that tools (Agent, Bash, etc.) are
-  # registered, every turn is JSONL-persisted, and the session is
-  # lifecycle-identical to a TUI session.
-  #
-  # Subscribe-before-start ordering (D-004): Phoenix.PubSub.subscribe/2 is
-  # called BEFORE Tau.start_session/1 returns so that the SessionStart event
-  # (broadcast synchronously inside init/1) is not lost even though we don't
-  # consume it here. Tau.stream/2 subscribes inside its Stream.resource
-  # setup function, which runs when we first pull from the stream — that
-  # happens AFTER start_session returns, violating D-004. We therefore
-  # subscribe manually, start the session, send the message, then enumerate
-  # the PubSub mailbox via receive instead of going through Tau.stream/2.
+  # D-004 subscribe-before-start: subscribe manually here because
+  # `Tau.stream/2` would subscribe inside its `Stream.resource` setup,
+  # which only fires when the first pull happens — AFTER `start_session`
+  # broadcasts `SessionStart`.
   @doc false
   def run_cmd(parsed) do
     prompt = parsed.args.prompt
@@ -422,39 +415,14 @@ defmodule Tau.CLI do
   # Returns 0 on a clean stop, 1 on any error or abnormal end.
   #
   # Decision order on MessageEnd (D-058):
-  #
-  #   1. CONTENT-FIRST: if msg.content has any %{type: :tool_call} block,
-  #      CONTINUE regardless of stop_reason. This is necessary because Gemini
-  #      and Bedrock emit stop_reason: :stop even on tool-call turns (they set
-  #      finishReason: "STOP" for all turns). The Session FSM itself dispatches
-  #      tools by content (session.ex ~line 1806:
-  #      Enum.filter(msg.content, &match?(%{type: :tool_call}, &1))), so we
-  #      mirror that exact decision. Killing the session on a Gemini tool-call
-  #      turn defeats M1 self-hosting (tau run --provider gemini cannot complete
-  #      any tool-using turn). The :tool_use arm below is subsumed by this check
-  #      (Anthropic/OpenAI :tool_use turns always have tool_call content).
-  #
+  #   1. CONTENT-FIRST: any `%{type: :tool_call}` block in `msg.content`
+  #      → CONTINUE regardless of stop_reason. Gemini and Bedrock emit
+  #      `:stop` on tool-call turns; the FSM dispatches by content, so
+  #      we mirror that exact decision.
   #   2. FAILURE stop_reasons → exit 1:
-  #      :error            — session-level error (session.ex:972, 1004, 2526, 2816)
-  #      :tool_loop_aborted — tool iteration cap reached (session.ex:1844)
-  #      :aborted          — coding-agent subprocess exited -2 (session.ex:2871)
-  #      :compaction_failed — 3 consecutive compaction failures (session.ex:1743)
-  #
-  #   3. Everything else (:stop, :length, :stop_sequence, :end_turn,
-  #      :content_filter, and any future provider atom) means "model finished
-  #      its turn and produced a usable response" → exit 0. This inversion
-  #      ensures new provider atoms default to success rather than misreporting
-  #      as crashes.
-  #
-  # Grep verification: can :tool_use arrive with empty content?
-  #   lib/tau/providers/shared/openai_chat_wire.ex:195 maps "tool_calls" →
-  #   :tool_use stop_reason, but the ToolCallStart/ToolCallEnd events that
-  #   populate content blocks are emitted in the SAME stream, so the Assembler
-  #   will have decoded them into content blocks before Done fires. A :tool_use
-  #   MessageEnd with empty content would require a provider that sets
-  #   stop_reason: :tool_use but emits no ToolCallStart events — no such
-  #   provider exists in the codebase. We therefore do NOT add an explicit
-  #   :tool_use guard; step 1 (content check) subsumes it entirely.
+  #      `:error`, `:tool_loop_aborted`, `:aborted`, `:compaction_failed`.
+  #   3. Everything else → exit 0. The inversion ensures new provider
+  #      atoms default to success rather than misreporting as crashes.
   @doc false
   def drain_run_loop(session_id, tool_names \\ %{}) do
     receive do
@@ -576,28 +544,18 @@ defmodule Tau.CLI do
 
   def resolve_system_prompt(_), do: {:ok, nil}
 
-  # Build a transient %Tau.Skill{} from a resolved system-prompt source so
-  # the session FSM injects it as a system-role message via
-  # `prepend_skill_messages/2` (the same mechanism used by on-disk skills
-  # loaded from `~/.tau/skills` / `<cwd>/.tau/skills` / `priv/skills`).
+  # Build a transient `%Tau.Skill{}` from a resolved system-prompt
+  # source so the FSM injects it as a system-role message via
+  # `prepend_skill_messages/2`.
   #
-  # Two shapes:
+  # `{:text, text}`: raw body, no frontmatter parse — `allowed_tools: []`
+  # exposes every registered builtin under D-059.
+  # `{:file, path}`: parsed via `Tau.Skills.Loader.parse/1` so YAML
+  # frontmatter (`allowed-tools:` etc.) is honored. Parse failure falls
+  # back to the raw body so the run never fails on a malformed file.
   #
-  #   * `{:text, text}` — `--system-prompt <text>`: raw text body, no
-  #     frontmatter parse. `allowed_tools: []` → every registered
-  #     builtin is exposed to the model (D-059 unrestricted semantics).
-  #
-  #   * `{:file, path}` — `--system-prompt-file <path>`: parse the file
-  #     via `Tau.Skills.Loader.parse/1`, which honors any YAML
-  #     frontmatter (`allowed-tools:`, `description:`, …). Without the
-  #     parse the frontmatter is dropped and the persona's declared tool
-  #     whitelist is silently widened to every builtin under D-059. On
-  #     parse failure, fall back to using the raw file body as the skill
-  #     body (preserve unrestricted tool exposure rather than failing
-  #     the run).
-  #
-  # `:persona_lifetime :session` is set by `run_cmd/1` so the persona
-  # survives multi-turn tool iteration within a single `tau run` invocation.
+  # `:persona_lifetime: :session` (set by `run_cmd/1`) survives multi-turn
+  # tool iteration within a single `tau run`.
   @doc false
   def build_headless_skill(nil), do: nil
 
