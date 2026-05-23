@@ -2589,23 +2589,16 @@ defmodule Tau.Session do
 
         cond do
           tool_calls == [] ->
-            # ADR-0017: drop the now-stale cancel flag — the stream that
-            # owned it has finished. The next turn's :start_provider
-            # allocates a fresh one. Same applies to ADR-0012's stream_ref.
-            # D-005: reset the per-turn tool-iteration counter on clean
-            # return to :awaiting_user.
-            # D-060: tool-loop brake state cleared alongside the
-            # iteration counter — a fresh turn starts with no history.
-            # D-061: provider-retry counter reset on successful
-            # Done — a fresh turn starts with the full retry budget.
+            # Per-turn resets on clean return to :awaiting_user: cancel
+            # flag (ADR-0017), stream_ref (ADR-0012), tool_iterations
+            # (D-005), tool_loop_state (D-060), provider_retry_state
+            # (D-061).
             #
-            # D-079: steering messages that survived a pure-text
-            # turn (no tool round occurred so drain_steering_queue_one was never
-            # called) MUST NOT carry over into the next unrelated turn. Merge any
-            # remaining steering_queue entries into the front of followup_queue so
-            # they run immediately as post-turn continuations, then clear
-            # steering_queue. This prevents stale steering context from bleeding
-            # into an unrelated later turn's tool-round boundary.
+            # D-079: a pure-text turn never reached the tool-round drain
+            # point, so any surviving steering messages would otherwise
+            # bleed into the next unrelated turn. Merge them to the front
+            # of `followup_queue` instead so they run immediately as
+            # post-turn continuations.
             {merged_followup, cleared_steering} =
               if :queue.is_empty(data.steering_queue) do
                 {data.followup_queue, data.steering_queue}
@@ -4484,25 +4477,13 @@ defmodule Tau.Session do
   defp maybe_put_tools(opts, tool_spec) when is_map(tool_spec),
     do: Map.put(opts, :tools, [tool_spec])
 
-  # D-059: assemble the list of tool specs exposed to the provider for
-  # the current turn. The list is the union of:
-  #
-  #   1. The synthetic `__activate_skill__` tool, when there are other
-  #      model-invokable skills the model might want to swap to. This
-  #      preserves the skill-activation UX for sessions whose skill
-  #      catalog is non-trivial.
-  #
-  #   2. The active skill's allowed tools, when `data.active_skill` is
-  #      set. Semantics mirror `Tau.Tools.Builtin.Agent.whitelist_from/1`:
-  #        * `allowed_tools == []` (the default for `build_headless_skill/1`)
-  #          ⇒ expose every registered built-in tool (`Tau.Tool.list/0`);
-  #        * `allowed_tools == [names]` ⇒ expose only those tools by name.
-  #
-  # The active-skill entry itself is never re-exposed via
-  # `__activate_skill__` (the model is already inside it).
-  #
-  # Returns `nil` when the resulting list is empty so `maybe_put_tools/2`
-  # leaves `:tools` unset (some providers reject an empty `:tools` array).
+  # D-059: tool specs exposed to the provider for this turn —
+  # union of (1) the synthetic `__activate_skill__` spec when other
+  # model-invokable skills exist, and (2) the active skill's allowed
+  # tools (semantics mirror `Tau.Tools.Builtin.Agent.whitelist_from/1`:
+  # `[]` exposes every registered built-in; a list narrows by name).
+  # Returns `nil` on empty result so `:tools` stays unset (some providers
+  # reject an empty `:tools` array).
   defp model_visible_tool_specs(data) do
     activation = skill_activation_tool_spec(data.skills)
     skill_specs = active_skill_tool_specs(data.active_skill)
@@ -5254,25 +5235,15 @@ defmodule Tau.Session do
     )
   end
 
-  # D-079 / SPEC-USER-TURN §6: steering drain helper.
-  # Called at the tool-round boundary (map_size(tools) == 0) before re-entering
-  # :start_provider. Dequeues one message from the steering queue (one-at-a-time
-  # mode, Pi's default), appends it to data.messages, persists it, and emits
-  # the :delivered telemetry. If the queue is empty, returns data unchanged.
+  # D-079 / SPEC-USER-TURN §6 / AC-8: steering drain helper.
+  # Dequeues one message and appends it AFTER all tool_results and BEFORE
+  # the next provider call so no tool_call is orphaned. Enforced by the
+  # call site, which invokes only when `map_size(tools) == 0`.
   #
-  # Ordering invariant (D-079, AC-8): the steering message is appended AFTER
-  # all tool_result blocks of the just-finished round and BEFORE the next
-  # provider call — so no tool_call is ever orphaned. This is enforced by the
-  # call site in the {:tool_done} handler, which calls this function only when
-  # map_size(tools) == 0 (all results received).
-  #
-  # Unlike follow-up drain (which routes through classify_slash_command via
-  # handle_event), steering drain appends the message directly to the transcript
-  # because the message has already passed the "user intent" gate at enqueue
-  # time and must land in the exact position between tool_results and the next
-  # provider call. Slash commands are not meaningful as steering messages
-  # (they would redirect to the model as text, which is the expected behaviour
-  # for a mid-turn steering intervention).
+  # Unlike follow-up drain, this path bypasses `classify_slash_command/4`
+  # — a steering message has already passed the user-intent gate at
+  # enqueue time and must land at the exact mid-turn position; slash
+  # commands aren't meaningful here.
   defp drain_steering_queue_one(data) do
     case :queue.out(data.steering_queue) do
       {:empty, _} ->
