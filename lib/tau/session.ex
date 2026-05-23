@@ -126,7 +126,7 @@ defmodule Tau.Session do
   end
 
   # D-077: hard cap on each queue tier. Messages past 32 entries are
-  # dropped with a %SystemNotice{} (D-083 / critic S3).
+  # dropped with a %SystemNotice{} (D-083).
   @queue_cap 32
 
   @doc "Send a user message; queued as `:followup`. See `Tau.send/2`."
@@ -1735,10 +1735,9 @@ defmodule Tau.Session do
         steering_queue: :queue.new()
     }
 
-    # D-080 / SPEC-USER-TURN §6: if the follow-up queue is non-empty,
-    # post a :drain_followups internal event so it fires on the transition to
-    # :awaiting_user. Using :internal (not state_enter) avoids a module-wide
-    # callback_mode change (critic S1).
+    # D-080 / SPEC-USER-TURN §6: post a :drain_followups internal event
+    # so it fires on the transition to :awaiting_user. `:internal` (not
+    # state_enter) avoids a module-wide callback_mode change.
     actions =
       if :queue.is_empty(next_data.followup_queue),
         do: [],
@@ -1823,13 +1822,9 @@ defmodule Tau.Session do
 
       {:continue, data} ->
         if map_size(tools) == 0 do
-          # D-079 / SPEC-USER-TURN §6: steering drain point.
-          # Before re-entering :start_provider, check if any steering messages
-          # were queued while this tool round was executing. If so, drain one
-          # message (one-at-a-time mode, matching Pi's default) and append it
-          # to data.messages AFTER all tool_result blocks and BEFORE the next
-          # provider call. This is the ordering invariant from D-079 — no
-          # tool_call is ever orphaned (AC-8 property test).
+          # D-079 / SPEC-USER-TURN §6 / AC-8: drain one steering message
+          # AFTER all tool_results and BEFORE the next provider call so
+          # no tool_call is orphaned.
           data = drain_steering_queue_one(data)
 
           handle_event(
