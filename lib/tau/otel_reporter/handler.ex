@@ -6,7 +6,7 @@ defmodule Tau.OtelReporter.Handler do
   and non-blocking. It casts a structured message to `Tau.OtelReporter`
   (C1), which serialises all span-map mutations through its mailbox.
 
-  SPEC-OTEL-REPORTER §2 C2, §3 [C69-B2], §4 B1/B2, D-051.
+  SPEC-OTEL-REPORTER §2 C2, §3, §4 B1/B2, D-051.
 
   No state. No OTel SDK calls. Only `GenServer.cast/2` to the reporter.
   """

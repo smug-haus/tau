@@ -165,7 +165,7 @@ defmodule Tau do
 
   @doc """
   Swap the active model for a running session. Gated on the session being
-  in `:awaiting_user` with no command task in flight (D-041 / [C54-B4]).
+  in `:awaiting_user` with no command task in flight (D-041).
 
   Returns `{:ok, %{from: old_model, to: new_model}}` on success.
   Returns `{:error, :busy}` if streaming or running a command.

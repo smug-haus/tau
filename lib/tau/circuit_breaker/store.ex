@@ -5,7 +5,8 @@ defmodule Tau.CircuitBreaker.Store do
   This GenServer's ONLY job is to own the `:tau_circuit_breakers` ETS table —
   it creates the table in `init/1` and holds it alive. All reads and writes,
   including the two atomic CAS operations, execute directly in the CALLER'S
-  process against the `:public` ETS table — no GenServer mailbox hop (§3 [C57-B1]).
+  process against the `:public` ETS table — no GenServer mailbox hop
+  (SPEC-CIRCUIT-BREAKER §3).
 
   - `transition/3` — full-row CAS state transition via `:ets.select_replace/2`
     with a guard on `state_atom`. Called directly by the caller process.
@@ -81,7 +82,7 @@ defmodule Tau.CircuitBreaker.Store do
   @doc """
   Returns the current state atom for `provider`.
 
-  Defaults to `:closed` when no row exists (C64-B1).
+  Defaults to `:closed` when no row exists.
   """
   @spec state_for(module()) :: :closed | :open | :half_open
   def state_for(provider) do
@@ -106,9 +107,8 @@ defmodule Tau.CircuitBreaker.Store do
   Atomically increments `failure_count` (position 3) for `provider` and returns
   the new value.
 
-  Uses `:ets.update_counter/3` — the SPEC-pinned primitive for counter fields
-  ([C56-B1] / [C60-B1]). Executes directly in the CALLER'S process; no GenServer
-  mailbox hop.
+  Uses `:ets.update_counter/3` — the SPEC-pinned primitive for counter fields.
+  Executes directly in the CALLER'S process; no GenServer mailbox hop.
 
   Assumes a row already exists (call `ensure_row/1` first).
   """
@@ -122,9 +122,8 @@ defmodule Tau.CircuitBreaker.Store do
   Atomically increments `success_count` (position 4) for `provider` and returns
   the new value.
 
-  Uses `:ets.update_counter/3` — the SPEC-pinned primitive for counter fields
-  ([C56-B1] / [C60-B1]). Executes directly in the CALLER'S process; no GenServer
-  mailbox hop.
+  Uses `:ets.update_counter/3` — the SPEC-pinned primitive for counter fields.
+  Executes directly in the CALLER'S process; no GenServer mailbox hop.
 
   Assumes a row already exists (call `ensure_row/1` first).
   """
@@ -138,7 +137,7 @@ defmodule Tau.CircuitBreaker.Store do
   Performs a state-column CAS transition via `:ets.select_replace/2`.
 
   Executes directly in the CALLER'S process against the `:public` ETS table
-  — no GenServer mailbox hop (§3 [C57-B1]).
+  — no GenServer mailbox hop (SPEC-CIRCUIT-BREAKER §3).
 
   The match spec guards on `current_state` (position 2) so the replace
   only fires if the row still holds the state the caller observed. Returns
@@ -150,7 +149,7 @@ defmodule Tau.CircuitBreaker.Store do
   `bump_success_count/1` primitives (`update_counter`). The match spec body
   binds these columns as `:"$N"` variables and writes them back unchanged,
   so a concurrent `bump_*` that races with this transition is never clobbered
-  ([C56-B1] / SPEC-CIRCUIT-BREAKER §4 B1/B2).
+  (SPEC-CIRCUIT-BREAKER §4 B1/B2).
 
   Only the columns that actually change at a state transition are mutated:
   `state`, `opened_at_ms`, and `probe_slot`. The `new_state` argument
@@ -166,7 +165,7 @@ defmodule Tau.CircuitBreaker.Store do
   Atomic half-open probe admission via `:ets.select_replace/2` on `probe_slot`.
 
   Executes directly in the CALLER'S process against the `:public` ETS table
-  — no GenServer mailbox hop (§3 [C57-B1]).
+  — no GenServer mailbox hop (SPEC-CIRCUIT-BREAKER §3).
 
   Returns `true` if admitted (probe_slot 0 → 1), `false` if rejected
   (probe_slot was already 1). Only one concurrent caller can receive `true`
@@ -222,7 +221,7 @@ defmodule Tau.CircuitBreaker.Store do
   #
   # Counter columns ($3 = failure_count, $4 = success_count) are captured as
   # bound variables and written back unchanged. This is the critical invariant
-  # ([C56-B1]): only `update_counter` bumps may mutate counter fields. A
+  # Only `update_counter` bumps may mutate counter fields. A
   # `select_replace` that overwrites them would lose concurrent increments.
   defp do_transition(provider, current_state_atom, new_state) do
     # Head: capture key as $1; match current_state_atom literally in pos 2;

@@ -5,7 +5,7 @@ defmodule Tau.Commands.Builtin.Logout do
   Clears Tau's own credential entry for the named provider from the
   configured `Tau.Settings.Vault` backend.
 
-  **CRITICAL — single-writer rule [C48]:** This command MUST NOT touch
+  **CRITICAL — single-writer rule:** This command MUST NOT touch
   `~/.claude/.credentials.json`.  That file is owned exclusively by
   Claude Code.  `/logout` only clears entries that Tau itself stored via
   `Tau.Settings.Vault`.

@@ -199,12 +199,12 @@ defmodule Tau.OtelReporter do
   end
 
   # ---------------------------------------------------------------------------
-  # Private — handler attach/detach (D-050, C70-B1)
+  # Private — handler attach/detach (D-050)
   # ---------------------------------------------------------------------------
 
-  # C70 amended: fixed handler id (not pid-scoped) so a restarted reporter can
-  # detach the crashed instance's handler. A pid-scoped id would be undetachable
-  # after crash because the new pid cannot construct the old pid's id.
+  # Fixed handler id (not pid-scoped) so a restarted reporter can detach the
+  # crashed instance's handler. A pid-scoped id would be undetachable after
+  # crash because the new pid cannot construct the old pid's id.
   defp handler_id, do: __MODULE__
 
   defp attach_handlers(config) do
@@ -313,7 +313,7 @@ defmodule Tau.OtelReporter do
   end
 
   # ---------------------------------------------------------------------------
-  # Private — OTel SDK availability check (C74-B4)
+  # Private — OTel SDK availability check
   # ---------------------------------------------------------------------------
 
   defp check_otel_running do

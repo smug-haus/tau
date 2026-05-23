@@ -18,8 +18,8 @@ defmodule Tau.Commands.Catalog do
   3. `session_data.skills` — `/skill:name` entries from the session.
   4. `session_data.prompt_templates` — the session-owned prompt-template list
      (a `[{name, template}]` keyword list refreshed by `/reload`). Consistent
-     with `classify_slash_command/2` which reads the same field (C9-B3 /
-     SPEC-TUI-COMPLETION §3). No-ops cleanly when the field is absent or empty.
+     with `classify_slash_command/2` which reads the same field
+     (SPEC-TUI-COMPLETION §3). No-ops cleanly when the field is absent or empty.
 
   ## Entry shape
 

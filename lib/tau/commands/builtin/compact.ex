@@ -5,7 +5,7 @@ defmodule Tau.Commands.Builtin.Compact do
   Triggers asynchronous compaction of the conversation history off the
   `:gen_statem` critical path.  The FSM transitions to `:compacting` and
   returns to `:awaiting_user` when the worker finishes, fails, is
-  cancelled, or times out (D-048, D-049, C67-B4).
+  cancelled, or times out (D-048, D-049).
 
   ## Outcome
 

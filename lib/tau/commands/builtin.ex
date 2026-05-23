@@ -21,8 +21,7 @@ defmodule Tau.Commands.Builtin do
   - `{:async_compact, notice}` — the **only** outcome that changes FSM
     state.  The session broadcasts `notice` as a `SystemNotice`, launches
     a supervised+monitored compaction worker, and transitions to the
-    `:compacting` state.  Does NOT call `process_user_message/2` (D-042,
-    C67-B4).
+    `:compacting` state. Does NOT call `process_user_message/2` (D-042).
 
   ## Built-in table
 
@@ -63,7 +62,7 @@ defmodule Tau.Commands.Builtin do
 
   All entries are built-in modules that implement `Tau.Commands.Builtin`.
   Built-in resolution precedes extension lookup in
-  `Tau.Commands.Parser.lookup_builtin/1` ([C55-B4]).
+  `Tau.Commands.Parser.lookup_builtin/1`.
   """
   @spec table() :: %{String.t() => module()}
   def table do

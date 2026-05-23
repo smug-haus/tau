@@ -178,7 +178,7 @@ defmodule Tau.CodingAgent.Dispatcher do
 
   @impl true
   def handle_continue(:start_adapter, state) do
-    # SPEC-CODING-AGENT [C5-B4]: the per-run tau-context MCP server
+    # SPEC-CODING-AGENT: the per-run tau-context MCP server
     # MUST be reachable BEFORE the adapter invokes its first MCP
     # tool. Start it (when enabled) and merge the resulting entry
     # into `task.mcp_servers` BEFORE calling adapter.start/2.

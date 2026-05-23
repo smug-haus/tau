@@ -21,7 +21,7 @@ defmodule Tau.CircuitBreaker do
     with `%{system_time: integer()}` in measurements and
     `%{provider: provider, state: state_atom}` in metadata.
   - `[:tau, :circuit_breaker, :open]` — emitted when a call is short-circuited
-    because the breaker is `:open` or the probe slot is taken (C62-B3).
+    because the breaker is `:open` or the probe slot is taken.
   - `[:tau, :circuit_breaker, :transition]` — emitted when a state transition
     occurs, with `%{from: old_state, to: new_state}` in metadata.
 
@@ -53,8 +53,8 @@ defmodule Tau.CircuitBreaker do
 
   The thunk MUST return `{:ok, result}` or `{:error, reason}`. The thunk MUST
   NOT raise — an exception propagates to the caller and is NOT recorded as a
-  breaker failure. Only the `:ok` / `:error` tag drives the breaker transition
-  (C65-B3); the full return value is forwarded unchanged.
+  breaker failure. Only the `:ok` / `:error` tag drives the breaker transition;
+  the full return value is forwarded unchanged.
 
   ## Returns
 
@@ -62,7 +62,7 @@ defmodule Tau.CircuitBreaker do
   - The thunk's own return value otherwise (success or error).
 
   The full error term from a failing thunk is preserved and returned to the
-  caller; only the `:ok` / `:error` tag drives the breaker transition (C65-B3).
+  caller; only the `:ok` / `:error` tag drives the breaker transition.
   """
   @spec call(module(), keyword(), (-> {:ok, term()} | {:error, term()})) ::
           {:ok, term()} | {:error, term()}
@@ -110,7 +110,7 @@ defmodule Tau.CircuitBreaker do
   # Record the thunk outcome and drive transitions.
   #
   # Counter increments (failure_count / success_count) go through the atomic
-  # Store.bump_* primitives ([C56-B1] / [C60-B1]). The returned post-increment
+  # Store.bump_* primitives. The returned post-increment
   # count is then fed into the pure State functions to decide whether a
   # state-machine transition is required. The transition itself is a CAS
   # select_replace guarded on the current state atom — correct and unchanged.

@@ -527,14 +527,14 @@ defmodule Tau.Session do
     id = Keyword.fetch!(opts, :session_id)
     cwd = opts[:cwd] || File.cwd!()
     provider = opts[:provider] || Tau.Provider.default()
-    # D-002 (SPEC-USER-TURN [C29]): resolve nil model to the provider's
-    # default at session init, NOT at stream-call time. Without this,
-    # `data.model` stays nil through telemetry, persistence header, and
-    # the assembler — all of which expect a real model id.
+    # D-002 / SPEC-USER-TURN: resolve nil model to the provider's default
+    # at session init, NOT at stream-call time. Without this, `data.model`
+    # stays nil through telemetry, persistence header, and the assembler
+    # — all of which expect a real model id.
     #
-    # D-041 / [C54-B4]: fold the last persisted `model_swap` event from
-    # preload so resume and fork both converge on the swapped model.
-    # Mirrors `coding_agent_state_from_preload/1`.
+    # D-041: fold the last persisted `model_swap` event from preload so
+    # resume and fork both converge on the swapped model. Mirrors
+    # `coding_agent_state_from_preload/1`.
     model =
       model_from_preload(opts[:preload_events] || []) || opts[:model] || provider.default_model()
 
@@ -713,7 +713,7 @@ defmodule Tau.Session do
           # propagate to children — that's the whole point of explicit
           # cascade on the user-driven shutdown paths.
           child_session_ids: MapSet.new(),
-          # D-005 / AC-6 (SPEC-USER-TURN [C24]): tool-call iteration cap.
+          # D-005 / AC-6 / SPEC-USER-TURN: tool-call iteration cap.
           # Counts tool-dispatch rounds within a single user turn; reset to
           # 0 when the FSM returns to :awaiting_user (clean end_turn OR
           # tool_loop_aborted). Capped at max_tool_iterations; overflow
@@ -824,7 +824,7 @@ defmodule Tau.Session do
           # `coding_agent_cost` JSONL event so `/resume` can fold
           # the totals back.
           coding_agent_costs: coding_agent_costs_from_preload(preload),
-          # D-048 / D-049 / C67-B4: async compaction worker state.
+          # D-048 / D-049: async compaction worker state.
           #
           # `compaction_task` — pid of the running compaction worker task, or nil.
           # Set in the {:async_compact, _} arm of handle_builtin_command/4;
@@ -1313,13 +1313,13 @@ defmodule Tau.Session do
 
       {:error, reason} ->
         # Synchronous provider error — emit and return to awaiting_user.
-        # D-009 (SPEC-USER-TURN [C12]/[C19]): the assistant message MUST
+        # D-009 / SPEC-USER-TURN: the assistant message MUST
         # carry a non-empty content block so render paths that iterate
         # `msg.content` (e.g. `Tau.TUI.App.on_message_end/2`) surface the
         # error to the user. Without the text block the TUI silently drops
         # the error, presenting "TUI does nothing" to the user.
         #
-        # D-018 (SPEC-USER-TURN [C46]/[C48]): for Anthropic auth atoms
+        # D-018 / SPEC-USER-TURN: for Anthropic auth atoms
         # (`:missing_api_key`, `:oauth_expired`, etc.) substitute the
         # human-readable, actionable renewal instruction so the user
         # learns to run `claude /login` instead of staring at an opaque
@@ -1830,12 +1830,12 @@ defmodule Tau.Session do
       Process.exit(data.command_task, :brutal_kill)
     end
 
-    # C67-B4 (BLOCKING-3 fix): guard every demonitor/exit on the compaction
-    # worker fields — an unguarded demonitor(nil) crashes the FSM. This handler
-    # runs in _state so it fires even outside :compacting (e.g. user types
-    # /cancel while the FSM is in :awaiting_user with no compaction running).
-    # compaction_failures is NOT reset by :cancel — a cancelled compaction is
-    # not a success; resetting would let users mask a broken compactor.
+    # Guard every demonitor/exit on the compaction worker fields — an
+    # unguarded demonitor(nil) crashes the FSM. This handler runs in _state
+    # so it fires even outside :compacting (e.g. user types /cancel while
+    # the FSM is in :awaiting_user with no compaction running).
+    # compaction_failures is NOT reset by :cancel — a cancelled compaction
+    # is not a success; resetting would let users mask a broken compactor.
     if data.compaction_monitor,
       do: Process.demonitor(data.compaction_monitor, [:flush])
 
@@ -1903,8 +1903,8 @@ defmodule Tau.Session do
         coding_agent_dispatcher: nil,
         coding_agent_pending: nil,
         coding_agent_blocks: [],
-        # C67-B4: clear compaction worker fields. compaction_failures
-        # is intentionally NOT reset (see guard comment above).
+        # Clear compaction worker fields. compaction_failures is
+        # intentionally NOT reset (see guard comment above).
         compaction_task: nil,
         compaction_monitor: nil,
         # D-082: steering queue is drained back to the user; clear it.
@@ -1936,7 +1936,7 @@ defmodule Tau.Session do
   # In-place provider/model/provider_ctx update. The change applies
   # to the next provider call — an in-flight :provider_streaming keeps
   # using the previous provider until it completes.
-  # [C54-B4]: when opts[:model] is present and non-nil, route it through
+  # When opts[:model] is present and non-nil, route it through
   # do_swap_model/2 (the single data.model mutation site). A nil opts[:model]
   # (provider-only reconfigure) MUST NOT touch data.model. No model_swap
   # event is emitted here — only the single "reconfigure" event below.
@@ -2022,9 +2022,9 @@ defmodule Tau.Session do
     end
   end
 
-  # D-041 / [C54-B4]: synchronous, state-gated model swap. Allowed only in
+  # D-041: synchronous, state-gated model swap. Allowed only in
   # :awaiting_user with no in-flight command task. Any other state is :busy.
-  # do_swap_model/2 is the single data.model mutation site ([C54-B4]).
+  # do_swap_model/2 is the single data.model mutation site.
   def handle_event({:call, from}, {:swap_model, model}, :awaiting_user, %{command_task: nil} = data) do
     case apply_model_swap(data, model) do
       {:error, :invalid_model} ->
@@ -2041,7 +2041,7 @@ defmodule Tau.Session do
   end
 
   # ---------------------------------------------------------------------------
-  # :compacting state — five terminal clauses (D-048, D-049, C67-B4)
+  # :compacting state — five terminal clauses (D-048, D-049)
   #
   # Source order is LOAD-BEARING. Clauses must precede the catch-all below.
   # Ordering rationale:
@@ -2804,7 +2804,7 @@ defmodule Tau.Session do
             {:next_state, :awaiting_user, next_data, actions}
 
           true ->
-            # D-005 / AC-6 (SPEC-USER-TURN [C24]): enforce the per-turn
+            # D-005 / AC-6 / SPEC-USER-TURN: enforce the per-turn
             # tool-call iteration cap before dispatching the next round.
             # Check against the already-dispatched count so that cap=N allows
             # exactly N dispatches (tool_iterations counts rounds dispatched).
@@ -3741,7 +3741,7 @@ defmodule Tau.Session do
 
   defp append_message(data, msg), do: %{data | messages: data.messages ++ [msg]}
 
-  # [C54-B4]: single data.model mutation site. Pure function — no side effects.
+  # Single data.model mutation site. Pure function — no side effects.
   # Returns {:ok, updated_data, from_model} | {:error, :invalid_model}.
   # "invalid" means nil, empty string, or whitespace-only.
   defp do_swap_model(data, model) do
@@ -3772,7 +3772,7 @@ defmodule Tau.Session do
     end
   end
 
-  # [C54-B4]: route reconfigure's model opt through do_swap_model/2 so
+  # Route reconfigure's model opt through do_swap_model/2 so
   # data.model has a single mutation site. nil means "no change" — a
   # provider-only reconfigure must NOT touch data.model (preserves the
   # update_provider_test.exs assertion that a model-only reconfigure
@@ -5008,7 +5008,7 @@ defmodule Tau.Session do
 
   defp event_to_message(_), do: nil
 
-  # D-041 / [C54-B4]: fold the last persisted model_swap event from a
+  # D-041: fold the last persisted model_swap event from a
   # preload list so resume and fork both converge on the swapped model.
   # Returns the most recent "to" value, or nil when no swap is recorded.
   # Mirrors coding_agent_state_from_preload/1.
@@ -5126,7 +5126,7 @@ defmodule Tau.Session do
         {:model_command, String.trim(args), msg}
 
       {:command, "/" <> bare_name = name, args} ->
-        # [C55-B4]: built-ins shadow same-named extensions.
+        # Built-ins shadow same-named extensions.
         case Tau.Commands.Parser.lookup_builtin(name) do
           {:ok, mod} ->
             {:builtin, mod, args, msg}
@@ -5152,7 +5152,7 @@ defmodule Tau.Session do
 
                   :error ->
                     # Not a skill — check prompt templates.
-                    # [C94-B4] / D-076: template match rewrites the user
+                    # D-076: template match rewrites the user
                     # message with the rendered body and returns {:sync, msg}
                     # — the same path as invoke_file_command/3.
                     case List.keyfind(templates, bare_name, 0) do
@@ -5176,7 +5176,7 @@ defmodule Tau.Session do
 
   defp classify_slash_command(msg, _skills, _templates, _cwd), do: {:sync, msg}
 
-  # D-101 (SPEC-TUI-COMPLETION C8-B5): only intercept whitespace-free tokens
+  # D-101 / SPEC-TUI-COMPLETION: only intercept whitespace-free tokens
   # (args == "") with no catalog match. When args is non-empty the user provided
   # arguments, pass through to the model (AC-7 guard).
   defp unknown_or_passthrough(bare_name, "", _msg), do: {:unknown_command, "/" <> bare_name}
@@ -5282,7 +5282,7 @@ defmodule Tau.Session do
 
   defp prepare_command_args(_mod, args), do: {:ok, args}
 
-  # D-042 / [C55-B4]: built-in slash-command inline handler.
+  # D-042: built-in slash-command inline handler.
   #
   # Dispatches `mod.run(args, data)` and maps the typed outcome to FSM
   # actions.  CRITICAL: {:notice}, {:mutate}, and {:error} branches MUST
@@ -5333,7 +5333,7 @@ defmodule Tau.Session do
         {:keep_state, data}
 
       {:async_compact, notice} ->
-        # C67-B4: the only outcome that changes FSM state (to :compacting).
+        # The only outcome that changes FSM state (to :compacting).
         # Does NOT call process_user_message/2 (D-042).
         broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: notice})
         # D-163: broadcast CompactionStarted before entering :compacting so the

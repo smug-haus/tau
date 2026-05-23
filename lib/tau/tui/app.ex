@@ -38,7 +38,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
     @impl true
     def init(context) do
-      # D-004 (SPEC-USER-TURN [C6]): the bridge MUST subscribe to PubSub
+      # D-004 / SPEC-USER-TURN: the bridge MUST subscribe to PubSub
       # BEFORE `Tau.start_session/1` returns. `Session.init/1`
       # synchronously broadcasts `%Events.SessionStart{}`; subscribing
       # afterwards loses it. Pre-generate the id, start the bridge, then
@@ -749,7 +749,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       opts = [
         app: __MODULE__,
         interval: @tick_interval_idle,
-        # D-003 ([C7] / AC-4): bare `{:ch, ?q}` is intentionally absent.
+        # D-003 / AC-4: bare `{:ch, ?q}` is intentionally absent.
         # The `q` key is forwarded to `update/2` where it is handled
         # context-sensitively: quit on empty prompt, append on non-empty.
         # Ctrl-C (`{:key, 3}`) remains unconditional.
@@ -806,7 +806,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       end
     end
 
-    # D-026 ([C51-B3]): a solid block cursor (U+2588 "█") MUST be appended
+    # D-026: a solid block cursor (U+2588 "█") MUST be appended
     # after the current input so the user can see the insertion point.
     # Unicode block renders in all common terminal emulators; it is
     # visually distinct from typed characters and requires no timer or
@@ -867,7 +867,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       IO.iodata_to_binary([before_cursor, @cursor_glyph, after_cursor])
     end
 
-    # D-003 ([C7] / AC-4): context-aware quit. On an empty prompt, stop the
+    # D-003 / AC-4: context-aware quit. On an empty prompt, stop the
     # Ratatouille runtime supervisor so the TUI exits cleanly. The supervisor
     # is located via the registered `Tau.TUI.Supervisor` DynamicSupervisor
     # rather than storing its pid in the model (which would require a
@@ -1337,7 +1337,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         |> Enum.flat_map(fn block ->
           case block do
             %{type: :text, text: t} ->
-              # D-028 / [C52-B5]: render markdown (CommonMark + GFM tables)
+              # D-028: render markdown (CommonMark + GFM tables)
               # in the TUI pane. Render.Markdown emits {content, attrs} tuples;
               # carry both through model.transcript so render/1 can apply attrs
               # to each label (AC-6: bold/colour/underline reach the terminal).

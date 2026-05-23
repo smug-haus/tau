@@ -199,7 +199,7 @@ defmodule Tau.Tools.Builtin.Delegate do
   # Delegate runs are long; per-call serialisation lets the FSM and
   # the user keep a coherent view of what the agent is doing. Two
   # concurrent Delegate calls in the same turn would also race on
-  # workspace creation (SPEC §3 [C2-B3]).
+  # workspace creation (SPEC-CODING-AGENT §3).
   @impl Tau.Tool
   def execution_mode, do: :sequential
 

@@ -33,7 +33,7 @@ defmodule Tau.Commands.Parser do
   `Tau.Commands.Builtin.table/0`, `:error` otherwise.
 
   Built-in resolution is intended to be called BEFORE `lookup/1` so that
-  built-in commands shadow same-named extensions ([C55-B4]).
+  built-in commands shadow same-named extensions.
   """
   @spec lookup_builtin(String.t()) :: {:ok, module()} | :error
   def lookup_builtin(name), do: Map.fetch(Builtin.table(), name)

@@ -10,7 +10,7 @@ defmodule Tau.CodingAgent.Workspace.Git do
   ## Why a worktree
 
   The dominant destructive interaction surface flagged in
-  SPEC-CODING-AGENT §3 ([C1-B3] / [C2-B3]) is a concurrent editor
+  SPEC-CODING-AGENT §3 is a concurrent editor
   session writing the same files the coding agent edits. A worktree
   isolates the agent's writes onto a parallel branch without copying
   the repo or interfering with the user's index. The user can review

@@ -3,7 +3,7 @@ defmodule Tau.Markdown do
   Renders CommonMark (with GFM tables) assistant text into ASCII-only
   terminal lines suitable for the Ratatouille transcript pane.
 
-  Scope (D-028 / [C52-B5]): replaces the prior raw-text concatenation in
+  Scope (D-028): replaces raw-text concatenation in
   `Tau.TUI.App.on_message_end/2`. Tables align as ASCII pipe-and-plus
   grids; headers and lists get visible treatment without leaking raw
   markdown into the rendered pane.
