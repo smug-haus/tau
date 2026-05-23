@@ -729,7 +729,7 @@ none exists, in the module's `@moduledoc`).
 | Surface | Source | Contract documented in |
 |---|---|---|
 | `:tau_web` poncho (LiveView dashboard) | `web/lib/tau_web/` | `docs/spec/SPEC-WEB-DASHBOARD.md` — reuses `Tau.PubSub`; reads sessions via `Tau.snapshot/1` only. |
-| Factory mechanical gates | `lib/tau/factory/gate.ex` + `lib/mix/tasks/tau.gate.*` | The module's `@moduledoc` (pure module; not coordination-heavy enough for a SPEC). |
+| Factory mechanical gates | `lib/mix/gate/` + `lib/mix/tasks/tau.gate.*` | Each module's `@moduledoc` (pure modules; not coordination-heavy enough for a SPEC). |
 | Coding-agent adapter | `lib/tau/coding_agent/`, `lib/tau/coding_agents/` | `docs/spec/SPEC-CODING-AGENT.md`. |
 
 | C82 | `lib/tau/providers/copilot/auth.ex` — `Tau.Providers.Copilot.Auth` (`resolve_oauth/1`, `token/1`, `refresh/2`, `describe_error/1`); `lib/tau/providers/copilot/token_store.ex` — `Tau.Providers.Copilot.TokenStore` (supervised GenServer; `get/0`, `put/1`, `clear/0`); `lib/tau/application.ex` — `Tau.Providers.Copilot.TokenStore` child spec; `lib/tau/cli.ex` — `doctor_cmd` Copilot auth-status report; `docs/spec/SPEC-USER-TURN.md` — C82, D-056; `test/tau/providers/copilot/auth_test.exs` |

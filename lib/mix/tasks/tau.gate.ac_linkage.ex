@@ -26,7 +26,7 @@ defmodule Mix.Tasks.Tau.Gate.AcLinkage do
 
   use Mix.Task
 
-  alias Tau.Factory.Gate
+  alias Mix.Gate.AcLinkage
 
   @impl Mix.Task
   def run(argv) do
@@ -35,7 +35,7 @@ defmodule Mix.Tasks.Tau.Gate.AcLinkage do
         pr_body = File.read!(pr_body_file)
         sources = Enum.map(gating_files, &File.read!/1)
 
-        case Gate.ac_linkage(pr_body, sources) do
+        case AcLinkage.ac_linkage(pr_body, sources) do
           :ok ->
             Mix.shell().info("tau.gate.ac_linkage: OK — all claimed AC/D-NNN tokens covered")
 

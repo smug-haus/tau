@@ -12,10 +12,12 @@ defmodule Tau.Factory.GateTest do
   """
   use ExUnit.Case, async: true
 
-  alias Tau.Factory.Gate
+  alias Mix.Gate.AcLinkage
+  alias Mix.Gate.Masking
+  alias Mix.Gate.Mutation
 
   # ---------------------------------------------------------------------------
-  # AC-1 — Tau.Factory.Gate.ac_linkage/2
+  # AC-1 — Mix.Gate.AcLinkage.ac_linkage/2
   #
   # "ac_linkage/2 returns {:error, [...]} for a PR body whose claimed AC-N has
   #  no matching gating-test name/tag, and :ok when every claimed AC is present."
@@ -54,7 +56,7 @@ defmodule Tau.Factory.GateTest do
         """
       ]
 
-      assert {:error, missing} = Gate.ac_linkage(@pr_body, sources)
+      assert {:error, missing} = AcLinkage.ac_linkage(@pr_body, sources)
       assert "AC-2" in missing
       refute "AC-1" in missing
       refute "D-200" in missing
@@ -79,7 +81,7 @@ defmodule Tau.Factory.GateTest do
         """
       ]
 
-      assert :ok = Gate.ac_linkage(@pr_body, sources)
+      assert :ok = AcLinkage.ac_linkage(@pr_body, sources)
     end
 
     # Meta-AC convention (PR #371): an AC whose identifier is immediately
@@ -116,7 +118,7 @@ defmodule Tau.Factory.GateTest do
         """
       ]
 
-      assert :ok = Gate.ac_linkage(@meta_pr_body, meta_covered_sources)
+      assert :ok = AcLinkage.ac_linkage(@meta_pr_body, meta_covered_sources)
 
       # Negative control: drop AC-2's coverage too. AC-2 is NOT meta-marked,
       # so it MUST still be reported missing — proving the exemption is
@@ -131,7 +133,7 @@ defmodule Tau.Factory.GateTest do
         """
       ]
 
-      assert {:error, missing} = Gate.ac_linkage(@meta_pr_body, non_meta_gap_sources)
+      assert {:error, missing} = AcLinkage.ac_linkage(@meta_pr_body, non_meta_gap_sources)
       assert "AC-2" in missing
       refute "AC-3" in missing
       refute "AC-1" in missing
@@ -179,7 +181,7 @@ defmodule Tau.Factory.GateTest do
     """
 
     test "AC-2: returns the removed-assertion list for a diff that deletes an assert" do
-      violations = Gate.masking_violations(@diff_with_removed_assert)
+      violations = Masking.masking_violations(@diff_with_removed_assert)
 
       assert is_list(violations)
       assert length(violations) == 1
@@ -192,7 +194,7 @@ defmodule Tau.Factory.GateTest do
     end
 
     test "AC-2: returns [] for a diff that deletes no assertion" do
-      assert [] = Gate.masking_violations(@diff_without_removed_assert)
+      assert [] = Masking.masking_violations(@diff_without_removed_assert)
     end
   end
 
@@ -266,7 +268,9 @@ defmodule Tau.Factory.GateTest do
       run.(["commit", "-q", "-m", "head"])
 
       assert :ok =
-               Gate.mutation_check(["test/widget_gate_test.exs"], base_ref)
+               File.cd!(tmp_dir, fn ->
+                 Mutation.mutation_check(["test/widget_gate_test.exs"], base_ref)
+               end)
     after
       _ = tmp_dir
     end
@@ -290,7 +294,9 @@ defmodule Tau.Factory.GateTest do
       run.(["commit", "-q", "-m", "head"])
 
       assert {:error, :all_passed} =
-               Gate.mutation_check(["test/widget_gate_test.exs"], base_ref)
+               File.cd!(tmp_dir, fn ->
+                 Mutation.mutation_check(["test/widget_gate_test.exs"], base_ref)
+               end)
     after
       _ = tmp_dir
     end

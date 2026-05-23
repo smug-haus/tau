@@ -29,7 +29,7 @@ defmodule Mix.Tasks.Tau.Gate.Masking do
 
   use Mix.Task
 
-  alias Tau.Factory.Gate
+  alias Mix.Gate.Masking
 
   @impl Mix.Task
   def run(argv) do
@@ -42,7 +42,7 @@ defmodule Mix.Tasks.Tau.Gate.Masking do
             File.read!(diff_source)
           end
 
-        violations = Gate.masking_violations(diff)
+        violations = Masking.masking_violations(diff)
 
         if violations == [] do
           Mix.shell().info("tau.gate.masking: OK — no removed assertions detected")
