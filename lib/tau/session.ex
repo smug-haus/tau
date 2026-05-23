@@ -669,56 +669,25 @@ defmodule Tau.Session do
           # settings reload between turns is picked up automatically.
           fallback_chain_remaining: [],
           tools_in_flight: %{},
-          # Pid of the per-turn parallel-tool dispatcher (a child of
-          # Tau.Tools.TaskSupervisor that drives Task.Supervisor.async_stream_nolink/4
-          # over the turn's tool calls). Stored so :cancel can brutal-kill
-          # the iterator; orphaned tool tasks remain under the supervisor
-          # and complete or are reaped naturally.
+          # Per-turn parallel-tool dispatcher pid; brutal-killed on :cancel.
           tool_dispatcher: nil,
-          # ADR-0008: slash-command tasks (user code) run isolated under
-          # Tau.Tools.TaskSupervisor, never inline in the FSM.
+          # ADR-0008: slash-command tasks run under Tau.Tools.TaskSupervisor.
           command_task: nil,
-          # ADR-0013: currently-active skill, or nil. When set,
-          # `Tau.Permissions.Evaluator` denies any tool not on
-          # `active_skill.allowed_tools` before consulting the rule set.
-          # Per-turn lifetime by default: cleared in `finalize_assistant/2`
-          # when the assistant returns `stop_reason == :end_turn` and on
-          # `:cancel`. ADR-0015 sub-agents may pre-pin a persona at start
-          # time via the `:active_skill` opt + `:persona_lifetime: :session`
-          # so the persona survives `:end_turn` and stays live for the
-          # session's whole life (the child can't dismiss it).
+          # ADR-0013 / ADR-0015. Per-turn lifetime by default; sub-agent
+          # personas with `:persona_lifetime: :session` survive `:end_turn`.
           active_skill: opts[:active_skill],
-          # ADR-0015: `:turn` (default) clears `active_skill` on
-          # `:end_turn`; `:session` pins it for the session's life. Only
-          # the `Agent` tool sets `:session` today; everything else
-          # behaves exactly like ADR-0013.
           persona_lifetime: opts[:persona_lifetime] || :turn,
-          # Spawn-time tool whitelist (`:all` or `[String.t()]`).
-          # Filter applies in `dispatch_tools/2` before
-          # `Tau.Permissions.Evaluator`; calls outside the list synthesise
-          # an `is_error: true` ToolResult the same way deny rules do.
-          # Foundation for ADR-0014/15 subagent personas (the parent's
-          # `Agent` tool plumbs the child skill's `allowed_tools` through
-          # this opt). `:all` preserves today's behaviour.
+          # Spawn-time tool whitelist (`:all` or `[String.t()]`). Calls
+          # outside the list synthesise an `is_error: true` ToolResult.
           tools_whitelist: opts[:tools_whitelist] || :all,
-          # ADR-0014: set of currently-running child session ids
-          # spawned by this session via the `Agent` tool. Populated by
-          # `{:register_child, _}` casts from the spawn task and emptied
-          # by `{:unregister_child, _}` when a child reports `%SessionEnd{}`.
-          # `Tau.cancel/1` and `Tau.stop/1` cascade across this set before
-          # tearing down the parent's own provider/tool/command tasks so
-          # children get a clean shutdown path (flush JSONL, emit
-          # `%SessionEnd{reason: :user}`) rather than being reaped from
-          # above. Supervisor is `:one_for_one`; a parent crash does *not*
-          # propagate to children — that's the whole point of explicit
-          # cascade on the user-driven shutdown paths.
+          # ADR-0014: child session ids spawned by this session via `Agent`.
+          # `Tau.cancel/1` and `Tau.stop/1` cascade across this set so
+          # children get a clean shutdown path rather than being reaped
+          # from above.
           child_session_ids: MapSet.new(),
           # D-005 / AC-6 / SPEC-USER-TURN: tool-call iteration cap.
-          # Counts tool-dispatch rounds within a single user turn; reset to
-          # 0 when the FSM returns to :awaiting_user (clean end_turn OR
-          # tool_loop_aborted). Capped at max_tool_iterations; overflow
-          # emits [:tau, :session, :tool_iteration_cap] telemetry and aborts
-          # the turn with stop_reason: :tool_loop_aborted.
+          # Counts tool-dispatch rounds within a turn; overflow aborts with
+          # stop_reason :tool_loop_aborted.
           tool_iterations: 0,
           max_tool_iterations:
             opts[:max_tool_iterations] ||
@@ -727,15 +696,9 @@ defmodule Tau.Session do
           # D-060: tool-loop brake — per-turn map keyed by
           # `{tool_name, args_hash}` to a `%{count, error}` cell. When
           # `count` reaches `tool_loop_brake_threshold` (default 3) the
-          # FSM aborts the turn with `stop_reason: :tool_loop_aborted`
-          # — a sibling circuit-breaker to the D-027 iteration cap that
-          # catches the narrow "model wedged repeating the SAME failing
-          # call" failure mode (real-world example: identical
-          # `Agent({})` schema rejection 5x in a row). Reset to %{} on
-          # every return to `:awaiting_user`. The cell records the
-          # error message so a transient error swapping mid-loop
-          # (network -> schema) restarts the counter instead of
-          # compounding two unrelated failure modes.
+          # FSM aborts with `stop_reason: :tool_loop_aborted`. The cell
+          # records the error message so a swapped error restarts the
+          # counter rather than compounding two unrelated failure modes.
           tool_loop_state: %{},
           tool_loop_brake_threshold:
             opts[:tool_loop_brake_threshold] ||
@@ -744,20 +707,11 @@ defmodule Tau.Session do
           # D-060: side-table mapping in-flight tool_call_id ->
           # `{tool_name, args_hash}` so the `{:tool_done, ...}` handler
           # can build the brake key without rescanning message history.
-          # Populated in `dispatch_tools/2`; entry removed in
-          # `handle_event(:info, {:tool_done, ...}, :tool_executing, _)`.
           tool_loop_call_lookups: %{},
-          # D-061: per-turn provider-retry counter for the
-          # single-provider case (no fallback chain remaining). When a
-          # mid-stream `%PEvent.Error{retryable?: true}` arrives and
-          # `fallback_chain_remaining == []`, the FSM retries the SAME
-          # provider with exponential backoff up to
-          # `provider_retry_max` (default 3) before surfacing a
-          # terminal error. ADR-0012 fallback still takes precedence
-          # when a chain is present — this is the fallback-of-last-
-          # resort for sessions configured against a single provider.
-          # Reset to `%{count: 0}` on every clean return to
-          # `:awaiting_user` and on every successful Done.
+          # D-061: per-turn same-provider retry counter, applied when
+          # `fallback_chain_remaining == []` on a retryable mid-stream
+          # error. Capped at `provider_retry_max` (default 3); ADR-0012
+          # fallback takes precedence when a chain is present.
           provider_retry_state: %{count: 0},
           provider_retry_max:
             opts[:provider_retry_max] ||
@@ -767,39 +721,8 @@ defmodule Tau.Session do
             opts[:provider_retry_base_delay_ms] ||
               get_in(SettingsCache.get(), [:session, :provider_retry_base_delay_ms]) ||
               1000,
-          # SPEC-CODING-AGENT:
-          #
-          # `coding_agent` — adapter module or nil. When set, user
-          # messages route to `:coding_agent_streaming`.
-          #
-          # `coding_agent_workspace_backend` — pluggable backend module
-          # (`Workspace.Git` for repo-detected, `Workspace.Cwd`
-          # otherwise). Resolved at init time from `cwd`; lazily
-          # `prepare/2`'d on the first `:coding_agent_streaming`
-          # transition so a session that never runs an agent pays no
-          # worktree cost.
-          #
-          # `coding_agent_workspace_opts` — extra opts threaded through
-          # to `Workspace.prepare/1` (e.g. `:state_dir` overrides in
-          # tests).
-          #
-          # `coding_agent_workspace` — the prepared `%Workspace{}` once
-          # established; persists across turns within the same session
-          # so the agent keeps editing the same isolated branch.
-          # Cleaned up in `terminate/3`.
-          #
-          # `coding_agent_dispatcher` — pid of the currently-running
-          # dispatcher, or nil. Holds the cancel target for
-          # `:cancel` in `:coding_agent_streaming`.
-          #
-          # `coding_agent_pending` — the in-progress `%Assistant{}`
-          # being assembled from dispatcher events. Finalized on `Done`.
-          #
-          # `coding_agent_blocks` — ordered content-block accumulator
-          # for the in-progress assistant message. AssistantText events
-          # append to a single text block (per turn); ToolUse events
-          # append `%{type: :tool_call, ...}` blocks. Mirrors the
-          # provider-side `Assembler`'s `:order` semantics.
+          # SPEC-CODING-AGENT. Workspace is lazily prepared on the first
+          # `:coding_agent_streaming` transition; cleaned up in `terminate/3`.
           coding_agent: coding_agent,
           coding_agent_ctx: coding_agent_ctx,
           coding_agent_workspace_backend: coding_agent_workspace_backend,
@@ -855,37 +778,15 @@ defmodule Tau.Session do
           # `%{name: String.t(), arguments: map()}`. Non-nil only while in
           # `:awaiting_permission`; cleared on exit (decision or cancel).
           pending_permission_requests: %{},
-          # SPEC-PERMISSION-PROMPTS §4 B3 (D-091): accumulator for approved
-          # calls within one `:awaiting_permission` visit. Holds both the
-          # pre-approved `:allow`-verdict calls deferred from `dispatch_tools/2`
-          # and any user-approved `:allow_once` decisions. Dispatched as one
-          # batch in `finish_permission_round/1`.
+          # SPEC-PERMISSION-PROMPTS §4 B3 / D-091. Both batches dispatch
+          # together in `finish_permission_round/1` so a single
+          # `:awaiting_permission` visit produces one atomic emission.
           permission_dispatch_batch: [],
-          # SPEC-PERMISSION-PROMPTS D-091 (whole-round deferral): instant-resolve
-          # results accumulated during `:awaiting_permission`. Holds
-          # `{call_id, %ToolResult{}}` tuples for calls resolved without user
-          # interaction (`:deny`-rule denied, whitelist-filtered, hook-denied,
-          # `:deny_once` decisions). Emitted in `finish_permission_round/1`
-          # via broadcast + history append, never via `{:tool_done}` messages
-          # while in `:awaiting_permission` state.
           permission_pending_results: [],
           # D-077 / D-078 / SPEC-USER-TURN §6: two-tier message queues.
-          # Replaces ADR-0009's single `:postpone` mechanism for user messages
-          # with explicit FIFO queues that have two distinct drain points.
-          #
-          # `steering_queue` — messages tagged `:steering` (Enter while busy).
-          # Drained at the tool-round boundary: after the last `tool_result`
-          # of a round and before the next provider call (D-079). Cleared
-          # (restored to editor via %QueueRestored{}) on `:cancel` (D-082).
-          #
-          # `followup_queue` — messages tagged `:followup` (Alt+Enter while busy).
-          # Drained on every transition into `:awaiting_user` that represents
-          # turn completion — normal end and post-cancel (D-080). Survives a
-          # `:cancel` (D-080).
-          #
-          # Both queues use OTP `:queue` for O(1) enqueue/dequeue. Hard cap of 32
-          # entries each: messages past the cap are dropped with a %SystemNotice{}
-          # (D-083, critic S3).
+          # `steering_queue` drains at the tool-round boundary (D-079);
+          # `followup_queue` drains on transition into `:awaiting_user`
+          # (D-080). Hard cap 32 each (D-083).
           steering_queue: :queue.new(),
           followup_queue: :queue.new()
         }
