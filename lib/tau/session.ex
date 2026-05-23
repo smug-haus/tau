@@ -27,8 +27,7 @@ defmodule Tau.Session do
 
   @behaviour :gen_statem
 
-  alias Tau.Message.{Assembler, Assistant, ToolResult, User}
-  alias Tau.Permissions.Evaluator, as: PermEvaluator
+  alias Tau.Message.{Assistant, ToolResult, User}
   alias Tau.Session.Events
   alias Tau.Provider.Event, as: PEvent
   alias Tau.Settings.Cache, as: SettingsCache
@@ -39,7 +38,6 @@ defmodule Tau.Session do
   # events fold into `data.messages` as `%Assistant{}` / `%ToolResult{}`
   # so the existing TUI render path, persistence, and `/resume` apply
   # unchanged (D-037).
-  alias Tau.CodingAgent.Event, as: CAEvent
   alias Tau.CodingAgent.Workspace, as: CAWorkspace
   alias Tau.Commands.Catalog
 
@@ -48,6 +46,9 @@ defmodule Tau.Session do
   # — interception happens in `dispatch_tools/2` before any executor
   # would see it.
   @activate_skill_tool_name "__activate_skill__"
+
+  @doc false
+  def activate_skill_tool_name, do: @activate_skill_tool_name
 
   @type id :: String.t()
 
@@ -544,7 +545,7 @@ defmodule Tau.Session do
     # settings provides the deployment-wide default.
     coding_agent =
       opts[:coding_agent] ||
-        coding_agent_from_settings()
+        Tau.Session.CodingAgentTurn.coding_agent_from_settings()
 
     coding_agent_workspace_backend =
       opts[:coding_agent_workspace_backend] ||
@@ -884,7 +885,7 @@ defmodule Tau.Session do
 
       {:model_command, new_model, _msg} ->
         # /model <id>: attempt swap
-        handle_slash_model_swap(data, new_model)
+        Tau.Session.ModelSwap.handle_slash_model_swap(data, new_model)
 
       {:unknown_command, name} ->
         # D-101 (SPEC-TUI-COMPLETION AC-2): unrecognized slash command.
@@ -958,236 +959,7 @@ defmodule Tau.Session do
   end
 
   def handle_event(:internal, :start_provider, :provider_streaming, data) do
-    transition(data.id, data, :provider_streaming)
-
-    # ADR-0012: re-derive the fallback chain from settings on every fresh
-    # turn (i.e. only when the chain hasn't already been seeded by a
-    # previous fallback within this same turn). data.provider here is
-    # always the original_provider for the first call of a turn — by
-    # construction, fallback iterations rebuild data with a non-empty
-    # remaining list and do NOT re-enter via this branch's seeding.
-    data =
-      if data.fallback_chain_remaining == [] and data.provider == data.original_provider do
-        %{data | fallback_chain_remaining: lookup_fallback_chain(data.original_provider)}
-      else
-        data
-      end
-
-    parent = self()
-
-    # ADR-0017: cooperative cancellation. Allocate a fresh per-stream
-    # `:counters` ref and thread it through the provider ctx. The
-    # `:cancel` handler flips slot 1 to signal abort; the streaming
-    # engine (and Replay, for tests) checks it at every chunk boundary.
-    cancel_flag = :counters.new(1, [])
-
-    ctx =
-      data.provider_ctx
-      |> Map.merge(%{session_id: data.id, cancel_flag: cancel_flag})
-
-    # D-057 / SPEC-OTEL-REPORTER: per-request discriminator ref so the OTel
-    # reporter correlates *.stop / *.cancelled / *.brutal_kill back to the
-    # right *.start span across concurrent requests. Stored in `data`
-    # immediately so every error branch (including ones that never reach
-    # `{:ok, stream}`) emits a matched terminal.
-    provider_span_ref = make_ref()
-    data = %{data | provider_span_ref: provider_span_ref}
-
-    :telemetry.execute(
-      [:tau, :provider, :request, :start],
-      %{system_time: System.system_time()},
-      %{
-        provider: data.provider,
-        model: data.model,
-        session_id: data.id,
-        span_ref: provider_span_ref
-      }
-    )
-
-    # D-059 (SPEC-USER-TURN §6, AC-10): when `data.active_skill` is set
-    # (e.g. headless `tau run --system-prompt-file` or a sub-agent persona
-    # pinned via `Agent`), the model-visible tool list MUST include the
-    # active skill's `allowed_tools` as discrete tools the provider can
-    # call — not just the synthetic `__activate_skill__` tool. Empty
-    # `allowed_tools` means "no whitelist declared" (matches
-    # `whitelist_from/1` in `Tau.Tools.Builtin.Agent`), so the model sees
-    # every registered built-in. The activate-skill tool is still
-    # included when other model-invokable skills are discoverable.
-    stream_opts =
-      %{model: data.model}
-      |> maybe_put_tools(model_visible_tool_specs(data))
-
-    # AC-7 (SPEC-CIRCUIT-BREAKER): wrap the provider call with the circuit
-    # breaker façade. The thunk returns `{:ok, stream}` or `{:error, reason}`;
-    # the façade records the outcome and, when the breaker is `:open`, short-
-    # circuits with `{:error, :circuit_open}` before the thunk is invoked
-    # (B3 contract, D-043). An open breaker falls through to the synchronous
-    # error path below and surfaces as a user-visible `%Events.MessageEnd{}`
-    # — it does NOT trigger ADR-0012 fallback (the fallback path is only
-    # entered via in-stream `%PEvent.Error{retryable?: true}` events, not by
-    # synchronous `{:error, _}` returns from this call site).
-    case Tau.CircuitBreaker.call(data.provider, [], fn ->
-           data.provider.stream(data.messages, stream_opts, ctx)
-         end) do
-      {:ok, stream} ->
-        # ADR-0012: tag each stream's mailbox traffic with a fresh ref so
-        # stragglers from a killed predecessor (e.g. a provider task whose
-        # `:provider_done` was already in the parent mailbox when fallback
-        # kicked in) get dropped instead of finalising a fresh assembler.
-        stream_ref = make_ref()
-
-        task =
-          Task.async(fn ->
-            try do
-              Enum.each(stream, fn ev ->
-                Process.send(parent, {:provider_event, stream_ref, ev}, [])
-              end)
-
-              Process.send(parent, {:provider_done, stream_ref}, [])
-            rescue
-              e ->
-                Process.send(
-                  parent,
-                  {:provider_failed, stream_ref, Exception.message(e)},
-                  []
-                )
-            end
-          end)
-
-        assembler = Assembler.new(provider: data.provider, model: data.model)
-        broadcast(data.id, %Events.MessageStart{session_id: data.id, message: assembler.message})
-
-        {:next_state, :provider_streaming,
-         %{
-           data
-           | provider_task: task,
-             assembler: assembler,
-             cancel_flag: cancel_flag,
-             stream_ref: stream_ref,
-             provider_span_ref: provider_span_ref
-         }}
-
-      {:error, :circuit_open} ->
-        # D-043 (SPEC-CIRCUIT-BREAKER): an open breaker on one provider MUST
-        # advance the fallback chain rather than killing the turn immediately.
-        # Only when the chain is exhausted (every provider's breaker open or
-        # no fallback left) does the turn surface a terminal error. This
-        # mirrors the in-stream `%PEvent.Error{retryable?: true}` path
-        # (ADR-0012) and guarantees the all-open chain terminates: N providers
-        # all open ⇒ N synchronous `{:error, :circuit_open}` returns ⇒ one
-        # terminal error, no infinite loop (each recursive call pops one
-        # element from `fallback_chain_remaining`).
-        case data.fallback_chain_remaining do
-          [next | rest] ->
-            from_provider = data.provider
-
-            :telemetry.execute(
-              [:tau, :provider, :fallback],
-              %{system_time: System.system_time()},
-              %{
-                from_provider: from_provider,
-                to_provider: next,
-                reason: :circuit_open,
-                session_id: data.id
-              }
-            )
-
-            broadcast(data.id, %Events.ProviderFallback{
-              session_id: data.id,
-              from_provider: from_provider,
-              to_provider: next,
-              reason: :circuit_open
-            })
-
-            data =
-              persist_event(data, "provider_fallback", %{
-                from_provider: inspect(from_provider),
-                to_provider: inspect(next),
-                reason: "circuit_open"
-              })
-
-            # D-057 (SPEC-OTEL-REPORTER): the *.start fired above; emit the
-            # terminal event before recursing into :start_provider so the span
-            # opened at *.start is closed and not leaked as a stale span.
-            emit_provider_request_terminal(:cancelled, data)
-
-            transformed =
-              Tau.Providers.Shared.ContentTransform.transform(
-                data.messages,
-                from_provider,
-                next
-              )
-
-            handle_event(
-              :internal,
-              :start_provider,
-              :provider_streaming,
-              %{
-                data
-                | provider: next,
-                  messages: transformed,
-                  fallback_chain_remaining: rest,
-                  assembler: nil,
-                  provider_task: nil,
-                  stream_ref: nil,
-                  provider_span_ref: nil
-              }
-            )
-
-          [] ->
-            # All providers exhausted — surface terminal error.
-            # D-057 (SPEC-OTEL-REPORTER): emit terminal event before returning
-            # to :awaiting_user so the span opened at *.start is closed.
-            emit_provider_request_terminal(:cancelled, data)
-            reason_str = describe_provider_error(:circuit_open)
-
-            msg =
-              Assistant.new(
-                stop_reason: :error,
-                error_message: reason_str,
-                content: [%{type: :text, text: "Error: " <> reason_str}]
-              )
-
-            broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: msg})
-
-            next_data = %{data | cancel_flag: nil, stream_ref: nil, provider_span_ref: nil}
-            # D-080: drain follow-up on turn-end (error path).
-            actions =
-              if :queue.is_empty(next_data.followup_queue),
-                do: [],
-                else: [{:next_event, :internal, :drain_followups}]
-
-            {:next_state, :awaiting_user, next_data, actions}
-        end
-
-      {:error, reason} ->
-        # Synchronous provider error.
-        # D-009 / SPEC-USER-TURN: the assistant message MUST carry a
-        # non-empty content block; render paths iterate `msg.content`.
-        # D-018: Anthropic auth atoms (`:missing_api_key`, `:oauth_expired`)
-        # become human-readable renewal instructions.
-        # D-057: emit terminal event so the *.start span is closed.
-        emit_provider_request_terminal(:cancelled, data)
-        reason_str = describe_provider_error(reason)
-
-        msg =
-          Assistant.new(
-            stop_reason: :error,
-            error_message: reason_str,
-            content: [%{type: :text, text: "Error: " <> reason_str}]
-          )
-
-        broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: msg})
-
-        next_data = %{data | cancel_flag: nil, stream_ref: nil, provider_span_ref: nil}
-        # D-080: drain follow-up on turn-end (error path).
-        actions =
-          if :queue.is_empty(next_data.followup_queue),
-            do: [],
-            else: [{:next_event, :internal, :drain_followups}]
-
-        {:next_state, :awaiting_user, next_data, actions}
-    end
+    Tau.Session.ProviderTurn.start(data)
   end
 
   # ── coding-agent streaming (SPEC-CODING-AGENT §4 B1 / D-037) ─────
@@ -1199,21 +971,7 @@ defmodule Tau.Session do
   # is dispatched in `handle_event(:info, {:coding_agent_event, ...},
   # :coding_agent_streaming, _)`.
   def handle_event(:internal, :start_coding_agent, :coding_agent_streaming, data) do
-    transition(data.id, data, :coding_agent_streaming)
-
-    :telemetry.execute(
-      [:tau, :session, :coding_agent_streaming, :start],
-      %{system_time: System.system_time()},
-      %{session_id: data.id, agent: data.coding_agent}
-    )
-
-    case ensure_coding_agent_workspace(data) do
-      {:ok, data, workspace_path} ->
-        start_coding_agent_dispatcher(data, workspace_path)
-
-      {:error, reason} ->
-        emit_coding_agent_sync_error(data, reason)
-    end
+    Tau.Session.CodingAgentTurn.handle_start_coding_agent(data)
   end
 
   # Forward dispatcher events into the FSM. Stale events (from a
@@ -1227,9 +985,7 @@ defmodule Tau.Session do
         :coding_agent_streaming,
         data
       ) do
-    if current_run?(data, {:coding_agent, pid}),
-      do: handle_coding_agent_event(event, data),
-      else: {:keep_state, data}
+    Tau.Session.CodingAgentTurn.handle_coding_agent_event_message(pid, event, data)
   end
 
   # Stale or out-of-order event — dispatcher mismatch. Drop silently;
@@ -1240,12 +996,8 @@ defmodule Tau.Session do
   end
 
   # D-061: retryable mid-stream error, no fallback chain remaining,
-  # unspent retry budget. Schedules a same-provider re-entry via
-  # `Process.send_after/3` posting `{:provider_retry, ref, count+1}`.
-  #
-  # CLAUSE ORDERING IS LOAD-BEARING. Both this clause and the ADR-0012
-  # fallback clause head-match `%PEvent.Error{retryable?: true}`; the
-  # `fallback_chain_remaining: []` guard keeps each in its own regime.
+  # unspent retry budget. CLAUSE ORDERING IS LOAD-BEARING — must precede
+  # the ADR-0012 fallback clause (both head-match `%PEvent.Error{retryable?: true}`).
   def handle_event(
         :info,
         {:provider_event, ref, %PEvent.Error{retryable?: true} = ev},
@@ -1257,65 +1009,7 @@ defmodule Tau.Session do
         } = data
       )
       when c < data.provider_retry_max do
-    next_count = c + 1
-    delay = data.provider_retry_base_delay_ms * Integer.pow(2, c)
-
-    :telemetry.execute(
-      [:tau, :session, :provider_retry],
-      %{count: next_count, delay_ms: delay},
-      %{
-        session_id: data.id,
-        provider: data.provider,
-        reason: ev.reason,
-        max: data.provider_retry_max
-      }
-    )
-
-    notice =
-      "provider #{inspect(data.provider)} errored (#{inspect(ev.reason)}); " <>
-        "retrying #{next_count}/#{data.provider_retry_max} after #{delay}ms"
-
-    broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: notice})
-
-    data =
-      persist_event(data, "provider_retry", %{
-        provider: inspect(data.provider),
-        reason: inspect(ev.reason),
-        count: next_count,
-        max: data.provider_retry_max,
-        delay_ms: delay
-      })
-
-    # D-057 (SPEC-OTEL-REPORTER): close the *.start span opened for the
-    # now-aborted attempt BEFORE killing the task, mirroring the ADR-
-    # 0012 fallback path. A brutal_kill event is appropriate because
-    # we are force-terminating a running stream rather than
-    # cooperatively cancelling it.
-    emit_provider_request_terminal(:brutal_kill, data)
-
-    # Shut down the still-running provider task. Stragglers in the
-    # mailbox are tagged with the previous stream_ref and get dropped
-    # by the catch-all clause once :start_provider re-allocates a
-    # fresh ref.
-    if data.provider_task && Process.alive?(data.provider_task.pid) do
-      Task.shutdown(data.provider_task, :brutal_kill)
-    end
-
-    # Bump the counter NOW so a flurry of retryable errors in flight
-    # cannot push the count past `max` (each retry only schedules one
-    # send_after; the FSM is single-threaded so the bump is atomic
-    # w.r.t. the next message).
-    data = %{
-      data
-      | provider_retry_state: %{count: next_count},
-        provider_task: nil,
-        assembler: nil,
-        stream_ref: nil,
-        provider_span_ref: nil
-    }
-
-    Process.send_after(self(), {:provider_retry, next_count}, delay)
-    {:keep_state, data}
+    Tau.Session.ProviderTurn.handle_provider_retry_event(ref, ev, data)
   end
 
   # D-061: deferred retry trigger. Posted by the clause above
@@ -1337,146 +1031,27 @@ defmodule Tau.Session do
     {:keep_state, data}
   end
 
-  # ADR-0012: retryable mid-stream errors fall back to the next provider
-  # in `data.fallback_chain_remaining`. Empty chain falls through to the
-  # generic `:provider_event` clause, which finalises the message with
-  # the error.
-  #
-  # CLAUSE ORDERING IS LOAD-BEARING. The generic `:provider_event` clause
-  # no longer head-discriminates on `stream_ref`; only source order keeps
-  # this fallback clause and the D-061 same-provider retry clause winning
-  # in their respective regimes.
+  # ADR-0012: retryable mid-stream errors fall back to the next provider.
+  # CLAUSE ORDERING IS LOAD-BEARING — must precede the generic :provider_event clause.
   def handle_event(
         :info,
         {:provider_event, ref, %PEvent.Error{retryable?: true} = ev},
         :provider_streaming,
-        %{fallback_chain_remaining: [next | rest], stream_ref: ref} = data
+        %{fallback_chain_remaining: [_next | _rest], stream_ref: ref} = data
       ) do
-    from_provider = data.provider
-
-    :telemetry.execute(
-      [:tau, :provider, :fallback],
-      %{system_time: System.system_time()},
-      %{
-        from_provider: from_provider,
-        to_provider: next,
-        reason: ev.reason,
-        session_id: data.id
-      }
-    )
-
-    broadcast(data.id, %Events.ProviderFallback{
-      session_id: data.id,
-      from_provider: from_provider,
-      to_provider: next,
-      reason: ev.reason
-    })
-
-    data =
-      persist_event(data, "provider_fallback", %{
-        from_provider: inspect(from_provider),
-        to_provider: inspect(next),
-        reason: inspect(ev.reason)
-      })
-
-    # D-057 (SPEC-OTEL-REPORTER): emit the terminal event BEFORE killing the
-    # task so the span opened at *.start is closed with the correct mechanism.
-    # A brutal_kill event is appropriate here because we are force-terminating
-    # a running stream rather than cooperatively cancelling it.
-    emit_provider_request_terminal(:brutal_kill, data)
-
-    # Shut down the still-running provider task (it might still be
-    # emitting events or about to send :provider_done). Stragglers
-    # already in the mailbox are tagged with the *previous* stream_ref
-    # and get dropped by the catch-all `handle_event` clause once
-    # `:start_provider` re-issues a fresh ref.
-    if data.provider_task && Process.alive?(data.provider_task.pid) do
-      Task.shutdown(data.provider_task, :brutal_kill)
-    end
-
-    transformed =
-      Tau.Providers.Shared.ContentTransform.transform(data.messages, from_provider, next)
-
-    handle_event(
-      :internal,
-      :start_provider,
-      :provider_streaming,
-      %{
-        data
-        | provider: next,
-          messages: transformed,
-          fallback_chain_remaining: rest,
-          assembler: nil,
-          provider_task: nil,
-          stream_ref: nil,
-          provider_span_ref: nil
-      }
-    )
+    Tau.Session.ProviderTurn.handle_provider_fallback_event(ref, ev, data)
   end
 
-  def handle_event(
-        :info,
-        {:provider_event, ref, ev},
-        :provider_streaming,
-        data
-      ) do
-    if current_run?(data, {:provider, ref}) do
-      new_assembler = Assembler.step(data.assembler, ev)
-
-      broadcast(data.id, %Events.MessageUpdate{
-        session_id: data.id,
-        event: ev,
-        message: new_assembler.message
-      })
-
-      if Assembler.done?(new_assembler) do
-        finalize_assistant(new_assembler, data)
-      else
-        {:keep_state, %{data | assembler: new_assembler}}
-      end
-    else
-      {:keep_state, data}
-    end
+  def handle_event(:info, {:provider_event, ref, ev}, :provider_streaming, data) do
+    Tau.Session.ProviderTurn.handle_provider_event(ref, ev, data)
   end
 
-  def handle_event(
-        :info,
-        {:provider_done, ref},
-        :provider_streaming,
-        data
-      ) do
-    if current_run?(data, {:provider, ref}) do
-      if data.assembler && Assembler.done?(data.assembler) do
-        {:keep_state, data}
-      else
-        # Stream ended without a Done event — synthesise one.
-        assembler =
-          Assembler.step(data.assembler || Assembler.new(), %PEvent.Done{stop_reason: :stop})
-
-        finalize_assistant(assembler, data)
-      end
-    else
-      {:keep_state, data}
-    end
+  def handle_event(:info, {:provider_done, ref}, :provider_streaming, data) do
+    Tau.Session.ProviderTurn.handle_provider_done(ref, data)
   end
 
-  def handle_event(
-        :info,
-        {:provider_failed, ref, msg},
-        :provider_streaming,
-        data
-      ) do
-    if current_run?(data, {:provider, ref}) do
-      assembler =
-        Assembler.step(data.assembler || Assembler.new(), %PEvent.Error{
-          reason: msg,
-          retryable?: false
-        })
-
-      finalize_assistant(assembler, data)
-    else
-      {:keep_state, data}
-    end
+  def handle_event(:info, {:provider_failed, ref, msg}, :provider_streaming, data) do
+    Tau.Session.ProviderTurn.handle_provider_failed(ref, msg, data)
   end
 
   # ADR-0014: bookkeeping casts from the `Agent` tool task.
@@ -1762,99 +1337,23 @@ defmodule Tau.Session do
   # (provider-only reconfigure) MUST NOT touch data.model. No model_swap
   # event is emitted here — only the single "reconfigure" event below.
   def handle_event(:cast, {:reconfigure, opts}, _state, data) do
-    data =
-      data
-      |> maybe_replace(:provider, opts[:provider])
-      # ADR-0012: keep original_provider in lockstep with the user-
-      # configured provider. Reconfigure replaces both — fallback chains
-      # are looked up keyed by the *new* primary on the next turn.
-      |> maybe_replace(:original_provider, opts[:provider])
-      |> reconfigure_model(opts[:model])
-      |> merge_provider_ctx(opts[:provider_ctx])
-      # SPEC-CODING-AGENT: reconfigure may also adjust the
-      # coding-agent per-run ctx. Used by tests to thread a different
-      # Replay fixture across turns; the production surface lets the
-      # TUI swap inactivity-timeout / cancel-flag without restarting.
-      |> maybe_replace(:coding_agent_ctx, opts[:coding_agent_ctx])
-
-    :telemetry.execute(
-      [:tau, :session, :reconfigure],
-      %{system_time: System.system_time()},
-      %{session_id: data.id, provider: data.provider, model: data.model}
-    )
-
-    data =
-      persist_event(data, "reconfigure", %{
-        provider: inspect(data.provider),
-        model: data.model
-      })
-
-    {:keep_state, data}
+    Tau.Session.ModelSwap.handle_reconfigure(opts, data)
   end
 
   def handle_event(:info, {:tool_done, call_id, result_msg}, :tool_executing, data) do
-    tools = Map.delete(data.tools_in_flight, call_id)
-
-    {lookup, call_lookups_rest} = Map.pop(data.tool_loop_call_lookups, call_id)
-
-    data =
-      data
-      |> append_message(result_msg)
-      |> persist_event("tool_result", tool_result_to_data(result_msg))
-      |> Map.put(:tool_loop_call_lookups, call_lookups_rest)
-
-    broadcast(data.id, %Events.ToolEnd{
-      session_id: data.id,
-      tool_call_id: call_id,
-      result: result_msg
-    })
-
-    # D-060: tool-loop brake. When the SAME `(tool_name,
-    # args_hash, error_message)` triple is rejected
-    # `tool_loop_brake_threshold` consecutive times within one turn,
-    # abort the turn with `stop_reason: :tool_loop_aborted` and emit
-    # a `%SystemNotice{}` naming the wedged call. Errors with
-    # different args OR a different error message reset the counter
-    # for that key — only IDENTICAL re-attempts count.
-    case maybe_apply_tool_loop_brake(data, lookup, result_msg) do
-      {:brake, data} ->
-        emit_tool_loop_brake_abort(data, tools)
-
-      {:continue, data} ->
-        if map_size(tools) == 0 do
-          # D-079 / SPEC-USER-TURN §6 / AC-8: drain one steering message
-          # AFTER all tool_results and BEFORE the next provider call so
-          # no tool_call is orphaned.
-          data = drain_steering_queue_one(data)
-
-          handle_event(
-            :internal,
-            :start_provider,
-            :provider_streaming,
-            %{data | tools_in_flight: tools, tool_dispatcher: nil}
-          )
-        else
-          {:keep_state, %{data | tools_in_flight: tools}}
-        end
-    end
+    Tau.Session.ToolDispatch.handle_tool_done(call_id, result_msg, data)
   end
 
   # D-041: synchronous, state-gated model swap. Allowed only in
   # :awaiting_user with no in-flight command task. Any other state is :busy.
   # do_swap_model/2 is the single data.model mutation site.
   def handle_event({:call, from}, {:swap_model, model}, :awaiting_user, %{command_task: nil} = data) do
-    case apply_model_swap(data, model) do
-      {:error, :invalid_model} ->
-        {:keep_state_and_data, [{:reply, from, {:error, :invalid_model}}]}
-
-      {:ok, data2, result} ->
-        {:keep_state, data2, [{:reply, from, {:ok, result}}]}
-    end
+    Tau.Session.ModelSwap.handle_swap_model_idle(from, model, data)
   end
 
   # Busy: state is not :awaiting_user, or command_task is in flight.
   def handle_event({:call, from}, {:swap_model, _model}, _state, _data) do
-    {:keep_state_and_data, [{:reply, from, {:error, :busy}}]}
+    Tau.Session.ModelSwap.handle_swap_model_busy(from)
   end
 
   # ---------------------------------------------------------------------------
@@ -1880,74 +1379,14 @@ defmodule Tau.Session do
   # Clause 1 — worker success: Task.Supervisor.async_nolink/3 delivers
   # {ref, result} on completion. Guard on compaction_monitor (the ref)
   # ensures stale results from a prior worker (cleared fields) are ignored.
+  # Clause 1 — worker success. Guards on compaction_monitor ref.
   def handle_event(:info, {ref, result}, :compacting, %{compaction_monitor: ref} = data)
       when is_reference(ref) do
-    # Demonitor first to flush any pending {:DOWN} that is already enqueued.
-    # Process.demonitor with [:flush] removes the monitor and purges any
-    # {:DOWN, ref, ...} already in the mailbox. Combined with clearing both
-    # worker fields, stale {:DOWN} messages from this worker can no longer
-    # match Clauses 2a/2b.
-    Process.demonitor(ref, [:flush])
-
-    data = %{data | compaction_task: nil, compaction_monitor: nil}
-
-    {notice, data} =
-      case result do
-        {:ok, new_messages, summary_text} ->
-          data =
-            persist_event(data, "compaction", %{
-              before_count: length(data.messages),
-              after_count: length(new_messages),
-              summary: format_summary_for_persist(summary_text)
-            })
-
-          :telemetry.execute(
-            [:tau, :compaction, :stop],
-            %{system_time: System.system_time()},
-            %{session_id: data.id, after_count: length(new_messages), async: true}
-          )
-
-          data = %{data | messages: new_messages, compaction_failures: 0}
-          {"Compaction complete.", data}
-
-        {:error, reason} ->
-          :telemetry.execute(
-            [:tau, :compaction, :exception],
-            %{system_time: System.system_time()},
-            %{session_id: data.id, reason: reason, kind: :compactor_error, async: true}
-          )
-
-          failures = data.compaction_failures + 1
-          data = %{data | compaction_failures: failures}
-          {"Compaction failed (#{failures} consecutive failure(s)).", data}
-      end
-
-    broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: notice})
-
-    # D-164 (S-2): CompactionFinished MUST fire on every exit from :compacting,
-    # including error paths, so the TUI status bar never sticks on "compacting…".
-    outcome =
-      case result do
-        {:ok, _, _} -> {:ok, :compacted}
-        {:error, reason} -> {:error, reason}
-      end
-
-    broadcast(data.id, %Events.CompactionFinished{session_id: data.id, outcome: outcome})
-
-    # D-080: drain follow-up queue on :awaiting_user transition.
-    actions =
-      if :queue.is_empty(data.followup_queue),
-        do: [],
-        else: [{:next_event, :internal, :drain_followups}]
-
-    {:next_state, :awaiting_user, data, actions}
+    Tau.Session.Compaction.handle_worker_result(ref, result, data)
   end
 
-  # Clause 2a — benign {:DOWN, :normal}: async_nolink emits both {ref, result}
-  # AND {:DOWN, ref, :process, _, :normal} on clean task exit. The mailbox
-  # ordering is non-deterministic; :normal DOWN may arrive before the result.
-  # Guard on compaction_monitor; do NOT demonitor here — the result (Clause 1)
-  # may arrive next and will perform the demonitor+flush. Keep state.
+  # Clause 2a — benign {:DOWN, :normal}: keep waiting for {ref, result}.
+  # Guard on compaction_monitor; do NOT demonitor here.
   def handle_event(
         :info,
         {:DOWN, ref, :process, _pid, :normal},
@@ -1955,13 +1394,10 @@ defmodule Tau.Session do
         %{compaction_monitor: ref} = data
       )
       when is_reference(ref) do
-    # The pending {ref, result} message will drive Clause 1. Keep waiting.
-    {:keep_state, data}
+    Tau.Session.Compaction.handle_worker_down_normal(data)
   end
 
-  # Clause 2b — worker crash: {:DOWN, reason} where reason != :normal means
-  # the task process died without delivering a result. Increment failure counter,
-  # clear worker fields, return to :awaiting_user.
+  # Clause 2b — worker crash: {:DOWN, reason} where reason != :normal.
   def handle_event(
         :info,
         {:DOWN, ref, :process, _pid, reason},
@@ -1969,39 +1405,10 @@ defmodule Tau.Session do
         %{compaction_monitor: ref} = data
       )
       when is_reference(ref) do
-    :telemetry.execute(
-      [:tau, :compaction, :exception],
-      %{system_time: System.system_time()},
-      %{session_id: data.id, reason: reason, kind: :worker_down, async: true}
-    )
-
-    failures = data.compaction_failures + 1
-    notice = "Compaction worker crashed (#{failures} consecutive failure(s))."
-
-    next_data = %{
-      data
-      | compaction_task: nil,
-        compaction_monitor: nil,
-        compaction_failures: failures
-    }
-
-    broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: notice})
-    # D-164: fire on every :compacting exit, including worker crash.
-    broadcast(data.id, %Events.CompactionFinished{session_id: data.id, outcome: {:error, reason}})
-
-    # D-080: drain follow-up queue on :awaiting_user transition.
-    actions =
-      if :queue.is_empty(next_data.followup_queue),
-        do: [],
-        else: [{:next_event, :internal, :drain_followups}]
-
-    {:next_state, :awaiting_user, next_data, actions}
+    Tau.Session.Compaction.handle_worker_crash(ref, reason, data)
   end
 
-  # Clause 3 — live timeout: fired while the worker is still running.
-  # Guard on compaction_task pid ensures this is the timeout for the CURRENT
-  # worker. Only this clause calls demonitor/exit — an unguarded
-  # demonitor(nil) would crash the FSM. MUST be ordered BEFORE Clause 4.
+  # Clause 3 — live timeout. Guards on compaction_task pid. MUST precede Clause 4.
   def handle_event(
         :info,
         {:compaction_timeout, pid, _ms},
@@ -2009,37 +1416,7 @@ defmodule Tau.Session do
         %{compaction_task: pid} = data
       )
       when is_pid(pid) do
-    if data.compaction_monitor, do: Process.demonitor(data.compaction_monitor, [:flush])
-
-    if pid && Process.alive?(pid), do: Process.exit(pid, :brutal_kill)
-
-    :telemetry.execute(
-      [:tau, :compaction, :exception],
-      %{system_time: System.system_time()},
-      %{session_id: data.id, kind: :timeout, async: true}
-    )
-
-    failures = data.compaction_failures + 1
-    notice = "Compaction timed out (#{failures} consecutive failure(s))."
-
-    next_data = %{
-      data
-      | compaction_task: nil,
-        compaction_monitor: nil,
-        compaction_failures: failures
-    }
-
-    broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: notice})
-    # D-164: fire on every :compacting exit, including timeout.
-    broadcast(data.id, %Events.CompactionFinished{session_id: data.id, outcome: {:error, :timeout}})
-
-    # D-080: drain follow-up queue on :awaiting_user transition.
-    actions =
-      if :queue.is_empty(next_data.followup_queue),
-        do: [],
-        else: [{:next_event, :internal, :drain_followups}]
-
-    {:next_state, :awaiting_user, next_data, actions}
+    Tau.Session.Compaction.handle_timeout(pid, data)
   end
 
   # Clause 4 — stale timeout: arrives AFTER the worker already completed
@@ -2078,203 +1455,42 @@ defmodule Tau.Session do
   # only fires when pending_permission_requests is empty (via the
   # permission_decision handlers). Applies only to known non-ask entries.
   def handle_event(:info, {:tool_done, call_id, result_msg}, :awaiting_permission, data) do
-    # Guard: only process if this call_id is in tools_in_flight and is NOT
-    # an :awaiting_permission sentinel (those represent unresolved :ask calls).
-    case Map.get(data.tools_in_flight, call_id) do
-      :awaiting_permission ->
-        # This would be a programming error — :ask calls resolve via
-        # permission_decision, not {:tool_done}. Log and keep state.
-        require Logger
-
-        Logger.warning(
-          "Unexpected {:tool_done} for :awaiting_permission sentinel #{inspect(call_id)}; ignoring"
-        )
-
-        {:keep_state, data}
-
-      nil ->
-        # Stale/unknown call_id — drop silently (same as catch-all below).
-        {:keep_state, data}
-
-      _status ->
-        # Pre-resolved item (deny-rule, whitelist-filtered, skill-activated, etc.).
-        # Process identically to :tool_executing, but stay in :awaiting_permission.
-        tools = Map.delete(data.tools_in_flight, call_id)
-        {_lookup, call_lookups_rest} = Map.pop(data.tool_loop_call_lookups, call_id)
-
-        data =
-          data
-          |> append_message(result_msg)
-          |> persist_event("tool_result", tool_result_to_data(result_msg))
-          |> Map.put(:tool_loop_call_lookups, call_lookups_rest)
-          |> Map.put(:tools_in_flight, tools)
-
-        broadcast(data.id, %Events.ToolEnd{
-          session_id: data.id,
-          tool_call_id: call_id,
-          result: result_msg
-        })
-
-        # Do NOT check for round completion here — that is gated on
-        # pending_permission_requests being empty (resolved by the user).
-        {:keep_state, data}
-    end
+    Tau.Session.ToolDispatch.handle_tool_done_awaiting_permission(call_id, result_msg, data)
   end
 
-  # Clause 1 — :allow_once: add the call to the dispatch batch; if last pending,
-  # dispatch batch and transition to :tool_executing.
+  # Clause 1 — :allow_once. Must precede clause 3 (same state, specific verdict).
   def handle_event(
         :cast,
         {:permission_decision, tool_call_id, :allow_once},
         :awaiting_permission,
         data
       ) do
-    case Map.pop(data.pending_permission_requests, tool_call_id) do
-      {nil, _} ->
-        # Unknown or stale tool_call_id (D-090): logged no-op.
-        require Logger
-
-        Logger.debug(
-          "permission_decision :allow_once for unknown tool_call_id #{inspect(tool_call_id)}"
-        )
-
-        :telemetry.execute(
-          [:tau, :permissions, :stale_decision],
-          %{system_time: System.system_time()},
-          %{session_id: data.id, tool_call_id: tool_call_id, verdict: :allow_once}
-        )
-
-        {:keep_state, data}
-
-      {%{name: name, arguments: args}, remaining} ->
-        :telemetry.execute(
-          [:tau, :permissions, :decision],
-          %{system_time: System.system_time()},
-          %{
-            session_id: data.id,
-            tool_call_id: tool_call_id,
-            tool_name: name,
-            decision: :allow_once
-          }
-        )
-
-        batch = [{tool_call_id, name, args} | data.permission_dispatch_batch]
-        data = %{data | pending_permission_requests: remaining, permission_dispatch_batch: batch}
-
-        if map_size(remaining) == 0 do
-          finish_permission_round(data)
-        else
-          {:keep_state, data}
-        end
-    end
+    Tau.Session.ToolDispatch.handle_permission_allow_once(tool_call_id, data)
   end
 
-  # Clause 2 — :deny_once: synthesise is_error ToolResult; if last pending,
-  # dispatch any accumulated allows and transition.
+  # Clause 2 — :deny_once. Must precede clause 3 (same state, specific verdict).
   def handle_event(
         :cast,
         {:permission_decision, tool_call_id, :deny_once},
         :awaiting_permission,
         data
       ) do
-    case Map.pop(data.pending_permission_requests, tool_call_id) do
-      {nil, _} ->
-        # Unknown or stale tool_call_id (D-090): logged no-op.
-        require Logger
-
-        Logger.debug(
-          "permission_decision :deny_once for unknown tool_call_id #{inspect(tool_call_id)}"
-        )
-
-        :telemetry.execute(
-          [:tau, :permissions, :stale_decision],
-          %{system_time: System.system_time()},
-          %{session_id: data.id, tool_call_id: tool_call_id, verdict: :deny_once}
-        )
-
-        {:keep_state, data}
-
-      {%{name: name}, remaining} ->
-        result =
-          ToolResult.new(
-            tool_call_id: tool_call_id,
-            tool_name: name,
-            content: "Permission denied: #{name} denied by user.",
-            is_error: true
-          )
-
-        # D-091 (whole-round deferral): accumulate the denied result in
-        # permission_pending_results instead of routing through {:tool_done}.
-        # finish_permission_round/1 emits all accumulated results (broadcast
-        # ToolEnd + append to history) when the last :ask call is resolved.
-        # This avoids {:tool_done} messages landing in :awaiting_permission
-        # for multi-:ask rounds where earlier denials precede the last allow.
-        :telemetry.execute(
-          [:tau, :permissions, :decision],
-          %{system_time: System.system_time()},
-          %{
-            session_id: data.id,
-            tool_call_id: tool_call_id,
-            tool_name: name,
-            decision: :deny_once
-          }
-        )
-
-        pending_results = [{tool_call_id, result} | data.permission_pending_results]
-
-        data = %{
-          data
-          | pending_permission_requests: remaining,
-            permission_pending_results: pending_results
-        }
-
-        if map_size(remaining) == 0 do
-          finish_permission_round(data)
-        else
-          {:keep_state, data}
-        end
-    end
+    Tau.Session.ToolDispatch.handle_permission_deny_once(tool_call_id, data)
   end
 
-  # Clause 3 — stale/unknown tool_call_id arriving in :awaiting_permission
-  # for any other verdict form: logged no-op (D-090). Must precede clause 4.
+  # Clause 3 — stale/unknown verdict in :awaiting_permission (D-090). Must precede clause 4.
   def handle_event(
         :cast,
         {:permission_decision, tool_call_id, verdict},
         :awaiting_permission,
         data
       ) do
-    require Logger
-
-    Logger.debug(
-      "permission_decision #{inspect(verdict)} for unknown/stale tool_call_id #{inspect(tool_call_id)}"
-    )
-
-    :telemetry.execute(
-      [:tau, :permissions, :stale_decision],
-      %{system_time: System.system_time()},
-      %{session_id: data.id, tool_call_id: tool_call_id, verdict: verdict}
-    )
-
-    {:keep_state, data}
+    Tau.Session.ToolDispatch.handle_permission_stale(tool_call_id, verdict, data)
   end
 
-  # Clause 4 — {:permission_decision} arriving outside :awaiting_permission:
-  # logged no-op (D-090). Catches stale decisions arriving after state transition.
+  # Clause 4 — decision outside :awaiting_permission (D-090).
   def handle_event(:cast, {:permission_decision, tool_call_id, verdict}, _state, data) do
-    require Logger
-
-    Logger.debug(
-      "permission_decision #{inspect(verdict)} for #{inspect(tool_call_id)} outside :awaiting_permission (state ignored)"
-    )
-
-    :telemetry.execute(
-      [:tau, :permissions, :stale_decision],
-      %{system_time: System.system_time()},
-      %{session_id: data.id, tool_call_id: tool_call_id, verdict: verdict}
-    )
-
-    {:keep_state, data}
+    Tau.Session.ToolDispatch.handle_permission_outside_state(tool_call_id, verdict, data)
   end
 
   # Clause 5 — :cancel in :awaiting_permission is handled by the specific
@@ -2311,36 +1527,17 @@ defmodule Tau.Session do
   # dispatcher pid. Stale events from superseded runs return false and
   # are dropped by the caller (ADR-0012).
   @spec current_run?(map(), {:provider, reference()} | {:coding_agent, pid()}) :: boolean()
-  defp current_run?(%{stream_ref: ref}, {:provider, ref}) when is_reference(ref), do: true
+  @doc false
+  def current_run?(%{stream_ref: ref}, {:provider, ref}) when is_reference(ref), do: true
 
-  defp current_run?(%{coding_agent_dispatcher: pid}, {:coding_agent, pid}) when is_pid(pid),
+  @doc false
+  def current_run?(%{coding_agent_dispatcher: pid}, {:coding_agent, pid}) when is_pid(pid),
     do: true
 
-  defp current_run?(_data, _token), do: false
+  @doc false
+  def current_run?(_data, _token), do: false
 
   # --- Helpers --------------------------------------------------------------
-
-  # D-057 / SPEC-OTEL-REPORTER: close the span opened by
-  # `[:tau, :provider, :request, :start]`. Every path abandoning an
-  # in-flight request MUST call this before re-entering `:start_provider`
-  # or returning to `:awaiting_user`, and MUST clear `provider_span_ref`.
-  # Suffix `:cancelled` for no-task paths (circuit_open / sync error);
-  # `:brutal_kill` for force-terminated streams.
-  defp emit_provider_request_terminal(_suffix, %{provider_span_ref: nil}), do: :ok
-
-  defp emit_provider_request_terminal(suffix, data)
-       when suffix in [:cancelled, :brutal_kill] do
-    :telemetry.execute(
-      [:tau, :provider, :request, suffix],
-      %{system_time: System.system_time()},
-      %{
-        provider: data.provider,
-        model: data.model,
-        session_id: data.id,
-        span_ref: data.provider_span_ref
-      }
-    )
-  end
 
   # ADR-0017: drive the cooperative-then-brutal cancellation handshake
   # for the in-flight provider stream task. Returns `:cooperative` if
@@ -2403,7 +1600,8 @@ defmodule Tau.Session do
   # command, or file-command) and by the
   # handle_event(:info, {:command_done, _, _}, _, _) clause when the
   # slash-command Task delivers its result (ADR-0008).
-  defp process_user_message(msg, data) do
+  @doc false
+  def process_user_message(msg, data) do
     case Tau.Hooks.Dispatcher.run(
            :user_prompt_submit,
            hook_payload(data, :user_prompt_submit, %{message: msg})
@@ -2436,1160 +1634,8 @@ defmodule Tau.Session do
     end
   end
 
-  defp finalize_assistant(assembler, data) do
-    msg = Assembler.assistant(assembler)
-    data = data |> append_message(msg) |> persist_event("assistant_message", message_to_data(msg))
-    broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: msg})
-
-    # Feed Tau.Cost.Tracker (ADR-0010). The tracker subscribes to this
-    # event and folds the per-turn usage into ETS counters keyed by
-    # {date, provider, model, session_id}.
-    :telemetry.execute(
-      [:tau, :provider, :request, :stop],
-      %{system_time: System.system_time(), usage: msg.usage || %{}},
-      %{
-        provider: data.provider,
-        model: data.model,
-        session_id: data.id,
-        stop_reason: msg.stop_reason,
-        # SPEC-OTEL-REPORTER: echo the per-request discriminator so the
-        # OTel reporter can close the span opened at *.start.
-        span_ref: data.provider_span_ref
-      }
-    )
-
-    # SPEC-PROMPT-CACHING AC-4: surface the per-turn prompt-cache
-    # hit/write signal so a silent cache miss (a cost regression) is
-    # observable. The OTel reporter consumes this. Reads the canonical
-    # usage-map keys (B3) directly off the assistant message — no
-    # callback indirection.
-    emit_cache_usage(data, msg.usage || %{})
-
-    # D-016: maybe_compact/2 delegates to do_compact/2 which can return
-    # {:abort, data} when compaction_failures reaches 3 consecutive failures
-    # (shared across sync and async paths — NOT path-tagged). On abort, surface
-    # the failure as a synthetic assistant message with stop_reason:
-    # :compaction_failed and return to :awaiting_user without continuing.
-    # {:soft_error, data} increments the counter but lets the turn continue.
-    # Plain data (or unwrapped soft_error) proceeds to tool dispatch.
-    case maybe_compact(data, msg.usage || %{}) do
-      {:abort, data} ->
-        abort_msg =
-          Assistant.new(
-            stop_reason: :compaction_failed,
-            content: [
-              %{
-                type: :text,
-                text:
-                  "Turn aborted: repeated or background compaction failure (3 consecutive errors). " <>
-                    "Check the compactor configuration or contact support if this persists."
-              }
-            ]
-          )
-
-        data =
-          data
-          |> append_message(abort_msg)
-          |> persist_event("assistant_message", message_to_data(abort_msg))
-
-        broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: abort_msg})
-
-        next_data = %{
-          data
-          | provider_task: nil,
-            assembler: nil,
-            cancel_flag: nil,
-            stream_ref: nil,
-            provider_span_ref: nil,
-            tool_iterations: 0,
-            tool_loop_state: %{},
-            tool_loop_call_lookups: %{},
-            # D-061: provider-retry counter is per-turn; reset.
-            provider_retry_state: %{count: 0}
-        }
-
-        # D-080: drain follow-up queue on turn-completion :awaiting_user transition.
-        actions =
-          if :queue.is_empty(next_data.followup_queue),
-            do: [],
-            else: [{:next_event, :internal, :drain_followups}]
-
-        {:next_state, :awaiting_user, next_data, actions}
-
-      compact_result ->
-        # Unwrap {:soft_error, data} — soft_error increments compaction_failures
-        # but the turn continues normally.
-        data =
-          if match?({:soft_error, _}, compact_result),
-            do: elem(compact_result, 1),
-            else: compact_result
-
-        # ADR-0012: per-message fallback semantics. Restore the working
-        # provider to the user-configured original_provider so the next
-        # turn's :start_provider re-derives the chain freshly and starts
-        # against the primary. A still-running tool call keeps using the
-        # provider that produced *this* message until the next provider
-        # turn — that's correct: the tool result feeds the same model
-        # that asked for the call.
-        data = %{data | provider: data.original_provider, fallback_chain_remaining: []}
-
-        # ADR-0013: skill activation is per-turn by default. The
-        # skill's lifetime ends when the model decides the task is complete
-        # (`:end_turn`). Tool-call turns keep the active skill so subsequent
-        # dispatch is still gated; only `:end_turn` clears it.
-        #
-        # ADR-0015 sub-agent persona: when `:persona_lifetime` is `:session`
-        # (set by `Tau.Tools.Builtin.Agent` at start time) the persona is
-        # pinned for the session's whole life — `:end_turn` does NOT clear
-        # it. The child can't dismiss its own persona this way, which is
-        # the safety property the ADR demands.
-        data =
-          if msg.stop_reason == :end_turn and Map.get(data, :persona_lifetime, :turn) == :turn do
-            %{data | active_skill: nil}
-          else
-            data
-          end
-
-        tool_calls = Enum.filter(msg.content, &match?(%{type: :tool_call}, &1))
-
-        cond do
-          tool_calls == [] ->
-            # Per-turn resets on clean return to :awaiting_user: cancel
-            # flag (ADR-0017), stream_ref (ADR-0012), tool_iterations
-            # (D-005), tool_loop_state (D-060), provider_retry_state
-            # (D-061).
-            #
-            # D-079: a pure-text turn never reached the tool-round drain
-            # point, so any surviving steering messages would otherwise
-            # bleed into the next unrelated turn. Merge them to the front
-            # of `followup_queue` instead so they run immediately as
-            # post-turn continuations.
-            {merged_followup, cleared_steering} =
-              if :queue.is_empty(data.steering_queue) do
-                {data.followup_queue, data.steering_queue}
-              else
-                steering_list = :queue.to_list(data.steering_queue)
-
-                merged =
-                  Enum.reduce(
-                    Enum.reverse(steering_list),
-                    data.followup_queue,
-                    fn msg, q -> :queue.in_r(msg, q) end
-                  )
-
-                {merged, :queue.new()}
-              end
-
-            next_data = %{
-              data
-              | provider_task: nil,
-                assembler: nil,
-                cancel_flag: nil,
-                stream_ref: nil,
-                provider_span_ref: nil,
-                tool_iterations: 0,
-                tool_loop_state: %{},
-                tool_loop_call_lookups: %{},
-                provider_retry_state: %{count: 0},
-                followup_queue: merged_followup,
-                steering_queue: cleared_steering
-            }
-
-            # D-080 / SPEC-USER-TURN §6: drain follow-up queue on
-            # turn-completion :awaiting_user transition (normal end).
-            # The merged steering messages (if any) will drain first.
-            actions =
-              if :queue.is_empty(next_data.followup_queue),
-                do: [],
-                else: [{:next_event, :internal, :drain_followups}]
-
-            {:next_state, :awaiting_user, next_data, actions}
-
-          true ->
-            # D-005 / AC-6 / SPEC-USER-TURN: enforce the per-turn
-            # tool-call iteration cap before dispatching the next round.
-            # Check against the already-dispatched count so that cap=N allows
-            # exactly N dispatches (tool_iterations counts rounds dispatched).
-            cap = data.max_tool_iterations
-
-            if data.tool_iterations >= cap do
-              aborted_iter = data.tool_iterations
-
-              :telemetry.execute(
-                [:tau, :session, :tool_iteration_cap],
-                %{iterations: aborted_iter, cap: cap},
-                %{session_id: data.id}
-              )
-
-              abort_msg =
-                Assistant.new(
-                  stop_reason: :tool_loop_aborted,
-                  content: [
-                    %{
-                      type: :text,
-                      text:
-                        "Tool-call iteration cap (#{cap}) exceeded. Turn aborted to prevent runaway loops."
-                    }
-                  ]
-                )
-
-              data =
-                data
-                |> append_message(abort_msg)
-                |> persist_event("assistant_message", message_to_data(abort_msg))
-
-              broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: abort_msg})
-
-              next_data = %{
-                data
-                | provider_task: nil,
-                  assembler: nil,
-                  cancel_flag: nil,
-                  stream_ref: nil,
-                  provider_span_ref: nil,
-                  tool_iterations: 0,
-                  tool_loop_state: %{},
-                  tool_loop_call_lookups: %{},
-                  # D-061: provider-retry counter is per-turn; reset
-                  # on iteration-cap abort alongside the brake state.
-                  provider_retry_state: %{count: 0}
-              }
-
-              # D-080: drain follow-up queue on turn-abort :awaiting_user transition.
-              actions =
-                if :queue.is_empty(next_data.followup_queue),
-                  do: [],
-                  else: [{:next_event, :internal, :drain_followups}]
-
-              {:next_state, :awaiting_user, next_data, actions}
-            else
-              dispatch_tools(tool_calls, %{data | tool_iterations: data.tool_iterations + 1})
-            end
-        end
-    end
-  end
-
-  # SPEC-PROMPT-CACHING AC-4: emit the per-turn prompt-cache
-  # hit/write telemetry at the `:provider_done` boundary. Measurements
-  # carry the raw token splits; metadata carries the routing context
-  # and the adapter-specific breakdown. Reads the canonical B3
-  # usage-map keys (`:cache_read` / `:cache_write` / `:cache_breakdown`)
-  # off the finalised assistant message.
-  defp emit_cache_usage(data, usage) do
-    read = nonneg_token(usage[:cache_read])
-    write = nonneg_token(usage[:cache_write])
-    breakdown = if is_map(usage[:cache_breakdown]), do: usage[:cache_breakdown], else: %{}
-
-    :telemetry.execute(
-      [:tau, :session, :cache_usage],
-      %{write_tokens: write, read_tokens: read, storage_tokens: 0},
-      %{session_id: data.id, provider: data.provider, breakdown: breakdown}
-    )
-  end
-
-  defp nonneg_token(n) when is_integer(n) and n >= 0, do: n
-  defp nonneg_token(_), do: 0
-
-  # Thin sync adapter: decides whether to compact, then delegates to do_compact/2.
-  # Returns data | {:abort, data} (D-016: on 3 consecutive failures, aborts the turn).
-  defp maybe_compact(data, usage) do
-    compactor = Tau.Compactor.impl()
-
-    if compactor.should_compact?(data.messages, usage) do
-      do_compact(data, %{provider: data.provider, model: data.model})
-    else
-      data
-    end
-  end
-
-  # Shared compaction core — invoked by the sync post-turn path (maybe_compact/2)
-  # and by the async `:compacting` worker handler (Clause 1 in handle_event).
-  #
-  # Returns:
-  #   data2            — {:ok, ...} success; messages swapped, telemetry emitted,
-  #                      compaction_failures reset to 0
-  #   {:soft_error, data2} — {:error, ...} but failures < 3; caller broadcasts
-  #                      a notice and continues
-  #   {:abort, data2}  — {:error, ...} and failures >= 3 (D-016); caller aborts
-  #                      the turn with stop_reason: :compaction_failed
-  #
-  # D-016: compaction_failures is SHARED across sync and async paths (NOT path-tagged).
-  # A broken compactor is a session-level fault; alternating paths must not
-  # mask it by keeping separate counters.
-  defp do_compact(data, ctx) do
-    compactor = Tau.Compactor.impl()
-
-    :telemetry.execute([:tau, :compaction, :start], %{system_time: System.system_time()}, %{
-      session_id: data.id,
-      message_count: length(data.messages)
-    })
-
-    case compactor.compact(data.messages, ctx) do
-      {:ok, new_messages, summary_text} ->
-        data =
-          persist_event(data, "compaction", %{
-            before_count: length(data.messages),
-            after_count: length(new_messages),
-            summary: format_summary_for_persist(summary_text)
-          })
-
-        :telemetry.execute([:tau, :compaction, :stop], %{system_time: System.system_time()}, %{
-          session_id: data.id,
-          after_count: length(new_messages)
-        })
-
-        %{data | messages: new_messages, compaction_failures: 0}
-
-      {:error, reason} ->
-        :telemetry.execute(
-          [:tau, :compaction, :exception],
-          %{system_time: System.system_time()},
-          %{session_id: data.id, reason: reason, kind: :compactor_error}
-        )
-
-        failures = data.compaction_failures + 1
-
-        if failures >= 3 do
-          {:abort, %{data | compaction_failures: failures}}
-        else
-          {:soft_error, %{data | compaction_failures: failures}}
-        end
-    end
-  end
-
-  defp dispatch_tools(tool_calls, data) do
-    parent = self()
-
-    # D-060: build per-turn lookup table mapping call_id ->
-    # `{tool_name, args_hash}` for every dispatched call. The
-    # `{:tool_done, ...}` handler consults this to key the brake
-    # counter on `(tool_name, args_hash)` without re-scanning the
-    # original assistant message content. Hook-rewritten args overwrite
-    # the original entry below so the recorded hash reflects what the
-    # tool actually saw.
-    call_lookups =
-      Enum.into(tool_calls, %{}, fn %{id: id, name: name, arguments: args} ->
-        {id, {name, tool_args_hash(args)}}
-      end)
-
-    # Intercept synthetic `__activate_skill__` tool calls *before*
-    # permissions / hooks. Activation is FSM-internal — it never reaches
-    # the executor pool. The handler updates `data.active_skill` and
-    # synthesises a tool_result so the model's next turn sees an
-    # acknowledgement; subsequent tool calls in the same activation are
-    # then gated by the skill's `allowed_tools` list (ADR-0013).
-    {activation_calls, tool_calls} =
-      Enum.split_with(tool_calls, fn %{name: name} -> name == @activate_skill_tool_name end)
-
-    {data, activated_in_flight} = handle_skill_activations(activation_calls, data, parent)
-
-    # Spawn-time tools_whitelist filter. Runs *before* the permissions
-    # evaluator so the evaluator stays a pure permission-rule decision.
-    # Calls outside the list synthesise an `is_error: true` ToolResult the
-    # same way deny rules do; the filter is a no-op when `:all`.
-    {whitelisted_out, tool_calls} = split_tools_whitelist(tool_calls, data.tools_whitelist)
-
-    Enum.each(whitelisted_out, fn %{id: id, name: name} ->
-      result =
-        ToolResult.new(
-          tool_call_id: id,
-          tool_name: name,
-          content: "Tool '#{name}' not in this session's whitelist.",
-          is_error: true
-        )
-
-      Process.send(parent, {:tool_done, id, result}, [])
-
-      :telemetry.execute(
-        [:tau, :session, :tool_whitelisted],
-        %{system_time: System.system_time()},
-        %{
-          session_id: data.id,
-          tool_name: name,
-          whitelist_size: whitelist_size(data.tools_whitelist)
-        }
-      )
-    end)
-
-    rule_set = Tau.Permissions.RuleSet.get()
-    mode = Map.get(data.metadata, :permissions_mode, :default)
-
-    eval_ctx = %{cwd: data.cwd, active_skill: data.active_skill}
-
-    # SPEC-PERMISSION-PROMPTS §4 B1 (D-091): three-way partition — `:deny`,
-    # `:ask`, `:allow`. The prior two-way split treated `:ask` as `:allow`,
-    # silently exposing unmatched tools. Replace with an explicit three-way
-    # reduce so each verdict class is handled correctly.
-    {gated, ask_calls, allowed} =
-      Enum.reduce(
-        tool_calls,
-        {[], [], []},
-        fn %{name: name, arguments: args} = call, {denied, asking, allowed_acc} ->
-          case PermEvaluator.evaluate(rule_set, name, args, eval_ctx, mode) do
-            :deny -> {[call | denied], asking, allowed_acc}
-            :ask -> {denied, [call | asking], allowed_acc}
-            :allow -> {denied, asking, [call | allowed_acc]}
-          end
-        end
-      )
-
-    # Restore emit order (reduce reverses).
-    gated = Enum.reverse(gated)
-    ask_calls = Enum.reverse(ask_calls)
-    allowed = Enum.reverse(allowed)
-
-    # Synthesise tool_results for deny-rule denied calls — model sees them as
-    # is_error. Always done via {:tool_done} messages; processed by :tool_executing
-    # (non-permission path) or the :awaiting_permission {:tool_done} handler.
-    Enum.each(gated, fn %{id: id, name: name} ->
-      result =
-        ToolResult.new(
-          tool_call_id: id,
-          tool_name: name,
-          content: deny_reason(name, data.active_skill),
-          is_error: true
-        )
-
-      Process.send(parent, {:tool_done, id, result}, [])
-
-      :telemetry.execute([:tau, :permissions, :decision], %{system_time: System.system_time()}, %{
-        tool: name,
-        tool_call_id: id,
-        decision: :deny,
-        session_id: data.id
-      })
-    end)
-
-    # SPEC-PERMISSION-PROMPTS §4 B1 (D-092, D-093): handle the `:ask` batch.
-    #
-    # Non-interactive (D-093): resolve immediately to fail-closed `:deny`.
-    # The FSM never enters `:awaiting_permission`; the factory-loop substrate
-    # (`tau run`) is never deadlocked.
-    #
-    # Interactive (D-092): broadcast `%PermissionRequest{}` per call, collect
-    # into `pending_permission_requests`, enter `:awaiting_permission`.
-    {data, ask_in_flight} =
-      if data.interactive? do
-        # Interactive: broadcast and defer.
-        pending =
-          Enum.reduce(ask_calls, %{}, fn %{id: id, name: name, arguments: args}, acc ->
-            :telemetry.execute(
-              [:tau, :permissions, :request],
-              %{system_time: System.system_time()},
-              %{session_id: data.id, tool_call_id: id, tool_name: name}
-            )
-
-            broadcast(data.id, %Events.PermissionRequest{
-              session_id: data.id,
-              tool_call_id: id,
-              name: name,
-              arguments: args,
-              decision_reason: "Tool not matched by any allow rule in current mode."
-            })
-
-            Map.put(acc, id, %{name: name, arguments: args})
-          end)
-
-        ask_in_flight = Enum.into(ask_calls, %{}, fn %{id: id} -> {id, :awaiting_permission} end)
-        {%{data | pending_permission_requests: pending}, ask_in_flight}
-      else
-        # Non-interactive: fail-closed deny (D-093).
-        Enum.each(ask_calls, fn %{id: id, name: name} ->
-          result =
-            ToolResult.new(
-              tool_call_id: id,
-              tool_name: name,
-              content:
-                "Permission required for #{name} but session is non-interactive; denied by policy.",
-              is_error: true
-            )
-
-          Process.send(parent, {:tool_done, id, result}, [])
-
-          :telemetry.execute(
-            [:tau, :permissions, :decision],
-            %{system_time: System.system_time()},
-            %{
-              session_id: data.id,
-              tool_call_id: id,
-              tool_name: name,
-              decision: :deny_non_interactive
-            }
-          )
-        end)
-
-        ask_in_flight = Enum.into(ask_calls, %{}, fn %{id: id} -> {id, :denied} end)
-        {data, ask_in_flight}
-      end
-
-    # D-091 (whole-round deferral): when entering :awaiting_permission, do NOT
-    # dispatch the :allow calls. Add them raw to permission_dispatch_batch so
-    # finish_permission_round/1 can run hooks and dispatch them after all :ask
-    # calls are resolved. Instant-resolve {:tool_done} messages (gated, whitelist,
-    # activated) are processed by the :awaiting_permission {:tool_done} handler.
-    if data.interactive? and ask_calls != [] do
-      # Pre-approved :allow calls: held raw — hooks run in finish_permission_round/1.
-      allow_batch =
-        Enum.map(allowed, fn %{id: id, name: name, arguments: args} ->
-          {id, name, args}
-        end)
-
-      # tools_in_flight covers: :ask sentinels, gated (deny-rule) instant results,
-      # whitelist-filtered instant results, and activated (skill) instant results.
-      # All these have {:tool_done} messages in the mailbox; the
-      # :awaiting_permission {:tool_done} handler processes them without
-      # triggering the post-round transition (that only fires when
-      # pending_permission_requests is empty).
-      initial_in_flight =
-        ask_in_flight
-        |> Map.merge(Enum.into(gated, %{}, fn %{id: id} -> {id, :denied} end))
-        |> Map.merge(Enum.into(whitelisted_out, %{}, fn %{id: id} -> {id, :whitelist_filtered} end))
-        |> Map.merge(activated_in_flight)
-
-      transition(data.id, data, :awaiting_permission)
-
-      {:next_state, :awaiting_permission,
-       %{
-         data
-         | tools_in_flight: initial_in_flight,
-           tool_dispatcher: nil,
-           # Pre-approved :allow calls + any :allow_once decisions accumulate here.
-           permission_dispatch_batch: allow_batch,
-           permission_pending_results: [],
-           provider_task: nil,
-           assembler: nil,
-           stream_ref: nil,
-           # SPEC-OTEL-REPORTER: clear span discriminator.
-           provider_span_ref: nil,
-           # D-060: merge this round's lookups.
-           tool_loop_call_lookups: Map.merge(data.tool_loop_call_lookups, call_lookups)
-       }}
-    else
-      # Non-permission path: run hooks on :allow calls and dispatch immediately.
-
-      # Run :pre_tool_use synchronously per call. Hook-vetoed calls synthesise
-      # a tool_result on the spot; survivors form the parallel batch handed
-      # to the dispatcher.
-      {_hook_denied, parallel_calls} =
-        Enum.reduce(allowed, {[], []}, fn %{id: id, name: name, arguments: args}, {denied, kept} ->
-          case Tau.Hooks.Dispatcher.run(
-                 :pre_tool_use,
-                 hook_payload(data, :pre_tool_use, %{
-                   tool_name: name,
-                   tool_call_id: id,
-                   tool_input: args
-                 })
-               ) do
-            {:halt, reason} ->
-              result =
-                ToolResult.new(
-                  tool_call_id: id,
-                  tool_name: name,
-                  content: "Hook blocked: #{inspect(reason)}",
-                  is_error: true
-                )
-
-              Process.send(parent, {:tool_done, id, result}, [])
-              {[id | denied], kept}
-
-            {:deny, reason} ->
-              result =
-                ToolResult.new(
-                  tool_call_id: id,
-                  tool_name: name,
-                  content: "Hook denied: #{reason}",
-                  is_error: true
-                )
-
-              Process.send(parent, {:tool_done, id, result}, [])
-              {[id | denied], kept}
-
-            {:cont, payload} ->
-              rewritten_args = Map.get(payload, :tool_input, args)
-              {denied, [{id, name, rewritten_args} | kept]}
-          end
-        end)
-
-      parallel_calls = Enum.reverse(parallel_calls)
-
-      # D-060: refresh lookups for hook-rewritten args so the
-      # recorded hash matches what the tool executed against.
-      call_lookups =
-        Enum.reduce(parallel_calls, call_lookups, fn {id, name, args}, acc ->
-          Map.put(acc, id, {name, tool_args_hash(args)})
-        end)
-
-      dispatcher_pid =
-        case parallel_calls do
-          [] -> nil
-          _ -> spawn_parallel_dispatcher(parallel_calls, data, parent)
-        end
-
-      real_tasks = Enum.into(parallel_calls, %{}, fn {id, _n, _a} -> {id, :running} end)
-
-      initial_in_flight =
-        real_tasks
-        |> Map.merge(ask_in_flight)
-        |> Map.merge(Enum.into(gated, %{}, fn %{id: id} -> {id, :denied} end))
-        |> Map.merge(Enum.into(whitelisted_out, %{}, fn %{id: id} -> {id, :whitelist_filtered} end))
-        |> Map.merge(activated_in_flight)
-
-      transition(data.id, data, :tool_executing)
-
-      {:next_state, :tool_executing,
-       %{
-         data
-         | tools_in_flight: initial_in_flight,
-           tool_dispatcher: dispatcher_pid,
-           provider_task: nil,
-           assembler: nil,
-           stream_ref: nil,
-           # SPEC-OTEL-REPORTER: span closed in `finalize_assistant/2`;
-           # clear the ref so it doesn't linger across tool execution.
-           provider_span_ref: nil,
-           # D-060: merge this round's lookups with any carried from
-           # earlier rounds in the same turn. The `:tool_done` handler
-           # removes its own entry after consuming it.
-           tool_loop_call_lookups: Map.merge(data.tool_loop_call_lookups, call_lookups)
-       }}
-    end
-  end
-
-  # Single iterator over the parallel batch via
-  # Task.Supervisor.async_stream_nolink/4. One process per turn drives the
-  # stream; per-tool tasks run concurrently under Tau.Tools.TaskSupervisor.
-  # Crash isolation: an exiting tool task surfaces as `{:exit, reason}` from
-  # the stream — we synthesise an `is_error: true` ToolResult so the FSM
-  # never loses a tool_call → tool_result correspondence. `ordered: true`
-  # so we can zip the input call back onto each result (needed to recover
-  # the call id on `{:exit, _}`); throughput is unchanged because tool
-  # tasks still run concurrently up to `max_concurrency`.
-  defp spawn_parallel_dispatcher(parallel_calls, data, parent) do
-    {:ok, pid} =
-      Task.Supervisor.start_child(Tau.Tools.TaskSupervisor, fn ->
-        Enum.each(parallel_calls, fn {id, name, args} ->
-          broadcast(data.id, %Events.ToolStart{
-            session_id: data.id,
-            tool_call_id: id,
-            name: name,
-            arguments: args
-          })
-        end)
-
-        Tau.Tools.TaskSupervisor
-        |> Task.Supervisor.async_stream_nolink(
-          parallel_calls,
-          fn {id, name, args} -> run_tool(name, id, args, data) end,
-          max_concurrency: System.schedulers_online(),
-          timeout: :infinity,
-          on_timeout: :kill_task,
-          ordered: true
-        )
-        |> Stream.zip(parallel_calls)
-        |> Enum.each(fn {stream_result, {id, name, _args}} ->
-          result =
-            case stream_result do
-              {:ok, %ToolResult{} = r} ->
-                r
-
-              {:exit, reason} ->
-                ToolResult.new(
-                  tool_call_id: id,
-                  tool_name: name,
-                  content: "Tool task crashed: #{inspect(reason)}",
-                  is_error: true
-                )
-            end
-
-          # :post_tool_use hook may rewrite the result.
-          post_event = if result.is_error, do: :post_tool_use_failure, else: :post_tool_use
-
-          result =
-            case Tau.Hooks.Dispatcher.run(
-                   post_event,
-                   hook_payload(data, post_event, %{
-                     tool_name: name,
-                     tool_call_id: id,
-                     result: result
-                   })
-                 ) do
-              {:cont, %{result: rewritten}} when is_struct(rewritten, ToolResult) -> rewritten
-              _ -> result
-            end
-
-          Process.send(parent, {:tool_done, id, result}, [])
-        end)
-      end)
-
-    pid
-  end
-
-  # Split tool calls into {filtered_out, kept} based on the session's
-  # spawn-time `:tools_whitelist`. `:all` is the no-op identity (everything
-  # in `kept`); a list keeps only calls whose `name` is in the list. Stays
-  # ordering-preserving so downstream `Enum.into/2` and synthesis preserve
-  # the model's emit order.
-  defp split_tools_whitelist(tool_calls, :all), do: {[], tool_calls}
-
-  defp split_tools_whitelist(tool_calls, list) when is_list(list) do
-    Enum.split_with(tool_calls, fn %{name: name} -> name not in list end)
-  end
-
-  defp whitelist_size(:all), do: :all
-  defp whitelist_size(list) when is_list(list), do: length(list)
-
-  # SPEC-PERMISSION-PROMPTS §4 B3 / D-091: called when the last pending
-  # permission request resolves. Emits accumulated instant-resolve
-  # results (`permission_pending_results`) and dispatches the approved
-  # batch (`permission_dispatch_batch`). Remaining `:awaiting_permission`
-  # sentinels in `tools_in_flight` are stripped; the next state's
-  # `tools_in_flight` carries only the newly-dispatched tasks.
-  defp finish_permission_round(data) do
-    parent = self()
-
-    # Remove all :awaiting_permission sentinel entries from tools_in_flight.
-    # They represent :ask calls that have now been resolved. Any remaining
-    # entries (non-sentinel) are pre-resolved items whose {:tool_done} messages
-    # were processed by the :awaiting_permission {:tool_done} handler.
-    tools_in_flight_after =
-      Map.reject(data.tools_in_flight, fn {_id, status} -> status == :awaiting_permission end)
-
-    # Emit all accumulated instant-resolve results (deny_once decisions +
-    # any accumulated permission_pending_results). These are broadcast as
-    # ToolEnd events and appended to history directly — no {:tool_done} routing.
-    data =
-      Enum.reduce(
-        Enum.reverse(data.permission_pending_results),
-        %{data | tools_in_flight: tools_in_flight_after},
-        fn {call_id, result_msg}, acc ->
-          {_lookup, call_lookups_rest} = Map.pop(acc.tool_loop_call_lookups, call_id)
-
-          acc =
-            acc
-            |> append_message(result_msg)
-            |> persist_event("tool_result", tool_result_to_data(result_msg))
-            |> Map.put(:tool_loop_call_lookups, call_lookups_rest)
-
-          broadcast(acc.id, %Events.ToolEnd{
-            session_id: acc.id,
-            tool_call_id: call_id,
-            result: result_msg
-          })
-
-          acc
-        end
-      )
-
-    # Capture the batch before clearing data fields.
-    batch = Enum.reverse(data.permission_dispatch_batch)
-
-    data = %{
-      data
-      | pending_permission_requests: %{},
-        permission_dispatch_batch: [],
-        permission_pending_results: []
-    }
-
-    # Run :pre_tool_use hooks on the approved batch (pre-approved :allow calls
-    # + :allow_once user-approved calls). Hook-denied calls are emitted directly
-    # rather than via {:tool_done} — we are not yet in :tool_executing.
-    {hook_denied_results, parallel_calls} =
-      Enum.reduce(
-        batch,
-        {[], []},
-        fn {id, name, args}, {denied_acc, kept} ->
-          case Tau.Hooks.Dispatcher.run(
-                 :pre_tool_use,
-                 hook_payload(data, :pre_tool_use, %{
-                   tool_name: name,
-                   tool_call_id: id,
-                   tool_input: args
-                 })
-               ) do
-            {:halt, reason} ->
-              result =
-                ToolResult.new(
-                  tool_call_id: id,
-                  tool_name: name,
-                  content: "Hook blocked: #{inspect(reason)}",
-                  is_error: true
-                )
-
-              {[{id, result} | denied_acc], kept}
-
-            {:deny, reason} ->
-              result =
-                ToolResult.new(
-                  tool_call_id: id,
-                  tool_name: name,
-                  content: "Hook denied: #{reason}",
-                  is_error: true
-                )
-
-              {[{id, result} | denied_acc], kept}
-
-            {:cont, payload} ->
-              rewritten_args = Map.get(payload, :tool_input, args)
-              {denied_acc, [{id, name, rewritten_args} | kept]}
-          end
-        end
-      )
-
-    parallel_calls = Enum.reverse(parallel_calls)
-
-    # D-060: update lookups for hook-rewritten args.
-    call_lookups =
-      Enum.reduce(parallel_calls, data.tool_loop_call_lookups, fn {id, name, args}, acc ->
-        Map.put(acc, id, {name, tool_args_hash(args)})
-      end)
-
-    # Emit hook-denied results directly.
-    data =
-      Enum.reduce(hook_denied_results, %{data | tool_loop_call_lookups: call_lookups}, fn {call_id,
-                                                                                           result_msg},
-                                                                                          acc ->
-        {_lookup, call_lookups_rest} = Map.pop(acc.tool_loop_call_lookups, call_id)
-
-        acc =
-          acc
-          |> append_message(result_msg)
-          |> persist_event("tool_result", tool_result_to_data(result_msg))
-          |> Map.put(:tool_loop_call_lookups, call_lookups_rest)
-
-        broadcast(acc.id, %Events.ToolEnd{
-          session_id: acc.id,
-          tool_call_id: call_id,
-          result: result_msg
-        })
-
-        acc
-      end)
-
-    if parallel_calls == [] do
-      # No approved calls to run (all denied or all batch empty). Proceed
-      # directly to the provider with the accumulated results in history.
-      handle_event(
-        :internal,
-        :start_provider,
-        :provider_streaming,
-        %{data | tools_in_flight: %{}, tool_dispatcher: nil}
-      )
-    else
-      dispatcher_pid = spawn_parallel_dispatcher(parallel_calls, data, parent)
-      running = Enum.into(parallel_calls, %{}, fn {id, _n, _a} -> {id, :running} end)
-
-      {:next_state, :tool_executing,
-       %{data | tools_in_flight: running, tool_dispatcher: dispatcher_pid}}
-    end
-  end
-
-  # ADR-0013: format the synthetic ToolResult content for a permissions
-  # :deny. When an active skill is in effect AND the tool is not on its
-  # allowed_tools list, the denial is attributed to the skill; otherwise
-  # the failure originated from a rule-set deny rule.
-  # D-060: tool-loop brake helpers. Co-located with dispatch logic so
-  # the brake's mechanics live next to the iteration cap.
-  defp tool_args_hash(args) do
-    # Canonical-form hash: encode the argument map with `Jason.encode!`
-    # after sorting keys recursively so semantically-equal maps with
-    # different key insertion order produce the same hash. Falls back
-    # to `inspect/1` if Jason can't encode (unusual; tool args are
-    # already constrained to JSON-shaped values by validation).
-    canonical =
-      try do
-        Jason.encode!(canonicalize_for_hash(args || %{}))
-      rescue
-        _ -> inspect(args, limit: :infinity, printable_limit: :infinity)
-      end
-
-    :crypto.hash(:sha256, canonical) |> Base.encode16(case: :lower)
-  end
-
-  defp canonicalize_for_hash(%{} = m) do
-    m
-    |> Enum.map(fn {k, v} -> {to_string(k), canonicalize_for_hash(v)} end)
-    |> Enum.sort_by(fn {k, _} -> k end)
-    |> Enum.into(%{})
-  end
-
-  defp canonicalize_for_hash(list) when is_list(list),
-    do: Enum.map(list, &canonicalize_for_hash/1)
-
-  defp canonicalize_for_hash(other), do: other
-
-  # Returns {:continue, data} for normal flow, {:brake, data} when the
-  # threshold is reached and the FSM MUST abort the turn.
-  defp maybe_apply_tool_loop_brake(data, nil, _result_msg), do: {:continue, data}
-
-  defp maybe_apply_tool_loop_brake(data, _lookup, %ToolResult{is_error: false}),
-    do: {:continue, reset_tool_loop_state(data)}
-
-  defp maybe_apply_tool_loop_brake(data, {name, args_hash}, %ToolResult{
-         is_error: true,
-         content: error_text
-       }) do
-    key = {name, args_hash}
-    error_str = to_string(error_text || "")
-    prev = Map.get(data.tool_loop_state, key)
-
-    cell =
-      case prev do
-        %{count: c, error: ^error_str} -> %{count: c + 1, error: error_str}
-        _ -> %{count: 1, error: error_str}
-      end
-
-    state2 = Map.put(data.tool_loop_state, key, cell)
-    data2 = %{data | tool_loop_state: state2}
-
-    if cell.count >= data2.tool_loop_brake_threshold do
-      {:brake, data2}
-    else
-      {:continue, data2}
-    end
-  end
-
-  # Successful tool result clears the WHOLE brake table for the turn —
-  # a clean dispatch is evidence the model has un-wedged.
-  defp reset_tool_loop_state(data), do: %{data | tool_loop_state: %{}}
-
-  # Synthesise the escalation notice + MessageEnd{stop_reason:
-  # :tool_loop_aborted}, then return to :awaiting_user. Mirrors the
-  # D-027 abort shape so the CLI's drain loop (`Tau.CLI.drain_run_loop`)
-  # exits cleanly on either brake.
-  defp emit_tool_loop_brake_abort(data, tools) do
-    {{name, args_hash}, %{count: count, error: error_str}} =
-      Enum.max_by(data.tool_loop_state, fn {_k, %{count: c}} -> c end)
-
-    notice_text =
-      "Tool '#{name}' has been called with identical arguments #{count}x in a row, " <>
-        "each time rejected with: '#{error_str}'. Halting this turn."
-
-    :telemetry.execute(
-      [:tau, :session, :tool_loop_brake],
-      %{count: count},
-      %{
-        session_id: data.id,
-        tool_name: name,
-        args_hash: args_hash,
-        error: error_str
-      }
-    )
-
-    broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: notice_text})
-
-    abort_msg =
-      Assistant.new(
-        stop_reason: :tool_loop_aborted,
-        content: [%{type: :text, text: notice_text}]
-      )
-
-    data =
-      data
-      |> append_message(abort_msg)
-      |> persist_event("assistant_message", message_to_data(abort_msg))
-
-    broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: abort_msg})
-
-    next_data = %{
-      data
-      | provider_task: nil,
-        assembler: nil,
-        cancel_flag: nil,
-        stream_ref: nil,
-        provider_span_ref: nil,
-        tools_in_flight: tools,
-        tool_dispatcher: nil,
-        tool_iterations: 0,
-        tool_loop_state: %{},
-        tool_loop_call_lookups: %{},
-        # D-061: provider-retry counter is per-turn; reset on
-        # brake-abort alongside the brake state.
-        provider_retry_state: %{count: 0}
-    }
-
-    # D-080: drain follow-up queue on tool-loop-brake :awaiting_user transition.
-    actions =
-      if :queue.is_empty(next_data.followup_queue),
-        do: [],
-        else: [{:next_event, :internal, :drain_followups}]
-
-    {:next_state, :awaiting_user, next_data, actions}
-  end
-
-  defp deny_reason(name, %Tau.Skill{name: skill_name, allowed_tools: list})
-       when is_list(list) and list != [] do
-    if name in list do
-      "Permission denied: #{name} blocked by deny rule"
-    else
-      "Tool '#{name}' not on active skill '#{skill_name}' allowed_tools whitelist"
-    end
-  end
-
-  defp deny_reason(name, _active_skill),
-    do: "Permission denied: #{name} blocked by deny rule"
-
-  defp run_tool(name, call_id, args, data) do
-    started = System.monotonic_time(:millisecond)
-
-    case Tau.Tool.lookup(name) do
-      {:ok, mod} ->
-        case Tau.Tool.Validator.validate(mod, args) do
-          :ok ->
-            run_tool_validated(name, call_id, args, data, mod, started)
-
-          {:error, errors} ->
-            summary = Tau.Tool.Validator.format_errors(errors)
-
-            :telemetry.execute(
-              [:tau, :tool, :validate, :error],
-              %{system_time: System.system_time()},
-              %{tool: name, tool_call_id: call_id, errors: summary}
-            )
-
-            ToolResult.new(
-              tool_call_id: call_id,
-              tool_name: name,
-              content: "Invalid arguments for tool #{name}: #{summary}",
-              is_error: true
-            )
-        end
-
-      :error ->
-        ToolResult.new(
-          tool_call_id: call_id,
-          tool_name: name,
-          content: "Unknown tool: #{name}",
-          is_error: true
-        )
-    end
-  end
-
-  defp run_tool_validated(name, call_id, args, data, mod, started) do
-    ctx =
-      Tau.Tool.Context.new(
-        tool_call_id: call_id,
-        session_id: data.id,
-        cwd: data.cwd,
-        emit: fn payload ->
-          broadcast(data.id, %Events.ToolUpdate{
-            session_id: data.id,
-            tool_call_id: call_id,
-            payload: payload
-          })
-
-          :ok
-        end
-      )
-
-    :telemetry.execute(
-      [:tau, :tool, :execute, :start],
-      %{system_time: System.system_time()},
-      %{tool: name, tool_call_id: call_id}
-    )
-
-    result =
-      try do
-        case mod.execute(args || %{}, ctx) do
-          {:ok, %Tau.Tool.Result{} = r} ->
-            ToolResult.new(
-              tool_call_id: call_id,
-              tool_name: name,
-              content: r.content,
-              details: r.details,
-              is_error: r.is_error
-            )
-
-          {:error, reason} ->
-            ToolResult.new(
-              tool_call_id: call_id,
-              tool_name: name,
-              content: "Tool error: #{inspect(reason)}",
-              is_error: true
-            )
-        end
-      rescue
-        e ->
-          :telemetry.execute(
-            [:tau, :tool, :execute, :exception],
-            %{duration: System.monotonic_time(:millisecond) - started},
-            # D-052 / SPEC-OTEL-REPORTER: tool_call_id MUST be present so
-            # the OTel reporter can correlate this exception span to its *.start span.
-            %{tool: name, tool_call_id: call_id, error: Exception.message(e)}
-          )
-
-          ToolResult.new(
-            tool_call_id: call_id,
-            tool_name: name,
-            content: "Tool exception: #{Exception.message(e)}",
-            is_error: true
-          )
-      end
-
-    :telemetry.execute(
-      [:tau, :tool, :execute, :stop],
-      %{duration: System.monotonic_time(:millisecond) - started},
-      %{tool: name, tool_call_id: call_id, is_error: result.is_error}
-    )
-
-    result
-  end
-
-  defp append_message(data, msg), do: %{data | messages: data.messages ++ [msg]}
-
-  # Single data.model mutation site. Pure function — no side effects.
-  # Returns {:ok, updated_data, from_model} | {:error, :invalid_model}.
-  # "invalid" means nil, empty string, or whitespace-only.
-  defp do_swap_model(data, model) do
-    if is_binary(model) and String.trim(model) != "" do
-      {:ok, %{data | model: model}, data.model}
-    else
-      {:error, :invalid_model}
-    end
-  end
-
-  # D-041: shared helper for swap_model telemetry + persist, used by both the
-  # {:call, from} {:swap_model} FSM clause and the /model slash-command path.
-  defp apply_model_swap(data, model) do
-    case do_swap_model(data, model) do
-      {:error, :invalid_model} ->
-        {:error, :invalid_model}
-
-      {:ok, data2, from_model} ->
-        :telemetry.execute(
-          [:tau, :session, :model_swapped],
-          %{system_time: System.system_time()},
-          %{session_id: data2.id, from: from_model, to: model, provider: data2.provider}
-        )
-
-        data2 = persist_event(data2, "model_swap", %{"from" => from_model, "to" => model})
-        broadcast(data2.id, %Events.ModelSwapped{session_id: data2.id, from: from_model, to: model})
-        {:ok, data2, %{from: from_model, to: model}}
-    end
-  end
-
-  # Route reconfigure's model opt through do_swap_model/2 so
-  # data.model has a single mutation site. nil means "no change" — a
-  # provider-only reconfigure must NOT touch data.model (preserves the
-  # update_provider_test.exs assertion that a model-only reconfigure
-  # persists one "reconfigure" event carrying data.model).
-  defp reconfigure_model(data, nil), do: data
-
-  defp reconfigure_model(data, model) do
-    case do_swap_model(data, model) do
-      {:ok, data2, _from} -> data2
-      {:error, :invalid_model} -> data
-    end
-  end
-
-  # Helpers — in-place data updates for {:reconfigure, opts}.
-  defp maybe_replace(data, _key, nil), do: data
-  defp maybe_replace(data, key, value), do: Map.put(data, key, value)
-
-  defp merge_provider_ctx(data, nil), do: data
-
-  defp merge_provider_ctx(data, ctx) when is_map(ctx) do
-    %{data | provider_ctx: Map.merge(data.provider_ctx || %{}, ctx)}
-  end
+  @doc false
+  def append_message(data, msg), do: %{data | messages: data.messages ++ [msg]}
 
   defp persist_event(data, kind, payload) do
     event = %{
@@ -3606,7 +1652,8 @@ defmodule Tau.Session do
     end
   end
 
-  defp generate_event_id do
+  @doc false
+  def generate_event_id do
     case Code.ensure_loaded?(Uniq.UUID) do
       true -> apply(Uniq.UUID, :uuid7, [])
       _ -> "evt_" <> (:crypto.strong_rand_bytes(10) |> Base.url_encode64(padding: false))
@@ -3615,40 +1662,8 @@ defmodule Tau.Session do
 
   defp parent_event_id(_data), do: nil
 
-  # ADR-0012: read the per-original-provider fallback list from settings.
-  # Returns [] when no chain is configured or when settings carry a typo
-  # (fail-closed via Tau.Settings.Schema.resolve_fallback_chains/1).
-  # Both atom and string keys are accepted (Settings.Loader uses
-  # `keys: :atoms`; Jason leaves *values* as strings, so the resolver
-  # is the canonical str → module step).
-  # SPEC-CODING-AGENT §5 / D-037: deployment-wide default for the
-  # coding-agent surface. Read from the merged settings cascade at
-  # session init only — the CLI flag overrides; in-flight sessions
-  # are not affected by mid-session settings reloads (D-007).
-  defp coding_agent_from_settings do
-    settings = SettingsCache.get()
-
-    raw =
-      get_in(settings, [:coding_agent, :default_agent]) ||
-        get_in(settings, ["coding_agent", "default_agent"])
-
-    case raw do
-      nil -> nil
-      mod when is_atom(mod) -> mod
-      str when is_binary(str) -> Tau.CLI.resolve_coding_agent(str)
-    end
-  end
-
-  defp lookup_fallback_chain(original_provider) when is_atom(original_provider) do
-    settings = Tau.Settings.Cache.get()
-
-    case Tau.Settings.Schema.resolve_fallback_chains(settings) do
-      {:ok, chains} -> Map.get(chains, original_provider, [])
-      {:error, _} -> []
-    end
-  end
-
-  defp transition(id, _data, to) do
+  @doc false
+  def transition(id, _data, to) do
     :telemetry.execute([:tau, :session, :transition], %{system_time: System.system_time()}, %{
       session_id: id,
       to: to
@@ -3657,40 +1672,10 @@ defmodule Tau.Session do
     :ok
   end
 
-  defp broadcast(id, event) do
+  @doc false
+  def broadcast(id, event) do
     Phoenix.PubSub.broadcast(Tau.PubSub, "session:#{id}", event)
   end
-
-  # D-018: translate known provider auth atoms into user-actionable
-  # strings. Other reasons fall through to inspect/1 (the original
-  # D-009 behavior).
-  defp describe_provider_error(:missing_api_key) do
-    Tau.Providers.Anthropic.Auth.describe_error({:error, :no_auth})
-  end
-
-  defp describe_provider_error(:oauth_expired) do
-    Tau.Providers.Anthropic.Auth.describe_error({:error, :oauth_expired})
-  end
-
-  defp describe_provider_error(:oauth_missing_scope) do
-    Tau.Providers.Anthropic.Auth.describe_error({:error, :oauth_missing_scope})
-  end
-
-  defp describe_provider_error(:oauth_malformed) do
-    Tau.Providers.Anthropic.Auth.describe_error({:error, :oauth_malformed})
-  end
-
-  # AC-7 (SPEC-CIRCUIT-BREAKER §4 B3): breaker is open — surface a
-  # user-actionable message. The user can wait for the cooldown or switch
-  # providers; the exact cooldown duration is not surfaced here because it
-  # is an ETS-internal value. Generic wording avoids surfacing internals.
-  defp describe_provider_error(:circuit_open) do
-    "Provider is temporarily unavailable (circuit breaker open). " <>
-      "The provider has returned too many consecutive errors. " <>
-      "Please wait a moment and try again, or switch providers."
-  end
-
-  defp describe_provider_error(other), do: inspect(other)
 
   # ADR-0014: cascade lifecycle operation to children. Both
   # `Tau.cancel/1` and `Tau.stop/1` are fire-and-forget casts; a child
@@ -3709,625 +1694,14 @@ defmodule Tau.Session do
   # may emit :enqueued multiple times if the FSM transitions through
   # several non-idle states before reaching :awaiting_user. Each
   # :enqueued reflects a real postpone-and-rewind decision.
-  defp emit_user_message_telemetry(event, data, state) do
+  @doc false
+  def emit_user_message_telemetry(event, data, state) do
     :telemetry.execute(
       [:tau, :session, :user_message, event],
       %{system_time: System.system_time()},
       %{session_id: data.id, from_state: state}
     )
   end
-
-  # --- Coding-agent streaming (SPEC-CODING-AGENT §4 B1 / D-037) ------------
-  #
-  # Helpers for the `:coding_agent_streaming` FSM state. The split mirrors
-  # the provider path's helpers (Assembler + finalize_assistant +
-  # cancel_provider_task) but operates on `Tau.CodingAgent.Event` instead
-  # of `Tau.Provider.Event`. Folding into a unified message type happens
-  # here so the TUI render, persistence, and `/resume` reuse the provider
-  # path unchanged.
-
-  # Ensure a per-session workspace exists. Re-uses an already-prepared
-  # workspace for subsequent turns within the same session (the worktree
-  # / cwd survives across user turns; only torn down at session end).
-  # Returns `{:ok, data, path}` on success, `{:error, reason}` on failure.
-  defp ensure_coding_agent_workspace(%{coding_agent_workspace: %CAWorkspace{} = ws} = data) do
-    {:ok, data, ws.path}
-  end
-
-  defp ensure_coding_agent_workspace(%{coding_agent_workspace: nil} = data) do
-    backend = data.coding_agent_workspace_backend || CAWorkspace.resolve_default_backend(data.cwd)
-
-    opts =
-      Keyword.merge(
-        [
-          backend: backend,
-          session_id: data.id,
-          cwd: data.cwd
-        ],
-        data.coding_agent_workspace_opts || []
-      )
-
-    case CAWorkspace.prepare(opts) do
-      {:ok, ws} -> {:ok, %{data | coding_agent_workspace: ws}, ws.path}
-      {:error, reason} -> {:error, {:workspace_prepare_failed, reason}}
-    end
-  end
-
-  # Synchronous pre-dispatch error (workspace prepare failed, supervisor
-  # refused to start a dispatcher, …). Surfaces as an `%Assistant{}` with
-  # `stop_reason: :error` and a non-empty content block — mirrors D-009
-  # for the provider path so the existing TUI render path Just Works.
-  defp emit_coding_agent_sync_error(data, reason) do
-    reason_str = describe_coding_agent_error(reason)
-
-    msg =
-      Assistant.new(
-        stop_reason: :error,
-        error_message: reason_str,
-        content: [%{type: :text, text: "Error: " <> reason_str}]
-      )
-
-    data =
-      data
-      |> append_message(msg)
-      |> persist_event("assistant_message", message_to_data(msg))
-
-    broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: msg})
-
-    :telemetry.execute(
-      [:tau, :session, :coding_agent_streaming, :exception],
-      %{system_time: System.system_time()},
-      %{session_id: data.id, agent: data.coding_agent, reason: reason}
-    )
-
-    {:next_state, :awaiting_user,
-     %{data | coding_agent_dispatcher: nil, coding_agent_pending: nil, coding_agent_blocks: []}}
-  end
-
-  # Start a fresh dispatcher under `Tau.CodingAgent.Supervisor` and
-  # broadcast `MessageStart` so the TUI's `:streaming` indicator lights
-  # up immediately (no waiting for the first AssistantText event).
-  defp start_coding_agent_dispatcher(data, workspace_path) do
-    user_text = latest_user_text(data.messages)
-
-    # SPEC-CODING-AGENT §7 Q5: thread the captured adapter-side
-    # session_id (from a previous %Event.Start{}) as
-    # `task.resume_id`. Claude Code picks up where the prior tau
-    # turn left off; other adapters that don't honour `resume_id`
-    # ignore the field. Emits a telemetry event so the audit test
-    # can assert the resume path was taken.
-    resume_id = get_in(data, [:coding_agent_state, :session_id])
-
-    task = %{
-      prompt: user_text,
-      workspace: workspace_path,
-      session_id: data.id,
-      resume_id: resume_id,
-      allowed_tools: :all,
-      mcp_servers: [],
-      timeout: :infinity
-    }
-
-    if is_binary(resume_id) do
-      :telemetry.execute(
-        [:tau, :coding_agent, :resume],
-        %{system_time: System.system_time()},
-        %{
-          session_id: data.id,
-          agent: data.coding_agent,
-          adapter_session_id: resume_id
-        }
-      )
-    end
-
-    ctx =
-      Map.merge(
-        %{
-          session_id: data.id,
-          request_id: generate_event_id()
-        },
-        data.coding_agent_ctx || %{}
-      )
-
-    args = [
-      adapter: data.coding_agent,
-      task: task,
-      ctx: ctx,
-      subscriber: self()
-    ]
-
-    case Tau.CodingAgent.Supervisor.start_dispatcher(args) do
-      {:ok, pid} ->
-        pending =
-          Assistant.new(
-            provider: data.coding_agent,
-            model: nil,
-            api: :coding_agent,
-            content: []
-          )
-
-        broadcast(data.id, %Events.MessageStart{session_id: data.id, message: pending})
-
-        # B1 / D-150 (SPEC-TUI-HEADLESS §5c): emit SubagentStart on the parent
-        # topic so the TUI can surface the coding agent as a named sub-agent
-        # node rather than flattened parent [tool_call] lines. The subagent_id
-        # is derived from the parent session id and is stable for this turn.
-        # The coding-agent dispatcher is a single-run process; at most one is
-        # active at a time, so the derived id is unique per session per turn.
-        ca_subagent_id = "#{data.id}:ca"
-        label = agent_to_string(data.coding_agent) || "coding-agent"
-
-        broadcast(data.id, %Events.SubagentStart{
-          session_id: data.id,
-          subagent_id: ca_subagent_id,
-          kind: :coding_agent,
-          label: label,
-          parent_tool_call_id: nil,
-          child_session_id: nil
-        })
-
-        {:next_state, :coding_agent_streaming,
-         %{
-           data
-           | coding_agent_dispatcher: pid,
-             coding_agent_pending: pending,
-             coding_agent_blocks: []
-         }}
-
-      {:error, reason} ->
-        emit_coding_agent_sync_error(data, {:dispatcher_start_failed, reason})
-    end
-  end
-
-  defp latest_user_text(messages) do
-    # Walk from the end to find the most recent user-supplied text.
-    # The skill/memory injection prepends synthetic User messages with
-    # `metadata.role in [:system, :compaction_summary]`; skip those.
-    messages
-    |> Enum.reverse()
-    |> Enum.find_value("", fn
-      %User{metadata: %{role: r}} when r in [:system, :compaction_summary] ->
-        nil
-
-      %User{content: c} when is_binary(c) ->
-        c
-
-      %User{content: blocks} when is_list(blocks) ->
-        Enum.map_join(blocks, "\n", fn
-          %{type: :text, text: t} -> t
-          %{"type" => "text", "text" => t} -> t
-          _ -> ""
-        end)
-
-      _ ->
-        nil
-    end)
-  end
-
-  # ── Event-by-event handlers (D-031: pattern match on struct module).
-  #
-  # AssistantText accumulates into a single text block per turn (or
-  # restarts when a `turn` jump is observed). ToolUse and ToolResult
-  # emit their own messages so the assembled assistant message reflects
-  # the agent's actual content shape, matching the provider path. Cost
-  # and FileEdit emit telemetry; Cost is also NOT yet aggregated into
-  # session cost totals (Team D's scope). Error / Done finalize.
-
-  defp handle_coding_agent_event(%CAEvent.Start{} = ev, data) do
-    :telemetry.execute(
-      [:tau, :session, :coding_agent_streaming, :adapter_start],
-      %{system_time: System.system_time()},
-      %{session_id: data.id, agent: data.coding_agent, version: ev.version}
-    )
-
-    # SPEC-CODING-AGENT §7 Q5: capture the adapter-side session_id.
-    # Persist a `coding_agent_session` JSONL event so a later
-    # `Tau.resume/1` can recover it and pass it as `task.resume_id`
-    # on the next dispatcher launch. Implementation deliberately
-    # lives below the other handle_coding_agent_event/2 clauses to
-    # keep them grouped (compiler warning otherwise).
-    data = maybe_capture_coding_agent_session(data, ev)
-
-    {:keep_state, data}
-  end
-
-  defp handle_coding_agent_event(%CAEvent.AssistantText{text: t}, data) do
-    blocks = append_assistant_text(data.coding_agent_blocks, t)
-    pending = %{data.coding_agent_pending | content: blocks}
-
-    broadcast(data.id, %Events.MessageUpdate{
-      session_id: data.id,
-      event: %CAEvent.AssistantText{text: t},
-      message: pending
-    })
-
-    {:keep_state, %{data | coding_agent_blocks: blocks, coding_agent_pending: pending}}
-  end
-
-  defp handle_coding_agent_event(%CAEvent.ToolUse{id: id, name: name, input: input}, data) do
-    # Anthropic-compatible content-block shape — same as the provider
-    # path's `%{type: :tool_call, ...}` blocks the Assembler emits.
-    block = %{type: :tool_call, id: id, name: name, arguments: input || %{}}
-    blocks = data.coding_agent_blocks ++ [block]
-    pending = %{data.coding_agent_pending | content: blocks}
-
-    broadcast(data.id, %Events.MessageUpdate{
-      session_id: data.id,
-      event: %CAEvent.ToolUse{id: id, name: name, input: input},
-      message: pending
-    })
-
-    # ToolStart broadcast mirrors the provider path so existing TUI /
-    # audit subscribers see the same tool-call surface regardless of
-    # which event source produced it (D-031).
-    broadcast(data.id, %Events.ToolStart{
-      session_id: data.id,
-      tool_call_id: id,
-      name: name,
-      arguments: input || %{}
-    })
-
-    # B1 / D-151 (SPEC-TUI-HEADLESS §5c): ADDITIONALLY emit SubagentProgress
-    # on the parent topic. The child_tool_call_id enables the render layer to
-    # de-dup: a ToolStart/ToolEnd whose tool_call_id is owned by a known
-    # sub-agent is NOT rendered as an inline tool call (B1 rule).
-    ca_subagent_id = "#{data.id}:ca"
-
-    broadcast(data.id, %Events.SubagentProgress{
-      session_id: data.id,
-      subagent_id: ca_subagent_id,
-      activity: {:tool_call, name},
-      child_tool_call_id: id
-    })
-
-    {:keep_state, %{data | coding_agent_blocks: blocks, coding_agent_pending: pending}}
-  end
-
-  defp handle_coding_agent_event(
-         %CAEvent.ToolResult{tool_use_id: tool_id, content: content, is_error: is_err},
-         data
-       ) do
-    # ToolResult is a separate message in Anthropic's wire format. We
-    # finalise the current assistant message (so the user can see what
-    # the agent said BEFORE the tool result), append a ToolResult
-    # message, broadcast ToolEnd, then start a new pending assistant
-    # message for any subsequent AssistantText.
-    {data, _} = flush_pending_assistant(data, :tool_use)
-
-    tool_result =
-      ToolResult.new(
-        tool_call_id: tool_id,
-        # ToolUse may not have been observed (some adapters emit
-        # ToolResult standalone); we don't have the tool name here, so
-        # fall back to "tool" — matches Anthropic's permissive shape.
-        tool_name: tool_name_for(data, tool_id),
-        content: content,
-        is_error: is_err
-      )
-
-    data =
-      data
-      |> append_message(tool_result)
-      |> persist_event("tool_result", tool_result_to_data(tool_result))
-
-    broadcast(data.id, %Events.ToolEnd{
-      session_id: data.id,
-      tool_call_id: tool_id,
-      result: tool_result
-    })
-
-    # Start a fresh assistant message for any further AssistantText
-    # the agent emits before `Done`.
-    pending =
-      Assistant.new(
-        provider: data.coding_agent,
-        model: nil,
-        api: :coding_agent,
-        content: []
-      )
-
-    broadcast(data.id, %Events.MessageStart{session_id: data.id, message: pending})
-
-    {:keep_state, %{data | coding_agent_pending: pending, coding_agent_blocks: []}}
-  end
-
-  defp handle_coding_agent_event(%CAEvent.FileEdit{path: path, kind: kind}, data) do
-    :telemetry.execute(
-      [:tau, :session, :coding_agent_streaming, :file_edit],
-      %{system_time: System.system_time()},
-      %{session_id: data.id, agent: data.coding_agent, path: path, kind: kind}
-    )
-
-    {:keep_state, data}
-  end
-
-  defp handle_coding_agent_event(%CAEvent.Cost{} = cost, data) do
-    # Team D will fold this into session cost totals; for now we just
-    # surface telemetry so observers (tau doctor, future TUI panel)
-    # can see it. The hook below is the deliberate extension point.
-    :telemetry.execute(
-      [:tau, :session, :coding_agent_streaming, :cost],
-      %{
-        system_time: System.system_time(),
-        duration_ms: cost.duration_ms,
-        usd: cost.usd || 0.0
-      },
-      %{session_id: data.id, agent: data.coding_agent, tokens: cost.tokens}
-    )
-
-    # D-153 (SPEC-TUI-HEADLESS §5c): emit SubagentCost on the parent topic so
-    # the TUI can display cost in the sub-agent end marker without folding it
-    # into the parent's own cost (no double-counting, R4).
-    ca_subagent_id = "#{data.id}:ca"
-
-    broadcast(data.id, %Events.SubagentCost{
-      session_id: data.id,
-      subagent_id: ca_subagent_id,
-      tokens: cost.tokens,
-      usd: cost.usd,
-      duration_ms: cost.duration_ms
-    })
-
-    {:keep_state, maybe_apply_cost_hook(data, cost)}
-  end
-
-  defp handle_coding_agent_event(%CAEvent.Error{reason: reason, recoverable: rec?}, data) do
-    reason_str = describe_coding_agent_error(reason)
-
-    if rec? do
-      # Recoverable: stash an error-content block so the user sees
-      # *something* and let the dispatcher continue.
-      blocks =
-        data.coding_agent_blocks ++ [%{type: :text, text: "[adapter error] " <> reason_str}]
-
-      pending = %{data.coding_agent_pending | content: blocks, error_message: reason_str}
-
-      broadcast(data.id, %Events.MessageUpdate{
-        session_id: data.id,
-        event: %CAEvent.Error{reason: reason, recoverable: rec?},
-        message: pending
-      })
-
-      {:keep_state, %{data | coding_agent_blocks: blocks, coding_agent_pending: pending}}
-    else
-      # Non-recoverable: the dispatcher will follow with a synthetic
-      # Done. Mark the pending message and let the Done finaliser
-      # render. We don't transition here — Done does the FSM move.
-      pending = %{
-        data.coding_agent_pending
-        | error_message: reason_str,
-          stop_reason: :error
-      }
-
-      {:keep_state, %{data | coding_agent_pending: pending}}
-    end
-  end
-
-  defp handle_coding_agent_event(%CAEvent.Done{} = done, data) do
-    finalize_coding_agent_turn(done, data)
-  end
-
-  defp handle_coding_agent_event(_other, data), do: {:keep_state, data}
-
-  # Build / extend the in-progress text block. AssistantText events
-  # within one turn concatenate into a single text content block — this
-  # mirrors how Anthropic's stream-json folds text deltas.
-  defp append_assistant_text(blocks, t) when is_binary(t) do
-    case List.last(blocks) do
-      %{type: :text, text: existing} ->
-        Enum.drop(blocks, -1) ++ [%{type: :text, text: existing <> t}]
-
-      _ ->
-        blocks ++ [%{type: :text, text: t}]
-    end
-  end
-
-  # Push the current pending assistant message into `data.messages`,
-  # persist, broadcast `MessageEnd`. Leaves the FSM state untouched
-  # (caller decides). Returns `{data, msg}`.
-  defp flush_pending_assistant(%{coding_agent_pending: nil} = data, _stop_reason),
-    do: {data, nil}
-
-  defp flush_pending_assistant(data, stop_reason) do
-    effective_stop = data.coding_agent_pending.stop_reason || stop_reason
-
-    msg =
-      Assembler.finalize(data.coding_agent_pending, data.coding_agent_blocks,
-        stop_reason: effective_stop
-      )
-
-    data =
-      data
-      |> append_message(msg)
-      |> persist_event("assistant_message", message_to_data(msg))
-
-    broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: msg})
-
-    {data, msg}
-  end
-
-  defp finalize_coding_agent_turn(%CAEvent.Done{exit_status: status} = done, data) do
-    stop_reason =
-      cond do
-        data.coding_agent_pending && data.coding_agent_pending.stop_reason == :error -> :error
-        # Synthetic cancel sentinel (D-032).
-        status == -2 -> :aborted
-        # Synthetic dispatcher / adapter death.
-        status == -1 -> :error
-        status == 0 -> :end_turn
-        true -> :error
-      end
-
-    # Inject the final_message as a trailing text block if the agent
-    # supplied one and we don't already have content covering it.
-    blocks =
-      case done.final_message do
-        nil -> data.coding_agent_blocks
-        "" -> data.coding_agent_blocks
-        text -> append_assistant_text(data.coding_agent_blocks, "\n" <> text)
-      end
-
-    data = %{data | coding_agent_blocks: blocks}
-
-    {data, _msg} = flush_pending_assistant(data, stop_reason)
-
-    :telemetry.execute(
-      [:tau, :session, :coding_agent_streaming, :stop],
-      %{system_time: System.system_time()},
-      %{
-        session_id: data.id,
-        agent: data.coding_agent,
-        exit_status: status,
-        stop_reason: stop_reason
-      }
-    )
-
-    # D-154 (SPEC-TUI-HEADLESS §5c): emit SubagentEnd on the parent topic.
-    # The end state maps from the coding-agent stop_reason.
-    ca_subagent_id = "#{data.id}:ca"
-
-    end_state =
-      cond do
-        status == -2 -> :cancelled
-        stop_reason == :end_turn -> :done
-        true -> :failed
-      end
-
-    end_summary =
-      case end_state do
-        :done -> "completed"
-        :cancelled -> "cancelled"
-        :failed -> "failed (exit #{status})"
-      end
-
-    broadcast(data.id, %Events.SubagentEnd{
-      session_id: data.id,
-      subagent_id: ca_subagent_id,
-      state: end_state,
-      summary: end_summary
-    })
-
-    {:next_state, :awaiting_user,
-     %{
-       data
-       | coding_agent_dispatcher: nil,
-         coding_agent_pending: nil,
-         coding_agent_blocks: []
-     }}
-  end
-
-  # Recover a tool name from the in-progress message's ToolUse blocks
-  # for a given `tool_use_id`. Falls back to "tool" if the ToolUse
-  # event wasn't observed (some adapters elide it for cheap tools).
-  defp tool_name_for(data, tool_use_id) do
-    blocks = (data.coding_agent_pending && data.coding_agent_pending.content) || []
-
-    Enum.find_value(blocks, "tool", fn
-      %{type: :tool_call, id: ^tool_use_id, name: n} -> n
-      _ -> nil
-    end)
-  end
-
-  # SPEC-CODING-AGENT §7 Q4 / D-038: fold `%Event.Cost{}` into session
-  # totals as an adapter-tagged line item. Three side effects (append to
-  # `data.coding_agent_costs`, persist `coding_agent_cost` JSONL,
-  # emit `[:tau, :coding_agent, :cost]` telemetry), each wrapped per
-  # D-035 so a failure in one MUST NOT crash the session.
-  defp maybe_apply_cost_hook(data, %CAEvent.Cost{} = cost) do
-    try do
-      tagged =
-        Tau.CodingAgent.Cost.from_event(cost,
-          agent: data.coding_agent,
-          session_id: data.id,
-          adapter_session_id: get_in(data, [:coding_agent_state, :session_id])
-        )
-
-      data = persist_event(data, "coding_agent_cost", Tau.CodingAgent.Cost.to_jsonl(tagged))
-
-      :telemetry.execute(
-        [:tau, :coding_agent, :cost],
-        %{
-          system_time: System.system_time(),
-          usd: tagged.usd || 0.0,
-          duration_ms: tagged.duration_ms,
-          input_tokens: tagged.input_tokens,
-          output_tokens: tagged.output_tokens,
-          cache_read: tagged.cache_read,
-          cache_write: tagged.cache_write
-        },
-        %{
-          session_id: data.id,
-          agent: data.coding_agent,
-          model: data.model,
-          source: Tau.CodingAgent.Cost.source(tagged),
-          adapter_session_id: tagged.adapter_session_id
-        }
-      )
-
-      %{data | coding_agent_costs: (data.coding_agent_costs || []) ++ [tagged]}
-    rescue
-      e ->
-        # D-035: cost-folding errors don't crash the session. Surface
-        # diagnostically and continue with the original data.
-        :telemetry.execute(
-          [:tau, :coding_agent, :cost, :failed],
-          %{system_time: System.system_time()},
-          %{
-            session_id: data.id,
-            agent: data.coding_agent,
-            reason: Exception.message(e)
-          }
-        )
-
-        data
-    end
-  end
-
-  # SPEC-CODING-AGENT §7 Q5: only persist when (a) the adapter
-  # actually surfaced a session_id and (b) it's new. This avoids
-  # appending a JSONL line per turn for adapters (e.g. Replay) that
-  # don't expose a session concept, and avoids duplicate writes
-  # when the same id arrives twice.
-  defp maybe_capture_coding_agent_session(data, %CAEvent.Start{session_id: nil}), do: data
-
-  defp maybe_capture_coding_agent_session(data, %CAEvent.Start{session_id: sid} = ev)
-       when is_binary(sid) do
-    state = data.coding_agent_state || %{session_id: nil, agent: nil}
-
-    if state.session_id == sid do
-      data
-    else
-      new_state = %{state | session_id: sid, agent: data.coding_agent}
-
-      data
-      |> Map.put(:coding_agent_state, new_state)
-      |> persist_event("coding_agent_session", %{
-        "session_id" => sid,
-        "agent" => agent_to_string(data.coding_agent),
-        "version" => ev.version
-      })
-    end
-  end
-
-  defp maybe_capture_coding_agent_session(data, _ev), do: data
-
-  defp agent_to_string(nil), do: nil
-  defp agent_to_string(agent) when is_atom(agent), do: Atom.to_string(agent)
-  defp agent_to_string(bin) when is_binary(bin), do: bin
-
-  # Translate a coding-agent error reason into a user-visible string.
-  # Mirrors `describe_provider_error/1` for the provider path.
-  defp describe_coding_agent_error({:workspace_prepare_failed, reason}),
-    do: "Workspace preparation failed: " <> inspect(reason)
-
-  defp describe_coding_agent_error({:dispatcher_start_failed, reason}),
-    do: "Coding-agent dispatcher failed to start: " <> inspect(reason)
-
-  defp describe_coding_agent_error(:cancelled), do: "cancelled"
-  defp describe_coding_agent_error(:inactivity_timeout), do: "Coding-agent inactivity timeout"
-
-  defp describe_coding_agent_error(other) when is_binary(other), do: other
-  defp describe_coding_agent_error(other), do: inspect(other)
 
   # --- Hook payload --------------------------------------------------------
   #
@@ -4336,7 +1710,8 @@ defmodule Tau.Session do
   # transcript_path in addition to event-specific fields. Callers pass only
   # the event-specific extras; the canonical fields are always present.
 
-  defp hook_payload(data, event, extras) when is_map(extras) do
+  @doc false
+  def hook_payload(data, event, extras) when is_map(extras) do
     Map.merge(
       %{
         session_id: data.id,
@@ -4356,162 +1731,6 @@ defmodule Tau.Session do
     # hook payload is always a non-nil binary.
     p.path_for(id, cwd)
   end
-
-  # --- Skill activation -----------------------------------------------------
-  #
-  # Mechanism A (ADR-0013): the model activates a discovered skill by
-  # emitting a tool_call to the synthetic `__activate_skill__` tool. The
-  # tool is FSM-internal — it never reaches the executor pool, never
-  # passes through permissions or hooks. Skills with
-  # `disable_model_invocation: true` are excluded from the exposed enum;
-  # their bodies are still injected as system messages (background
-  # context) by `prepend_skill_messages/2`.
-
-  defp model_invokable_skills(skills) do
-    Enum.reject(skills, fn {_name, s} -> s.disable_model_invocation end)
-  end
-
-  defp skill_activation_tool_spec(skills) do
-    case model_invokable_skills(skills) do
-      [] ->
-        nil
-
-      list ->
-        names = Enum.map(list, fn {name, _s} -> name end)
-
-        descriptions =
-          list
-          |> Enum.map(fn {name, %Tau.Skill{description: d}} ->
-            case d do
-              "" -> "  - #{name}"
-              nil -> "  - #{name}"
-              desc -> "  - #{name}: #{desc}"
-            end
-          end)
-          |> Enum.join("\n")
-
-        description =
-          "Activate one of the available skills for the current turn. " <>
-            "Activation scopes subsequent tool calls to the skill's allowed_tools " <>
-            "whitelist (if set) and ends when you emit `end_turn`. " <>
-            "Available skills:\n" <> descriptions
-
-        %{
-          name: @activate_skill_tool_name,
-          description: description,
-          parameters: %{
-            "type" => "object",
-            "properties" => %{
-              "name" => %{
-                "type" => "string",
-                "enum" => names,
-                "description" => "Name of the skill to activate."
-              }
-            },
-            "required" => ["name"],
-            "additionalProperties" => false
-          }
-        }
-    end
-  end
-
-  defp maybe_put_tools(opts, nil), do: opts
-  defp maybe_put_tools(opts, []), do: opts
-
-  defp maybe_put_tools(opts, tool_specs) when is_list(tool_specs),
-    do: Map.put(opts, :tools, tool_specs)
-
-  defp maybe_put_tools(opts, tool_spec) when is_map(tool_spec),
-    do: Map.put(opts, :tools, [tool_spec])
-
-  # D-059: tool specs exposed to the provider for this turn —
-  # union of (1) the synthetic `__activate_skill__` spec when other
-  # model-invokable skills exist, and (2) the active skill's allowed
-  # tools (semantics mirror `Tau.Tools.Builtin.Agent.whitelist_from/1`:
-  # `[]` exposes every registered built-in; a list narrows by name).
-  # Returns `nil` on empty result so `:tools` stays unset (some providers
-  # reject an empty `:tools` array).
-  defp model_visible_tool_specs(data) do
-    activation = skill_activation_tool_spec(data.skills)
-    skill_specs = active_skill_tool_specs(data.active_skill)
-
-    case {activation, skill_specs} do
-      {nil, []} -> nil
-      {nil, list} -> list
-      {spec, []} -> [spec]
-      {spec, list} -> [spec | list]
-    end
-  end
-
-  # D-059: tool specs derived from the active skill's `allowed_tools`.
-  # `nil` active_skill ⇒ no extra specs (the activate-skill tool, if
-  # any, is the only model-visible tool). Empty `allowed_tools` ⇒ every
-  # registered built-in tool. Otherwise: only the listed names that
-  # actually resolve in `Tau.Tool` (unknown names are silently skipped
-  # rather than crashing the turn — the same posture
-  # `Tau.Permissions.Evaluator` takes for unknown names).
-  defp active_skill_tool_specs(nil), do: []
-
-  defp active_skill_tool_specs(%Tau.Skill{allowed_tools: []}) do
-    Tau.Tool.list()
-    |> Enum.sort()
-    |> Enum.flat_map(&tool_spec_for/1)
-  end
-
-  defp active_skill_tool_specs(%Tau.Skill{allowed_tools: names}) when is_list(names) do
-    names
-    |> Enum.uniq()
-    |> Enum.flat_map(&tool_spec_for/1)
-  end
-
-  # Build the Anthropic-shape `%{name, description, parameters}` map from
-  # a registered tool module. Returns `[]` (not `[nil]`) when the name
-  # is not registered so the caller can `flat_map` cleanly.
-  defp tool_spec_for(name) when is_binary(name) do
-    case Tau.Tool.lookup(name) do
-      {:ok, mod} ->
-        [%{name: mod.name(), description: mod.description(), parameters: mod.parameters()}]
-
-      :error ->
-        []
-    end
-  end
-
-  # Process every `__activate_skill__` call inline. Returns the new
-  # `data` (with `active_skill` set on success) and the partial
-  # `tools_in_flight` map for these calls — they share the `:tool_done`
-  # mailbox path with regular tool results so the FSM bookkeeping is
-  # uniform.
-  defp handle_skill_activations([], data, _parent), do: {data, %{}}
-
-  defp handle_skill_activations(calls, data, parent) do
-    Enum.reduce(calls, {data, %{}}, fn %{id: id, name: tool_name, arguments: args},
-                                       {data_acc, in_flight_acc} ->
-      requested = skill_name_from_args(args)
-
-      {data_acc, result} = activate_skill(data_acc, requested, id)
-
-      :telemetry.execute(
-        [:tau, :session, :skill_activated],
-        %{system_time: System.system_time()},
-        %{
-          session_id: data_acc.id,
-          skill_name: requested,
-          tool_name: tool_name,
-          disabled?: result.is_error
-        }
-      )
-
-      Process.send(parent, {:tool_done, id, result}, [])
-      {data_acc, Map.put(in_flight_acc, id, :activated)}
-    end)
-  end
-
-  defp skill_name_from_args(args) when is_map(args) do
-    Map.get(args, "name") || Map.get(args, :name)
-  end
-
-  defp skill_name_from_args(_), do: nil
 
   # User-initiated slash-command skill activation.
   #
@@ -4544,67 +1763,8 @@ defmodule Tau.Session do
     data
   end
 
-  # Look up `name` on `data.skills`; honour `disable_model_invocation`.
-  # On success, set `data.active_skill`, persist a JSONL event, and
-  # broadcast `%Events.SkillActivated{}`. On failure, return an
-  # `is_error: true` ToolResult and leave `data` unchanged.
-  defp activate_skill(data, nil, call_id) do
-    {data,
-     ToolResult.new(
-       tool_call_id: call_id,
-       tool_name: @activate_skill_tool_name,
-       content: "Skill activation failed: missing 'name' parameter.",
-       is_error: true
-     )}
-  end
-
-  defp activate_skill(data, name, call_id) when is_binary(name) do
-    case List.keyfind(data.skills, name, 0) do
-      {^name, %Tau.Skill{disable_model_invocation: true}} ->
-        {data,
-         ToolResult.new(
-           tool_call_id: call_id,
-           tool_name: @activate_skill_tool_name,
-           content:
-             "Skill '#{name}' has disable-model-invocation set; it cannot be activated by the model.",
-           is_error: true
-         )}
-
-      {^name, %Tau.Skill{} = skill} ->
-        data =
-          %{data | active_skill: skill}
-          |> persist_event("skill_activated", %{
-            skill_name: name,
-            tool_call_id: call_id,
-            allowed_tools: skill.allowed_tools
-          })
-
-        broadcast(data.id, %Events.SkillActivated{
-          session_id: data.id,
-          skill_name: name,
-          tool_call_id: call_id
-        })
-
-        {data,
-         ToolResult.new(
-           tool_call_id: call_id,
-           tool_name: @activate_skill_tool_name,
-           content: "Skill activated: #{name}",
-           is_error: false
-         )}
-
-      nil ->
-        {data,
-         ToolResult.new(
-           tool_call_id: call_id,
-           tool_name: @activate_skill_tool_name,
-           content: "Unknown skill: #{name}",
-           is_error: true
-         )}
-    end
-  end
-
-  defp register_builtins do
+  @doc false
+  def register_builtins do
     Enum.each(
       Application.get_env(:tau, :builtin_tools, []),
       fn mod ->
@@ -4836,20 +1996,6 @@ defmodule Tau.Session do
 
   defp agent_to_atom(a) when is_atom(a), do: a
   defp agent_to_atom(_), do: nil
-
-  # --- Compaction helpers --------------------------------------------------
-  #
-  # We persist the full <conversation_summary>...</conversation_summary>
-  # block as the JSONL "summary" field so events_to_messages/1's
-  # "compaction" clause can reconstruct the synthetic message verbatim
-  # on Tau.fork/2 / Tau.resume/1. The compactor returns just the inner
-  # text via the tri-tuple contract; we wrap it here.
-
-  defp format_summary_for_persist(nil), do: nil
-
-  defp format_summary_for_persist(summary_text) when is_binary(summary_text) do
-    "<conversation_summary>\n#{summary_text}\n</conversation_summary>"
-  end
 
   defp deserialize_blocks(blocks) when is_list(blocks),
     do: Enum.map(blocks, &deserialize_block/1)
@@ -5137,24 +2283,6 @@ defmodule Tau.Session do
   defp outcome_tag({:async_compact, _}), do: :async_compact
   defp outcome_tag(:passthrough), do: :passthrough
 
-  # D-041: /model <id> slash-command handler. Runs the same validate +
-  # mutate + telemetry + persist logic as the {:swap_model} call handler
-  # via the shared apply_model_swap/2 helper. Does NOT start a provider
-  # turn — broadcasts a SystemNotice instead.
-  defp handle_slash_model_swap(data, new_model) do
-    case apply_model_swap(data, new_model) do
-      {:ok, data2, %{from: from, to: to}} ->
-        notice = "Model changed: #{from} → #{to}"
-        broadcast(data2.id, %Events.SystemNotice{session_id: data2.id, text: notice})
-        {:keep_state, data2}
-
-      {:error, :invalid_model} ->
-        notice = "Error: '#{new_model}' is not a valid model id (empty or whitespace)."
-        broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: notice})
-        {:keep_state, data}
-    end
-  end
-
   defp invoke_file_command(path, args, msg) do
     case File.read(path) do
       {:ok, body} -> %Tau.Message.User{msg | content: body <> "\n\n" <> args}
@@ -5174,35 +2302,5 @@ defmodule Tau.Session do
       end,
       metadata: data.metadata
     )
-  end
-
-  # D-079 / SPEC-USER-TURN §6 / AC-8: steering drain helper.
-  # Dequeues one message and appends it AFTER all tool_results and BEFORE
-  # the next provider call so no tool_call is orphaned. Enforced by the
-  # call site, which invokes only when `map_size(tools) == 0`.
-  #
-  # Unlike follow-up drain, this path bypasses `classify_slash_command/4`
-  # — a steering message has already passed the user-intent gate at
-  # enqueue time and must land at the exact mid-turn position; slash
-  # commands aren't meaningful here.
-  defp drain_steering_queue_one(data) do
-    case :queue.out(data.steering_queue) do
-      {:empty, _} ->
-        data
-
-      {{:value, msg}, rest} ->
-        :telemetry.execute(
-          [:tau, :session, :steering, :delivered],
-          %{system_time: System.system_time()},
-          %{session_id: data.id, from_state: :tool_executing}
-        )
-
-        emit_user_message_telemetry(:delivered, data, :tool_executing)
-
-        data
-        |> append_message(msg)
-        |> persist_event("user_message", message_to_data(msg))
-        |> Map.put(:steering_queue, rest)
-    end
   end
 end
