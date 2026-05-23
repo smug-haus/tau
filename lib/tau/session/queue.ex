@@ -32,7 +32,7 @@ defmodule Tau.Session.Queue do
   Returns updated `data` wrapped in `{:keep_state, data}`.
   """
   @spec enqueue(Tau.Session.Data.t(), Tau.Message.t(), :steering | :followup, atom()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def enqueue(data, msg, tier, from_state) do
     {queue_field, tier_atom} =
       case tier do
@@ -111,7 +111,7 @@ defmodule Tau.Session.Queue do
   ADR-0008: postpone so the message is re-delivered on the next FSM transition,
   preserving order.
   """
-  @spec handle_postpone(Tau.Session.Data.t(), atom()) :: :gen_statem.event_handler_result()
+  @spec handle_postpone(Tau.Session.Data.t(), atom()) :: Tau.Session.Data.fsm_result()
   def handle_postpone(data, state) do
     Tau.Session.emit_user_message_telemetry(:enqueued, data, state)
     {:keep_state_and_data, [{:postpone, true}]}
@@ -123,7 +123,7 @@ defmodule Tau.Session.Queue do
   D-077 / D-078: route to the appropriate tier queue.
   """
   @spec handle_enqueue(Tau.Message.t(), :steering | atom(), atom(), Tau.Session.Data.t()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def handle_enqueue(msg, tier, state, data) do
     Tau.Session.emit_user_message_telemetry(:enqueued, data, state)
     enqueue(data, msg, tier, state)
@@ -135,7 +135,7 @@ defmodule Tau.Session.Queue do
   Dequeues one follow-up message and re-routes it through the full user_message
   dispatch path so slash commands are classified.
   """
-  @spec handle_drain_followups_idle(Tau.Session.Data.t()) :: :gen_statem.event_handler_result()
+  @spec handle_drain_followups_idle(Tau.Session.Data.t()) :: Tau.Session.Data.fsm_result()
   def handle_drain_followups_idle(data) do
     case :queue.out(data.followup_queue) do
       {:empty, _} ->
@@ -162,7 +162,7 @@ defmodule Tau.Session.Queue do
   Handle `:drain_followups` in a non-idle state or with a command task in flight.
   Drop — the followup will re-drain on the next `:awaiting_user` transition.
   """
-  @spec handle_drain_followups_busy(Tau.Session.Data.t()) :: :gen_statem.event_handler_result()
+  @spec handle_drain_followups_busy(Tau.Session.Data.t()) :: Tau.Session.Data.fsm_result()
   def handle_drain_followups_busy(data) do
     {:keep_state, data}
   end
@@ -173,7 +173,7 @@ defmodule Tau.Session.Queue do
   These are fire-and-forget confirmations from the parallel tool dispatcher;
   the FSM ignores them (no state change).
   """
-  @spec handle_provider_dispatch(Tau.Session.Data.t()) :: :gen_statem.event_handler_result()
+  @spec handle_provider_dispatch(Tau.Session.Data.t()) :: Tau.Session.Data.fsm_result()
   def handle_provider_dispatch(data) do
     {:keep_state, data}
   end

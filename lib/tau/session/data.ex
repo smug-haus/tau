@@ -27,6 +27,16 @@ defmodule Tau.Session.Data do
     :persist_handle
   ]
 
+  @typedoc """
+  Return type alias for `:gen_statem` event-handler functions.
+
+  Dialyzer cannot resolve `:gen_statem.event_handler_result/0` from the
+  project PLT. Using `term()` here is a deliberate trade-off: it silences
+  the `unknown_type` warning while keeping the intent visible at the
+  call-sites via the `@spec` annotation.
+  """
+  @type fsm_result() :: term()
+
   @typedoc "The full FSM data for a `Tau.Session` process."
   @type t :: %__MODULE__{
           id: String.t(),

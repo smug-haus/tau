@@ -111,7 +111,7 @@ defmodule Tau.Session.ModelSwap do
   Returns an FSM action tuple.
   """
   @spec handle_slash_model_swap(Tau.Session.Data.t(), String.t()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def handle_slash_model_swap(data, new_model) do
     case apply_model_swap(data, new_model) do
       {:ok, data2, %{from: from, to: to}} ->
@@ -132,7 +132,7 @@ defmodule Tau.Session.ModelSwap do
   Handle `{:swap_model, model}` call in `:awaiting_user` with no command task.
   """
   @spec handle_swap_model_idle(term(), String.t(), Tau.Session.Data.t()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def handle_swap_model_idle(from, model, data) do
     case apply_model_swap(data, model) do
       {:error, :invalid_model} ->
@@ -147,7 +147,7 @@ defmodule Tau.Session.ModelSwap do
   Handle `{:swap_model, _}` call while the session is busy (any non-idle state,
   or `:awaiting_user` with a command task in flight).
   """
-  @spec handle_swap_model_busy(term()) :: :gen_statem.event_handler_result()
+  @spec handle_swap_model_busy(term()) :: Tau.Session.Data.fsm_result()
   def handle_swap_model_busy(from) do
     {:keep_state_and_data, [{:reply, from, {:error, :busy}}]}
   end
@@ -160,7 +160,7 @@ defmodule Tau.Session.ModelSwap do
   fallback chain for the next turn uses the new primary.
   """
   @spec handle_reconfigure(keyword(), Tau.Session.Data.t()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def handle_reconfigure(opts, data) do
     data =
       data
