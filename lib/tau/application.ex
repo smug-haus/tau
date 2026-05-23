@@ -118,18 +118,12 @@ defmodule Tau.Application do
     end
   end
 
-  # Suppress noisy [error]/[warning] messages from the :file_system library
-  # (FSInotify.bootstrap and FileSystem.Worker.init) that fire before the
-  # Tau.Settings.Watcher GenServer has a chance to degrade gracefully.  These
-  # messages are emitted at the OTP logger level by Erlang code inside the
-  # dependency and therefore cannot be suppressed via Elixir Logger config
-  # alone — they arrive before any runtime filter registered by the Watcher
-  # could be in place.  Installing a primary filter here, before the
-  # supervision tree starts, ensures they are never written to stderr.
-  #
-  # The filter is intentionally narrow: it only drops :error and :warning
-  # entries whose OTP logger :application metadata is :file_system.  All
-  # other log entries are passed through unaffected.
+  # Suppress noisy `[error]`/`[warning]` messages from the `:file_system`
+  # library that fire before `Tau.Settings.Watcher` can degrade gracefully.
+  # These come from Erlang code at the OTP logger level so a runtime
+  # Elixir Logger filter can't catch them. Installed as a primary filter
+  # before the supervision tree starts; narrowly drops only `:error` and
+  # `:warning` with `:application == :file_system`.
   defp install_file_system_log_filter do
     case :logger.add_primary_filter(
            :tau_suppress_file_system_noise,

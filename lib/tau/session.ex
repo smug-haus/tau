@@ -3044,9 +3044,8 @@ defmodule Tau.Session do
            provider_task: nil,
            assembler: nil,
            stream_ref: nil,
-           # SPEC-OTEL-REPORTER: the provider.request span was closed in
-           # finalize_assistant/2 before dispatch_tools/2 is called. Clear the
-           # ref so it doesn't linger stale across the tool-execution phase.
+           # SPEC-OTEL-REPORTER: span closed in `finalize_assistant/2`;
+           # clear the ref so it doesn't linger across tool execution.
            provider_span_ref: nil,
            # D-060: merge this round's lookups with any carried from
            # earlier rounds in the same turn. The `:tool_done` handler
@@ -3699,13 +3698,10 @@ defmodule Tau.Session do
 
   defp describe_provider_error(other), do: inspect(other)
 
-  # ADR-0014: walk the child set and cast the chosen lifecycle
-  # operation. Both `Tau.cancel/1` and `Tau.stop/1` are :ok-or-:ok casts
-  # against a registry lookup — a child id that's already gone is a
-  # silent no-op (this is exactly the case we want when a child finished
-  # naturally between its `%SessionEnd{}` broadcast and the parent's
-  # cancel landing). Recursion is implicit: each child runs the same
-  # cascade against its own descendants.
+  # ADR-0014: cascade lifecycle operation to children. Both
+  # `Tau.cancel/1` and `Tau.stop/1` are fire-and-forget casts; a child
+  # already gone is a silent no-op (the natural race with its own
+  # `%SessionEnd{}` broadcast). Recursion is implicit.
   defp cascade_to_children(%{child_session_ids: ids}, op) when op in [:cancel, :stop] do
     Enum.each(ids, fn child_id ->
       case op do
