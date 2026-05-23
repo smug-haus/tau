@@ -2,8 +2,8 @@ defmodule Tau.Memory.Store do
   @moduledoc """
   Behaviour for durable memory storage.
 
-  PR1 delivers `write/1` and `delete/1`. `search/2` (FTS5) lands in PR2;
-  `semantic_search/2` (sqlite-vec embeddings) in PR3.
+  Callbacks: `write/1`, `delete/1`, `search/2` (FTS5 full-text),
+  `semantic_search/2` (sqlite-vec embeddings).
 
   See `docs/spec/SPEC-MEMORY-STORE.md` and `docs/adr/0020-memory-store-sqlite-driver.md`.
 

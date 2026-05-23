@@ -17,13 +17,13 @@ defmodule Tau.Memory.Store.SQLite do
   Database location: `Path.join(Tau.Settings.data_dir(), "memory.db")`.
   WAL mode is enabled immediately after `open`.
 
-  PR2 adds `search/2` (FTS5 full-text search). The FTS index is maintained by
-  three triggers added in migrations 004–006 (insert, delete, update). Pending
-  and failed rows are included in FTS results per D-046.
+  `search/2` (FTS5 full-text search): the FTS index is maintained by three
+  triggers (insert, delete, update). Pending and failed rows are included in
+  FTS results per D-046.
 
-  PR3 adds `semantic_search/2` (sqlite-vec vector search). The sqlite-vec
-  loadable extension is loaded in `init/1` before migrations run. Vector data
-  lives in the `memory_vec` vec0 virtual table (migration 007). Only rows with
+  `semantic_search/2` (sqlite-vec vector search): the sqlite-vec loadable
+  extension is loaded in `init/1` before migrations run. Vector data lives in
+  the `memory_vec` vec0 virtual table. Only rows with
   `embedding_status = "ready"` are included in semantic search results (D-046).
 
   The embedding pipeline (populating `memory_vec` and transitioning

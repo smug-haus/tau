@@ -4,8 +4,8 @@ defmodule Tau.Memory.Supervisor do
 
   Hosts `Tau.Memory.Store.SQLite` under a `one_for_one` strategy. Sits in
   `Tau.Application`'s `:rest_for_one` child list after `Tau.Settings.Watcher`
-  (which resolves `data_dir/0` — required before the store can open its DB) and
-  before `Finch` (which embedding pipeline calls will use in PR3).
+  (which resolves `data_dir/0` — required before the store can open its DB)
+  and before `Finch` (the embedding pipeline uses Finch).
 
   A crash of `Store.SQLite` restarts only that child. A crash of this supervisor
   cascades to Finch and everything below it in the application tree — acceptable,

@@ -39,13 +39,12 @@ defmodule Tau.Providers.Custom do
   2. `System.get_env("CUSTOM_MODEL")`
   3. Sentinel `"custom-model"` — override via `opts[:model]` at call-time.
 
-  ## C81 — Custom provider nil api_key contract
+  ## Authentication contract
 
   `Tau.Providers.Custom` is a configure-by-URL OpenAI-Chat-compatible
-  provider; a nil `api_key` is valid (it omits the `Authorization` header),
-  the one synchronous hard-config error is `{:error, :missing_base_url}`;
-  upstream 401/429 arrive in-stream as `%Event.Error{}` per C68(b).
-  See SPEC-USER-TURN.md §3 C81.
+  provider; a nil `api_key` is valid (it omits the `Authorization` header).
+  The one synchronous hard-config error is `{:error, :missing_base_url}`;
+  upstream 401/429 arrive in-stream as `%Event.Error{}`.
   """
 
   @behaviour Tau.Provider

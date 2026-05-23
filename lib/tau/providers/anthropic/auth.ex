@@ -18,10 +18,10 @@ defmodule Tau.Providers.Anthropic.Auth do
   OAuth path that Claude Code maintains. Without (2), Tau's TUI
   cannot serve the dominant user population.
 
-  Tau v1 does NOT refresh OAuth tokens itself (D-018) — refresh
-  would race with Claude Code's own refresh on the same file. An
-  expired token surfaces an actionable error: "Your Claude Code
-  OAuth token expired; run `claude /login` to renew."
+  Tau does NOT refresh OAuth tokens itself (D-018) — refresh would
+  race with Claude Code's own refresh on the same file. An expired
+  token surfaces an actionable error: "Your Claude Code OAuth token
+  expired; run `claude /login` to renew."
 
   ## Resolution order (first non-error wins)
 

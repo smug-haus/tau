@@ -156,11 +156,10 @@ defmodule Tau.Providers.Shared.FinchStream do
   #
   # The per-chunk timeout is 300s. Opus on a deep-deliberation turn can
   # legitimately pause for 60-180s between chunks while it reasons about
-  # a complex tool call (real-world: empirically observed during M1
-  # coordinator verification, 2026-05-20, issue #307). The prior 60s
-  # budget misread that thinking time as transport failure; D-061 retry
-  # (#303) then re-issued the same prompt, which incurred the same
-  # thinking time, and the session died after exhausting retries.
+  # a complex tool call. A shorter budget misreads that thinking time as
+  # transport failure; D-061 retry then re-issues the same prompt, which
+  # incurs the same thinking time, and the session dies after exhausting
+  # retries.
   # HTTP transport failures still fail fast at the OS / Mint level
   # (RST, connection close, etc.); only the legitimate "silent
   # connection, model is thinking" case is held open longer here.

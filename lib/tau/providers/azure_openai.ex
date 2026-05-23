@@ -39,10 +39,10 @@ defmodule Tau.Providers.AzureOpenAI do
   Missing `api_key`, `endpoint`, or `deployment` → `stream/3` returns
   `{:error, :missing_api_key}` synchronously before any network call.
 
-  ## C80 — Azure auth/URL shape
+  ## Auth / URL shape
 
   Azure OpenAI MUST use `api-key: <key>` (not `Authorization: Bearer`) and the
-  deployment-based URL pattern. See SPEC-USER-TURN.md §3 C80.
+  deployment-based URL pattern.
   """
 
   @behaviour Tau.Provider

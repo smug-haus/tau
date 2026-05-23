@@ -18,11 +18,10 @@ defmodule Tau.Memory.Migrations do
   after all existing versions; ISO-8601 prefix (e.g. `"20260518_001"`) is
   recommended.
 
-  PR2 adds `memory_fts` (FTS5 virtual table) and three sync triggers here.
-  PR3 adds the `memory_vec` vec0 virtual table (sqlite-vec) migration here.
-  The vec0 extension must be loaded before `run/1` is called when using PR3 migrations;
-  `Store.SQLite` loads it in `init/1` via `Exqlite.Sqlite3.enable_load_extension/2`
-  and a `SELECT load_extension(?)` call.
+  The vec0 sqlite-extension must be loaded before `run/1` is called when
+  the `memory_vec` migration runs; `Store.SQLite` loads it in `init/1` via
+  `Exqlite.Sqlite3.enable_load_extension/2` and a `SELECT load_extension(?)`
+  call.
   """
 
   @migrations [
