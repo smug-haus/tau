@@ -32,7 +32,7 @@ defmodule Tau.Session do
   alias Tau.Session.Events
   alias Tau.Provider.Event, as: PEvent
   alias Tau.Settings.Cache, as: SettingsCache
-  # SPEC-CODING-AGENT (#191): coding-agent session mode. The FSM hosts
+  # SPEC-CODING-AGENT: coding-agent session mode. The FSM hosts
   # a parallel `:coding_agent_streaming` state. When `data.coding_agent`
   # is non-nil, user messages route through `Tau.CodingAgent.Dispatcher`
   # instead of `data.provider.stream/3`; the dispatcher's normalized
@@ -43,7 +43,7 @@ defmodule Tau.Session do
   alias Tau.CodingAgent.Workspace, as: CAWorkspace
   alias Tau.Commands.Catalog
 
-  # #17: name of the synthetic FSM-internal tool the model emits to
+  # Name of the synthetic FSM-internal tool the model emits to
   # activate a discovered skill. Not registered as a `Tau.Tool` module
   # — interception happens in `dispatch_tools/2` before any executor
   # would see it.
@@ -125,7 +125,7 @@ defmodule Tau.Session do
     end
   end
 
-  # D-077 (#339): hard cap on each queue tier. Messages past 32 entries are
+  # D-077: hard cap on each queue tier. Messages past 32 entries are
   # dropped with a %SystemNotice{} (D-083 / critic S3).
   @queue_cap 32
 
@@ -453,9 +453,9 @@ defmodule Tau.Session do
          provider_retry_state: Map.get(data, :provider_retry_state, %{count: 0}),
          provider_retry_max: Map.get(data, :provider_retry_max, 3),
          interactive?: Map.get(data, :interactive?, true),
-         # D-077 (#339 / SPEC-USER-TURN §6): expose queue depths and contents.
-         # ADR-0009 explicitly deferred this; #339 delivers it. Makes the queues
-         # introspectable for tests and a future "pending input" panel.
+         # D-077 / SPEC-USER-TURN §6: expose queue depths and contents.
+         # ADR-0009 deferred this; it makes the queues introspectable for
+         # tests and a future "pending input" panel.
          queues: %{
            steering: :queue.to_list(Map.get(data, :steering_queue, :queue.new())),
            followup: :queue.to_list(Map.get(data, :followup_queue, :queue.new()))
@@ -633,7 +633,7 @@ defmodule Tau.Session do
           provider_ctx: provider_ctx,
           messages: messages,
           skills: skills,
-          # #183 / [C94-B4] / D-076: prompt templates discovered once at
+          # D-076: prompt templates discovered once at
           # init time, stored on FSM data exactly like `data.skills`.
           # Consulted in `classify_slash_command/2` after skill lookup;
           # the last branch before verbatim fall-through (precedence:
@@ -669,7 +669,7 @@ defmodule Tau.Session do
           # settings reload between turns is picked up automatically.
           fallback_chain_remaining: [],
           tools_in_flight: %{},
-          # #33: pid of the per-turn parallel-tool dispatcher (a child of
+          # Pid of the per-turn parallel-tool dispatcher (a child of
           # Tau.Tools.TaskSupervisor that drives Task.Supervisor.async_stream_nolink/4
           # over the turn's tool calls). Stored so :cancel can brutal-kill
           # the iterator; orphaned tool tasks remain under the supervisor
@@ -678,7 +678,7 @@ defmodule Tau.Session do
           # ADR-0008: slash-command tasks (user code) run isolated under
           # Tau.Tools.TaskSupervisor, never inline in the FSM.
           command_task: nil,
-          # ADR-0013 (#16): currently-active skill, or nil. When set,
+          # ADR-0013: currently-active skill, or nil. When set,
           # `Tau.Permissions.Evaluator` denies any tool not on
           # `active_skill.allowed_tools` before consulting the rule set.
           # Per-turn lifetime by default: cleared in `finalize_assistant/2`
@@ -693,7 +693,7 @@ defmodule Tau.Session do
           # the `Agent` tool sets `:session` today; everything else
           # behaves exactly like ADR-0013.
           persona_lifetime: opts[:persona_lifetime] || :turn,
-          # #91: spawn-time tool whitelist (`:all` or `[String.t()]`).
+          # Spawn-time tool whitelist (`:all` or `[String.t()]`).
           # Filter applies in `dispatch_tools/2` before
           # `Tau.Permissions.Evaluator`; calls outside the list synthesise
           # an `is_error: true` ToolResult the same way deny rules do.
@@ -701,7 +701,7 @@ defmodule Tau.Session do
           # `Agent` tool plumbs the child skill's `allowed_tools` through
           # this opt). `:all` preserves today's behaviour.
           tools_whitelist: opts[:tools_whitelist] || :all,
-          # ADR-0014 (#92): set of currently-running child session ids
+          # ADR-0014: set of currently-running child session ids
           # spawned by this session via the `Agent` tool. Populated by
           # `{:register_child, _}` casts from the spawn task and emptied
           # by `{:unregister_child, _}` when a child reports `%SessionEnd{}`.
@@ -724,7 +724,7 @@ defmodule Tau.Session do
             opts[:max_tool_iterations] ||
               get_in(SettingsCache.get(), [:session, :max_tool_iterations]) ||
               100,
-          # D-060 / #293: tool-loop brake — per-turn map keyed by
+          # D-060: tool-loop brake — per-turn map keyed by
           # `{tool_name, args_hash}` to a `%{count, error}` cell. When
           # `count` reaches `tool_loop_brake_threshold` (default 3) the
           # FSM aborts the turn with `stop_reason: :tool_loop_aborted`
@@ -741,13 +741,13 @@ defmodule Tau.Session do
             opts[:tool_loop_brake_threshold] ||
               get_in(SettingsCache.get(), [:session, :tool_loop_brake_threshold]) ||
               3,
-          # D-060 / #293: side-table mapping in-flight tool_call_id ->
+          # D-060: side-table mapping in-flight tool_call_id ->
           # `{tool_name, args_hash}` so the `{:tool_done, ...}` handler
           # can build the brake key without rescanning message history.
           # Populated in `dispatch_tools/2`; entry removed in
           # `handle_event(:info, {:tool_done, ...}, :tool_executing, _)`.
           tool_loop_call_lookups: %{},
-          # D-061 / #303: per-turn provider-retry counter for the
+          # D-061: per-turn provider-retry counter for the
           # single-provider case (no fallback chain remaining). When a
           # mid-stream `%PEvent.Error{retryable?: true}` arrives and
           # `fallback_chain_remaining == []`, the FSM retries the SAME
@@ -767,7 +767,7 @@ defmodule Tau.Session do
             opts[:provider_retry_base_delay_ms] ||
               get_in(SettingsCache.get(), [:session, :provider_retry_base_delay_ms]) ||
               1000,
-          # SPEC-CODING-AGENT (#191):
+          # SPEC-CODING-AGENT:
           #
           # `coding_agent` — adapter module or nil. When set, user
           # messages route to `:coding_agent_streaming`.
@@ -869,7 +869,7 @@ defmodule Tau.Session do
           # via broadcast + history append, never via `{:tool_done}` messages
           # while in `:awaiting_permission` state.
           permission_pending_results: [],
-          # D-077 / D-078 (#339 / SPEC-USER-TURN §6): two-tier message queues.
+          # D-077 / D-078 / SPEC-USER-TURN §6: two-tier message queues.
           # Replaces ADR-0009's single `:postpone` mechanism for user messages
           # with explicit FIFO queues that have two distinct drain points.
           #
@@ -946,9 +946,9 @@ defmodule Tau.Session do
     {:keep_state_and_data, [{:postpone, true}]}
   end
 
-  # D-077 / D-078 (#339 / SPEC-USER-TURN §6): replaces ADR-0009's single
+  # D-077 / D-078 / SPEC-USER-TURN §6: replaces ADR-0009's single
   # `:postpone` with explicit two-tier queue routing. Busy states (any state
-  # other than :awaiting_user, including :awaiting_permission from #341) enqueue
+  # other than :awaiting_user, including :awaiting_permission) enqueue
   # messages onto the appropriate tier rather than postponing them. This gives
   # two independent drain points and makes queued messages introspectable via
   # snapshot/1 (ADR-0009's own exit clause, exercised here).
@@ -1033,7 +1033,7 @@ defmodule Tau.Session do
     end
   end
 
-  # D-080 (#339 / SPEC-USER-TURN §6): follow-up drain handler.
+  # D-080 / SPEC-USER-TURN §6: follow-up drain handler.
   # Posted as an :internal event on every :awaiting_user transition that
   # represents turn completion (normal end, post-cancel, error paths). Dequeues
   # one follow-up message and starts a fresh turn (one-at-a-time mode, Pi's
@@ -1399,7 +1399,7 @@ defmodule Tau.Session do
     {:keep_state, data}
   end
 
-  # D-061 / #303: retryable mid-stream error with NO fallback chain
+  # D-061: retryable mid-stream error with NO fallback chain
   # remaining and an unspent retry budget. Re-issues `:start_provider`
   # on the SAME provider after exponential backoff. The non-blocking
   # backoff is implemented via `Process.send_after/3` posting a
@@ -1487,7 +1487,7 @@ defmodule Tau.Session do
     {:keep_state, data}
   end
 
-  # D-061 / #303: deferred retry trigger. Posted by the clause above
+  # D-061: deferred retry trigger. Posted by the clause above
   # after the backoff delay elapses. Re-enters `:start_provider` on
   # the same provider. Stale messages (where `provider_retry_state`
   # has advanced past the count we were scheduled with — e.g. the
@@ -1519,7 +1519,7 @@ defmodule Tau.Session do
   # would silently skip the ADR-0012 fallback and finalize as terminal
   # errors. This fallback clause MUST stay first.
   #
-  # D-061 / #303: the same-provider retry clause precedes this one so
+  # D-061: the same-provider retry clause precedes this one so
   # a session with NO chain remaining and an unspent retry budget
   # retries before this clause is consulted (its `[next | rest]`
   # guard fails on `[]` anyway, but the explicit ordering matters
@@ -1657,7 +1657,7 @@ defmodule Tau.Session do
     end
   end
 
-  # ADR-0014 (#92): bookkeeping casts from the (future) `Agent` tool task.
+  # ADR-0014: bookkeeping casts from the `Agent` tool task.
   # On a successful `Tau.start_session/1` for a child, the spawn task casts
   # `{:register_child, child_id}` to its parent FSM. When the child's
   # `%SessionEnd{}` is observed (the spawn task is subscribed to the child
@@ -1757,7 +1757,7 @@ defmodule Tau.Session do
 
     data = persist_event(data, "cancellation", %{cause: "user", reason: "awaiting_permission"})
 
-    # D-082 (#339 / SPEC-USER-TURN §6): drain steering queue back to user,
+    # D-082 / SPEC-USER-TURN §6: drain steering queue back to user,
     # consistent with the general :cancel handler. The :awaiting_permission
     # state is a "busy" state from the steering/follow-up queue perspective
     # (B2 from the critic: it is in the busy-state queueing guard). On cancel,
@@ -1802,7 +1802,7 @@ defmodule Tau.Session do
   end
 
   def handle_event(:cast, :cancel, _state, data) do
-    # ADR-0014 (#92): cascade to children first so each child's FSM gets
+    # ADR-0014: cascade to children first so each child's FSM gets
     # a chance to flush persistence and emit `%SessionEnd{reason: :user}`
     # on its own topic before this parent's tools/provider are torn down.
     # Casts are fire-and-forget; children live under
@@ -1818,7 +1818,7 @@ defmodule Tau.Session do
     # hatch for wedged providers.
     cancel_mechanism = cancel_provider_task(data)
 
-    # #33: with async_stream_nolink the dispatcher owns the tool tasks.
+    # With async_stream_nolink the dispatcher owns the tool tasks.
     # Brutal-killing it stops the iterator; in-flight tool processes under
     # Tau.Tools.TaskSupervisor finish on their own (no link to dispatcher)
     # and any late `:tool_done` messages drop into the catch-all clause.
@@ -1861,7 +1861,7 @@ defmodule Tau.Session do
         reason: Atom.to_string(cancel_mechanism)
       })
 
-    # D-082 (#339 / SPEC-USER-TURN §6): drain the steering queue back to the
+    # D-082 / SPEC-USER-TURN §6: drain the steering queue back to the
     # caller as a %QueueRestored{} event. A steering message was meant to
     # redirect the now-cancelled turn; auto-delivering it on the post-cancel
     # turn would surprise the user. The follow-up queue is kept (D-080) —
@@ -1887,16 +1887,16 @@ defmodule Tau.Session do
         tool_dispatcher: nil,
         assembler: nil,
         command_task: nil,
-        # ADR-0013 (#16): cancel ends the current turn — drop any
+        # ADR-0013: cancel ends the current turn — drop any
         # active skill alongside it.
         active_skill: nil,
         # D-027: reset per-turn tool-iteration counter on every
         # return to :awaiting_user, including cancellation.
         tool_iterations: 0,
-        # D-060 / #293: tool-loop brake state is per-turn; reset on cancel.
+        # D-060: tool-loop brake state is per-turn; reset on cancel.
         tool_loop_state: %{},
         tool_loop_call_lookups: %{},
-        # D-061 / #303: provider-retry counter is per-turn; reset on cancel.
+        # D-061: provider-retry counter is per-turn; reset on cancel.
         provider_retry_state: %{count: 0},
         # SPEC-CODING-AGENT: dispatcher state is per-turn; reset on
         # cancel. Workspace is per-session — preserved.
@@ -1913,7 +1913,7 @@ defmodule Tau.Session do
         steering_queue: :queue.new()
     }
 
-    # D-080 (#339 / SPEC-USER-TURN §6): if the follow-up queue is non-empty,
+    # D-080 / SPEC-USER-TURN §6: if the follow-up queue is non-empty,
     # post a :drain_followups internal event so it fires on the transition to
     # :awaiting_user. Using :internal (not state_enter) avoids a module-wide
     # callback_mode change (critic S1).
@@ -1926,14 +1926,14 @@ defmodule Tau.Session do
   end
 
   def handle_event(:cast, :stop, _state, data) do
-    # ADR-0014 (#92): cascade `Tau.stop/1` to children before terminating.
+    # ADR-0014: cascade `Tau.stop/1` to children before terminating.
     # Each child runs its own `terminate/3` which broadcasts `%SessionEnd{}`
     # on the child's topic.
     cascade_to_children(data, :stop)
     {:stop, :normal, data}
   end
 
-  # #38: in-place provider/model/provider_ctx update. The change applies
+  # In-place provider/model/provider_ctx update. The change applies
   # to the next provider call — an in-flight :provider_streaming keeps
   # using the previous provider until it completes.
   # [C54-B4]: when opts[:model] is present and non-nil, route it through
@@ -1950,7 +1950,7 @@ defmodule Tau.Session do
       |> maybe_replace(:original_provider, opts[:provider])
       |> reconfigure_model(opts[:model])
       |> merge_provider_ctx(opts[:provider_ctx])
-      # SPEC-CODING-AGENT (#191): reconfigure may also adjust the
+      # SPEC-CODING-AGENT: reconfigure may also adjust the
       # coding-agent per-run ctx. Used by tests to thread a different
       # Replay fixture across turns; the production surface lets the
       # TUI swap inactivity-timeout / cancel-flag without restarting.
@@ -1988,7 +1988,7 @@ defmodule Tau.Session do
       result: result_msg
     })
 
-    # D-060 / #293: tool-loop brake. When the SAME `(tool_name,
+    # D-060: tool-loop brake. When the SAME `(tool_name,
     # args_hash, error_message)` triple is rejected
     # `tool_loop_brake_threshold` consecutive times within one turn,
     # abort the turn with `stop_reason: :tool_loop_aborted` and emit
@@ -2001,7 +2001,7 @@ defmodule Tau.Session do
 
       {:continue, data} ->
         if map_size(tools) == 0 do
-          # D-079 (#339 / SPEC-USER-TURN §6): steering drain point.
+          # D-079 / SPEC-USER-TURN §6: steering drain point.
           # Before re-entering :start_provider, check if any steering messages
           # were queued while this tool round was executing. If so, drain one
           # message (one-at-a-time mode, matching Pi's default) and append it
@@ -2615,7 +2615,7 @@ defmodule Tau.Session do
           |> append_message(msg)
           |> persist_event("user_message", message_to_data(msg))
 
-        # SPEC-CODING-AGENT (#191) / D-037: route to the coding-agent
+        # SPEC-CODING-AGENT / D-037: route to the coding-agent
         # dispatcher when one is configured; preserve the legacy
         # provider path otherwise. The byte-identity guarantee for
         # the no-coding-agent case lives here.
@@ -2632,7 +2632,7 @@ defmodule Tau.Session do
     data = data |> append_message(msg) |> persist_event("assistant_message", message_to_data(msg))
     broadcast(data.id, %Events.MessageEnd{session_id: data.id, message: msg})
 
-    # #40: feed Tau.Cost.Tracker (ADR-0010). The tracker subscribes to this
+    # Feed Tau.Cost.Tracker (ADR-0010). The tracker subscribes to this
     # event and folds the per-turn usage into ETS counters keyed by
     # {date, provider, model, session_id}.
     :telemetry.execute(
@@ -2695,7 +2695,7 @@ defmodule Tau.Session do
             tool_iterations: 0,
             tool_loop_state: %{},
             tool_loop_call_lookups: %{},
-            # D-061 / #303: provider-retry counter is per-turn; reset.
+            # D-061: provider-retry counter is per-turn; reset.
             provider_retry_state: %{count: 0}
         }
 
@@ -2724,7 +2724,7 @@ defmodule Tau.Session do
         # that asked for the call.
         data = %{data | provider: data.original_provider, fallback_chain_remaining: []}
 
-        # ADR-0013 (#16): skill activation is per-turn by default. The
+        # ADR-0013: skill activation is per-turn by default. The
         # skill's lifetime ends when the model decides the task is complete
         # (`:end_turn`). Tool-call turns keep the active skill so subsequent
         # dispatch is still gated; only `:end_turn` clears it.
@@ -2750,12 +2750,12 @@ defmodule Tau.Session do
             # allocates a fresh one. Same applies to ADR-0012's stream_ref.
             # D-005: reset the per-turn tool-iteration counter on clean
             # return to :awaiting_user.
-            # D-060 / #293: tool-loop brake state cleared alongside the
+            # D-060: tool-loop brake state cleared alongside the
             # iteration counter — a fresh turn starts with no history.
-            # D-061 / #303: provider-retry counter reset on successful
+            # D-061: provider-retry counter reset on successful
             # Done — a fresh turn starts with the full retry budget.
             #
-            # D-079 / FIX-4 (#339): steering messages that survived a pure-text
+            # D-079 / FIX-4: steering messages that survived a pure-text
             # turn (no tool round occurred so drain_steering_queue_one was never
             # called) MUST NOT carry over into the next unrelated turn. Merge any
             # remaining steering_queue entries into the front of followup_queue so
@@ -2793,7 +2793,7 @@ defmodule Tau.Session do
                 steering_queue: cleared_steering
             }
 
-            # D-080 (#339 / SPEC-USER-TURN §6): drain follow-up queue on
+            # D-080 / SPEC-USER-TURN §6: drain follow-up queue on
             # turn-completion :awaiting_user transition (normal end).
             # The merged steering messages (if any) will drain first.
             actions =
@@ -2848,7 +2848,7 @@ defmodule Tau.Session do
                   tool_iterations: 0,
                   tool_loop_state: %{},
                   tool_loop_call_lookups: %{},
-                  # D-061 / #303: provider-retry counter is per-turn; reset
+                  # D-061: provider-retry counter is per-turn; reset
                   # on iteration-cap abort alongside the brake state.
                   provider_retry_state: %{count: 0}
               }
@@ -2958,7 +2958,7 @@ defmodule Tau.Session do
   defp dispatch_tools(tool_calls, data) do
     parent = self()
 
-    # D-060 / #293: build per-turn lookup table mapping call_id ->
+    # D-060: build per-turn lookup table mapping call_id ->
     # `{tool_name, args_hash}` for every dispatched call. The
     # `{:tool_done, ...}` handler consults this to key the brake
     # counter on `(tool_name, args_hash)` without re-scanning the
@@ -2970,7 +2970,7 @@ defmodule Tau.Session do
         {id, {name, tool_args_hash(args)}}
       end)
 
-    # #17: intercept synthetic `__activate_skill__` tool calls *before*
+    # Intercept synthetic `__activate_skill__` tool calls *before*
     # permissions / hooks. Activation is FSM-internal — it never reaches
     # the executor pool. The handler updates `data.active_skill` and
     # synthesises a tool_result so the model's next turn sees an
@@ -2981,7 +2981,7 @@ defmodule Tau.Session do
 
     {data, activated_in_flight} = handle_skill_activations(activation_calls, data, parent)
 
-    # #91: spawn-time tools_whitelist filter. Runs *before* the permissions
+    # Spawn-time tools_whitelist filter. Runs *before* the permissions
     # evaluator so the evaluator stays a pure permission-rule decision.
     # Calls outside the list synthesise an `is_error: true` ToolResult the
     # same way deny rules do; the filter is a no-op when `:all`.
@@ -3159,15 +3159,15 @@ defmodule Tau.Session do
            stream_ref: nil,
            # C76 (SPEC-OTEL-REPORTER): clear span discriminator.
            provider_span_ref: nil,
-           # D-060 / #293: merge this round's lookups.
+           # D-060: merge this round's lookups.
            tool_loop_call_lookups: Map.merge(data.tool_loop_call_lookups, call_lookups)
        }}
     else
       # Non-permission path: run hooks on :allow calls and dispatch immediately.
 
       # Run :pre_tool_use synchronously per call. Hook-vetoed calls synthesise
-      # a tool_result on the spot; survivors form the parallel batch handed to
-      # the dispatcher (#33).
+      # a tool_result on the spot; survivors form the parallel batch handed
+      # to the dispatcher.
       {_hook_denied, parallel_calls} =
         Enum.reduce(allowed, {[], []}, fn %{id: id, name: name, arguments: args}, {denied, kept} ->
           case Tau.Hooks.Dispatcher.run(
@@ -3210,7 +3210,7 @@ defmodule Tau.Session do
 
       parallel_calls = Enum.reverse(parallel_calls)
 
-      # D-060 / #293: refresh lookups for hook-rewritten args so the
+      # D-060: refresh lookups for hook-rewritten args so the
       # recorded hash matches what the tool executed against.
       call_lookups =
         Enum.reduce(parallel_calls, call_lookups, fn {id, name, args}, acc ->
@@ -3246,7 +3246,7 @@ defmodule Tau.Session do
            # finalize_assistant/2 before dispatch_tools/2 is called. Clear the
            # ref so it doesn't linger stale across the tool-execution phase.
            provider_span_ref: nil,
-           # D-060 / #293: merge this round's lookups with any carried from
+           # D-060: merge this round's lookups with any carried from
            # earlier rounds in the same turn. The `:tool_done` handler
            # removes its own entry after consuming it.
            tool_loop_call_lookups: Map.merge(data.tool_loop_call_lookups, call_lookups)
@@ -3254,7 +3254,7 @@ defmodule Tau.Session do
     end
   end
 
-  # #33: single iterator over the parallel batch via
+  # Single iterator over the parallel batch via
   # Task.Supervisor.async_stream_nolink/4. One process per turn drives the
   # stream; per-tool tasks run concurrently under Tau.Tools.TaskSupervisor.
   # Crash isolation: an exiting tool task surfaces as `{:exit, reason}` from
@@ -3323,7 +3323,7 @@ defmodule Tau.Session do
     pid
   end
 
-  # #91: split tool calls into {filtered_out, kept} based on the session's
+  # Split tool calls into {filtered_out, kept} based on the session's
   # spawn-time `:tools_whitelist`. `:all` is the no-op identity (everything
   # in `kept`); a list keeps only calls whose `name` is in the list. Stays
   # ordering-preserving so downstream `Enum.into/2` and synthesis preserve
@@ -3442,7 +3442,7 @@ defmodule Tau.Session do
 
     parallel_calls = Enum.reverse(parallel_calls)
 
-    # D-060 / #293: update lookups for hook-rewritten args.
+    # D-060: update lookups for hook-rewritten args.
     call_lookups =
       Enum.reduce(parallel_calls, data.tool_loop_call_lookups, fn {id, name, args}, acc ->
         Map.put(acc, id, {name, tool_args_hash(args)})
@@ -3488,12 +3488,12 @@ defmodule Tau.Session do
     end
   end
 
-  # ADR-0013 / #16: format the synthetic ToolResult content for a
-  # permissions :deny. When an active skill is in effect AND the tool is
-  # not on its allowed_tools list, the denial is attributed to the skill;
-  # otherwise the failure originated from a rule-set deny rule.
-  # D-060 / #293: tool-loop brake helpers. Co-located with dispatch
-  # logic so the brake's mechanics live next to the iteration cap.
+  # ADR-0013: format the synthetic ToolResult content for a permissions
+  # :deny. When an active skill is in effect AND the tool is not on its
+  # allowed_tools list, the denial is attributed to the skill; otherwise
+  # the failure originated from a rule-set deny rule.
+  # D-060: tool-loop brake helpers. Co-located with dispatch logic so
+  # the brake's mechanics live next to the iteration cap.
   defp tool_args_hash(args) do
     # Canonical-form hash: encode the argument map with `Jason.encode!`
     # after sorting keys recursively so semantically-equal maps with
@@ -3607,7 +3607,7 @@ defmodule Tau.Session do
         tool_iterations: 0,
         tool_loop_state: %{},
         tool_loop_call_lookups: %{},
-        # D-061 / #303: provider-retry counter is per-turn; reset on
+        # D-061: provider-retry counter is per-turn; reset on
         # brake-abort alongside the brake state.
         provider_retry_state: %{count: 0}
     }
@@ -3786,7 +3786,7 @@ defmodule Tau.Session do
     end
   end
 
-  # #38 helpers — in-place data updates for {:reconfigure, opts}.
+  # Helpers — in-place data updates for {:reconfigure, opts}.
   defp maybe_replace(data, _key, nil), do: data
   defp maybe_replace(data, key, value), do: Map.put(data, key, value)
 
@@ -3897,7 +3897,7 @@ defmodule Tau.Session do
 
   defp describe_provider_error(other), do: inspect(other)
 
-  # ADR-0014 (#92): walk the child set and cast the chosen lifecycle
+  # ADR-0014: walk the child set and cast the chosen lifecycle
   # operation. Both `Tau.cancel/1` and `Tau.stop/1` are :ok-or-:ok casts
   # against a registry lookup — a child id that's already gone is a
   # silent no-op (this is exactly the case we want when a child finished
@@ -4567,13 +4567,13 @@ defmodule Tau.Session do
   end
 
   defp transcript_path(%{persistence: p, id: id, cwd: cwd}) do
-    # path_for/2 is a required Tau.Persistence callback (#61). Backends
+    # path_for/2 is a required Tau.Persistence callback. Backends
     # without an on-disk file return a pseudo-URI; the field on the
     # hook payload is always a non-nil binary.
     p.path_for(id, cwd)
   end
 
-  # --- Skill activation (issue #17) -----------------------------------------
+  # --- Skill activation -----------------------------------------------------
   #
   # Mechanism A (ADR-0013): the model activates a discovered skill by
   # emitting a tool_call to the synthetic `__activate_skill__` tool. The
@@ -4741,7 +4741,7 @@ defmodule Tau.Session do
 
   defp skill_name_from_args(_), do: nil
 
-  # Issue #95: user-initiated slash-command skill activation.
+  # User-initiated slash-command skill activation.
   #
   # Called when `classify_slash_command/2` matches the slash-command name
   # against `data.skills`. Sets `data.active_skill`, persists a JSONL
@@ -5071,7 +5071,7 @@ defmodule Tau.Session do
   # block as the JSONL "summary" field so events_to_messages/1's
   # "compaction" clause can reconstruct the synthetic message verbatim
   # on Tau.fork/2 / Tau.resume/1. The compactor returns just the inner
-  # text via the new tri-tuple contract (#57); we wrap it here.
+  # text via the tri-tuple contract; we wrap it here.
 
   defp format_summary_for_persist(nil), do: nil
 
@@ -5113,7 +5113,7 @@ defmodule Tau.Session do
   # Precedence (outermost wins):
   #   builtin > extension > file-command > skill > template > verbatim
   #
-  # [C94-B4] / D-076 / #183: prompt-template branch sits last before the
+  # D-076: prompt-template branch sits last before the
   # verbatim fall-through, so skills and built-ins can shadow same-named
   # templates.  On a template match the body is rendered (variable
   # substitution) and the result is returned as {:sync, rewritten_msg} —
@@ -5255,7 +5255,7 @@ defmodule Tau.Session do
           | content: "(slash command timed out after #{ms}ms)\n\n" <> msg.content
         }
 
-      # #15: spec-parse failure surfaced from prepare_command_args/2.
+      # Spec-parse failure surfaced from prepare_command_args/2.
       {:error, reason} ->
         %Tau.Message.User{
           msg
@@ -5269,9 +5269,9 @@ defmodule Tau.Session do
     end
   end
 
-  # #15: if the command module declares a `parameters/0` spec, tokenise
-  # the tail string and bind it before invoking `execute/2`. Otherwise
-  # pass the raw tail (backwards-compatible).
+  # If the command module declares a `parameters/0` spec, tokenise the
+  # tail string and bind it before invoking `execute/2`. Otherwise pass
+  # the raw tail.
   defp prepare_command_args(mod, args) when is_binary(args) do
     if function_exported?(mod, :parameters, 0) do
       Tau.Command.Spec.parse(mod.parameters(), args)
@@ -5410,7 +5410,7 @@ defmodule Tau.Session do
     )
   end
 
-  # D-079 (#339 / SPEC-USER-TURN §6): steering drain helper.
+  # D-079 / SPEC-USER-TURN §6: steering drain helper.
   # Called at the tool-round boundary (map_size(tools) == 0) before re-entering
   # :start_provider. Dequeues one message from the steering queue (one-at-a-time
   # mode, Pi's default), appends it to data.messages, persists it, and emits

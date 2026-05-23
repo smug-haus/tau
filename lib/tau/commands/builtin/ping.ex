@@ -2,9 +2,8 @@ defmodule Tau.Commands.Builtin.Ping do
   @moduledoc """
   Built-in `/ping` command.
 
-  Responds with `"pong"` via a `{:notice, ...}` outcome.  Primary
-  purpose: seed entry for the built-in registry so dispatch is testable
-  before real commands land (PRs 1–3 of #178).
+  Responds with `"pong"` via a `{:notice, ...}` outcome. Primary
+  purpose: seed entry for the built-in registry so dispatch is testable.
   """
 
   @behaviour Tau.Commands.Builtin

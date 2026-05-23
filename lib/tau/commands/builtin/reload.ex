@@ -14,7 +14,7 @@ defmodule Tau.Commands.Builtin.Reload do
      list, matching the merge/dedup/sort logic in `Session.load_skills/1`.
   2. Replaces `data.skills` with the refreshed list.
   3. Calls `Tau.PromptTemplates.discover(data.cwd)` to rebuild the prompt
-     template list (AC-7 / #183) and replaces `data.prompt_templates`.
+     template list (AC-7) and replaces `data.prompt_templates`.
 
   **IO note:** `Skills.Loader.discover/1` and `PromptTemplates.discover/1`
   perform a bounded local-disk scan.  This IO runs inline on the session

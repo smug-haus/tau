@@ -22,8 +22,7 @@ defmodule Tau.Settings.Vault do
       via `/usr/bin/security`.
     * `Tau.Settings.Vault.Keychain.Linux` — freedesktop libsecret
       via `secret-tool`.
-    * `Tau.Settings.Vault.Keychain.Windows` — DPAPI (stubbed,
-      tracked as a follow-up — see issue #66).
+    * `Tau.Settings.Vault.Keychain.Windows` — DPAPI (stubbed).
 
   ## Configuration
 

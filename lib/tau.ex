@@ -88,7 +88,7 @@ defmodule Tau do
   Send a user message to a running session. Returns immediately;
   consumers should subscribe via `stream/2` to receive the response.
 
-  Messages sent via `Tau.send/2` default to the `:followup` tier (D-078 / #339):
+  Messages sent via `Tau.send/2` default to the `:followup` tier (D-078):
   they are delivered after the current turn completes. Use `Tau.steer/2` to
   enqueue a steering message delivered at the next tool-round boundary instead.
   """
@@ -200,7 +200,7 @@ defmodule Tau do
 
   @doc """
   Register `child_id` as a child of `parent_id` so that `Tau.cancel/1`
-  and `Tau.stop/1` on the parent cascade to it (ADR-0014, issue #92).
+  and `Tau.stop/1` on the parent cascade to it (ADR-0014).
 
   Used by the `Agent` tool: after `Tau.start_session/1` returns for a
   sub-agent, the spawn task casts `{:register_child, child_id}` to its

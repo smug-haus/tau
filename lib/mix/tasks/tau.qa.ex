@@ -172,8 +172,8 @@ defmodule Mix.Tasks.Tau.Qa do
     # known load-race flakes (Tau.BurritoSteps.RelinkSqliteNifTest module-load
     # vs parallel compile; Tau.CodingAgent.DispatcherTest inactivity timing)
     # that fail intermittently on parallel runs but pass deterministically
-    # serialised. Tracked in #283; until fixed, serialised + seed-0 is the
-    # operational choice. Runtime impact: ~60s → ~80s, acceptable.
+    # serialised. Serialised + seed-0 is the operational choice; runtime
+    # impact ~60s → ~80s is acceptable.
     #
     # `mix credo --strict` is INTENTIONALLY OMITTED from this blocking gate:
     # the codebase has ~130 pre-existing strict-mode findings (refactor /
@@ -181,8 +181,8 @@ defmodule Mix.Tasks.Tau.Qa do
     # gate would block every PR on style debt unrelated to the change. The
     # existing CI `lint` job runs credo with `continue-on-error` so the
     # findings are recorded but not blocking; mirrored here by inclusion in
-    # the `informational` set below. Tracked in #285 — when the codebase is
-    # credo-clean (or a baseline mechanism is in place), promote it back.
+    # the `informational` set below. When the codebase is credo-clean
+    # (or a baseline mechanism is in place), promote it back.
     steps = [
       {"mix compile --warnings-as-errors", ["compile", "--warnings-as-errors"]},
       {"mix test --seed 0 --max-cases 1", ["test", "--seed", "0", "--max-cases", "1"]},

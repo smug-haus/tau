@@ -3,7 +3,7 @@ defmodule Tau.Tools.Builtin.Agent do
   Spawn a sub-agent — an isolated child `Tau.Session` — and await its
   result.
 
-  This is the v1.0 sub-agents centerpiece (ADR-0014, ADR-0015, issue #32).
+  This is the v1.0 sub-agents centerpiece (ADR-0014, ADR-0015).
   The model emits an `Agent` tool call with a brief; this tool stands up
   a child session under `Tau.Sessions.Supervisor`, sends the brief, and
   returns the child's first `:end_turn` assistant text as the parent's
@@ -62,7 +62,6 @@ defmodule Tau.Tools.Builtin.Agent do
     * `docs/adr/0014-subagents-are-sessions.md`
     * `docs/adr/0015-subagent-persona-is-a-skill.md`
     * `Tau.Permissions.Mode` — the clamp helper.
-    * Issue #32 — the spec body.
   """
 
   @behaviour Tau.Tool
@@ -424,15 +423,15 @@ defmodule Tau.Tools.Builtin.Agent do
 
   # --- Awaiting the child's :end_turn / :stop ------------------------------
   #
-  # #315: provider adapters (Anthropic, OpenAI, Bedrock, Gemini, etc.) normalise
+  # Provider adapters (Anthropic, OpenAI, Bedrock, Gemini, etc.) normalise
   # the model's `"end_turn"` to `:stop` via their `normalise_stop/1`. Children
   # driven by a real provider therefore end with `stop_reason: :stop`, not the
   # literal `:end_turn` atom. We accept both — plus `:length` (max_tokens) and
   # `:stop_sequence` which are also natural-end terminals where the model is
   # done producing output. Failure stop_reasons are enumerated explicitly so
   # the union shrinks predictably: any unknown stop_reason continues waiting
-  # for the next MessageEnd (matches Tau.CLI.drain_run_loop's D-058 / #252 f-1
-  # inversion: enumerate failures, treat everything else as natural end).
+  # for the next MessageEnd (matches Tau.CLI.drain_run_loop's D-058: enumerate
+  # failures, treat everything else as natural end).
 
   @subagent_natural_end [:stop, :end_turn, :length, :stop_sequence]
   @subagent_failure_end [:error, :aborted, :tool_loop_aborted, :compaction_failed]

@@ -22,7 +22,7 @@ defmodule Tau.TUI do
     * `Enter`  — submit input
     * `ESC`    — cancel in-flight work (`Tau.cancel/1`)
     * `Ctrl-C` — quit (with confirmation)
-    * `Ctrl-R` — open session picker (TODO — #343)
+    * `Ctrl-R` — open session picker (TODO)
     * `/`      — slash-command completion
 
   Ratatouille is an optional dep. When it isn't loaded (prod / minimal

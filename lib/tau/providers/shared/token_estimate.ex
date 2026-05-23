@@ -3,9 +3,9 @@ defmodule Tau.Providers.Shared.TokenEstimate do
   Cheap pre-flight token estimate shared across providers.
 
   Used by the rate limiter (ADR-0011) to take a TPM permit before the
-  HTTP send — we don't have a real tokenizer integrated yet, and pulling
-  one in (tiktoken, gpt-tokenizer) is a dependency decision that #39
-  intentionally defers. The heuristic is `byte_size(text) / 4` summed
+  HTTP send. There is no real tokenizer integrated yet; pulling one in
+  (tiktoken, gpt-tokenizer) is a deferred dependency decision. The
+  heuristic is `byte_size(text) / 4` summed
   over every string-shaped piece of every message, which is within
   ~30% of real for English prose and is fine for budget gating where
   the upstream API has the final say (and we react to its 429s).

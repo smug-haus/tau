@@ -48,8 +48,8 @@ defmodule Tau.PromptTemplates do
 
   A template named identically to a built-in or skill is shadowed.  This
   preserves the security property that unprivileged text files cannot mask
-  permission-scoped personas.  The divergence from Pi's order (`commands >
-  templates > skills`) is intentional; see issue #183 for rationale.
+  permission-scoped personas. The divergence from Pi's order (`commands >
+  templates > skills`) is intentional.
   """
 
   require Logger

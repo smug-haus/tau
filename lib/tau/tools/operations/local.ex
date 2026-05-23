@@ -17,12 +17,11 @@ defmodule Tau.Tools.Operations.Local do
   become orphans reparented to PID 1.
 
   An earlier prototype used `:erlexec` to send `SIGTERM` to the whole
-  process group via `setpgid` + `kill(-pgid)`. That dep was dropped
-  during the M0–M8 cleanup to keep CI portable; restoring it is tracked
-  in issue #12. Until then, callers should not assume `cancel/1` is
-  sufficient for resource cleanup of long-running shell scripts on
-  Linux/macOS — wrap user commands in a parent that propagates signals
-  (`exec` chaining, `setsid`, or `trap`) if it matters for the use case.
+  process group via `setpgid` + `kill(-pgid)`. That dep was dropped to
+  keep CI portable. Callers should not assume `cancel/1` is sufficient
+  for resource cleanup of long-running shell scripts on Linux/macOS —
+  wrap user commands in a parent that propagates signals (`exec`
+  chaining, `setsid`, or `trap`) if it matters for the use case.
   Windows has no equivalent of process groups regardless.
   """
 
