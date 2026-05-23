@@ -142,7 +142,6 @@ defmodule Tau.Providers.Anthropic do
                  started?: false,
                  model: nil,
                  provider: __MODULE__,
-                 # ADR-0017: cooperative cancellation flag.
                  cancel_flag: ctx[:cancel_flag]
                }
              )}

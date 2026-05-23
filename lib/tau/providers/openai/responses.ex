@@ -61,7 +61,6 @@ defmodule Tau.Providers.OpenAI.Responses do
                  model: nil,
                  started?: false,
                  provider: __MODULE__,
-                 # ADR-0017: cooperative cancellation flag.
                  cancel_flag: ctx[:cancel_flag]
                }
              )}

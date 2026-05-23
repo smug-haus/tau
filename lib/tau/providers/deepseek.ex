@@ -85,7 +85,6 @@ defmodule Tau.Providers.DeepSeek do
                  tool_calls: %{},
                  model: nil,
                  provider: __MODULE__,
-                 # ADR-0017: cooperative cancellation flag.
                  cancel_flag: ctx[:cancel_flag]
                }
              )}
