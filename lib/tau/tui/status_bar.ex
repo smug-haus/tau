@@ -65,7 +65,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       token_seg = cost_summary(usage_from(model))
       ctx_seg = context_segment(model)
       compaction_seg = compaction_segment(model)
-      # D-171 (#341 PR-B / SPEC-PERMISSION-PROMPTS §7 AC-B5): always-visible
+      # D-171 / SPEC-PERMISSION-PROMPTS §7 AC-B5: always-visible
       # permissions-mode indicator. Shows the active mode (default/accept_edits/plan).
       mode_seg = permissions_mode_segment(model)
       hint_seg = hint_segment(model)
@@ -235,8 +235,8 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     defp compaction_segment(%{compaction: :running}), do: "compacting…"
     defp compaction_segment(_), do: ""
 
-    # D-171 (#341 PR-B / SPEC-PERMISSION-PROMPTS §7 AC-B5):
-    # Always-visible permissions mode indicator. Renders "mode: <mode>".
+    # D-171 / SPEC-PERMISSION-PROMPTS §7 AC-B5: always-visible
+    # permissions mode indicator. Renders "mode: <mode>".
     defp permissions_mode_segment(%{permissions_mode: mode}) when is_atom(mode) do
       "mode: " <> to_string(mode)
     end

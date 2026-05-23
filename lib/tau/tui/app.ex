@@ -86,15 +86,15 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
       %{
         session_id: session_id,
-        # #338: editor replaces the bare `input` string field.
+        # Editor replaces the bare `input` string field.
         editor: Editor.new(),
-        # #338: per-cwd history, pre-loaded from Store.
+        # Per-cwd history, pre-loaded from Store.
         history: history,
-        # #338: transient Ctrl+R reverse-search sub-state (D-147).
+        # Transient Ctrl+R reverse-search sub-state (D-147).
         # nil = normal mode; map = search mode with :query, :pre_search_editor,
         # and :search_index for cycling through matches.
         search: nil,
-        # #338: remember data_dir and cwd for Store.append on submit.
+        # Remember data_dir and cwd for Store.append on submit.
         history_data_dir: data_dir,
         history_cwd: cwd,
         transcript: [],
@@ -114,14 +114,14 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         # SPEC-TUI-COMPLETION §4 B2 (D-102): MVU menu sub-state.
         # nil = closed; non-nil = open with query/entries/selected.
         menu: nil,
-        # D-170 (#341 PR-B / SPEC-PERMISSION-PROMPTS §7): permission approval dialog.
+        # D-170 / SPEC-PERMISSION-PROMPTS §7: permission approval dialog.
         # Queue of %PermissionRequest{} structs pending user decision.
         # The dialog renders the head request as a modal; y/n resolve it.
         pending_permissions: [],
-        # D-171 (#341 PR-B): active permissions mode — :default | :accept_edits | :plan.
+        # D-171: active permissions mode — :default | :accept_edits | :plan.
         # Seeded from RuntimeOpts at init; changed via /perms <mode> command.
         permissions_mode: Map.get(runtime_opts, :permissions_mode, :default),
-        # D-160..D-169 (#340 / SPEC-TUI-HEADLESS §5d): status surface fields.
+        # D-160..D-169 / SPEC-TUI-HEADLESS §5d: status surface fields.
         # AC-1: seed provider and model at init so the status bar shows the
         # active model on the FIRST rendered frame (not only after the first
         # SessionStart tick drain). Fall back to Tau.Provider.default/0 and
@@ -233,21 +233,21 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     # D-160, D-103, D-170, D-082, D-150..D-154 all live here.
     defp update_session_event(model, event) do
       case event do
-        # D-160 (#340 / SPEC-TUI-HEADLESS §5d): seed model/provider/context_window
+        # D-160 / SPEC-TUI-HEADLESS §5d: seed model/provider/context_window
         # from SessionStart. context_window resolved via optional callback.
         %Tau.Session.Events.SessionStart{model: m, provider: p} = e ->
           on_session_start_status(model, e, m, p)
 
-        # D-160 (#340): ModelSwapped — update model segment in the status bar.
+        # D-160: ModelSwapped — update model segment in the status bar.
         # Do NOT string-scrape the accompanying SystemNotice (D-160 rationale).
         %Tau.Session.Events.ModelSwapped{} = e ->
           on_model_swapped(model, e)
 
-        # D-163 (#340): CompactionStarted — transition compaction to :running.
+        # D-163: CompactionStarted — transition compaction to :running.
         %Tau.Session.Events.CompactionStarted{} ->
           on_compaction_started(model)
 
-        # D-164 (#340): CompactionFinished — clear compaction indicator regardless
+        # D-164: CompactionFinished — clear compaction indicator regardless
         # of outcome (S-2: MUST fire on every :compacting exit, incl. abort/error).
         %Tau.Session.Events.CompactionFinished{} ->
           on_compaction_finished(model)
@@ -260,20 +260,20 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
           |> Map.put(:catalog, entries)
           |> update_menu()
 
-        # D-170 (#341 PR-B / SPEC-PERMISSION-PROMPTS §7 AC-B1, AC-B8):
+        # D-170 / SPEC-PERMISSION-PROMPTS §7 AC-B1, AC-B8:
         # Push a PermissionRequest onto the pending_permissions queue.
         # The dialog renders the head; resolving it pops the head (AC-B2/B3).
         # Pure MVU state — no new process (OTP non-negotiables #3/#8).
         %Tau.Session.Events.PermissionRequest{} = req ->
           on_permission_request(model, req)
 
-        # D-082 (#339 / SPEC-USER-TURN §6): restore queued steering messages to
+        # D-082 / SPEC-USER-TURN §6: restore queued steering messages to
         # the input editor when a cancel is issued mid-turn. The FSM drains the
         # steering queue back to the user via this event. The TUI repopulates the
         # editor with the first queued message (joining multiple with "\n" as a
-        # best-effort single-line representation; the #338 multi-line editor
-        # handles multi-line content natively). Idempotent: re-delivery of the
-        # same event replaces the editor with the same content.
+        # best-effort single-line representation; the multi-line editor handles
+        # multi-line content natively). Idempotent: re-delivery of the same
+        # event replaces the editor with the same content.
         %Tau.Session.Events.QueueRestored{messages: msgs} when msgs != [] ->
           on_queue_restored(model, msgs)
 
@@ -318,7 +318,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     # match the `%{key: key}` clause and are silently dropped in
     # handle_readline_key's catch-all, breaking typed character input (AC-H2).
     #
-    # D-172 (#341 PR-B / SPEC-PERMISSION-PROMPTS §7 AC-B4): when the permission
+    # D-172 / SPEC-PERMISSION-PROMPTS §7 AC-B4: when the permission
     # dialog is open (pending_permissions non-empty), ALL input is captured by
     # the dialog. Only y/n resolve the head; every other keystroke is swallowed.
     # This check MUST precede the normal event routing (load-bearing clause order).
@@ -374,7 +374,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         13 when model.search != nil ->
           search_accept(model)
 
-        # D-077 (#339 / AC-2): Enter while busy enqueues a steering message delivered
+        # D-077 / AC-2: Enter while busy enqueues a steering message delivered
         # at the next tool-round boundary (before the next provider call). The input
         # is cleared and the queued text is shown in the transcript for feedback.
         13 when model.status in [:streaming, :sending] or is_binary(model.status) ->
@@ -396,7 +396,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         27 when model.search != nil ->
           search_cancel(model)
 
-        # D-078 (#339 / AC-6): Esc while idle → clear the input editor, never quit.
+        # D-078 / AC-6: Esc while idle → clear the input editor, never quit.
         # Quit stays Ctrl+C (unconditional, registered in start_runtime_supervisor/0).
         # Context-aware: busy → cancel (existing ADR-0017 path); idle → clear input.
         27 when model.status == :idle ->
@@ -540,7 +540,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     defp handle_alt(model, ?f, _key),
       do: %{model | editor: Editor.move_word_right(model.editor), search: nil}
 
-    # D-078 (#339 / AC-3): Alt+Enter — enqueue a follow-up message delivered
+    # D-078 / AC-3: Alt+Enter — enqueue a follow-up message delivered
     # after the whole turn completes. Termbox delivers Alt+Enter as mod != 0,
     # ch = 0, key = 13 (Return). Distinguish from other alt-chords with ch=0
     # (e.g. Alt+arrow: ch=0, key=65_514) by also checking the key field.
@@ -620,7 +620,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
           end
         end
 
-        # D-172 (#341 PR-B / SPEC-PERMISSION-PROMPTS §7 AC-B1): render the
+        # D-172 / SPEC-PERMISSION-PROMPTS §7 AC-B1: render the
         # permission approval dialog when the queue is non-empty. Renders as
         # an inline panel below the transcript (Ratatouille has no overlay
         # primitive). Captures all input while open (AC-B4).
@@ -664,7 +664,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       end
     end
 
-    # D-172 (#341 PR-B / SPEC-PERMISSION-PROMPTS §7 AC-B1):
+    # D-172 / SPEC-PERMISSION-PROMPTS §7 AC-B1:
     # Render the permission approval dialog for the head of the queue.
     # Shows tool name, one-line argument summary, decision_reason, and options.
     defp render_permission_dialog(%{pending_permissions: [req | _]}) do
@@ -772,7 +772,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
     # --- Helpers --------------------------------------------------------
 
-    # D-162 (#340 / SPEC-TUI-HEADLESS §5d): delegate to the pure StatusBar module.
+    # D-162 / SPEC-TUI-HEADLESS §5d: delegate to the pure StatusBar module.
     # The coding-agent segment is included when model.coding_agent is set, as before
     # (AC-9 regression: SPEC-CODING-AGENT §4 B1 must still render).
     defp status_bar(model) do
@@ -783,7 +783,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     # session_id, session status, and coding-agent info that StatusBar needs.
     # D-162 (AC-H1): session_id MUST be passed so render_text/1 can emit
     # "session: <id>" as the first segment (smoke-gate ~r/session:/ assertion).
-    # D-171 (#341 PR-B): permissions_mode passed to StatusBar for the mode indicator.
+    # D-171: permissions_mode passed to StatusBar for the mode indicator.
     defp status_bar_model(model) do
       base = %{
         session_id: Map.get(model, :session_id),
@@ -1059,7 +1059,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     # D-106: MUST NOT submit the turn.
     defp menu_accept(%{menu: nil} = model), do: model
 
-    # D-173 (#341 PR-B): when the menu is open but has no entries (e.g. user
+    # D-173: when the menu is open but has no entries (e.g. user
     # typed a complete command not in the autocomplete set like /perms), Enter
     # closes the menu and submits — the command is unambiguous and unambiguous
     # submission is the expected UX (no matches = no autocomplete needed).
@@ -1105,7 +1105,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       if Editor.empty?(model.editor) do
         model
       else
-        # D-173 (#341 PR-B / SPEC-PERMISSION-PROMPTS §7 AC-B6):
+        # D-173 / SPEC-PERMISSION-PROMPTS §7 AC-B6:
         # Intercept /perms <mode> in the TUI layer before sending to the session.
         # The mode is changed locally in the model; if a session is running,
         # set_permissions_mode/2 is called asynchronously (D-096: busy when not
@@ -1131,7 +1131,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       end
     end
 
-    # D-173 (#341 PR-B / SPEC-PERMISSION-PROMPTS §7 AC-B6/AC-B7):
+    # D-173 / SPEC-PERMISSION-PROMPTS §7 AC-B6/AC-B7:
     # Handle the /perms <mode> slash command in the TUI layer.
     # mode ∈ {:default, :accept_edits, :plan}.
     # AC-B7: while :streaming/:sending the mode does not change (FSM rejects).
@@ -1181,7 +1181,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       %{model | status: :idle}
     end
 
-    # D-077 (#339 / AC-2): steer — enqueue the current editor text as a steering
+    # D-077 / AC-2: steer — enqueue the current editor text as a steering
     # message (delivered at the next tool-round boundary, before the next provider
     # call). Only enqueues when the editor is non-empty. Clears the editor and
     # appends a "[queued steer]" notice to the transcript for user feedback.
@@ -1202,7 +1202,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       end
     end
 
-    # D-078 (#339 / AC-3): followup — enqueue the current editor text as a
+    # D-078 / AC-3: followup — enqueue the current editor text as a
     # follow-up message (delivered after the whole turn completes). Clears the
     # editor and appends a "[queued follow-up]" notice to the transcript.
     # Also used for Alt+Enter while idle (falls back to normal submit in that case).
@@ -1229,7 +1229,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       end
     end
 
-    # D-078 (#339 / AC-6): clear_input — clear the editor without quitting.
+    # D-078 / AC-6: clear_input — clear the editor without quitting.
     # Called on Esc while idle. Never quits (quit stays Ctrl+C).
     defp clear_input(model) do
       %{model | editor: Editor.new(), search: nil}
@@ -1288,14 +1288,14 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       end
     end
 
-    # D-170 (#341 PR-B / SPEC-PERMISSION-PROMPTS §7 AC-B1, AC-B8):
+    # D-170 / SPEC-PERMISSION-PROMPTS §7 AC-B1, AC-B8:
     # Enqueue a PermissionRequest. Pure MVU — no process (OTP non-negotiables #3/#8).
     defp on_permission_request(model, req) do
       queue = Map.get(model, :pending_permissions, [])
       Map.put(model, :pending_permissions, queue ++ [req])
     end
 
-    # D-082 (#339 / SPEC-USER-TURN §6): restore queued steering messages to the
+    # D-082 / SPEC-USER-TURN §6: restore queued steering messages to the
     # editor from a %QueueRestored{} event. Extracted from update/2 to keep
     # cyclomatic complexity within bounds.
     defp on_queue_restored(model, msgs) do
@@ -1370,7 +1370,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
           end
         end)
 
-      # D-169 (S-4 / #340): context_tokens is OVERWRITTEN with the latest turn's
+      # D-169 / S-4: context_tokens is OVERWRITTEN with the latest turn's
       # input_tokens (not cumulative). Pre-first-turn reads 0. This avoids the
       # >100% context-bar bug. Source: Tau.Cost.for_session/1 ETS table.
       session_counters = cost_for_session(model.session_id)
@@ -1451,7 +1451,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       }
     end
 
-    # D-160 (#340 / SPEC-TUI-HEADLESS §5d): seed model/provider fields from the
+    # D-160 / SPEC-TUI-HEADLESS §5d: seed model/provider fields from the
     # SessionStart event. The context_window is resolved once via the optional
     # context_window/1 callback; nil means use the fallback (~NN%).
     defp on_session_start_status(model, _e, m, p) do
@@ -1459,7 +1459,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       %{model | model: m, provider: p, context_window: context_window}
     end
 
-    # D-160 (#340): update the model segment when the user does /model <id>.
+    # D-160: update the model segment when the user does /model <id>.
     # Resolves the new context_window for the swapped model.
     defp on_model_swapped(model, %{to: new_model}) do
       provider = Map.get(model, :provider)
@@ -1484,10 +1484,10 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
     defp resolve_context_window(_provider, _model_id), do: nil
 
-    # D-163 (#340): CompactionStarted — transition to :running.
+    # D-163: CompactionStarted — transition to :running.
     defp on_compaction_started(model), do: %{model | compaction: :running}
 
-    # D-164 (#340 / S-2): CompactionFinished — clear to :idle regardless of outcome.
+    # D-164 / S-2: CompactionFinished — clear to :idle regardless of outcome.
     # This MUST fire on every exit from the :compacting FSM state, including abort/error,
     # so the "compacting…" indicator never sticks in the status bar.
     defp on_compaction_finished(model), do: %{model | compaction: :idle}

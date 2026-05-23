@@ -9,9 +9,9 @@ defmodule Tau.TUI.Render.Width do
   - Everything else: 1 column.
 
   This module is the single source of truth for display-width measurement
-  in the TUI rendering pipeline. It replaces the `String.length/1` call in
-  `Tau.TUI.App.wrap/2` which incorrectly counts codepoints rather than
-  display columns, causing #334 (crash) and #190 (UTF-8 corruption).
+  in the TUI rendering pipeline. `String.length/1` counts codepoints, not
+  display columns — wide CJK or zero-width graphemes crash or corrupt
+  wrapping in the surrounding terminal.
 
   Pure module — no process, no state.
   """

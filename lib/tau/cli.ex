@@ -29,7 +29,7 @@ defmodule Tau.CLI do
   `tau run` drives a full `Tau.Session` FSM: tools (including `Agent` and
   `Bash`) are registered, every turn is persisted to JSONL, and the session
   receives the same permissions/compaction/PubSub infrastructure as a TUI
-  session. This resolves issue #213 (tau run bypassed the FSM entirely).
+  session.
 
   The run loop subscribes to the session's PubSub topic BEFORE calling
   `Tau.start_session/1` (D-004 compliance), sends the prompt, and consumes
@@ -558,9 +558,9 @@ defmodule Tau.CLI do
   # no frontmatter parse), or `{:ok, {:file, path}}` for
   # `--system-prompt-file <path>` (file input — `build_headless_skill/1`
   # must parse YAML frontmatter from the file body so `allowed-tools:`
-  # is honored under PR #272's D-059 `active_skill_tool_specs/1`
-  # semantics; otherwise an empty `allowed_tools` exposes every builtin
-  # instead of the declared whitelist — #273).
+  # is honored under D-059 `active_skill_tool_specs/1` semantics;
+  # otherwise an empty `allowed_tools` exposes every builtin instead of
+  # the declared whitelist).
   @doc false
   def resolve_system_prompt(%{system_prompt: text})
       when is_binary(text) and text != "",
@@ -589,12 +589,12 @@ defmodule Tau.CLI do
   #
   #   * `{:file, path}` — `--system-prompt-file <path>`: parse the file
   #     via `Tau.Skills.Loader.parse/1`, which honors any YAML
-  #     frontmatter (`allowed-tools:`, `description:`, …). This is the
-  #     #273 fix: without it the frontmatter is dropped and the
-  #     persona's declared tool whitelist is silently widened to every
-  #     builtin under D-059. On parse failure, fall back to using the
-  #     raw file body as the skill body (preserve the existing behaviour
-  #     of unrestricted tool exposure rather than failing the run).
+  #     frontmatter (`allowed-tools:`, `description:`, …). Without the
+  #     parse the frontmatter is dropped and the persona's declared tool
+  #     whitelist is silently widened to every builtin under D-059. On
+  #     parse failure, fall back to using the raw file body as the skill
+  #     body (preserve unrestricted tool exposure rather than failing
+  #     the run).
   #
   # `:persona_lifetime :session` is set by `run_cmd/1` so the persona
   # survives multi-turn tool iteration within a single `tau run` invocation.
