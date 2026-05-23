@@ -44,8 +44,8 @@ defmodule Tau.CodingAgent.TauContext do
       }
 
   The adapter is free to translate this into whatever
-  per-CLI configuration shape it needs; this contract is the
-  one Phase 1B Team A's ClaudeCode adapter consumes.
+  per-CLI configuration shape it needs; this is the contract the
+  ClaudeCode adapter consumes.
   """
 
   use GenServer, restart: :temporary

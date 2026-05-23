@@ -20,8 +20,8 @@ defmodule Tau.Registries do
       session to boot owned a tool; every later session's registration was
       silently rejected as `{:already_registered, _}`. When that first
       session terminated, the tool was deregistered out from under every
-      other still-live session, so concurrent sessions lost tool access
-      (issue #250). Under a `:duplicate` registry each session holds its
+      other still-live session, so concurrent sessions lost tool access.
+      Under a `:duplicate` registry each session holds its
       own claim, so a tool stays registered as long as *any* session that
       registered it is alive. All registrants for a given tool name carry
       the same module value, so `Tau.Tool.lookup/1` resolves against the

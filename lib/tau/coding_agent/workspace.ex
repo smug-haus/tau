@@ -2,10 +2,9 @@ defmodule Tau.CodingAgent.Workspace do
   @moduledoc """
   Workspace preparation and cleanup for coding-agent runs.
 
-  Phase 1B Team B (#191) introduces a **per-session git worktree** as the
-  default workspace for coding-agent runs (SPEC-CODING-AGENT §4 B3, Q3).
-  The worktree isolates the agent's edits from the user's working tree
-  and survives until the session ends.
+  The default workspace is a **per-session git worktree** (SPEC-CODING-AGENT
+  §4 B3, Q3). The worktree isolates the agent's edits from the user's
+  working tree and survives until the session ends.
 
   This module is a thin **behaviour** with pluggable backends:
 

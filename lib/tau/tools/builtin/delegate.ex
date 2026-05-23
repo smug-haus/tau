@@ -3,12 +3,12 @@ defmodule Tau.Tools.Builtin.Delegate do
   Hand a subtask off to an external coding-agent backend (Claude Code,
   Aider, …) via the `Tau.CodingAgent` substrate.
 
-  Phase 2 of SPEC-CODING-AGENT §7 Q2: the provider conversation's
-  planner emits a `Delegate` tool call; this tool stands up a
-  `Tau.CodingAgent.Dispatcher` against the requested adapter, drains
-  its event stream synchronously, and folds the assembled final text
-  + intermediate tool activity back into the parent's transcript as
-  a `ToolResult`.
+  The provider conversation's planner emits a `Delegate` tool call;
+  this tool stands up a `Tau.CodingAgent.Dispatcher` against the
+  requested adapter, drains its event stream synchronously, and
+  folds the assembled final text + intermediate tool activity back
+  into the parent's transcript as a `ToolResult` (SPEC-CODING-AGENT
+  §7 Q2).
 
   Mirrors `Tau.Tools.Builtin.Agent` in spirit (sub-agent dispatch) but
   the worker is a child **OS subprocess** rather than a child
@@ -80,8 +80,8 @@ defmodule Tau.Tools.Builtin.Delegate do
 
   Coding-agent runs that report cost emit `%Tau.CodingAgent.Event.Cost{}`
   events. The dispatcher's per-event telemetry (`[:tau, :coding_agent,
-  :event]`) carries the adapter module in its metadata, and Phase 1B
-  Team D's session-cost aggregator subscribes to those events to fold
+  :event]`) carries the adapter module in its metadata, and the
+  session-cost aggregator subscribes to those events to fold
   the line items into `Tau.Cost.Tracker` tagged by adapter (separate
   bucket from `Tau.Provider`-direct usage, per SPEC §7 Q4). The
   Delegate tool does NOT touch the cost path directly — it only
@@ -355,8 +355,7 @@ defmodule Tau.Tools.Builtin.Delegate do
       request_id: ctx.tool_call_id,
       # Forward depth+1 to the spawned tau-context MCP server so a
       # recursive `tau_delegate` from the coding agent respects the
-      # same ceiling. Phase 1B Team C's TauContext reads this key
-      # via the dispatcher.
+      # same ceiling. TauContext reads this key via the dispatcher.
       tau_context_max_depth: max(@max_depth - depth, 0)
     }
 

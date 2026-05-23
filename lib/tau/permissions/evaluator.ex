@@ -28,7 +28,7 @@ defmodule Tau.Permissions.Evaluator do
   `rule_set` is the precompiled tuple of triples from
   `Tau.Permissions.RuleSet.get/0`. `mode` is the current permissions mode.
 
-  ## Skill activation (issue #16)
+  ## Skill activation
 
   When `ctx` carries an `:active_skill` whose `allowed_tools` is a
   non-empty list, the requested `tool_name` must appear on that list

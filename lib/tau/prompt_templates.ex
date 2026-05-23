@@ -1,6 +1,6 @@
 defmodule Tau.PromptTemplates do
   @moduledoc """
-  Pure loader and renderer for user-defined prompt templates (issue #183).
+  Pure loader and renderer for user-defined prompt templates.
 
   ## Discovery
 

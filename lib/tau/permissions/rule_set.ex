@@ -15,7 +15,7 @@ defmodule Tau.Permissions.RuleSet do
   Permissions mode that gates tool dispatch and slash-command
   execution. Single source of truth — `Tau.Command.Context`,
   `Tau.Tool.Context`, `Tau.Session.Meta`, and the hook payload all
-  use this type (M12).
+  use this type.
   """
   @type mode :: :default | :accept_edits | :plan | :auto | :dont_ask | :bypass
 

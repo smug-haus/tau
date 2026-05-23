@@ -365,7 +365,7 @@ defmodule Tau.Memory.Store.SQLite do
              step_result <- Exqlite.Sqlite3.step(db, stmt),
              :ok <- Exqlite.Sqlite3.release(db, stmt) do
           # step/2 returns :done or {:row, _} on success; {:error, reason} on failure.
-          # Ignoring the result here silently swallowed load failures (issue #304).
+          # Ignoring the result here silently swallows load failures.
           case step_result do
             :done ->
               # Disable general extension loading after the vec extension is loaded.

@@ -37,8 +37,8 @@ defmodule Tau.CodingAgent.Dispatcher do
   * `handle_continue` so `start_link/1` returns quickly and the
     adapter's `start/2` runs inside the supervised process.
 
-  Phase 1B (real subprocess-backed adapters) will lean on these
-  guarantees. Keep the surface area small.
+  Real subprocess-backed adapters lean on these guarantees. Keep the
+  surface area small.
 
   ## Public API
 

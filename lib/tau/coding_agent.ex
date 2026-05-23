@@ -32,13 +32,13 @@ defmodule Tau.CodingAgent do
 
   `task.workspace` MUST be an explicit absolute path. The
   dispatcher MUST NOT silently inherit tau's cwd (D-033). Worktree
-  creation, when requested, is handled by the caller (Phase 1B
-  Team B); this behaviour only enforces the API contract.
+  creation, when requested, is handled by the caller; this
+  behaviour only enforces the API contract.
 
-  ## Implementations (current and planned)
+  ## Implementations
 
     * `Tau.CodingAgents.Replay` — test fixture adapter (in-tree).
-    * `Tau.CodingAgents.ClaudeCode` — first real adapter (Phase 1B).
+    * `Tau.CodingAgents.ClaudeCode` — subprocess-backed Claude Code adapter.
   """
 
   @typedoc """

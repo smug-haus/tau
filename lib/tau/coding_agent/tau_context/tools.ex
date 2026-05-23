@@ -310,8 +310,8 @@ defmodule Tau.CodingAgent.TauContext.Tools do
     # No writable memory layer ships in tau today — the loader is
     # read-only and ADR-0006 removed the cache. Surface this as a
     # structured "available: false" rather than fail loudly: a
-    # future Phase 2 task may wire a `Tau.Memory.Writer` here
-    # without changing the MCP surface.
+    # writable memory layer can be wired here without changing the
+    # MCP surface.
     {:ok,
      encode(%{
        "available" => false,
@@ -347,14 +347,14 @@ defmodule Tau.CodingAgent.TauContext.Tools do
          })}
 
       true ->
-        # Recursive delegation is gated on Phase 2 (Delegate tool
-        # surface). For Phase 1B Team C we record intent and
-        # return a structured "queued: false" so the agent can
-        # plan without crashing.
+        # Recursive delegation from inside a coding-agent run is not
+        # wired through `Tau.Tools.Builtin.Delegate` yet. We record
+        # intent and return a structured "queued: false" so the agent
+        # can plan without crashing.
         {:ok,
          encode(%{
            "available" => false,
-           "reason" => "recursive delegation not wired (Phase 2)",
+           "reason" => "recursive delegation not wired",
            "would_delegate" => %{
              "agent" => agent,
              "depth" => depth + 1,

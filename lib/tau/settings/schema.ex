@@ -53,7 +53,7 @@ defmodule Tau.Settings.Schema do
     Tau.Providers.Replay
   ]
 
-  # Compile-time-built schema map (M13). json_schema/0 returns the
+  # Compile-time-built schema map. json_schema/0 returns the
   # same literal map on every call without rebuilding it.
   @schema %{
     "$schema" => @schema_uri,
