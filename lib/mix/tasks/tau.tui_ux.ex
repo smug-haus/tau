@@ -1,8 +1,8 @@
 defmodule Mix.Tasks.Tau.TuiUx do
-  @shortdoc "Build the Burrito binary and run the TUI UX protocol tests (closes #336)."
+  @shortdoc "Build the Burrito binary and run the TUI UX protocol tests."
 
   @moduledoc """
-  TUI UX protocol runner — issue #336.
+  TUI UX protocol runner.
 
   Locates (or builds) the host-architecture Burrito binary, then runs the
   `:tui_smoke` and `:tui_ux` tagged protocol tests against it via the

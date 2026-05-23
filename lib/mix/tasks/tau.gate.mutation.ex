@@ -2,7 +2,7 @@ defmodule Mix.Tasks.Tau.Gate.Mutation do
   @shortdoc "Gate 5.3: mutation check — verifies ≥1 gating test fails against the pre-implementer tree."
 
   @moduledoc """
-  Factory-loop Gate 5.3 — Mutation check (issue #370).
+  Factory-loop Gate 5.3 — Mutation check.
 
   Keeps the declared gating-test paths at HEAD, reverts every other path
   to `base_ref` (the pre-implementer commit), runs the gating tests, and

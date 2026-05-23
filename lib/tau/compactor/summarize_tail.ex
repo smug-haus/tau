@@ -62,22 +62,21 @@ defmodule Tau.Compactor.SummarizeTail do
     end
   end
 
-  # D-062 / #310: After the initial length-based split, any leading
-  # %ToolResult{} messages in `recent` must be moved into `old`.  The
-  # Anthropic API rejects a conversation whose first message after the
-  # compaction summary is a ToolResult with no preceding Assistant message
-  # that carries a matching tool_use block.
+  # After the initial length-based split, any leading %ToolResult{}
+  # messages in `recent` must be moved into `old`. The Anthropic API
+  # rejects a conversation whose first message after the compaction
+  # summary is a ToolResult with no preceding Assistant message that
+  # carries a matching tool_use block (D-062).
   defp realign_split_at_tool_boundary({old, recent}) do
     {leading_results, rest} = Enum.split_while(recent, &match?(%Message.ToolResult{}, &1))
     {old ++ leading_results, rest}
   end
 
   # Pinned messages are preserved verbatim across compaction.
-  # `:system`           — memory cascade + skill bodies (ADR-0005).
-  # `:compaction_summary` — output of an earlier compaction round
-  #                       (ADR-0007); preserved so we don't
-  #                       re-summarise a summary and lose fidelity
-  #                       geometrically.
+  # `:system`           — memory cascade + skill bodies.
+  # `:compaction_summary` — output of an earlier compaction round;
+  #                       preserved so we don't re-summarise a
+  #                       summary and lose fidelity geometrically.
   defp pinned?(%Message.User{metadata: %{role: :system}}), do: true
   defp pinned?(%Message.User{metadata: %{role: :compaction_summary}}), do: true
   defp pinned?(_), do: false

@@ -2,7 +2,7 @@ defmodule Mix.Tasks.Tau.Gate.AcLinkage do
   @shortdoc "Gate 5.1: verify every AC-N/D-NNN in the PR body has a gating test. Exits 1 on missing."
 
   @moduledoc """
-  Factory-loop Gate 5.1 — AC-to-test linkage (issue #370).
+  Factory-loop Gate 5.1 — AC-to-test linkage.
 
   Reads the PR body and gating-test source files, then verifies that every
   `AC-N` / `D-NNN` token claimed in the body appears in at least one

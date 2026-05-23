@@ -1,8 +1,8 @@
 defmodule Mix.Tasks.Tau.Qa do
-  @shortdoc "Six-layer factory-loop QA gate (closes #268)."
+  @shortdoc "Six-layer factory-loop QA gate."
 
   @moduledoc """
-  Factory-loop closing-move QA routine — issue #268.
+  Factory-loop closing-move QA routine.
 
   One command, six layers, ordered. Each layer that fails halts the
   task with a distinct exit code so CI logs name the failure mode.
@@ -17,8 +17,8 @@ defmodule Mix.Tasks.Tau.Qa do
   | A | source quality | `mix compile --warnings-as-errors && mix test && mix format --check-formatted` then `mix credo diff --strict --from-git-merge-base origin/main` (skipped when origin/main is unavailable) | code defects |
   | B | artifact build | `BURRITO_TARGET=<host> MIX_ENV=prod mix release tau --overwrite` (with `XDG_DATA_HOME` isolation) | NIF cross-compile failures, broken Burrito post-steps |
   | C | artifact boot  | `<binary> help run`; assert exit 0; assert `--system-prompt-file` flag present | flag drift, escript/binary packaging gaps |
-  | D | replay smoke   | `<binary> run "hello" --provider replay --model replay`; assert exit 0; stdout contains `(replay) hello` | NIF load failures (#264) |
-  | E | tool exposure  | `mix test test/tau/qa/tool_exposure_test.exs` | the #267 class — model literally cannot call its tools |
+  | D | replay smoke   | `<binary> run "hello" --provider replay --model replay`; assert exit 0; stdout contains `(replay) hello` | NIF load failures |
+  | E | tool exposure  | `mix test test/tau/qa/tool_exposure_test.exs` | model cannot call its declared tools |
   | F | coordinator round-trip | `mix test test/tau/qa/coordinator_roundtrip_test.exs` | whole coordinator pipeline (persona → tool exposure → Agent → child → result) |
 
   ## Exit codes

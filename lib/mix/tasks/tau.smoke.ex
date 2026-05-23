@@ -1,5 +1,5 @@
 defmodule Mix.Tasks.Tau.Smoke do
-  @shortdoc "Build the Burrito binary and run a replay smoke. Closes #262."
+  @shortdoc "Build the Burrito binary and run a replay smoke."
 
   @moduledoc """
   Deployed-artifact smoke gate.

@@ -5,7 +5,7 @@ defmodule Tau.Build do
   The release version drives Burrito's runtime extraction-cache path
   (`<app>_erts-<erts>_<release-version>`). Stamping the git short-hash
   makes that path unique per commit, so a fresh build is never served from
-  a stale extraction (issue #200).
+  a stale extraction.
   """
 
   # Recompile this module when HEAD moves or the index changes, so the

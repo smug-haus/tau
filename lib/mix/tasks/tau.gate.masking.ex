@@ -2,7 +2,7 @@ defmodule Mix.Tasks.Tau.Gate.Masking do
   @shortdoc "Gate 5.2: scan a unified diff for removed assertions. Detection-only; never exits 1."
 
   @moduledoc """
-  Factory-loop Gate 5.2 — Masking detection (issue #370).
+  Factory-loop Gate 5.2 — Masking detection.
 
   Scans a unified diff for removed assertion lines (`assert`, `refute`,
   `assert_receive`, `assert_raise` on `-` lines). Detection-only: outputs
