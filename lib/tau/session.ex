@@ -2325,19 +2325,12 @@ defmodule Tau.Session do
 
   # --- Helpers --------------------------------------------------------------
 
-  # D-057 (SPEC-OTEL-REPORTER): emit a terminal provider-request telemetry
-  # event to close the span opened by `[:tau, :provider, :request, :start]`.
-  # Every path that abandons an in-flight provider request MUST call this
-  # helper BEFORE re-entering `:start_provider` or returning to `:awaiting_user`,
-  # and MUST set `provider_span_ref: nil` on the data it passes forward.
-  #
-  # `event_suffix` is one of `:cancelled` | `:brutal_kill`. `:cancelled` is
-  # used when no provider task is running (circuit_open / synchronous error);
-  # `:brutal_kill` is used when the task is force-terminated mid-stream.
-  #
-  # The helper is a no-op when `provider_span_ref` is nil (guard against
-  # double-emit on re-entrant paths, or when called on a data struct that
-  # never started a request).
+  # D-057 / SPEC-OTEL-REPORTER: close the span opened by
+  # `[:tau, :provider, :request, :start]`. Every path abandoning an
+  # in-flight request MUST call this before re-entering `:start_provider`
+  # or returning to `:awaiting_user`, and MUST clear `provider_span_ref`.
+  # Suffix `:cancelled` for no-task paths (circuit_open / sync error);
+  # `:brutal_kill` for force-terminated streams.
   defp emit_provider_request_terminal(_suffix, %{provider_span_ref: nil}), do: :ok
 
   defp emit_provider_request_terminal(suffix, data)
