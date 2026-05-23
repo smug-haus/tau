@@ -123,7 +123,7 @@ defmodule Tau.Session.Compaction do
   flushed from the mailbox.
   """
   @spec handle_worker_result(reference(), term(), Tau.Session.Data.t()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def handle_worker_result(ref, result, data) do
     # Demonitor first to flush any pending {:DOWN} that is already enqueued.
     Process.demonitor(ref, [:flush])
@@ -187,7 +187,7 @@ defmodule Tau.Session.Compaction do
   Clause 2a: `async_nolink` emits both `{ref, result}` AND `{:DOWN, :normal}`
   on clean task exit. The result may arrive after `:DOWN`; keep waiting.
   """
-  @spec handle_worker_down_normal(Tau.Session.Data.t()) :: :gen_statem.event_handler_result()
+  @spec handle_worker_down_normal(Tau.Session.Data.t()) :: Tau.Session.Data.fsm_result()
   def handle_worker_down_normal(data) do
     {:keep_state, data}
   end
@@ -199,7 +199,7 @@ defmodule Tau.Session.Compaction do
   `compaction_failures`, clear worker fields, return to `:awaiting_user`.
   """
   @spec handle_worker_crash(reference(), term(), Tau.Session.Data.t()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def handle_worker_crash(_ref, reason, data) do
     :telemetry.execute(
       [:tau, :compaction, :exception],
@@ -240,7 +240,7 @@ defmodule Tau.Session.Compaction do
   counter, and return to `:awaiting_user`. Guards on `compaction_task == pid`
   to ensure this is for the current worker.
   """
-  @spec handle_timeout(pid(), Tau.Session.Data.t()) :: :gen_statem.event_handler_result()
+  @spec handle_timeout(pid(), Tau.Session.Data.t()) :: Tau.Session.Data.fsm_result()
   def handle_timeout(pid, data) do
     if data.compaction_monitor, do: Process.demonitor(data.compaction_monitor, [:flush])
     if pid && Process.alive?(pid), do: Process.exit(pid, :brutal_kill)

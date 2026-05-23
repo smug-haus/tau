@@ -69,7 +69,7 @@ defmodule Tau.Session.CodingAgentTurn do
   Mirrors D-009 for the provider path so the existing TUI render path works.
   """
   @spec emit_coding_agent_sync_error(Tau.Session.Data.t(), term()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def emit_coding_agent_sync_error(data, reason) do
     reason_str = describe_coding_agent_error(reason)
 
@@ -105,11 +105,11 @@ defmodule Tau.Session.CodingAgentTurn do
   `{:next_state, :awaiting_user, ...}` on failure).
   """
   @spec start_coding_agent_dispatcher(Tau.Session.Data.t(), String.t()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def start_coding_agent_dispatcher(data, workspace_path) do
     user_text = latest_user_text(data.messages)
 
-    resume_id = get_in(data, [:coding_agent_state, :session_id])
+    resume_id = Map.get(data.coding_agent_state, :session_id)
 
     task = %{
       prompt: user_text,
@@ -192,7 +192,7 @@ defmodule Tau.Session.CodingAgentTurn do
   Pattern-matched on the CAEvent struct module (D-031). Returns an FSM action tuple.
   """
   @spec handle_coding_agent_event(struct(), Tau.Session.Data.t()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def handle_coding_agent_event(%CAEvent.Start{} = ev, data) do
     :telemetry.execute(
       [:tau, :session, :coding_agent_streaming, :adapter_start],
@@ -407,7 +407,7 @@ defmodule Tau.Session.CodingAgentTurn do
   and transitions to `:awaiting_user`.
   """
   @spec finalize_coding_agent_turn(struct(), Tau.Session.Data.t()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def finalize_coding_agent_turn(%CAEvent.Done{exit_status: status} = done, data) do
     stop_reason =
       cond do
@@ -501,7 +501,7 @@ defmodule Tau.Session.CodingAgentTurn do
         Tau.CodingAgent.Cost.from_event(cost,
           agent: data.coding_agent,
           session_id: data.id,
-          adapter_session_id: get_in(data, [:coding_agent_state, :session_id])
+          adapter_session_id: Map.get(data.coding_agent_state, :session_id)
         )
 
       data =
@@ -699,7 +699,7 @@ defmodule Tau.Session.CodingAgentTurn do
   Ensures the workspace, then starts the dispatcher. Telemetry is emitted
   at entry; failure surfaces as an `%Assistant{stop_reason: :error}` message.
   """
-  @spec handle_start_coding_agent(Tau.Session.Data.t()) :: :gen_statem.event_handler_result()
+  @spec handle_start_coding_agent(Tau.Session.Data.t()) :: Tau.Session.Data.fsm_result()
   def handle_start_coding_agent(data) do
     Tau.Session.transition(data.id, data, :coding_agent_streaming)
 
@@ -725,7 +725,7 @@ defmodule Tau.Session.CodingAgentTurn do
   dispatchers, analogous to `stream_ref` for the provider path (ADR-0012).
   """
   @spec handle_coding_agent_event_message(pid(), struct(), Tau.Session.Data.t()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def handle_coding_agent_event_message(pid, event, data) do
     if Tau.Session.current_run?(data, {:coding_agent, pid}),
       do: handle_coding_agent_event(event, data),

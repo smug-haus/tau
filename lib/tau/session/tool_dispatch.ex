@@ -34,7 +34,7 @@ defmodule Tau.Session.ToolDispatch do
   and either transitions to `:awaiting_permission` (interactive with `:ask` calls)
   or spawns the parallel dispatcher and transitions to `:tool_executing`.
   """
-  @spec dispatch_tools(list(), Tau.Session.Data.t()) :: :gen_statem.event_handler_result()
+  @spec dispatch_tools(list(), Tau.Session.Data.t()) :: Tau.Session.Data.fsm_result()
   def dispatch_tools(tool_calls, data) do
     parent = self()
 
@@ -290,7 +290,7 @@ defmodule Tau.Session.ToolDispatch do
   parallel batch (transitioning to `:tool_executing`) or re-invokes
   `:start_provider` directly when no approved calls remain.
   """
-  @spec finish_permission_round(Tau.Session.Data.t()) :: :gen_statem.event_handler_result()
+  @spec finish_permission_round(Tau.Session.Data.t()) :: Tau.Session.Data.fsm_result()
   def finish_permission_round(data) do
     parent = self()
 
@@ -531,7 +531,7 @@ defmodule Tau.Session.ToolDispatch do
   :tool_loop_aborted}` message, and transitions to `:awaiting_user`.
   """
   @spec emit_tool_loop_brake_abort(Tau.Session.Data.t(), map()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def emit_tool_loop_brake_abort(data, tools) do
     {{name, args_hash}, %{count: count, error: error_str}} =
       Enum.max_by(data.tool_loop_state, fn {_k, %{count: c}} -> c end)
@@ -814,7 +814,7 @@ defmodule Tau.Session.ToolDispatch do
   waiting (more in-flight).
   """
   @spec handle_tool_done(String.t(), struct(), Tau.Session.Data.t()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def handle_tool_done(call_id, result_msg, data) do
     tools = Map.delete(data.tools_in_flight, call_id)
 
@@ -864,7 +864,7 @@ defmodule Tau.Session.ToolDispatch do
   `pending_permission_requests` is empty.
   """
   @spec handle_tool_done_awaiting_permission(String.t(), struct(), Tau.Session.Data.t()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def handle_tool_done_awaiting_permission(call_id, result_msg, data) do
     case Map.get(data.tools_in_flight, call_id) do
       :awaiting_permission ->
@@ -911,7 +911,7 @@ defmodule Tau.Session.ToolDispatch do
   `finish_permission_round/1`.
   """
   @spec handle_permission_allow_once(String.t(), Tau.Session.Data.t()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def handle_permission_allow_once(tool_call_id, data) do
     case Map.pop(data.pending_permission_requests, tool_call_id) do
       {nil, _} ->
@@ -960,7 +960,7 @@ defmodule Tau.Session.ToolDispatch do
   if the last pending, calls `finish_permission_round/1`.
   """
   @spec handle_permission_deny_once(String.t(), Tau.Session.Data.t()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def handle_permission_deny_once(tool_call_id, data) do
     case Map.pop(data.pending_permission_requests, tool_call_id) do
       {nil, _} ->
@@ -1019,7 +1019,7 @@ defmodule Tau.Session.ToolDispatch do
   `:awaiting_permission` (D-090 logged no-op).
   """
   @spec handle_permission_stale(String.t(), term(), Tau.Session.Data.t()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def handle_permission_stale(tool_call_id, verdict, data) do
     require Logger
 
@@ -1041,7 +1041,7 @@ defmodule Tau.Session.ToolDispatch do
   (D-090 logged no-op — stale decision after state transition).
   """
   @spec handle_permission_outside_state(String.t(), term(), Tau.Session.Data.t()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def handle_permission_outside_state(tool_call_id, verdict, data) do
     require Logger
 

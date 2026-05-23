@@ -27,10 +27,9 @@ defmodule Tau.Session do
 
   @behaviour :gen_statem
 
-  alias Tau.Message.{Assistant, ToolResult, User}
+  alias Tau.Message.{ToolResult, User}
   alias Tau.Session.Events
   alias Tau.Provider.Event, as: PEvent
-  alias Tau.Settings.Cache, as: SettingsCache
   # SPEC-CODING-AGENT: coding-agent session mode. The FSM hosts
   # a parallel `:coding_agent_streaming` state. When `data.coding_agent`
   # is non-nil, user messages route through `Tau.CodingAgent.Dispatcher`
@@ -39,7 +38,6 @@ defmodule Tau.Session do
   # so the existing TUI render path, persistence, and `/resume` apply
   # unchanged (D-037).
   alias Tau.CodingAgent.Workspace, as: CAWorkspace
-  alias Tau.Commands.Catalog
 
   # Name of the synthetic FSM-internal tool the model emits to
   # activate a discovered skill. Not registered as a `Tau.Tool` module
@@ -521,260 +519,9 @@ defmodule Tau.Session do
 
   @impl :gen_statem
   def init(opts) do
-    id = Keyword.fetch!(opts, :session_id)
-    cwd = opts[:cwd] || File.cwd!()
-    provider = opts[:provider] || Tau.Provider.default()
-    # D-002 / SPEC-USER-TURN: resolve nil model to the provider's default
-    # at session init, NOT at stream-call time. Without this, `data.model`
-    # stays nil through telemetry, persistence header, and the assembler
-    # — all of which expect a real model id.
-    #
-    # D-041: fold the last persisted `model_swap` event from preload so
-    # resume and fork both converge on the swapped model. Mirrors
-    # `coding_agent_state_from_preload/1`.
-    model =
-      model_from_preload(opts[:preload_events] || []) || opts[:model] || provider.default_model()
-
-    metadata = opts[:metadata] || %{}
-    provider_ctx = opts[:provider_ctx] || %{}
-    persistence = opts[:persistence] || Tau.Persistence.impl()
-    preload = opts[:preload_events] || []
-    # SPEC-CODING-AGENT §4 B1 / D-037: coding-agent session mode. When
-    # `:coding_agent` is set the FSM routes user messages through the
-    # `:coding_agent_streaming` state. CLI flag overrides settings;
-    # settings provides the deployment-wide default.
-    coding_agent =
-      opts[:coding_agent] ||
-        Tau.Session.CodingAgentTurn.coding_agent_from_settings()
-
-    coding_agent_workspace_backend =
-      opts[:coding_agent_workspace_backend] ||
-        if(coding_agent, do: CAWorkspace.resolve_default_backend(cwd), else: nil)
-
-    coding_agent_workspace_opts = opts[:coding_agent_workspace_opts] || []
-    # SPEC-CODING-AGENT §4 B1: per-run knobs for the coding-agent
-    # adapter. Mirrors `:provider_ctx` (ADR-0002) — not persisted, not
-    # propagated to forks/resumes. Tests use this to thread a Replay
-    # fixture into the adapter without touching settings or env.
-    coding_agent_ctx = opts[:coding_agent_ctx] || %{}
-
-    case persistence.open(id,
-           cwd: cwd,
-           provider: inspect(provider),
-           model: model,
-           metadata: metadata,
-           parent_event_id: opts[:parent_event_id]
-         ) do
-      {:ok, persist_handle} ->
-        register_builtins()
-
-        :telemetry.execute(
-          [:tau, :session, :start],
-          %{system_time: System.system_time()},
-          %{session_id: id, provider: provider}
-        )
-
-        broadcast(id, %Events.SessionStart{
-          session_id: id,
-          provider: provider,
-          model: model,
-          cwd: cwd,
-          metadata: metadata
-        })
-
-        skills = load_skills(cwd)
-
-        # D-058 / AC-10 / SPEC-USER-TURN §4 B2: a headless skill injected
-        # via `:active_skill` (e.g. `--system-prompt` from `tau run`) is
-        # prepended to the skill list so `prepend_skill_messages/2`
-        # includes its body in the model-visible system blob. Without
-        # this the skill only gates permissions, never reaches the model.
-        skills =
-          case opts[:active_skill] do
-            %Tau.Skill{name: name} = skill ->
-              [{name, skill} | skills]
-
-            _ ->
-              skills
-          end
-
-        # ADR-0013 / ADR-0015: skills with `disable_model_invocation: true`
-        # are background-only — their bodies (and `# Skill: <name>` headings)
-        # MUST NOT enter the model-visible system_blob, lest internal
-        # personas leak. Filter at the assembly site; `prepend_skill_messages/2`
-        # also filters as defence-in-depth.
-        model_visible_skills =
-          Enum.reject(skills, fn {_name, s} -> s.disable_model_invocation end)
-
-        messages =
-          preload
-          |> events_to_messages()
-          |> prepend_skill_messages(model_visible_skills)
-          |> inject_memory(cwd)
-
-        data = %{
-          id: id,
-          cwd: cwd,
-          provider: provider,
-          # ADR-0012: original_provider is the user-configured provider for
-          # the lifetime of the session. data.provider shape-shifts during
-          # a fallback turn; finalize_assistant/2 restores it from
-          # original_provider so the next turn always starts against the
-          # primary (per-message fallback semantics).
-          original_provider: provider,
-          model: model,
-          metadata: metadata,
-          provider_ctx: provider_ctx,
-          messages: messages,
-          skills: skills,
-          # D-076: prompt templates discovered once at init time.
-          # Precedence: builtin > extension > file-command > skill > template.
-          prompt_templates: Tau.PromptTemplates.discover(cwd),
-          persistence: persistence,
-          persist_handle: persist_handle,
-          provider_task: nil,
-          # ADR-0012: per-stream tag distinguishing events from the
-          # current provider task from a killed predecessor's stragglers
-          # during a fallback transition. Stale events whose ref doesn't
-          # match drop in the catch-all clause.
-          stream_ref: nil,
-          # SPEC-OTEL-REPORTER: per-request OTel span discriminator.
-          # Echoed through *.stop / *.cancelled / *.brutal_kill so spans
-          # correlate. Each fallback attempt is a distinct request and
-          # generates a fresh ref.
-          provider_span_ref: nil,
-          # ADR-0017: per-stream cooperative-cancel flag (a `:counters`
-          # ref). Allocated freshly in `:start_provider`; consulted by the
-          # `:cancel` handler before falling back to brutal-kill.
-          cancel_flag: nil,
-          assembler: nil,
-          # ADR-0012: per-turn fallback queue. Re-derived from
-          # Tau.Settings.Cache at the start of every :start_provider so a
-          # settings reload between turns is picked up automatically.
-          fallback_chain_remaining: [],
-          tools_in_flight: %{},
-          # Per-turn parallel-tool dispatcher pid; brutal-killed on :cancel.
-          tool_dispatcher: nil,
-          # ADR-0008: slash-command tasks run under Tau.Tools.TaskSupervisor.
-          command_task: nil,
-          # ADR-0013 / ADR-0015. Per-turn lifetime by default; sub-agent
-          # personas with `:persona_lifetime: :session` survive `:end_turn`.
-          active_skill: opts[:active_skill],
-          persona_lifetime: opts[:persona_lifetime] || :turn,
-          # Spawn-time tool whitelist (`:all` or `[String.t()]`). Calls
-          # outside the list synthesise an `is_error: true` ToolResult.
-          tools_whitelist: opts[:tools_whitelist] || :all,
-          # ADR-0014: child session ids spawned by this session via `Agent`.
-          # `Tau.cancel/1` and `Tau.stop/1` cascade across this set so
-          # children get a clean shutdown path rather than being reaped
-          # from above.
-          child_session_ids: MapSet.new(),
-          # D-005 / AC-6 / SPEC-USER-TURN: tool-call iteration cap.
-          # Counts tool-dispatch rounds within a turn; overflow aborts with
-          # stop_reason :tool_loop_aborted.
-          tool_iterations: 0,
-          max_tool_iterations:
-            opts[:max_tool_iterations] ||
-              get_in(SettingsCache.get(), [:session, :max_tool_iterations]) ||
-              100,
-          # D-060: tool-loop brake — per-turn map keyed by
-          # `{tool_name, args_hash}` to a `%{count, error}` cell. When
-          # `count` reaches `tool_loop_brake_threshold` (default 3) the
-          # FSM aborts with `stop_reason: :tool_loop_aborted`. The cell
-          # records the error message so a swapped error restarts the
-          # counter rather than compounding two unrelated failure modes.
-          tool_loop_state: %{},
-          tool_loop_brake_threshold:
-            opts[:tool_loop_brake_threshold] ||
-              get_in(SettingsCache.get(), [:session, :tool_loop_brake_threshold]) ||
-              3,
-          # D-060: side-table mapping in-flight tool_call_id ->
-          # `{tool_name, args_hash}` so the `{:tool_done, ...}` handler
-          # can build the brake key without rescanning message history.
-          tool_loop_call_lookups: %{},
-          # D-061: per-turn same-provider retry counter, applied when
-          # `fallback_chain_remaining == []` on a retryable mid-stream
-          # error. Capped at `provider_retry_max` (default 3); ADR-0012
-          # fallback takes precedence when a chain is present.
-          provider_retry_state: %{count: 0},
-          provider_retry_max:
-            opts[:provider_retry_max] ||
-              get_in(SettingsCache.get(), [:session, :provider_retry_max]) ||
-              3,
-          provider_retry_base_delay_ms:
-            opts[:provider_retry_base_delay_ms] ||
-              get_in(SettingsCache.get(), [:session, :provider_retry_base_delay_ms]) ||
-              1000,
-          # SPEC-CODING-AGENT. Workspace is lazily prepared on the first
-          # `:coding_agent_streaming` transition; cleaned up in `terminate/3`.
-          coding_agent: coding_agent,
-          coding_agent_ctx: coding_agent_ctx,
-          coding_agent_workspace_backend: coding_agent_workspace_backend,
-          coding_agent_workspace_opts: coding_agent_workspace_opts,
-          coding_agent_workspace: nil,
-          coding_agent_dispatcher: nil,
-          coding_agent_pending: nil,
-          coding_agent_blocks: [],
-          # SPEC-CODING-AGENT §7 Q5 / D-037: adapter-side session
-          # state. Today carries the Claude-Code-side `session_id`
-          # captured from `%Event.Start{}` so the next dispatcher
-          # launch can thread it as `task.resume_id`. Persisted to
-          # JSONL via the `coding_agent_session` event so `/resume`
-          # recovers it across BEAM restarts.
-          coding_agent_state:
-            coding_agent_state_from_preload(preload) ||
-              %{session_id: nil, agent: nil},
-          # SPEC-CODING-AGENT §7 Q4 / D-038: per-session list of
-          # adapter-tagged cost records, folded from `%Event.Cost{}`
-          # events. Sums the dollar/token/duration split for the
-          # active session. Persisted line-by-line via the
-          # `coding_agent_cost` JSONL event so `/resume` can fold
-          # the totals back.
-          coding_agent_costs: coding_agent_costs_from_preload(preload),
-          # D-048 / D-049: async compaction worker state. `compaction_monitor`
-          # is the guard key for the five terminal clauses of `:compacting`.
-          # D-016: `compaction_failures` is NOT reset by `:cancel` — masking
-          # a broken compactor is worse than resetting on legitimate success.
-          compaction_task: nil,
-          compaction_monitor: nil,
-          compaction_failures: 0,
-          # SPEC-PERMISSION-PROMPTS §4 B4 (D-092, D-093): whether this session
-          # has an interactive user surface (TUI) or not (headless `tau run`).
-          # When false, `:ask` verdicts from the permissions evaluator resolve
-          # immediately to fail-closed `:deny` — the FSM never enters
-          # `:awaiting_permission`. Set via `:interactive` opt at session start;
-          # defaults to true (TUI is the primary session type).
-          interactive?: opts[:interactive] != false,
-          # SPEC-PERMISSION-PROMPTS §4 B3 (D-091): per-round map of tool calls
-          # awaiting user consent. Keyed by `tool_call_id`; each value is
-          # `%{name: String.t(), arguments: map()}`. Non-nil only while in
-          # `:awaiting_permission`; cleared on exit (decision or cancel).
-          pending_permission_requests: %{},
-          # SPEC-PERMISSION-PROMPTS §4 B3 / D-091. Both batches dispatch
-          # together in `finish_permission_round/1` so a single
-          # `:awaiting_permission` visit produces one atomic emission.
-          permission_dispatch_batch: [],
-          permission_pending_results: [],
-          # D-077 / D-078 / SPEC-USER-TURN §6: two-tier message queues.
-          # `steering_queue` drains at the tool-round boundary (D-079);
-          # `followup_queue` drains on transition into `:awaiting_user`
-          # (D-080). Hard cap 32 each (D-083).
-          steering_queue: :queue.new(),
-          followup_queue: :queue.new()
-        }
-
-        # D-103 / D-108 (SPEC-TUI-COMPLETION §4 B1): broadcast the command
-        # catalog once at session start so the TUI menu is pre-populated
-        # before the first `/` keystroke. The catalog is derived here from
-        # the freshly-constructed `data` so skills and templates discovered
-        # at init are included. Re-broadcast on every `/reload` (D-108).
-        catalog_entries = Catalog.list(data)
-        broadcast(id, %Events.CommandCatalog{session_id: id, entries: catalog_entries})
-
-        {:ok, :awaiting_user, data}
-
-      err ->
-        {:stop, err}
+    case Tau.Session.Data.new(opts) do
+      {:ok, data} -> {:ok, :awaiting_user, data}
+      {:stop, _} = stop -> stop
     end
   end
 
@@ -866,15 +613,20 @@ defmodule Tau.Session do
   def handle_event(:cast, {:user_message, msg, _tier}, :awaiting_user, %{command_task: nil} = data) do
     emit_user_message_telemetry(:delivered, data, :awaiting_user)
 
-    case classify_slash_command(msg, data.skills, data.prompt_templates, data.cwd) do
+    case Tau.Session.SlashCommand.classify_slash_command(
+           msg,
+           data.skills,
+           data.prompt_templates,
+           data.cwd
+         ) do
       {:builtin, mod, args, msg} ->
-        handle_builtin_command(mod, args, msg, data)
+        Tau.Session.SlashCommand.handle_builtin_command(mod, args, msg, data)
 
       {:async, mod, args, msg} ->
-        spawn_command_task(mod, args, msg, data)
+        Tau.Session.SlashCommand.spawn_command_task(mod, args, msg, data)
 
       {:skill_activation, skill, rewritten_msg} ->
-        data = activate_skill_via_slash(data, skill)
+        data = Tau.Session.SkillActivation.activate_skill_via_slash(data, skill)
         process_user_message(rewritten_msg, data)
 
       {:model_command, "", _msg} ->
@@ -937,7 +689,7 @@ defmodule Tau.Session do
   end
 
   def handle_event(:info, {:command_done, result, original_msg}, _state, data) do
-    msg = apply_command_result(result, original_msg)
+    msg = Tau.Session.SlashCommand.apply_command_result(result, original_msg)
     process_user_message(msg, %{data | command_task: nil})
   end
 
@@ -948,7 +700,7 @@ defmodule Tau.Session do
         %{command_task: pid} = data
       ) do
     if Process.alive?(pid), do: Process.exit(pid, :brutal_kill)
-    msg = apply_command_result({:timeout, ms}, original_msg)
+    msg = Tau.Session.SlashCommand.apply_command_result({:timeout, ms}, original_msg)
     process_user_message(msg, %{data | command_task: nil})
   end
 
@@ -1101,7 +853,10 @@ defmodule Tau.Session do
           acc =
             acc
             |> append_message(result_msg)
-            |> persist_event("tool_result", tool_result_to_data(result_msg))
+            |> Tau.Session.Journal.persist(
+              "tool_result",
+              Tau.Session.Journal.tool_result_to_data(result_msg)
+            )
             |> Map.put(:tool_loop_call_lookups, call_lookups_rest)
 
           broadcast(acc.id, %Events.ToolEnd{
@@ -1137,7 +892,10 @@ defmodule Tau.Session do
           acc =
             acc
             |> append_message(result)
-            |> persist_event("tool_result", tool_result_to_data(result))
+            |> Tau.Session.Journal.persist(
+              "tool_result",
+              Tau.Session.Journal.tool_result_to_data(result)
+            )
             |> Map.put(:tool_loop_call_lookups, call_lookups_rest)
 
           broadcast(acc.id, %Events.ToolEnd{
@@ -1152,7 +910,11 @@ defmodule Tau.Session do
 
     broadcast(data.id, %Events.Cancelled{session_id: data.id, reason: :user})
 
-    data = persist_event(data, "cancellation", %{cause: "user", reason: "awaiting_permission"})
+    data =
+      Tau.Session.Journal.persist(data, "cancellation", %{
+        cause: "user",
+        reason: "awaiting_permission"
+      })
 
     # D-082 / SPEC-USER-TURN §6: drain steering queue back to user,
     # consistent with the general :cancel handler. The :awaiting_permission
@@ -1213,7 +975,7 @@ defmodule Tau.Session do
     # Brutal-kill is the fallback path only — preserves clean upstream
     # socket release in the common case while keeping a hard escape
     # hatch for wedged providers.
-    cancel_mechanism = cancel_provider_task(data)
+    cancel_mechanism = Tau.Session.ProviderTurn.cancel_provider_task(data)
 
     # With async_stream_nolink the dispatcher owns the tool tasks.
     # Brutal-killing it stops the iterator; in-flight tool processes under
@@ -1250,7 +1012,7 @@ defmodule Tau.Session do
     broadcast(data.id, %Events.Cancelled{session_id: data.id, reason: :user})
 
     data =
-      persist_event(data, "cancellation", %{
+      Tau.Session.Journal.persist(data, "cancellation", %{
         cause: "user",
         # ADR-0017: distinguishes the cooperative path (clean socket
         # release, partial content captured) from the brutal-kill
@@ -1511,7 +1273,7 @@ defmodule Tau.Session do
         :awaiting_user,
         %{command_task: nil} = data
       ) do
-    data = put_in(data, [:metadata, :permissions_mode], mode)
+    data = %{data | metadata: Map.put(data.metadata, :permissions_mode, mode)}
     {:keep_state, data, [{:reply, from, :ok}]}
   end
 
@@ -1539,61 +1301,6 @@ defmodule Tau.Session do
 
   # --- Helpers --------------------------------------------------------------
 
-  # ADR-0017: drive the cooperative-then-brutal cancellation handshake
-  # for the in-flight provider stream task. Returns `:cooperative` if
-  # the task drained on its own within the 250ms grace period (in
-  # which case the stream observed the flag, halted, and Stream.resource
-  # called its cleanup hook), `:brutal_kill` if we had to shut it
-  # down forcibly, or `:noop` if no provider task was active.
-  # Pairs with `[:tau, :provider, :request, :start]`.
-  defp cancel_provider_task(%{provider_task: nil}), do: :noop
-
-  defp cancel_provider_task(%{provider_task: task} = data) do
-    if not Process.alive?(task.pid) do
-      :noop
-    else
-      if data.cancel_flag, do: :counters.add(data.cancel_flag, 1, 1)
-
-      mechanism =
-        case Task.yield(task, 250) do
-          {:ok, _} -> :cooperative
-          {:exit, _} -> :cooperative
-          nil -> brutal_kill_provider_task(task)
-        end
-
-      # ADR-0017: telemetry event names are decoupled from the persisted
-      # mechanism atom — `:cooperative` surfaces as
-      # `[:tau, :provider, :request, :cancelled]` (the user-facing
-      # outcome), while `:brutal_kill` keeps its mechanism-named event
-      # so observability dashboards can flag the forced path explicitly.
-      telemetry_event_name =
-        case mechanism do
-          :cooperative -> :cancelled
-          :brutal_kill -> :brutal_kill
-        end
-
-      :telemetry.execute(
-        [:tau, :provider, :request, telemetry_event_name],
-        %{system_time: System.system_time()},
-        %{
-          provider: data.provider,
-          model: data.model,
-          session_id: data.id,
-          # SPEC-OTEL-REPORTER: echo the per-request discriminator so
-          # the OTel reporter can close the span opened at *.start.
-          span_ref: data.provider_span_ref
-        }
-      )
-
-      mechanism
-    end
-  end
-
-  defp brutal_kill_provider_task(task) do
-    Task.shutdown(task, :brutal_kill)
-    :brutal_kill
-  end
-
   # Common path that handles a user_message after any slash-command
   # expansion has resolved. Called both by the synchronous
   # handle_event(:cast, {:user_message, _}, _, _) clause (no slash
@@ -1620,7 +1327,7 @@ defmodule Tau.Session do
         data =
           data
           |> append_message(msg)
-          |> persist_event("user_message", message_to_data(msg))
+          |> Tau.Session.Journal.persist("user_message", Tau.Session.Journal.message_to_data(msg))
 
         # SPEC-CODING-AGENT / D-037: route to the coding-agent
         # dispatcher when one is configured; preserve the legacy
@@ -1637,21 +1344,6 @@ defmodule Tau.Session do
   @doc false
   def append_message(data, msg), do: %{data | messages: data.messages ++ [msg]}
 
-  defp persist_event(data, kind, payload) do
-    event = %{
-      "id" => generate_event_id(),
-      "parent_id" => parent_event_id(data),
-      "ts" => DateTime.utc_now() |> DateTime.to_iso8601(),
-      "kind" => kind,
-      "data" => payload
-    }
-
-    case data.persistence.append(data.persist_handle, event) do
-      {:ok, h} -> %{data | persist_handle: h}
-      {:error, _} -> data
-    end
-  end
-
   @doc false
   def generate_event_id do
     case Code.ensure_loaded?(Uniq.UUID) do
@@ -1659,8 +1351,6 @@ defmodule Tau.Session do
       _ -> "evt_" <> (:crypto.strong_rand_bytes(10) |> Base.url_encode64(padding: false))
     end
   end
-
-  defp parent_event_id(_data), do: nil
 
   @doc false
   def transition(id, _data, to) do
@@ -1732,37 +1422,6 @@ defmodule Tau.Session do
     p.path_for(id, cwd)
   end
 
-  # User-initiated slash-command skill activation.
-  #
-  # Called when `classify_slash_command/2` matches the slash-command name
-  # against `data.skills`. Sets `data.active_skill`, persists a JSONL
-  # `skill_activated` event, broadcasts `%Events.SkillActivated{}`, and
-  # emits telemetry — reusing the same side-effects as model-initiated
-  # activation, but without a tool_call_id (nil).
-  defp activate_skill_via_slash(data, %Tau.Skill{name: name} = skill) do
-    data =
-      %{data | active_skill: skill}
-      |> persist_event("skill_activated", %{
-        skill_name: name,
-        tool_call_id: nil,
-        allowed_tools: skill.allowed_tools
-      })
-
-    broadcast(data.id, %Events.SkillActivated{
-      session_id: data.id,
-      skill_name: name,
-      tool_call_id: nil
-    })
-
-    :telemetry.execute(
-      [:tau, :session, :skill_activated],
-      %{},
-      %{session_id: data.id, skill_name: name, disabled?: false}
-    )
-
-    data
-  end
-
   @doc false
   def register_builtins do
     Enum.each(
@@ -1774,533 +1433,6 @@ defmodule Tau.Session do
           _ -> :ok
         end
       end
-    )
-  end
-
-  defp message_to_data(%User{} = m), do: %{role: "user", content: serialize_content(m.content)}
-
-  defp message_to_data(%Assistant{} = m) do
-    %{
-      role: "assistant",
-      content: Enum.map(m.content, &serialize_block/1),
-      stop_reason: m.stop_reason && to_string(m.stop_reason),
-      usage: m.usage,
-      model: m.model
-    }
-  end
-
-  defp message_to_data(%ToolResult{} = m), do: tool_result_to_data(m)
-
-  defp tool_result_to_data(%ToolResult{} = m) do
-    %{
-      role: "tool_result",
-      tool_call_id: m.tool_call_id,
-      tool_name: m.tool_name,
-      content: serialize_content(m.content),
-      is_error: m.is_error,
-      details: m.details
-    }
-  end
-
-  defp serialize_content(s) when is_binary(s), do: s
-  defp serialize_content(blocks) when is_list(blocks), do: Enum.map(blocks, &serialize_block/1)
-
-  defp serialize_block(%{type: :text, text: t}), do: %{"type" => "text", "text" => t}
-
-  defp serialize_block(%{type: :image, data: d, media_type: mt}) when is_binary(d) do
-    %{"type" => "image", "media_type" => mt, "data_b64" => Base.encode64(d)}
-  end
-
-  defp serialize_block(%{type: :tool_call} = b),
-    do: %{"type" => "tool_call", "id" => b.id, "name" => b.name, "arguments" => b.arguments}
-
-  defp serialize_block(%{type: :thinking, text: t, signature: s}),
-    do: %{"type" => "thinking", "text" => t, "signature" => s}
-
-  defp serialize_block(other), do: other
-
-  # --- Skill loading + injection --------------------------------------------
-  #
-  # Per ADR-0005 the session is a read-only consumer of skill data:
-  # filesystem-discovered skills come from the pure
-  # Tau.Skills.Loader.discover/1, extension-provided skills come
-  # from the registry that Tau.Extensions.Loader populates once at
-  # boot. We merge both, deduplicating by name (filesystem wins on
-  # conflict, since cwd-local should mask priv/bundled).
-
-  defp load_skills(cwd) do
-    discovered = Tau.Skills.Loader.discover(cwd)
-    extension = Tau.Skills.Loader.list_extension_skills()
-
-    skills =
-      (extension ++ discovered)
-      |> Enum.uniq_by(fn {name, _} -> name end)
-      |> Enum.sort_by(fn {name, _} -> name end)
-
-    if skills != [] do
-      active_count = Enum.count(skills, fn {_n, s} -> not s.disable_model_invocation end)
-
-      :telemetry.execute(
-        [:tau, :skills, :loaded],
-        %{count: length(skills), active: active_count, skipped: length(skills) - active_count},
-        %{cwd: cwd}
-      )
-    end
-
-    skills
-  end
-
-  defp prepend_skill_messages(messages, skills) do
-    active = Enum.reject(skills, fn {_name, s} -> s.disable_model_invocation end)
-
-    case active do
-      [] ->
-        messages
-
-      list ->
-        Enum.map(list, fn {name, %Tau.Skill{} = s} ->
-          Tau.Message.User.new(render_skill(name, s),
-            metadata: %{role: :system, source: :skill, name: name, path: s.path}
-          )
-        end) ++ messages
-    end
-  end
-
-  defp render_skill(name, %Tau.Skill{description: desc, body: body}) do
-    header =
-      if is_binary(desc) and desc != "" do
-        "# Skill: #{name}\n\n_#{desc}_\n\n"
-      else
-        "# Skill: #{name}\n\n"
-      end
-
-    header <> body
-  end
-
-  # --- Memory injection -----------------------------------------------------
-
-  defp inject_memory(messages, cwd) do
-    case Tau.Memory.Loader.load(cwd) do
-      [] ->
-        messages
-
-      cascade ->
-        bytes = Enum.reduce(cascade, 0, fn {_p, b}, acc -> acc + byte_size(b) end)
-
-        :telemetry.execute(
-          [:tau, :memory, :loaded],
-          %{file_count: length(cascade), bytes: bytes},
-          %{cwd: cwd}
-        )
-
-        memory_messages =
-          Enum.map(cascade, fn {path, body} ->
-            Tau.Message.User.new(body, metadata: %{role: :system, source: :memory, path: path})
-          end)
-
-        memory_messages ++ messages
-    end
-  end
-
-  # --- Event replay (for fork/resume) ---------------------------------------
-
-  defp events_to_messages(events) do
-    events
-    |> Enum.map(&event_to_message/1)
-    |> Enum.reject(&is_nil/1)
-  end
-
-  defp event_to_message(%{"kind" => "user_message", "data" => d}) do
-    Tau.Message.User.new(d["content"])
-  end
-
-  defp event_to_message(%{"kind" => "assistant_message", "data" => d}) do
-    Tau.Message.Assistant.new(
-      content: deserialize_blocks(d["content"]),
-      stop_reason: stop_reason_atom(d["stop_reason"]),
-      usage: d["usage"] || %{},
-      model: d["model"]
-    )
-  end
-
-  defp event_to_message(%{"kind" => "tool_result", "data" => d}) do
-    Tau.Message.ToolResult.new(
-      tool_call_id: d["tool_call_id"],
-      tool_name: d["tool_name"],
-      content: d["content"],
-      details: d["details"] || %{},
-      is_error: d["is_error"] || false
-    )
-  end
-
-  defp event_to_message(%{"kind" => "compaction", "data" => %{"summary" => s}})
-       when is_binary(s) and s != "" do
-    Tau.Message.User.new(s, metadata: %{role: :compaction_summary})
-  end
-
-  defp event_to_message(_), do: nil
-
-  # D-041: fold the last persisted model_swap event from a
-  # preload list so resume and fork both converge on the swapped model.
-  # Returns the most recent "to" value, or nil when no swap is recorded.
-  # Mirrors coding_agent_state_from_preload/1.
-  defp model_from_preload(preload) when is_list(preload) do
-    Enum.reduce(preload, nil, fn
-      %{"kind" => "model_swap", "data" => %{"to" => to}}, _acc when is_binary(to) -> to
-      _, acc -> acc
-    end)
-  end
-
-  defp model_from_preload(_), do: nil
-
-  # SPEC-CODING-AGENT §7 Q5: recover the most recent
-  # adapter-side session_id from a preload event log so a resumed
-  # session can pass it back as `task.resume_id`. Walks events in
-  # order so the LAST `coding_agent_session` wins (Claude Code
-  # rotates session_id across restarts in some failure modes).
-  defp coding_agent_state_from_preload(preload) when is_list(preload) do
-    Enum.reduce(preload, nil, fn
-      %{"kind" => "coding_agent_session", "data" => %{} = d}, _acc ->
-        %{
-          session_id: d["session_id"],
-          agent: agent_to_atom(d["agent"])
-        }
-
-      _, acc ->
-        acc
-    end)
-  end
-
-  defp coding_agent_state_from_preload(_), do: nil
-
-  # SPEC-CODING-AGENT §7 Q4 / D-038: fold persisted `coding_agent_cost`
-  # events back into in-memory records so the resumed session's
-  # cost panel doesn't lose history. Skips malformed lines silently
-  # (forward-compat — newer schema fields land here as additions).
-  defp coding_agent_costs_from_preload(preload) when is_list(preload) do
-    preload
-    |> Enum.filter(&match?(%{"kind" => "coding_agent_cost"}, &1))
-    |> Enum.map(fn %{"data" => d} -> Tau.CodingAgent.Cost.from_jsonl(d) end)
-    |> Enum.reject(&is_nil/1)
-  end
-
-  defp coding_agent_costs_from_preload(_), do: []
-
-  defp agent_to_atom(nil), do: nil
-
-  defp agent_to_atom(bin) when is_binary(bin) do
-    String.to_existing_atom(bin)
-  rescue
-    ArgumentError -> nil
-  end
-
-  defp agent_to_atom(a) when is_atom(a), do: a
-  defp agent_to_atom(_), do: nil
-
-  defp deserialize_blocks(blocks) when is_list(blocks),
-    do: Enum.map(blocks, &deserialize_block/1)
-
-  defp deserialize_blocks(other), do: other
-
-  defp deserialize_block(%{"type" => "text", "text" => t}), do: %{type: :text, text: t}
-
-  defp deserialize_block(%{"type" => "tool_call", "id" => id, "name" => n, "arguments" => a}),
-    do: %{type: :tool_call, id: id, name: n, arguments: a}
-
-  defp deserialize_block(%{"type" => "thinking", "text" => t} = b),
-    do: %{type: :thinking, text: t, signature: b["signature"]}
-
-  defp deserialize_block(other), do: other
-
-  defp stop_reason_atom(nil), do: nil
-  defp stop_reason_atom(s) when is_binary(s), do: String.to_atom(s)
-  defp stop_reason_atom(s), do: s
-
-  # --- Slash commands (ADR-0008) -------------------------------------------
-  #
-  # Programmatic command bodies (Tau.Command modules) run in a supervised
-  # Task so a misbehaving extension can't deadlock the session. File-
-  # commands stay synchronous (bounded `File.read/1`, no user code).
-  #
-  # `classify_slash_command/4` is pure: returns `{:async, mod, args, msg}`
-  # or `{:sync, msg}`.
-  #
-  # Precedence (outermost wins):
-  #   builtin > extension > file-command > skill > template > verbatim
-  #
-  # D-076: prompt templates sit last before verbatim fall-through so
-  # skills and built-ins can shadow same-named templates.
-
-  defp classify_slash_command(%Tau.Message.User{content: c} = msg, skills, templates, cwd)
-       when is_binary(c) do
-    case Tau.Commands.Parser.parse(c) do
-      {:command, "/model", args} ->
-        {:model_command, String.trim(args), msg}
-
-      {:command, "/" <> bare_name = name, args} ->
-        # Built-ins shadow same-named extensions.
-        case Tau.Commands.Parser.lookup_builtin(name) do
-          {:ok, mod} ->
-            {:builtin, mod, args, msg}
-
-          :error ->
-            case Tau.Commands.Parser.lookup(name) do
-              {:ok, mod} when is_atom(mod) ->
-                if function_exported?(mod, :execute, 2) do
-                  {:async, mod, args, msg}
-                else
-                  {:sync, msg}
-                end
-
-              {:ok, path} when is_binary(path) ->
-                {:sync, invoke_file_command(path, args, msg)}
-
-              :error ->
-                # Not a built-in or extension command — check skills.
-                case Tau.Commands.Parser.lookup_skill(bare_name, skills) do
-                  {:ok, skill} ->
-                    rewritten = %Tau.Message.User{msg | content: args}
-                    {:skill_activation, skill, rewritten}
-
-                  :error ->
-                    # Not a skill — check prompt templates.
-                    # D-076: template match rewrites the user
-                    # message with the rendered body and returns {:sync, msg}
-                    # — the same path as invoke_file_command/3.
-                    case List.keyfind(templates, bare_name, 0) do
-                      {_name, template} ->
-                        context = build_template_context(cwd)
-                        {:ok, rendered} = Tau.PromptTemplates.render(template, args, context)
-                        rewritten = %Tau.Message.User{msg | content: rendered}
-                        {:sync, rewritten}
-
-                      nil ->
-                        unknown_or_passthrough(bare_name, args, msg)
-                    end
-                end
-            end
-        end
-
-      _ ->
-        {:sync, msg}
-    end
-  end
-
-  defp classify_slash_command(msg, _skills, _templates, _cwd), do: {:sync, msg}
-
-  # D-101 / SPEC-TUI-COMPLETION: only intercept whitespace-free tokens
-  # (args == "") with no catalog match. When args is non-empty the user provided
-  # arguments, pass through to the model (AC-7 guard).
-  defp unknown_or_passthrough(bare_name, "", _msg), do: {:unknown_command, "/" <> bare_name}
-  defp unknown_or_passthrough(_bare_name, _args, msg), do: {:sync, msg}
-
-  defp build_template_context(cwd) do
-    user =
-      case System.user_home() do
-        nil -> ""
-        home -> Path.basename(home)
-      end
-
-    %{
-      "cwd" => cwd,
-      "date" => DateTime.utc_now() |> DateTime.to_date() |> Date.to_iso8601(),
-      "user" => user,
-      "cursor" => ""
-    }
-  end
-
-  defp spawn_command_task(mod, args, msg, data) do
-    parent = self()
-    ctx = build_command_ctx(data)
-    timeout_ms = Application.get_env(:tau, :slash_command_timeout_ms, 30_000)
-
-    # Use start_child (not async_nolink) so we can deliver the result
-    # from *inside* the worker via Process.send. async_nolink's Task
-    # struct is owner-locked; querying it from a watcher pid raises
-    # ArgumentError. The session FSM tracks the worker pid directly
-    # for cancel/timeout purposes.
-    {:ok, pid} =
-      Task.Supervisor.start_child(Tau.Tools.TaskSupervisor, fn ->
-        result =
-          try do
-            case prepare_command_args(mod, args) do
-              {:ok, prepared} -> mod.execute(prepared, ctx)
-              {:error, _} = err -> err
-            end
-          rescue
-            e -> {:crashed, Exception.message(e)}
-          catch
-            kind, value -> {:crashed, "uncaught #{kind}: #{inspect(value)}"}
-          end
-
-        Process.send(parent, {:command_done, result, msg}, [])
-      end)
-
-    Process.send_after(self(), {:command_timeout, pid, msg, timeout_ms}, timeout_ms)
-
-    {:keep_state, %{data | command_task: pid}}
-  end
-
-  defp apply_command_result(result, msg) do
-    case result do
-      {:inject, prefix} when is_binary(prefix) ->
-        %Tau.Message.User{msg | content: prefix <> "\n\n" <> msg.content}
-
-      {:replace, replacement} when is_binary(replacement) ->
-        %Tau.Message.User{msg | content: replacement}
-
-      {:run, replacement} when is_binary(replacement) ->
-        %Tau.Message.User{msg | content: replacement}
-
-      :ignore ->
-        msg
-
-      {:crashed, reason} ->
-        %Tau.Message.User{
-          msg
-          | content: "(slash command crashed: #{reason})\n\n" <> msg.content
-        }
-
-      {:timeout, ms} ->
-        %Tau.Message.User{
-          msg
-          | content: "(slash command timed out after #{ms}ms)\n\n" <> msg.content
-        }
-
-      # Spec-parse failure surfaced from prepare_command_args/2.
-      {:error, reason} ->
-        %Tau.Message.User{
-          msg
-          | content:
-              "(slash command argument error: #{Tau.Command.Spec.format_error(reason)})\n\n" <>
-                msg.content
-        }
-
-      _ ->
-        msg
-    end
-  end
-
-  # If the command module declares a `parameters/0` spec, tokenise the
-  # tail string and bind it before invoking `execute/2`. Otherwise pass
-  # the raw tail.
-  defp prepare_command_args(mod, args) when is_binary(args) do
-    if function_exported?(mod, :parameters, 0) do
-      Tau.Command.Spec.parse(mod.parameters(), args)
-    else
-      {:ok, args}
-    end
-  end
-
-  defp prepare_command_args(_mod, args), do: {:ok, args}
-
-  # D-042: built-in slash-command inline handler.
-  #
-  # Dispatches `mod.run(args, data)` and maps the typed outcome to FSM
-  # actions.  CRITICAL: {:notice}, {:mutate}, and {:error} branches MUST
-  # NOT call process_user_message/2 — no provider turn is started.
-  # Only :passthrough falls through to the normal provider path.
-  defp handle_builtin_command(mod, args, original_msg, data) do
-    outcome = mod.run(args, data)
-
-    :telemetry.execute(
-      [:tau, :session, :builtin_command],
-      %{},
-      %{session_id: data.id, command: mod.name(), outcome: outcome_tag(outcome)}
-    )
-
-    case outcome do
-      {:notice, text} when is_binary(text) ->
-        broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: text})
-        {:keep_state, data}
-
-      {:notice, lines} when is_list(lines) ->
-        Enum.each(lines, fn line ->
-          broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: line})
-        end)
-
-        {:keep_state, data}
-
-      {:mutate, fun, notice} when is_function(fun, 1) ->
-        data2 = fun.(data)
-
-        if is_binary(notice) do
-          broadcast(data2.id, %Events.SystemNotice{session_id: data2.id, text: notice})
-        end
-
-        # D-108 (SPEC-TUI-COMPLETION §4 B1): re-broadcast the catalog after
-        # any {:mutate} outcome so /reload's updated skills and templates are
-        # reflected in the TUI menu immediately (without a session restart).
-        catalog_entries2 = Catalog.list(data2)
-
-        broadcast(data2.id, %Events.CommandCatalog{
-          session_id: data2.id,
-          entries: catalog_entries2
-        })
-
-        {:keep_state, data2}
-
-      {:error, text} ->
-        broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: "Error: " <> text})
-        {:keep_state, data}
-
-      {:async_compact, notice} ->
-        # The only outcome that changes FSM state (to :compacting).
-        # Does NOT call process_user_message/2 (D-042).
-        broadcast(data.id, %Events.SystemNotice{session_id: data.id, text: notice})
-        # D-163: broadcast CompactionStarted before entering :compacting so the
-        # TUI status bar transitions to :running before the task is spawned.
-        broadcast(data.id, %Events.CompactionStarted{session_id: data.id})
-
-        ctx = %{provider: data.provider, model: data.model}
-        timeout_ms = Application.get_env(:tau, :compaction_timeout_ms, 60_000)
-
-        task =
-          Task.Supervisor.async_nolink(Tau.Tools.TaskSupervisor, fn ->
-            Tau.Compactor.impl().compact(data.messages, ctx)
-          end)
-
-        :telemetry.execute([:tau, :compaction, :start], %{system_time: System.system_time()}, %{
-          session_id: data.id,
-          message_count: length(data.messages),
-          async: true
-        })
-
-        Process.send_after(self(), {:compaction_timeout, task.pid, timeout_ms}, timeout_ms)
-
-        {:next_state, :compacting,
-         %{data | compaction_task: task.pid, compaction_monitor: task.ref}}
-
-      :passthrough ->
-        # Fall through to the normal provider turn with the original message.
-        process_user_message(original_msg, data)
-    end
-  end
-
-  defp outcome_tag({:notice, _}), do: :notice
-  defp outcome_tag({:mutate, _, _}), do: :mutate
-  defp outcome_tag({:error, _}), do: :error
-  defp outcome_tag({:async_compact, _}), do: :async_compact
-  defp outcome_tag(:passthrough), do: :passthrough
-
-  defp invoke_file_command(path, args, msg) do
-    case File.read(path) do
-      {:ok, body} -> %Tau.Message.User{msg | content: body <> "\n\n" <> args}
-      _ -> msg
-    end
-  end
-
-  defp build_command_ctx(data) do
-    sid = data.id
-
-    Tau.Command.Context.new(
-      session_id: sid,
-      cwd: data.cwd,
-      permissions_mode: Map.get(data.metadata, :permissions_mode, :default),
-      emit: fn payload ->
-        Phoenix.PubSub.broadcast(Tau.PubSub, "session:#{sid}", payload)
-      end,
-      metadata: data.metadata
     )
   end
 end

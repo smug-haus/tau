@@ -104,7 +104,7 @@ defmodule Tau.Session.SlashCommand do
   `{:keep_state, updated_data}`.
   """
   @spec spawn_command_task(module(), String.t(), Tau.Message.User.t(), Tau.Session.Data.t()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def spawn_command_task(mod, args, msg, data) do
     parent = self()
     ctx = build_command_ctx(data)
@@ -186,7 +186,7 @@ defmodule Tau.Session.SlashCommand do
   falls through to the normal provider path.
   """
   @spec handle_builtin_command(module(), String.t(), Tau.Message.User.t(), Tau.Session.Data.t()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def handle_builtin_command(mod, args, original_msg, data) do
     outcome = mod.run(args, data)
 
@@ -286,7 +286,7 @@ defmodule Tau.Session.SlashCommand do
   Applies the command result and routes through `process_user_message/2`.
   """
   @spec handle_command_done(term(), Tau.Message.User.t(), Tau.Session.Data.t()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def handle_command_done(result, original_msg, data) do
     msg = apply_command_result(result, original_msg)
     Tau.Session.process_user_message(msg, %{data | command_task: nil})
@@ -302,7 +302,7 @@ defmodule Tau.Session.SlashCommand do
           non_neg_integer(),
           Tau.Session.Data.t()
         ) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def handle_command_timeout_live(pid, original_msg, ms, data) do
     if Process.alive?(pid), do: Process.exit(pid, :brutal_kill)
     msg = apply_command_result({:timeout, ms}, original_msg)
@@ -312,7 +312,7 @@ defmodule Tau.Session.SlashCommand do
   @doc """
   Handle a stale command timeout (task already completed). Drop.
   """
-  @spec handle_command_timeout_stale(Tau.Session.Data.t()) :: :gen_statem.event_handler_result()
+  @spec handle_command_timeout_stale(Tau.Session.Data.t()) :: Tau.Session.Data.fsm_result()
   def handle_command_timeout_stale(data) do
     {:keep_state, data}
   end

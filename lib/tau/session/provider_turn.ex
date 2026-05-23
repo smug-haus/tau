@@ -201,7 +201,7 @@ defmodule Tau.Session.ProviderTurn do
   streaming path.
   """
   @spec process_user_message(Tau.Message.t(), Tau.Session.Data.t()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def process_user_message(msg, data) do
     case Tau.Hooks.Dispatcher.run(
            :user_prompt_submit,
@@ -249,7 +249,7 @@ defmodule Tau.Session.ProviderTurn do
   to `:awaiting_user`.
   """
   @spec finalize_assistant(Assembler.t(), Tau.Session.Data.t()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def finalize_assistant(assembler, data) do
     msg = Assembler.assistant(assembler)
 
@@ -458,7 +458,7 @@ defmodule Tau.Session.ProviderTurn do
   ADR-0017: allocates a fresh cancel flag per stream.
   D-057 / SPEC-OTEL-REPORTER: allocates a fresh `provider_span_ref` per request.
   """
-  @spec start(Tau.Session.Data.t()) :: :gen_statem.event_handler_result()
+  @spec start(Tau.Session.Data.t()) :: Tau.Session.Data.fsm_result()
   def start(data) do
     Tau.Session.transition(data.id, data, :provider_streaming)
 
@@ -549,7 +549,7 @@ defmodule Tau.Session.ProviderTurn do
   Handle a provider event arriving in `:provider_streaming`.
   """
   @spec handle_provider_event(reference(), term(), Tau.Session.Data.t()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def handle_provider_event(ref, ev, data) do
     if current_run?(data, {:provider, ref}) do
       new_assembler = Assembler.step(data.assembler, ev)
@@ -576,7 +576,7 @@ defmodule Tau.Session.ProviderTurn do
   D-061: schedules a same-provider retry after a backoff delay.
   """
   @spec handle_provider_retry_event(reference(), PEvent.Error.t(), Tau.Session.Data.t()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def handle_provider_retry_event(ref, ev, data) do
     if current_run?(data, {:provider, ref}) do
       next_count = data.provider_retry_state.count + 1
@@ -636,7 +636,7 @@ defmodule Tau.Session.ProviderTurn do
   ADR-0012: advances to the next provider in the chain.
   """
   @spec handle_provider_fallback_event(reference(), PEvent.Error.t(), Tau.Session.Data.t()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def handle_provider_fallback_event(ref, ev, %{fallback_chain_remaining: [next | rest]} = data) do
     if current_run?(data, {:provider, ref}) do
       from_provider = data.provider
@@ -699,7 +699,7 @@ defmodule Tau.Session.ProviderTurn do
   Handle `:provider_done` in `:provider_streaming`.
   """
   @spec handle_provider_done(reference(), Tau.Session.Data.t()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def handle_provider_done(ref, data) do
     if current_run?(data, {:provider, ref}) do
       if data.assembler && Assembler.done?(data.assembler) do
@@ -719,7 +719,7 @@ defmodule Tau.Session.ProviderTurn do
   Handle `:provider_failed` (task raised) in `:provider_streaming`.
   """
   @spec handle_provider_failed(reference(), String.t(), Tau.Session.Data.t()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def handle_provider_failed(ref, msg, data) do
     if current_run?(data, {:provider, ref}) do
       assembler =
@@ -737,7 +737,7 @@ defmodule Tau.Session.ProviderTurn do
   @doc """
   Handle `:finish_provider` internal event in `:provider_streaming`.
   """
-  @spec handle_finish_provider(Tau.Session.Data.t()) :: :gen_statem.event_handler_result()
+  @spec handle_finish_provider(Tau.Session.Data.t()) :: Tau.Session.Data.fsm_result()
   def handle_finish_provider(data) do
     handle_provider_done(data.stream_ref, data)
   end
@@ -745,7 +745,7 @@ defmodule Tau.Session.ProviderTurn do
   @doc """
   Handle `:end_turn` internal event — provider signals graceful completion.
   """
-  @spec handle_end_turn(atom(), Tau.Session.Data.t()) :: :gen_statem.event_handler_result()
+  @spec handle_end_turn(atom(), Tau.Session.Data.t()) :: Tau.Session.Data.fsm_result()
   def handle_end_turn(_state, data) do
     if data.assembler do
       finalize_assistant(data.assembler, data)
@@ -758,7 +758,7 @@ defmodule Tau.Session.ProviderTurn do
   Handle a deferred retry trigger `{:provider_retry, count}` in `:provider_streaming`.
   """
   @spec handle_provider_retry_trigger(non_neg_integer(), Tau.Session.Data.t()) ::
-          :gen_statem.event_handler_result()
+          Tau.Session.Data.fsm_result()
   def handle_provider_retry_trigger(count, data) do
     if count == data.provider_retry_state.count do
       start(data)
