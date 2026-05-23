@@ -3138,18 +3138,12 @@ defmodule Tau.Session do
   defp whitelist_size(:all), do: :all
   defp whitelist_size(list) when is_list(list), do: length(list)
 
-  # SPEC-PERMISSION-PROMPTS §4 B3 (D-091): called when the last pending
-  # permission request is resolved. Emits accumulated instant-resolve results
-  # (from :deny_once decisions and pre-resolved items tracked in
-  # permission_pending_results), then dispatches the approved batch
-  # (permission_dispatch_batch — pre-approved :allow calls + :allow_once calls).
-  #
-  # The :awaiting_permission {:tool_done} handler has already processed
-  # pre-resolved items (deny-rule, whitelist, activated) from tools_in_flight
-  # while we were waiting for consent. The only remaining tools_in_flight
-  # entries at this point are the :awaiting_permission sentinels (the :ask
-  # calls now resolved). We remove those and build a fresh tools_in_flight
-  # for the :tool_executing state from only the newly dispatched tasks.
+  # SPEC-PERMISSION-PROMPTS §4 B3 / D-091: called when the last pending
+  # permission request resolves. Emits accumulated instant-resolve
+  # results (`permission_pending_results`) and dispatches the approved
+  # batch (`permission_dispatch_batch`). Remaining `:awaiting_permission`
+  # sentinels in `tools_in_flight` are stripped; the next state's
+  # `tools_in_flight` carries only the newly-dispatched tasks.
   defp finish_permission_round(data) do
     parent = self()
 
@@ -4234,19 +4228,11 @@ defmodule Tau.Session do
     end)
   end
 
-  # SPEC-CODING-AGENT §7 Q4 / D-038: fold `%Event.Cost{}` into
-  # session totals as an adapter-tagged line item. Three side
-  # effects, all wrapped so a failure in one MUST NOT crash the
-  # session (D-035):
-  #
-  # 1. Build a `%Tau.CodingAgent.Cost{}` and append to
-  #    `data.coding_agent_costs` so the in-process aggregator
-  #    has the line item.
-  # 2. Persist a `coding_agent_cost` JSONL event so `/resume` can
-  #    recompute totals from disk.
-  # 3. Emit `[:tau, :coding_agent, :cost]` telemetry so
-  #    `Tau.Cost.Tracker` folds the tokens into its ETS table
-  #    alongside provider-direct costs.
+  # SPEC-CODING-AGENT §7 Q4 / D-038: fold `%Event.Cost{}` into session
+  # totals as an adapter-tagged line item. Three side effects (append to
+  # `data.coding_agent_costs`, persist `coding_agent_cost` JSONL,
+  # emit `[:tau, :coding_agent, :cost]` telemetry), each wrapped per
+  # D-035 so a failure in one MUST NOT crash the session.
   defp maybe_apply_cost_hook(data, %CAEvent.Cost{} = cost) do
     try do
       tagged =
@@ -4886,24 +4872,18 @@ defmodule Tau.Session do
 
   # --- Slash commands (ADR-0008) -------------------------------------------
   #
-  # Programmatic slash-command bodies (Tau.Command modules) run in a
-  # supervised Task — never inline in the FSM — so a misbehaving
-  # extension can't deadlock the session. File-commands stay
-  # synchronous; they're bounded File.read/1s with no user code.
+  # Programmatic command bodies (Tau.Command modules) run in a supervised
+  # Task so a misbehaving extension can't deadlock the session. File-
+  # commands stay synchronous (bounded `File.read/1`, no user code).
   #
-  # classify_slash_command/4 is a pure parser: it returns
-  # `{:async, mod, args, msg}` (caller spawns the task) or
-  # `{:sync, msg}` (caller proceeds directly with the rewritten
-  # message).
+  # `classify_slash_command/4` is pure: returns `{:async, mod, args, msg}`
+  # or `{:sync, msg}`.
   #
   # Precedence (outermost wins):
   #   builtin > extension > file-command > skill > template > verbatim
   #
-  # D-076: prompt-template branch sits last before the
-  # verbatim fall-through, so skills and built-ins can shadow same-named
-  # templates.  On a template match the body is rendered (variable
-  # substitution) and the result is returned as {:sync, rewritten_msg} —
-  # identical to the file-command path; no new FSM state or cast handler.
+  # D-076: prompt templates sit last before verbatim fall-through so
+  # skills and built-ins can shadow same-named templates.
 
   defp classify_slash_command(%Tau.Message.User{content: c} = msg, skills, templates, cwd)
        when is_binary(c) do
