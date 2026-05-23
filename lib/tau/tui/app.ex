@@ -304,7 +304,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     end
 
     # Route terminal key events to sub-handlers by event shape.
-    # FIX-8: mod-bearing events MUST reach handle_alt regardless of whether
+    # Mod-bearing events MUST reach handle_alt regardless of whether
     # `key` is also present. Check mod first so alt-chords are not shadowed
     # by the key-only handler. D-141: unrecognised alt-chords MUST be no-ops.
     #
@@ -380,7 +380,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
         13 when model.status in [:streaming, :sending] or is_binary(model.status) ->
           steer(model)
 
-        # FIX-2: Enter with trailing backslash → strip backslash, insert newline.
+        # Enter with trailing backslash → strip backslash, insert newline.
         # Avoids submit, preserving existing multi-line structure (D-145).
         13 ->
           submit_or_continue(model)
@@ -435,7 +435,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     # Readline editing chords (Ctrl+A/E/W/U/K/Y/D/P/N/R) and arrow keys.
     # Split from handle_key/3 to keep cyclomatic complexity within bounds.
     #
-    # FIX-1: Up/down arrows are edge-aware:
+    # Up/down arrows are edge-aware:
     #   - Up when cursor on first line → history_prev (existing behaviour)
     #   - Up when cursor on non-first line → Editor.move_up
     #   - Down when cursor on last line → history_next (existing behaviour)
@@ -498,7 +498,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       end
     end
 
-    # FIX-1: Edge-aware up arrow. On first buffer line → history_prev.
+    # Edge-aware up arrow. On first buffer line → history_prev.
     # On interior lines → Editor.move_up (inter-line cursor movement).
     defp arrow_up(model) do
       {row, _col} = model.editor.cursor
@@ -510,7 +510,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
       end
     end
 
-    # FIX-1: Edge-aware down arrow. On last buffer line → history_next.
+    # Edge-aware down arrow. On last buffer line → history_next.
     # On interior lines → Editor.move_down (inter-line cursor movement).
     defp arrow_down(model) do
       {row, _col} = model.editor.cursor
@@ -525,7 +525,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
     # Handle Alt-chord events (mod != 0). Best-effort: degrade to no-op
     # if termbox/tmux mangles the ESC-prefix (D-141).
-    # FIX-3: Ctrl+R search mode — Ctrl+R while already in search cycles to next match.
+    # Ctrl+R search mode — Ctrl+R while already in search cycles to next match.
     #
     # Note: handle_alt/3 receives (model, ch, key) where ch is the printable
     # codepoint (0 for control keys) and key is the control-key code. Both are
@@ -830,7 +830,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
       prefix =
         if model.search != nil do
-          # FIX-3 / FIX-C1: show the live match in the prompt, honouring the
+          # Show the live match in the prompt, honouring the
           # current search_index so the displayed entry matches what
           # search_accept/1 would accept at the current cycle position (D-147).
           match_text =
@@ -902,8 +902,8 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     # History navigation: prev (older). On empty editor, navigate to
     # most recent entry. On non-empty, allow navigation from any state.
     #
-    # FIX f-12: restore multi-line entries by splitting on "\n" and rebuilding
-    # real lines rather than inserting a "\n"-joined flat string.
+    # Restore multi-line entries by splitting on "\n" and rebuilding real
+    # lines rather than inserting a "\n"-joined flat string.
     defp history_prev(model) do
       current_text = Editor.text(model.editor)
       {new_hist, entry} = History.prev(model.history, current_text)
@@ -919,7 +919,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     end
 
     # History navigation: next (newer / restore draft).
-    # FIX f-12: same multi-line restore as history_prev.
+    # Same multi-line restore as history_prev.
     defp history_next(model) do
       {new_hist, entry} = History.next(model.history)
 
@@ -944,7 +944,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     end
 
     # Ctrl+R: enter reverse-search mode (D-147).
-    # FIX-3: entering Ctrl+R while already in search mode advances to
+    # Entering Ctrl+R while already in search mode advances to
     # the next-older match (cycles) rather than resetting.
     defp search_start(model) do
       case model.search do
@@ -1079,7 +1079,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     defp clamp(n, max) when n > max, do: max
     defp clamp(n, _max), do: n
 
-    # FIX-2: submit_or_continue checks for trailing backslash BEFORE submitting.
+    # submit_or_continue checks for trailing backslash BEFORE submitting.
     # If the grapheme immediately before the cursor is `\`, strip it and insert
     # a real newline at cursor position instead of submitting the turn (D-145).
     # This preserves existing multi-line structure and cursor position.
@@ -1423,7 +1423,7 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
     # B1 rule (D-151): ToolStart/ToolEnd on the parent topic are no-ops.
     # Calls owned by a sub-agent: the live region and end marker own the
     # visual representation. Non-owned calls: tool_output was removed in
-    # FIX-3; a future PR may surface non-owned tool calls in the transcript.
+    # a future PR may surface non-owned tool calls in the transcript.
     defp on_tool_start(model, _e), do: model
 
     defp on_tool_end(model, _e), do: model

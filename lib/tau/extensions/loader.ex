@@ -52,7 +52,7 @@ defmodule Tau.Extensions.Loader do
   @doc """
   Unload an extension entry, removing its registrations from all four
   registries. No-op if the entry was never loaded. Used by tests to
-  remove loaded extensions and prevent cross-test registry leakage — f-2.
+  remove loaded extensions and prevent cross-test registry leakage.
   """
   @spec unload(term()) :: :ok
   def unload(entry), do: GenServer.cast(__MODULE__, {:unload, entry})
@@ -87,7 +87,7 @@ defmodule Tau.Extensions.Loader do
     # would indicate a deeper startup ordering bug.
     #
     # opts[:entries] — if present, use as the entries list directly, bypassing
-    # Settings.Cache and auto-discovery. Used only in tests (f-1). D-122.
+    # Settings.Cache and auto-discovery. Used only in tests. D-122.
     {explicit_entries, discovered_entries} =
       if Keyword.has_key?(opts, :entries) do
         {Keyword.fetch!(opts, :entries), []}
@@ -169,7 +169,7 @@ defmodule Tau.Extensions.Loader do
 
   # Returns a list of directory path strings to scan.
   # Uses File.cwd/0 (non-raising) so a missing cwd does not propagate
-  # as an unguarded raise from init/1 — D-122, f-5.
+  # as an unguarded raise from init/1 — D-122.
   defp discover_extension_dirs do
     home = System.user_home() || "."
 
@@ -272,7 +272,7 @@ defmodule Tau.Extensions.Loader do
   # that have never been compiled — i.e. brand-new extension modules — are
   # still extracted and checked for collisions via Code.ensure_loaded?/1.
   # Module names in extension files are bounded in number, so adding atoms here
-  # is acceptable. — D-123, f-3.
+  # is acceptable. — D-123.
   defp peek_module_names(path) do
     case File.read(path) do
       {:ok, src} ->
@@ -323,7 +323,7 @@ defmodule Tau.Extensions.Loader do
           :telemetry.execute(
             [:tau, :extensions, :load, :stop],
             %{duration: duration_val},
-            # result: :skipped distinguishes "loaded nothing" from :ok (f-6 / SPEC-EXTENSIONS §5).
+            # result: :skipped distinguishes "loaded nothing" from :ok (SPEC-EXTENSIONS §5).
             Map.merge(meta, %{result: :skipped, skipped: true})
           )
 

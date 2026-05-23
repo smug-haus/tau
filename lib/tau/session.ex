@@ -833,7 +833,7 @@ defmodule Tau.Session do
           #
           # `compaction_monitor` — monitor ref returned by Task.Supervisor.async_nolink/3,
           # the discriminating guard key for the five terminal clauses. Presence
-          # guards on demonitor/exit calls (BLOCKING-2/3 fixes).
+          # guards on demonitor/exit calls.
           #
           # `compaction_failures` — per-session consecutive failure counter (D-016).
           # Shared across sync (maybe_compact/2) and async paths — NOT path-tagged.
@@ -2056,7 +2056,6 @@ defmodule Tau.Session do
   # set to nil. Stale {ref,result} / {:DOWN} messages that arrive after the
   # fields are cleared fail the %{compaction_monitor: ref} guard and fall
   # through to the catch-all (which drops them via {:keep_state, data}).
-  # This is the BLOCKING-1 fix.
   #
   # All five clauses MUST precede the catch-all (next clause below).
   # ---------------------------------------------------------------------------
@@ -2070,7 +2069,7 @@ defmodule Tau.Session do
     # Process.demonitor with [:flush] removes the monitor and purges any
     # {:DOWN, ref, ...} already in the mailbox. Combined with clearing both
     # worker fields, stale {:DOWN} messages from this worker can no longer
-    # match Clauses 2a/2b (BLOCKING-1 fix).
+    # match Clauses 2a/2b.
     Process.demonitor(ref, [:flush])
 
     data = %{data | compaction_task: nil, compaction_monitor: nil}
@@ -2184,8 +2183,8 @@ defmodule Tau.Session do
 
   # Clause 3 — live timeout: fired while the worker is still running.
   # Guard on compaction_task pid ensures this is the timeout for the CURRENT
-  # worker. Only this clause calls demonitor/exit (BLOCKING-2 fix: an unguarded
-  # demonitor(nil) would crash the FSM). MUST be ordered BEFORE Clause 4.
+  # worker. Only this clause calls demonitor/exit — an unguarded
+  # demonitor(nil) would crash the FSM. MUST be ordered BEFORE Clause 4.
   def handle_event(
         :info,
         {:compaction_timeout, pid, _ms},
@@ -2228,7 +2227,7 @@ defmodule Tau.Session do
 
   # Clause 4 — stale timeout: arrives AFTER the worker already completed
   # (Clause 1 cleared compaction_task to nil, so pid != data.compaction_task).
-  # Drop with NO demonitor — both worker fields are already nil (BLOCKING-2 fix).
+  # Drop with NO demonitor — both worker fields are already nil.
   # MUST be ordered AFTER Clause 3.
   def handle_event(:info, {:compaction_timeout, _pid, _ms}, _state, data) do
     {:keep_state, data}
@@ -2755,7 +2754,7 @@ defmodule Tau.Session do
             # D-061: provider-retry counter reset on successful
             # Done — a fresh turn starts with the full retry budget.
             #
-            # D-079 / FIX-4: steering messages that survived a pure-text
+            # D-079: steering messages that survived a pure-text
             # turn (no tool round occurred so drain_steering_queue_one was never
             # called) MUST NOT carry over into the next unrelated turn. Merge any
             # remaining steering_queue entries into the front of followup_queue so

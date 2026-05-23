@@ -368,7 +368,7 @@ defmodule Tau.TUI.Editor do
     Enum.drop_while(list, pred)
   end
 
-  # FIX f-10: use Unicode-aware \w/u so word motion handles non-ASCII graphemes.
+  # Unicode-aware \w/u so word motion handles non-ASCII graphemes.
   defp word_char?(g), do: String.match?(g, ~r/\w/u)
 
   # Push a killed string onto the kill-ring.
@@ -378,7 +378,7 @@ defmodule Tau.TUI.Editor do
   defp push_kill(%__MODULE__{kill_ring: ring, last_kill: :kill} = ed, killed) when killed != "" do
     coalesced =
       case ring do
-        # FIX-4: append killed to head (kill order), not prepend
+        # Append killed to head (kill order), not prepend
         [head | rest] -> [head <> killed | rest]
         [] -> [killed]
       end

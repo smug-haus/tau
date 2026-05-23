@@ -577,7 +577,7 @@ defmodule Tau.Tools.Builtin.Agent do
           details: %{kind: :parent_down, child_session_id: child_id}
         )
 
-      # B2 (FIX-4): discard any other child-session event not explicitly
+      # B2: discard any other child-session event not explicitly
       # matched above — SystemNotice, ProviderFallback, QueueRestored,
       # CommandCatalog, etc. Without this catch-all they accumulate in the
       # tool-task mailbox and the "B2 any non-forwarded child event is

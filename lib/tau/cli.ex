@@ -421,7 +421,7 @@ defmodule Tau.CLI do
   # Consume PubSub events for the headless run until SessionEnd.
   # Returns 0 on a clean stop, 1 on any error or abnormal end.
   #
-  # Decision order on MessageEnd (f-1 fix, D-058 amendment):
+  # Decision order on MessageEnd (D-058):
   #
   #   1. CONTENT-FIRST: if msg.content has any %{type: :tool_call} block,
   #      CONTINUE regardless of stop_reason. This is necessary because Gemini
