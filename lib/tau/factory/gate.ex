@@ -1,7 +1,7 @@
 defmodule Tau.Factory.Gate do
   @moduledoc """
   Pure module implementing the three mechanical oracle-separation CI gates
-  for the factory loop (issue #370 / PR-B).
+  for the factory loop.
 
   All three functions are side-effect-free with respect to module state —
   no process, no ETS, no GenServer. `mutation_check/2` shells out to run
