@@ -16,11 +16,11 @@ defmodule Tau.Command do
     3. Skills (with frontmatter) — see `Tau.Skill`.
 
   Prompt templates (`~/.tau/prompts/*.md`, `<cwd>/.tau/prompts/*.md`) are a
-  fourth mechanism added in #183: they are discovered by `Tau.PromptTemplates`
-  and invoked as slash commands with named-variable substitution.  See
+  fourth mechanism: they are discovered by `Tau.PromptTemplates` and invoked
+  as slash commands with named-variable substitution. See
   `Tau.PromptTemplates` for details.
 
-  ## Argument specs (#15)
+  ## Argument specs
 
   By default, `execute/2` is invoked with the raw tail string. Authors
   who want positional/flag/option parsing can declare a spec with the

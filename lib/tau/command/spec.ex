@@ -1,6 +1,6 @@
 defmodule Tau.Command.Spec do
   @moduledoc """
-  Pure tokeniser + binder for slash-command argument specs (#15).
+  Pure tokeniser + binder for slash-command argument specs.
 
   A spec is a list of entries, each a map of one of three shapes:
 

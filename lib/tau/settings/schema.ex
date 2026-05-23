@@ -156,7 +156,7 @@ defmodule Tau.Settings.Schema do
           }
         }
       },
-      # SPEC-CODING-AGENT (#191) / D-037: deployment-wide default for
+      # SPEC-CODING-AGENT / D-037: deployment-wide default for
       # the coding-agent session-mode surface. `default_agent` is a
       # short name resolved via `Tau.CLI.resolve_coding_agent/1`
       # (e.g. `"claude_code"`, `"replay"`). The CLI flag
@@ -169,7 +169,7 @@ defmodule Tau.Settings.Schema do
           "expose_tau_context" => %{"type" => "boolean"}
         }
       },
-      # SPEC-OTEL-REPORTER (#35 / AC-2): OpenTelemetry export settings.
+      # SPEC-OTEL-REPORTER / AC-2: OpenTelemetry export settings.
       # `enabled` gates reporter startup; all other keys are optional and
       # take the defaults documented in SPEC-OTEL-REPORTER §6 (D-053/D-054).
       "otel" => %{

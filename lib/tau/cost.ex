@@ -1,6 +1,6 @@
 defmodule Tau.Cost do
   @moduledoc """
-  Read-side API for cost / token-usage aggregates (#40).
+  Read-side API for cost / token-usage aggregates.
 
   All counters live in the `:tau_cost_counters` ETS table owned by
   `Tau.Cost.Tracker` (ADR-0010). Updates flow from the

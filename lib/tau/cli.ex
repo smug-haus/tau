@@ -56,12 +56,12 @@ defmodule Tau.CLI do
 
   `--system-prompt-file <path>` parses the file via
   `Tau.Skills.Loader.parse/1`, honoring its YAML frontmatter (notably
-  `allowed-tools:`). Under PR #272's `active_skill_tool_specs/1` (D-059)
-  an `allowed_tools: []` skill exposes every registered builtin to the
+  `allowed-tools:`). Under `active_skill_tool_specs/1` (D-059) an
+  `allowed_tools: []` skill exposes every registered builtin to the
   model; the file's `allowed-tools:` whitelist constrains that exposure
-  to the declared subset (#273). `--system-prompt <text>` is raw text
-  input and has no frontmatter, so its skill keeps `allowed_tools: []`
-  and the full builtin surface remains visible.
+  to the declared subset. `--system-prompt <text>` is raw text input
+  and has no frontmatter, so its skill keeps `allowed_tools: []` and
+  the full builtin surface remains visible.
   """
 
   alias Tau.Session.Events
@@ -272,7 +272,7 @@ defmodule Tau.CLI do
           options: [
             provider: [short: "-p", long: "--provider", help: "Provider id"],
             model: [short: "-m", long: "--model", help: "Model id"],
-            # SPEC-CODING-AGENT (#191) — session-mode coding-agent surface.
+            # SPEC-CODING-AGENT — session-mode coding-agent surface.
             # When set, the TUI's "Send" routes user messages to the
             # named coding-agent (e.g. `claude_code`, `replay`) via the
             # `Tau.CodingAgent.Dispatcher` and the FSM's
@@ -294,8 +294,7 @@ defmodule Tau.CLI do
   #
   # Drives a full Tau.Session FSM so that tools (Agent, Bash, etc.) are
   # registered, every turn is JSONL-persisted, and the session is
-  # lifecycle-identical to a TUI session. Prior to this, `tau run` called
-  # provider.stream/3 directly — no FSM, no tools, no persistence (#213).
+  # lifecycle-identical to a TUI session.
   #
   # Subscribe-before-start ordering (D-004): Phoenix.PubSub.subscribe/2 is
   # called BEFORE Tau.start_session/1 returns so that the SessionStart event

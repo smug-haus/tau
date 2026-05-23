@@ -7,8 +7,7 @@ defmodule Tau.Permissions.Matchers.Always do
   pattern is `"*"` (true blanket across all tools).
 
   Bare-tool-name patterns deliberately do NOT match other tools — a
-  rule like `allow: ["Read"]` allows `Read` only, not `Bash`. Pre-#16
-  semantics. See issue #123.
+  rule like `allow: ["Read"]` allows `Read` only, not `Bash`.
   """
   @behaviour Tau.Permissions.Matcher
   @impl true

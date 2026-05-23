@@ -21,11 +21,10 @@ defmodule Tau.Tools.Builtin.Bash do
 
   An earlier prototype used `:erlexec` to send `SIGTERM` to the whole
   process group via `setpgid` + `kill(-pgid)`. That dep was dropped
-  during the M0–M8 cleanup to keep CI portable; restoring it is
-  tracked in #12. Windows has no equivalent of process groups
+  to keep CI portable. Windows has no equivalent of process groups
   regardless — even if `:erlexec` comes back on Linux/macOS, Windows
   callers will still need an in-script `taskkill /T /PID …` wrapper
-  if descendant cleanup matters (#27).
+  if descendant cleanup matters.
   """
 
   @behaviour Tau.Tool

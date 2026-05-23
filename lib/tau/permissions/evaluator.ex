@@ -38,7 +38,7 @@ defmodule Tau.Permissions.Evaluator do
   necessary, not sufficient — see ADR-0013).
 
   An `:active_skill` of `nil` or one whose `allowed_tools` is `nil`
-  or `[]` is a no-op: behaviour is identical to pre-#16 evaluation.
+  or `[]` is a no-op: the call falls through to the rule-set/mode check.
   """
   @spec evaluate(
           rule_set :: tuple(),
@@ -95,7 +95,7 @@ defmodule Tau.Permissions.Evaluator do
   # mode's read-only intent targets content tools (Bash, Write, Edit), not
   # synthetic dispatch primitives. The child session inherits :plan as its
   # ceiling via Tau.Permissions.Mode.clamp/2, so the read-only constraint is
-  # still enforced inside the child. (Issue #166, Option 1.)
+  # still enforced inside the child.
   defp default_for_mode(:plan, tool, _) when tool in ["Read", "Grep", "Glob", "Agent"],
     do: :allow
 
@@ -108,10 +108,10 @@ defmodule Tau.Permissions.Evaluator do
     if Tau.Permissions.Heuristics.destructive_bash?(args), do: :deny, else: :allow
   end
 
-  # "Agent" is dispatch infrastructure (same rationale as :plan above — see
-  # Issue #166). :auto mode governs write-capability for content tools; it
-  # should not gate sub-agent delegation. The child inherits :auto as its
-  # permission ceiling via Tau.Permissions.Mode.clamp/2.
+  # "Agent" is dispatch infrastructure (same rationale as :plan above).
+  # :auto mode governs write-capability for content tools; it should not
+  # gate sub-agent delegation. The child inherits :auto as its permission
+  # ceiling via Tau.Permissions.Mode.clamp/2.
   defp default_for_mode(:auto, tool, _) when tool in ["Read", "Grep", "Glob", "Agent"],
     do: :allow
 

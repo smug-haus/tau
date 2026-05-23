@@ -103,8 +103,8 @@ defmodule Tau.Provider do
     * `:none`      — caching disabled for this turn. Default when the callback
       is absent.
 
-  This is the only new behaviour callback in the prompt-caching PR (#317).
-  Cache-usage normalisation is NOT a callback — it is each adapter's own
+  This is the only behaviour callback for prompt caching. Cache-usage
+  normalisation is NOT a callback — it is each adapter's own
   `merge_usage`-side responsibility (SPEC-PROMPT-CACHING B3).
   """
   @callback cache_regions(messages :: [Tau.Message.t()], opts :: map()) ::

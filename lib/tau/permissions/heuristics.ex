@@ -14,8 +14,6 @@ defmodule Tau.Permissions.Heuristics do
   negatives, in contrast, would silently let a destructive command
   through under `:accept_edits`, which is what we are protecting
   against.
-
-  See issue #22.
   """
 
   # Pre-compiled patterns. Compiled once at module-load via the

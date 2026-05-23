@@ -145,7 +145,7 @@ defmodule Tau.Tools.Operations.Local do
 
   # Deadline is computed once in bash/2 and passed through unchanged
   # so the timeout's wall-clock budget doesn't drift across many
-  # small chunks (#60).
+  # small chunks.
   defp collect_port(port, acc, deadline) do
     receive do
       {^port, {:data, data}} ->

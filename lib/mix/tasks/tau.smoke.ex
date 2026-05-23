@@ -38,13 +38,13 @@ defmodule Mix.Tasks.Tau.Smoke do
   `UNSUPPORTED_HOST` (2) — the task is intended for the CI smoke job
   and the Linux dev box, not Windows.
 
-  ## Burrito unpack-cache bust (#266)
+  ## Burrito unpack-cache bust
 
   Burrito caches the unpacked ERTS bundle under
   `~/.local/share/.burrito/tau_erts-*`. The cache key does NOT include
   the binary's content hash, so a stale cache can silently mask a
-  freshly-built broken binary — see #266. To remove that trap this
-  task wipes any matching cache directory before the smoke runs.
+  freshly-built broken binary. To remove that trap this task wipes any
+  matching cache directory before the smoke runs.
   """
 
   use Mix.Task

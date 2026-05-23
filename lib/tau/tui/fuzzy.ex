@@ -3,8 +3,8 @@ defmodule Tau.TUI.Fuzzy do
   Pure subsequence fuzzy-matcher for TUI completion menus.
 
   Candidate-source-agnostic: entries need only a `:name` key. The same
-  function is used for slash-command autocomplete (#333) and `@`-mention
-  autocomplete (#344 — future).
+  function is used for slash-command autocomplete and (future)
+  `@`-mention autocomplete.
 
   ## Scoring
 

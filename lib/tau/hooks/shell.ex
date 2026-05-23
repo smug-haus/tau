@@ -111,11 +111,10 @@ defmodule Tau.Hooks.Shell do
   # reason: ...` halts; `continue: true` proceeds.
   #
   # We normalise the result back to the atom-keyed payload shape the
-  # rest of the FSM expects (#55) — without this, a `{:cont, payload}`
-  # from a shell hook handed a string-keyed map to subsequent
-  # programmatic hooks and to `Tau.Session.handle_event/4`'s
-  # `Map.get(payload, :tool_input, ...)` (which fell through to the
-  # default, silently ignoring the rewrite).
+  # rest of the FSM expects: a `{:cont, payload}` from a shell hook
+  # carries string-keyed maps, but subsequent programmatic hooks and
+  # `Tau.Session.handle_event/4`'s `Map.get(payload, :tool_input, ...)`
+  # both key on atoms.
   defp parse_response(output, original) do
     output = String.trim(output)
 

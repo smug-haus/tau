@@ -50,10 +50,10 @@ defmodule Tau.Tools.Builtin.Agent do
 
     * The Agent tool's `execute/2` runs inside a per-call task spawned
       under `Tau.Tools.TaskSupervisor` by the session FSM's parallel
-      tool dispatcher (#33). No new supervisor.
+      tool dispatcher. No new supervisor.
     * No `Manager`/`Service` GenServer (CLAUDE.md non-negotiable #1) —
       the child session FSM IS the per-spawn process.
-    * Cancellation cascade is parent-FSM-driven (#92) plus a
+    * Cancellation cascade is parent-FSM-driven, plus a
       `Process.monitor/1` from inside this task on the parent's pid
       (ADR-0008: tool tasks own their own monitors, not the FSM).
 
