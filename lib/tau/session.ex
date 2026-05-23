@@ -747,22 +747,10 @@ defmodule Tau.Session do
           # `coding_agent_cost` JSONL event so `/resume` can fold
           # the totals back.
           coding_agent_costs: coding_agent_costs_from_preload(preload),
-          # D-048 / D-049: async compaction worker state.
-          #
-          # `compaction_task` — pid of the running compaction worker task, or nil.
-          # Set in the {:async_compact, _} arm of handle_builtin_command/4;
-          # cleared by every terminal clause of the :compacting state (worker
-          # success, worker crash, timeout, :cancel).
-          #
-          # `compaction_monitor` — monitor ref returned by Task.Supervisor.async_nolink/3,
-          # the discriminating guard key for the five terminal clauses. Presence
-          # guards on demonitor/exit calls.
-          #
-          # `compaction_failures` — per-session consecutive failure counter (D-016).
-          # Shared across sync (maybe_compact/2) and async paths — NOT path-tagged.
-          # Reset to 0 on any successful compaction; NOT reset by :cancel (a
-          # cancelled compaction is not a success; resetting would let users mask
-          # a broken compactor). Re-initialised to 0 on resume/fork (not persisted).
+          # D-048 / D-049: async compaction worker state. `compaction_monitor`
+          # is the guard key for the five terminal clauses of `:compacting`.
+          # D-016: `compaction_failures` is NOT reset by `:cancel` — masking
+          # a broken compactor is worse than resetting on legitimate success.
           compaction_task: nil,
           compaction_monitor: nil,
           compaction_failures: 0,
@@ -934,21 +922,10 @@ defmodule Tau.Session do
     end
   end
 
-  # D-080 / SPEC-USER-TURN §6: follow-up drain handler.
-  # Posted as an :internal event on every :awaiting_user transition that
-  # represents turn completion (normal end, post-cancel, error paths). Dequeues
-  # one follow-up message and starts a fresh turn (one-at-a-time mode, Pi's
-  # default). This is the follow-up drain point — only fires in :awaiting_user
-  # with no command_task (if a command task is in flight, the ADR-0008 postpone
-  # re-delivers the event after the command completes).
-  #
-  # Using :internal (not state_enter) avoids a module-wide callback_mode change
-  # (critic S1 from the pre-implementation review).
-  #
-  # IMPORTANT: re-routes through handle_event(:cast, {:user_message, ...})
-  # rather than process_user_message/2 directly, so that slash-command
-  # classification (classify_slash_command/4) runs. Without this, a queued
-  # "/reload" would start a provider turn instead of executing the builtin.
+  # D-080 / SPEC-USER-TURN §6: follow-up drain. Re-routes through
+  # `handle_event(:cast, {:user_message, ...})` rather than calling
+  # `process_user_message/2` directly so slash-command classification still
+  # runs (a queued `/reload` must execute the builtin, not start a turn).
   def handle_event(:internal, :drain_followups, :awaiting_user, %{command_task: nil} = data) do
     case :queue.out(data.followup_queue) do
       {:empty, _} ->
@@ -1031,17 +1008,11 @@ defmodule Tau.Session do
       data.provider_ctx
       |> Map.merge(%{session_id: data.id, cancel_flag: cancel_flag})
 
-    # C76 (SPEC-OTEL-REPORTER): generate a per-request discriminator ref so the
-    # OTel reporter can correlate *.stop / *.cancelled / *.brutal_kill back to
-    # this *.start span even when multiple requests from the same session to the
-    # same provider are in flight concurrently (e.g. parallel sessions).
-    #
-    # D-057 (SPEC-OTEL-REPORTER): store the ref in `data` immediately after
-    # emitting *.start so all downstream error paths (circuit_open fallback,
-    # circuit_open exhausted, synchronous error) read it from `data` rather than
-    # a local variable. Without this, error branches that never reach the {:ok,
-    # stream} arm would see provider_span_ref: nil and silently skip the terminal
-    # emit.
+    # D-057 / SPEC-OTEL-REPORTER: per-request discriminator ref so the OTel
+    # reporter correlates *.stop / *.cancelled / *.brutal_kill back to the
+    # right *.start span across concurrent requests. Stored in `data`
+    # immediately so every error branch (including ones that never reach
+    # `{:ok, stream}`) emits a matched terminal.
     provider_span_ref = make_ref()
     data = %{data | provider_span_ref: provider_span_ref}
 
@@ -1213,21 +1184,12 @@ defmodule Tau.Session do
         end
 
       {:error, reason} ->
-        # Synchronous provider error — emit and return to awaiting_user.
-        # D-009 / SPEC-USER-TURN: the assistant message MUST
-        # carry a non-empty content block so render paths that iterate
-        # `msg.content` (e.g. `Tau.TUI.App.on_message_end/2`) surface the
-        # error to the user. Without the text block the TUI silently drops
-        # the error, presenting "TUI does nothing" to the user.
-        #
-        # D-018 / SPEC-USER-TURN: for Anthropic auth atoms
-        # (`:missing_api_key`, `:oauth_expired`, etc.) substitute the
-        # human-readable, actionable renewal instruction so the user
-        # learns to run `claude /login` instead of staring at an opaque
-        # `:oauth_expired`.
-        #
-        # D-057 (SPEC-OTEL-REPORTER): emit terminal event before returning
-        # to :awaiting_user so the span opened at *.start is closed.
+        # Synchronous provider error.
+        # D-009 / SPEC-USER-TURN: the assistant message MUST carry a
+        # non-empty content block; render paths iterate `msg.content`.
+        # D-018: Anthropic auth atoms (`:missing_api_key`, `:oauth_expired`)
+        # become human-readable renewal instructions.
+        # D-057: emit terminal event so the *.start span is closed.
         emit_provider_request_terminal(:cancelled, data)
         reason_str = describe_provider_error(reason)
 
@@ -1300,22 +1262,13 @@ defmodule Tau.Session do
     {:keep_state, data}
   end
 
-  # D-061: retryable mid-stream error with NO fallback chain
-  # remaining and an unspent retry budget. Re-issues `:start_provider`
-  # on the SAME provider after exponential backoff. The non-blocking
-  # backoff is implemented via `Process.send_after/3` posting a
-  # `{:provider_retry, ref, count+1}` to the FSM; the receiving clause
-  # below brutally kills the prior task (mirroring the ADR-0012
-  # fallback path) and re-enters `:start_provider`.
+  # D-061: retryable mid-stream error, no fallback chain remaining,
+  # unspent retry budget. Schedules a same-provider re-entry via
+  # `Process.send_after/3` posting `{:provider_retry, ref, count+1}`.
   #
-  # CLAUSE ORDERING IS LOAD-BEARING: this clause MUST precede the
-  # ADR-0012 fallback clause that follows. Both head-match the same
-  # `%PEvent.Error{retryable?: true}` shape; only source order plus
-  # the `fallback_chain_remaining: []` guard keeps each clause winning
-  # in its own regime. A non-empty chain falls through to ADR-0012
-  # (the next clause); an empty chain with unspent retries enters
-  # here; an empty chain with exhausted retries falls through to the
-  # generic clause below and finalises as a terminal error.
+  # CLAUSE ORDERING IS LOAD-BEARING. Both this clause and the ADR-0012
+  # fallback clause head-match `%PEvent.Error{retryable?: true}`; the
+  # `fallback_chain_remaining: []` guard keeps each in its own regime.
   def handle_event(
         :info,
         {:provider_event, ref, %PEvent.Error{retryable?: true} = ev},
@@ -1408,23 +1361,14 @@ defmodule Tau.Session do
   end
 
   # ADR-0012: retryable mid-stream errors fall back to the next provider
-  # in `data.fallback_chain_remaining`. Inserted *before* the generic
-  # :provider_event clause so a non-empty chain takes over before the
-  # error reaches the assembler. Empty chain → fall through to the
-  # generic clause, which records the error and finalises the message.
+  # in `data.fallback_chain_remaining`. Empty chain falls through to the
+  # generic `:provider_event` clause, which finalises the message with
+  # the error.
   #
-  # CLAUSE ORDERING IS LOAD-BEARING: the generic :provider_event clause
-  # below no longer head-discriminates on `stream_ref` (it uses
-  # `current_run?/2` in its body), so only source order keeps this
-  # fallback clause winning. If reordered, retryable mid-stream errors
-  # would silently skip the ADR-0012 fallback and finalize as terminal
-  # errors. This fallback clause MUST stay first.
-  #
-  # D-061: the same-provider retry clause precedes this one so
-  # a session with NO chain remaining and an unspent retry budget
-  # retries before this clause is consulted (its `[next | rest]`
-  # guard fails on `[]` anyway, but the explicit ordering matters
-  # for the all-empty case).
+  # CLAUSE ORDERING IS LOAD-BEARING. The generic `:provider_event` clause
+  # no longer head-discriminates on `stream_ref`; only source order keeps
+  # this fallback clause and the D-061 same-provider retry clause winning
+  # in their respective regimes.
   def handle_event(
         :info,
         {:provider_event, ref, %PEvent.Error{retryable?: true} = ev},

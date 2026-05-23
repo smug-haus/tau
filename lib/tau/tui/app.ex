@@ -38,20 +38,14 @@ if Code.ensure_loaded?(Ratatouille.Runtime) do
 
     @impl true
     def init(context) do
-      # D-004 / SPEC-USER-TURN: the bridge MUST subscribe to PubSub
-      # BEFORE `Tau.start_session/1` returns. `Session.init/1`
+      # D-004 / SPEC-USER-TURN: subscribe-before-start. `Session.init/1`
       # synchronously broadcasts `%Events.SessionStart{}`; subscribing
-      # afterwards loses it. Pre-generate the id, start the bridge, then
-      # start the session.
+      # afterwards loses it.
       #
-      # Bridge rationale: Ratatouille 0.5.1's runtime does NOT forward
-      # arbitrary mailbox messages to `update/2` — only its declared
-      # subscriptions (here, `:tick`). Without `Tau.TUI.EventBridge` the
-      # PubSub broadcasts would queue in the runtime's mailbox forever,
-      # the transcript pane stays empty, and the user never sees an
-      # assistant response. The bridge holds a queue per session;
-      # `update/2`'s `:tick` clause drains it. The drain interval is
-      # adaptive: 16 ms while streaming, 250 ms while idle.
+      # Bridge rationale: Ratatouille 0.5.1's runtime forwards only its
+      # declared subscriptions (`:tick`) to `update/2`. The bridge
+      # queues PubSub broadcasts; the `:tick` clause drains them on a
+      # 16 ms (streaming) / 250 ms (idle) cadence.
       session_id = Tau.Session.generate_id()
       {:ok, _bridge_pid} = Tau.TUI.EventBridge.start_link(session_id)
 
