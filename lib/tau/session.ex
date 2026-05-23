@@ -208,14 +208,10 @@ defmodule Tau.Session do
 
           [%{"kind" => "session_header", "data" => d} | rest] ->
             # SPEC-CODING-AGENT §7 Q4/Q5 (D-037/D-038): thread the
-            # post-header event log into `:preload_events` so init/1's
+            # post-header event log into `:preload_events` so the
             # `coding_agent_state_from_preload/1` and
-            # `coding_agent_costs_from_preload/1` can rehydrate the
-            # adapter-side session_id (for the next dispatcher's
-            # `task.resume_id`) and the per-session cost ledger.
-            # Mirrors `fork/2`'s shape — provider-only sessions pass
-            # an event list with no coding_agent_* kinds, and the
-            # helpers fall back to safe defaults (nil / []).
+            # `coding_agent_costs_from_preload/1` helpers can rehydrate
+            # the adapter-side session_id and cost ledger.
             opts = [
               session_id: id,
               cwd: d["cwd"],
@@ -587,14 +583,11 @@ defmodule Tau.Session do
 
         skills = load_skills(cwd)
 
-        # D-058 / AC-10 (SPEC-USER-TURN §4 B2): if a headless skill was
-        # injected via `:active_skill` opt (e.g. `--system-prompt` from
-        # `tau run`), prepend it to the skill list so
-        # `prepend_skill_messages/2` includes its body in the model-visible
-        # system blob. Without this the skill only gates permissions
-        # (`eval_ctx`) but never reaches the provider call. The entry is
-        # prepended (highest priority) and deliberately has no
-        # `disable_model_invocation` flag so it is always model-visible.
+        # D-058 / AC-10 / SPEC-USER-TURN §4 B2: a headless skill injected
+        # via `:active_skill` (e.g. `--system-prompt` from `tau run`) is
+        # prepended to the skill list so `prepend_skill_messages/2`
+        # includes its body in the model-visible system blob. Without
+        # this the skill only gates permissions, never reaches the model.
         skills =
           case opts[:active_skill] do
             %Tau.Skill{name: name} = skill ->
@@ -633,31 +626,21 @@ defmodule Tau.Session do
           provider_ctx: provider_ctx,
           messages: messages,
           skills: skills,
-          # D-076: prompt templates discovered once at
-          # init time, stored on FSM data exactly like `data.skills`.
-          # Consulted in `classify_slash_command/2` after skill lookup;
-          # the last branch before verbatim fall-through (precedence:
-          # builtin > extension > file-command > skill > template).
+          # D-076: prompt templates discovered once at init time.
+          # Precedence: builtin > extension > file-command > skill > template.
           prompt_templates: Tau.PromptTemplates.discover(cwd),
           persistence: persistence,
           persist_handle: persist_handle,
           provider_task: nil,
-          # ADR-0012: per-stream tag (a fresh `make_ref/0`) used to
-          # distinguish events emitted by the *current* provider task
-          # from stragglers left over from a predecessor that was killed
-          # mid-stream during a fallback transition. Re-issued in every
-          # `:start_provider`; matched on in every `{:provider_event, _,
-          # _}`, `{:provider_done, _}`, `{:provider_failed, _, _}`
-          # handler. Stale messages whose ref doesn't match are dropped
-          # by the catch-all clause.
+          # ADR-0012: per-stream tag distinguishing events from the
+          # current provider task from a killed predecessor's stragglers
+          # during a fallback transition. Stale events whose ref doesn't
+          # match drop in the catch-all clause.
           stream_ref: nil,
-          # C76 (SPEC-OTEL-REPORTER): per-request OTel span discriminator.
-          # Generated at [:tau, :provider, :request, :start] emit time;
-          # echoed through *.stop / *.cancelled / *.brutal_kill so the
-          # OTel reporter can correlate them to the open span. Cleared
-          # whenever the FSM leaves the request (reset to nil alongside
-          # stream_ref). Each fallback attempt generates a fresh ref —
-          # that is correct: a fallback is a distinct provider request.
+          # SPEC-OTEL-REPORTER: per-request OTel span discriminator.
+          # Echoed through *.stop / *.cancelled / *.brutal_kill so spans
+          # correlate. Each fallback attempt is a distinct request and
+          # generates a fresh ref.
           provider_span_ref: nil,
           # ADR-0017: per-stream cooperative-cancel flag (a `:counters`
           # ref). Allocated freshly in `:start_provider`; consulted by the
@@ -835,15 +818,9 @@ defmodule Tau.Session do
     {:keep_state_and_data, [{:postpone, true}]}
   end
 
-  # D-077 / D-078 / SPEC-USER-TURN §6: replaces ADR-0009's single
-  # `:postpone` with explicit two-tier queue routing. Busy states (any state
-  # other than :awaiting_user, including :awaiting_permission) enqueue
-  # messages onto the appropriate tier rather than postponing them. This gives
-  # two independent drain points and makes queued messages introspectable via
-  # snapshot/1 (ADR-0009's own exit clause, exercised here).
-  #
-  # Both :steering and :followup tiers are handled. The hard cap (D-083) drops
-  # messages past 32 with a %SystemNotice{} to prevent unbounded growth.
+  # D-077 / D-078 / SPEC-USER-TURN §6: two-tier queue routing for
+  # messages received in any state other than `:awaiting_user`. D-083
+  # hard cap at 32 entries drops with a `%SystemNotice{}`.
   def handle_event(:cast, {:user_message, msg, tier}, state, data)
       when state != :awaiting_user do
     {queue_field, tier_atom} =
