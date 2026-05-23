@@ -59,7 +59,7 @@ defmodule Tau.Session.Events do
   defmodule SkillActivated do
     @moduledoc """
     Broadcast when the model activates a discovered skill via the
-    synthetic `__activate_skill__` tool (issue #17, ADR-0013).
+    synthetic `__activate_skill__` tool.
 
     Activation lives on the FSM's `data.active_skill` field for the
     remainder of the current turn (cleared on `:end_turn` or `:cancel`).
@@ -168,10 +168,10 @@ defmodule Tau.Session.Events do
     Broadcast by the session FSM when a `:cancel` drains the steering queue
     back to the caller rather than delivering the queued messages as turns.
 
-    D-082 (#339 / SPEC-USER-TURN §6): a steering message was enqueued to
-    redirect a turn that no longer exists. On `:cancel`, the FSM drains the
-    steering queue and broadcasts this event carrying the restored messages.
-    The TUI repopulates the input editor from `messages` (joining with newline)
+    D-082 — a steering message was enqueued to redirect a turn that no
+    longer exists. On `:cancel`, the FSM drains the steering queue and
+    broadcasts this event carrying the restored messages. The TUI
+    repopulates the input editor from `messages` (joining with newline)
     so the user can review, edit, or re-submit what they typed.
 
     The follow-up queue is NOT included — follow-up messages survive a cancel
