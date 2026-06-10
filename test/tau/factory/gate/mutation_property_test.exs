@@ -101,7 +101,7 @@ defmodule Tau.Factory.Gate.MutationPropertyTest do
              "Expected {:pass, _} for report with ≥1 failed case, got #{inspect(result)}"
 
       assert is_list(killed)
-      assert length(killed) >= 1
+      assert killed != []
 
       # Every killed id must correspond to a :failed case in the report.
       failed_ids = report.cases |> Enum.filter(&(&1.status == :failed)) |> Enum.map(& &1.id)

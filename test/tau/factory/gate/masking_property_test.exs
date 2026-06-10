@@ -110,7 +110,7 @@ defmodule Tau.Factory.Gate.MaskingPropertyTest do
       {status, findings} = Masking.scan(diff, gating_paths)
 
       assert status == :flagged
-      assert length(findings) >= 1
+      assert findings != []
 
       assert Enum.any?(findings, fn f ->
                Map.get(f, :path, Map.get(f, :file, "")) == file_path or
@@ -127,7 +127,7 @@ defmodule Tau.Factory.Gate.MaskingPropertyTest do
       {status, findings} = Masking.scan(diff, gating_paths)
 
       assert status == :flagged
-      assert length(findings) >= 1
+      assert findings != []
     end
   end
 
@@ -165,7 +165,7 @@ defmodule Tau.Factory.Gate.MaskingPropertyTest do
       assert status == :flagged,
              "Expected :flagged for edit to declared gating path #{gating_path}"
 
-      assert length(findings) >= 1
+      assert findings != []
     end
   end
 
@@ -318,6 +318,6 @@ defmodule Tau.Factory.Gate.MaskingPropertyTest do
     assert status == :flagged,
            "Expected :flagged when an edit touches a declared gating-test path"
 
-    assert length(findings) >= 1
+    assert findings != []
   end
 end

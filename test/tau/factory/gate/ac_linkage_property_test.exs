@@ -48,13 +48,6 @@ defmodule Tau.Factory.Gate.AcLinkagePropertyTest do
     %{name: "#{token}: some test description", tags: [String.to_atom(tag_form)]}
   end
 
-  defp uncovering_meta(token) do
-    # A meta that covers a DIFFERENT token to guarantee the given one is uncovered.
-    other = if String.starts_with?(token, "AC-"), do: "D-999", else: "AC-999"
-    tag_form = other |> String.downcase() |> String.replace("-", "_")
-    %{name: "#{other}: unrelated", tags: [String.to_atom(tag_form)]}
-  end
-
   defp pr_body_with_ac_section(tokens) when is_list(tokens) do
     bullets = Enum.map_join(tokens, "\n", fn t -> "- **#{t}** some criterion" end)
 
