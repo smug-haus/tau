@@ -35,6 +35,7 @@ defmodule Mix.Gate.Mutation do
   """
 
   alias Mix.Gate.Common
+  alias Tau.Factory.Gate.Mutation, as: PureMutation
 
   @doc """
   Orchestrates the mutation check in the current working directory's git repo.
@@ -206,12 +207,12 @@ defmodule Mix.Gate.Mutation do
     :ok
   end
 
-  # Run the gating tests, distinguishing three outcomes by parsing the ExUnit
-  # "N tests, M failures" summary line:
+  # Run the gating tests and apply the pure judge/1 predicate from
+  # Tau.Factory.Gate.Mutation. Distinguishes three outcomes:
   #
-  #   - summary present, M > 0  → :ok                           (tests discriminate)
-  #   - summary present, M == 0 → {:error, :all_passed}         (vacuous suite)
-  #   - no summary at all       → {:error, {:runner_crashed, output}}
+  #   - ≥1 failure  → PureMutation.judge/1 → {:pass, _}  → :ok
+  #   - 0 failures  → PureMutation.judge/1 → {:fail, _}  → {:error, :all_passed}
+  #   - no summary  → {:error, {:runner_crashed, output}}
   defp run_gating_tests(gating_test_paths, repo_dir) do
     output =
       if File.exists?(Path.join(repo_dir, "mix.exs")) do
@@ -221,15 +222,28 @@ defmodule Mix.Gate.Mutation do
       end
 
     case parse_test_summary(output) do
-      {:ok, failures} when failures > 0 ->
-        :ok
+      {:ok, failures} ->
+        # Build a minimal report and delegate to the pure judge/1.
+        cases = build_minimal_cases(failures)
+        report = %{cases: cases}
 
-      {:ok, 0} ->
-        {:error, :all_passed}
+        case PureMutation.judge(report) do
+          {:pass, _killed} -> :ok
+          {:fail, :no_test_failed} -> {:error, :all_passed}
+        end
 
       :no_summary ->
         {:error, {:runner_crashed, output}}
     end
+  end
+
+  # Build a minimal cases list from a failure count. We do not have individual
+  # test IDs from the text summary, so we synthesise them as "failed_N" for
+  # each failed test. The judge/1 contract only requires :status fields.
+  defp build_minimal_cases(0), do: []
+
+  defp build_minimal_cases(failures) do
+    Enum.map(1..failures, fn i -> %{id: "failed_#{i}", status: :failed} end)
   end
 
   defp run_via_mix(gating_test_paths, repo_dir) do

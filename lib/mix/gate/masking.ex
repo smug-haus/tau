@@ -1,14 +1,16 @@
 defmodule Mix.Gate.Masking do
   @moduledoc """
-  Gate 5.2 — Masking detection.
+  Gate 5.2 — Masking detection (Mix shim).
 
-  Scans a unified diff for removed assertion lines. Detection-only: returns
-  the list for the `critic` to review. A removed assertion is a `-`-prefixed
-  line (not `---` file header) whose content contains `assert`, `refute`,
-  `assert_receive`, or `assert_raise`.
+  Thin shim over `Tau.Factory.Gate.Masking`. Adapts the pure module's
+  `{:clean | :flagged, findings}` output to the legacy list-of-maps format
+  consumed by `Mix.Tasks.Tau.Gate.Masking`.
+
+  No decision logic lives here — all scanning is delegated to
+  `Tau.Factory.Gate.Masking.scan/2`.
   """
 
-  @assertion_keywords ~w[assert refute assert_receive assert_raise]
+  alias Tau.Factory.Gate.Masking, as: PureMasking
 
   @doc """
   Scans `unified_diff` for removed assertion lines.
@@ -17,59 +19,27 @@ defmodule Mix.Gate.Masking do
   `file` is the path from the `+++ b/` diff header. `line` is the original-file
   line number (parsed from `@@ -L,N` hunks). `removed` is the raw content of the
   `-` line (without the leading `-`).
+
+  Note: this shim passes an empty gating-path set (the Mix CLI receives the
+  gating paths separately via `mix tau.gate.masking`; path-violation detection
+  with a declared set is handled by the pure module when invoked directly with
+  those paths).
   """
   @spec masking_violations(String.t()) :: [
           %{file: String.t(), line: integer(), removed: String.t()}
         ]
   def masking_violations(unified_diff) when is_binary(unified_diff) do
-    lines = String.split(unified_diff, "\n")
-    parse_diff_lines(lines, nil, 0, [])
-  end
+    {_status, findings} = PureMasking.scan(unified_diff, MapSet.new())
 
-  # State machine over diff lines.
-  # current_file — path of the file being diffed (nil until first "+++ b/").
-  # orig_line    — current original-file line counter (reset per hunk).
-  defp parse_diff_lines([], _file, _orig_line, acc), do: Enum.reverse(acc)
-
-  defp parse_diff_lines([h | t], current_file, orig_line, acc) do
-    cond do
-      String.starts_with?(h, "+++ b/") ->
-        file = String.slice(h, 6..-1//1)
-        parse_diff_lines(t, file, orig_line, acc)
-
-      String.starts_with?(h, "@@") ->
-        orig = parse_hunk_orig_line(h)
-        parse_diff_lines(t, current_file, orig, acc)
-
-      String.starts_with?(h, "-") and not String.starts_with?(h, "---") ->
-        content = String.slice(h, 1..-1//1)
-
-        acc2 =
-          if assertion_line?(content) do
-            [%{file: current_file, line: orig_line, removed: content} | acc]
-          else
-            acc
-          end
-
-        parse_diff_lines(t, current_file, orig_line + 1, acc2)
-
-      String.starts_with?(h, "+") and not String.starts_with?(h, "+++") ->
-        parse_diff_lines(t, current_file, orig_line, acc)
-
-      true ->
-        parse_diff_lines(t, current_file, orig_line + 1, acc)
-    end
-  end
-
-  defp assertion_line?(content) do
-    Enum.any?(@assertion_keywords, &String.contains?(content, &1))
-  end
-
-  # Parse the original starting line from a hunk header like "@@ -3,7 +3,6 @@".
-  defp parse_hunk_orig_line(hunk_header) do
-    case Regex.run(~r/@@ -(\d+)/, hunk_header) do
-      [_, n] -> String.to_integer(n)
-      _ -> 0
-    end
+    # Adapt: filter to assertion-deletion findings and map to the legacy shape.
+    findings
+    |> Enum.filter(&(Map.get(&1, :reason) == :assertion_deleted))
+    |> Enum.map(fn f ->
+      %{
+        file: Map.get(f, :path),
+        line: Map.get(f, :line, 0),
+        removed: Map.get(f, :removed, "")
+      }
+    end)
   end
 end
