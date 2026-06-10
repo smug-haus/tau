@@ -24,7 +24,7 @@ violation. This is the Appendix-B source-map of the proposed `SPEC-FACTORY-*`
 | U | `Unit` (gen_statem), `UnitSupervisor` (DynamicSupervisor), `UnitRegistry` |
 | G | `Gate` (+ `GateTasks` Task.Supervisor), `Gate.{AcLinkage,Masking,Mutation,SpecMembership}` (pure), `Toolchain` (behaviour) |
 | W | `WorkerSupervisor` (DynamicSupervisor), `WorkerRegistry`, `WorkspaceJanitor` (monitor), agent `Port` |
-| M | `MergeAuthority` (GenServer, concurrency 1) |
+| M | `MergeAuthority` (gen_statem: `:idle/:integrating/:committing`) |
 | Gov | `Egress`, `Policy` (+ `Policy.Owner`), `ActionClassifier`; reuse `CircuitBreaker.Store`, `RateLimiter`, `Cost.Tracker`, `OtelReporter` |
 
 ## Safety invariants
@@ -33,7 +33,7 @@ violation. This is the Appendix-B source-map of the proposed `SPEC-FACTORY-*`
 |-------|-----------|-----------------------------------|------------------|
 | D-300 | INV-1 gate-before-merge | `MergeAuthority` CAS reads latest PASS verdict before push | property: no `main` commit lacks a PASS verdict@hash; mutation: drop the verdict read ⇒ test fails |
 | D-301 | INV-2 freshness | `MergeAuthority` `git push --force-with-lease=<expected-old-oid>` | integration: advance origin/main mid-gate ⇒ push rejected, no merge |
-| D-302 | INV-3 serialized merge | `MergeAuthority` single GenServer (concurrency-1 mailbox) | property: ≤1 concurrent integration; concurrency stress test |
+| D-302 | INV-3 serialized merge | `MergeAuthority` single `gen_statem`; INV-3 holds because at most one `:integrating` train at a time and the commit is serialized in the one M process | property: ≤1 concurrent integration; concurrency stress test |
 | D-303 | INV-4 main health | `MergeAuthority` post-batch health → E-RED-MAIN; no merge while red | integration: red batch tip ⇒ halt + no further push |
 | D-304 | INV-5 oracle separation | `WorkerSupervisor` spawn-order + recorded author identity (HR-7) | property: `author(test) ≠ author(impl)`; reject same-identity |
 | D-305 | INV-6 gating-test immutability | `Gate.Masking` path-scan of diff vs frozen `paths_g` | unit: implementer diff touching `paths_g` ⇒ flagged |

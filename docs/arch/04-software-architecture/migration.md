@@ -204,7 +204,7 @@ cannot enforce — it becomes a process/OS boundary instead (GAP-2).
 | `worktree-discipline.md`: spawn-brief integrity — agent verifies its own pwd/HEAD/branch, aborts in parent root | worker self-verifies position in `init/1` | INV-12 / **D-311** |
 | `factory-loop.md`: never branch off stale `main`; merge only a fresh diff (freshness re-check) | `MergeAuthority` CAS `git push --force-with-lease=<expected-old-oid>` (HR-1) | INV-2 / **D-301** |
 | `factory-loop.md`: both `critic` and `reviewer` PASS before merge; no skip/override/partial | `MergeAuthority` CAS reads latest PASS verdict@hash before push (HR-2) | INV-1 / **D-300** |
-| `factory-loop.md`: merges are serialized — one PR at a time | `MergeAuthority` single GenServer, concurrency-1 mailbox | INV-3 / **D-302** |
+| `factory-loop.md`: merges are serialized — one PR at a time | `MergeAuthority` single `gen_statem`; INV-3 holds because at most one `:integrating` train at a time and commit serialized in the one M process | INV-3 / **D-302** |
 | `factory-loop.md`: post-merge `main` health check; red `main` halts | `MergeAuthority` post-batch health → `E-RED-MAIN`; no merge while red | INV-4 / **D-303** |
 | `factory-loop.md`: 5-clause conflict check before concurrent admission | `Scheduler` admits iff pure `ConflictCheck` clears on *declared* sets (HR-4) | INV-13 / **D-312** |
 | `factory-loop.md`: oracle separation — test-author ≠ implementer, frozen path set | `WorkerSupervisor` spawn-order + recorded author identity (HR-7); `Gate.Masking` path-scan | INV-5 / **D-304**, INV-6 / **D-305** |

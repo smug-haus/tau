@@ -23,7 +23,7 @@ GAP-1).
 | S Scheduler | yes | serialization of admission decisions; back-pressure | `GenServer` |
 | U Unit (PR) | yes (per-entity) | lifecycle + legal-transition FSM + failure isolation | `gen_statem` per PR, `DynamicSupervisor`+`Registry` |
 | W Worker | yes (per-entity) | concurrency + failure isolation + lifecycle | supervised process/port, `DynamicSupervisor`+`Registry` |
-| M Merge Authority | yes | **serialization (concurrency 1)** + sole `main` writer | `GenServer` |
+| M Merge Authority | yes | **serialization (concurrency 1)** + sole `main` writer | `gen_statem` (`:idle/:integrating/:committing`) |
 | G Gate run | **no** (transient) | bounded concurrent fan-out, then result | `Task.async_stream` under a `Task.Supervisor` |
 | Conflict check, gate predicates, message folding | **no** | pure transformations | plain modules (properties before examples) |
 | Toolchain adapter | **no** | declarative descriptor (data) | `behaviour`; engine executes via `Port` |
@@ -73,7 +73,7 @@ Tau.Factory.Supervisor              [rest_for_one]   -- the control-plane spine
 │   ├── Registry  UnitRegistry      (keys: unit/PR id)
 │   └── Registry  WorkerRegistry    (keys: worker id)
 ├── Task.Supervisor  GateTasks       -- bounded gate fan-out (async_stream)
-├── Tau.Factory.MergeAuthority      (GenServer, concurrency 1; SOLE main writer)  -- M
+├── Tau.Factory.MergeAuthority      (gen_statem: :idle/:integrating/:committing; SOLE main writer)  -- M
 ├── Tau.Factory.WorkerSupervisor    [DynamicSupervisor, one_for_one, :temporary] -- W fleet
 ├── Tau.Factory.UnitSupervisor      [DynamicSupervisor, one_for_one, :temporary] -- U PR-FSMs
 ├── Tau.Factory.Scheduler           (GenServer: admission authority)             -- S
@@ -95,8 +95,9 @@ Tau.Factory.Supervisor              [rest_for_one]   -- the control-plane spine
   the decisive split: **supervision recovers *infrastructure*; the FSM + solution
   tree recover *semantics*.** A gate FAIL or bad LLM output is an outcome, never
   a crash to restart (the dominant BEAM-for-agents mistake).
-- **`MergeAuthority` is a single GenServer** — its concurrency-1 mailbox **is**
-  INV-3 (serialized merge) by construction; no lock discipline needed.
+- **`MergeAuthority` is a single `gen_statem`** — INV-3 (serialized merge) holds
+  because at most one `:integrating` train exists at a time and the commit/push is
+  serialized in the single M process; no lock discipline needed.
 - **Error kernel:** `Repo`, `Ledger`, `Budget.Owner`, `MergeAuthority` near the
   root (precious state, simple logic); implementers/critics/toolchain runs in the
   leaves (risky, complex, restartable). Risk pushed down the tree.

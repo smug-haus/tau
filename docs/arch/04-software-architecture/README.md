@@ -38,9 +38,10 @@ not a prompt loop — the central correction to the current attempt.
 
 ## The five OTP decisions that carry the design
 
-1. **The merge authority is a single GenServer (concurrency-1) ⇒ INV-3 is the
-   mailbox**, not lock discipline. It is the sole writer of `origin/main` and the
-   factory's deliberate throughput bottleneck (the only place INV-1..4 hold).
+1. **The merge authority is a single `gen_statem` (`:idle/:integrating/:committing`) ⇒ INV-3
+   holds** because at most one `:integrating` train exists at a time and the commit/push is
+   serialized in the single M process — not lock discipline. It is the sole writer of
+   `origin/main` and the factory's deliberate throughput bottleneck (the only place INV-1..4 hold).
 2. **Supervisors recover *infrastructure*; the FSM + durable ledger recover
    *semantics*.** A crashed worker is a death certificate, not a resurrection; a
    gate FAIL is an FSM outcome, not a crash to restart. Conflating them is the

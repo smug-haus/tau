@@ -61,7 +61,7 @@ claimed to enforce it.
 |-------------|-------------------|--------|
 | INV-1 ● M CAS | `MergeAuthority` reads live verdict lease pre-push | none |
 | INV-2 ● M CAS ref | `--force-with-lease` | none |
-| INV-3 ● M concur=1 | single GenServer mailbox | none |
+| INV-3 ● M concur=1 | single `gen_statem`; at most one `:integrating` train at a time, commit serialized in M | none |
 | INV-4 ● M | pre-push batch health → E-RED-MAIN | **partial — see H-1** (the mechanism exists but its execution locus is the flaw) |
 | INV-5 ● G author≠impl, ● W spawn order | identity predicate + spawn order | none |
 | INV-7 ● G engine-judged | `Engine.TestRun` + `judge/1` | none |
