@@ -86,3 +86,8 @@ __pycache__/
 # Per-developer Python venv (see CONTRIBUTING.md "Build prerequisites").
 # `.python-version` IS committed (pyenv reads it); `.venv/` is not.
 /.venv/
+
+# Local-only Polya audit plugin and outputs (not for github)
+.claude/plugins/polya-audit/
+docs/problems/
+.claude/agents/code-audit-*.md
