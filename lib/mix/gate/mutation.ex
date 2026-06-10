@@ -212,6 +212,13 @@ defmodule Mix.Gate.Mutation do
   #   - summary present, M > 0  → :ok                           (tests discriminate)
   #   - summary present, M == 0 → {:error, :all_passed}         (vacuous suite)
   #   - no summary at all       → {:error, {:runner_crashed, output}}
+  #
+  # NOTE: this function is intentionally self-contained — it MUST NOT delegate
+  # to Tau.Factory.Gate.Mutation (the pure P2 module). Gate 5.3 reverts all
+  # non-gating-test production files to the merge-base in-place; Tau.Factory.Gate.*
+  # does not exist at the merge-base, so any call to it would raise
+  # UndefinedFunctionError mid-run (revert-cycle). The pure module is reserved
+  # for the P2 isolated-workspace engine where it runs in the unreverted tree.
   defp run_gating_tests(gating_test_paths, repo_dir) do
     output =
       if File.exists?(Path.join(repo_dir, "mix.exs")) do

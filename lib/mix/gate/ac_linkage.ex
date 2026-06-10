@@ -1,13 +1,10 @@
 defmodule Mix.Gate.AcLinkage do
   @moduledoc """
-  Gate 5.1 — AC-to-test linkage.
+  Gate 5.1 — AC-to-test linkage (Mix shim).
 
-  Parses every `AC-N` / `D-NNN` token from the `## Acceptance criteria`
-  section of the draft-PR body and returns the subset not found (as a test
-  name substring or `@tag`) in any of the supplied gating-test source strings.
-  Tokens cited only outside that section (e.g. in a Background section) are
-  background prose and are NOT checked. If no `## Acceptance criteria` heading
-  exists in the PR body, the claims region is empty and `:ok` is returned.
+  Thin shim over `Tau.Factory.Gate.AcLinkage`. Parses raw gating-test source
+  strings into `TestMeta` maps (`%{name:, tags:}`) and delegates the decision
+  logic to the pure module. No decision logic lives here.
 
   ## Meta-AC exemption
 
@@ -17,6 +14,8 @@ defmodule Mix.Gate.AcLinkage do
   are never reported as missing.
   """
 
+  alias Tau.Factory.Gate.AcLinkage, as: PureAcLinkage
+
   @doc """
   Returns `:ok` when every `AC-N` / `D-NNN` token in the `## Acceptance
   criteria` section of `pr_body` appears in at least one of
@@ -24,84 +23,75 @@ defmodule Mix.Gate.AcLinkage do
 
   Token format: `AC-N` (one or more digits) and `D-NNN` (one or more digits).
   Matching is case-insensitive on the tag side (`:ac_1`, `:d_200`) and
-  substring on the test-name side (`"AC-1: ..."`, `"D-200: ..."`).
+  boundary-match on the test-name side (`"AC-1: ..."`, `"D-200: ..."`).
   """
   @spec ac_linkage(String.t(), [String.t()]) :: :ok | {:error, [String.t()]}
   def ac_linkage(pr_body, gating_test_sources)
       when is_binary(pr_body) and is_list(gating_test_sources) do
-    ac_section = extract_acceptance_criteria_section(pr_body)
-    meta_acs = parse_meta_ac_tokens(ac_section)
-    claimed = parse_ac_tokens(ac_section)
-    non_meta = Enum.reject(claimed, &MapSet.member?(meta_acs, &1))
-    missing = Enum.reject(non_meta, &token_covered?(&1, gating_test_sources))
+    gating_tests = Enum.flat_map(gating_test_sources, &parse_test_metas/1)
 
-    case missing do
-      [] -> :ok
-      _ -> {:error, missing}
+    case PureAcLinkage.check(pr_body, gating_tests) do
+      {:pass, []} -> :ok
+      {:fail, missing} -> {:error, missing}
     end
   end
 
-  # Extract the content of the "## Acceptance criteria" section from the PR body.
-  # Starts after the heading whose text (stripped of leading #, trimmed, downcased)
-  # begins with "acceptance criteria". Ends at the next markdown heading or EOF.
-  # Returns "" if no such heading is found.
-  defp extract_acceptance_criteria_section(pr_body) do
-    lines = String.split(pr_body, "\n")
-    heading_pattern = ~r/^[#]{1,6}\s/
+  # ---------------------------------------------------------------------------
+  # Source-string → TestMeta parser
+  # ---------------------------------------------------------------------------
 
-    ac_heading_idx =
-      Enum.find_index(lines, fn line ->
-        stripped = line |> String.replace(~r/^#+\s*/, "") |> String.trim() |> String.downcase()
+  # Parse a gating-test source string into a list of TestMeta maps.
+  # Extracts test names (from `test "..."` and `property "..."` lines) and
+  # @tag atoms (from `@tag :atom` and `@tag atom: value` lines).
+  defp parse_test_metas(source) when is_binary(source) do
+    lines = String.split(source, "\n")
+    extract_test_metas(lines, [], [])
+  end
 
-        String.starts_with?(stripped, "acceptance criteria") and
-          String.match?(line, heading_pattern)
-      end)
+  # Walk lines accumulating @tags, emitting a TestMeta when a test/property line is found.
+  defp extract_test_metas([], _pending_tags, acc), do: acc
 
-    case ac_heading_idx do
-      nil ->
-        ""
+  defp extract_test_metas([line | rest], pending_tags, acc) do
+    trimmed = String.trim(line)
 
-      idx ->
-        lines
-        |> Enum.drop(idx + 1)
-        |> Enum.take_while(&(not String.match?(&1, heading_pattern)))
-        |> Enum.join("\n")
+    cond do
+      # @tag :atom or @tag atom_name (bare atom)
+      String.starts_with?(trimmed, "@tag :") ->
+        tag_str = trimmed |> String.replace_prefix("@tag :", "") |> String.trim()
+        tag = String.to_atom(tag_str)
+        extract_test_metas(rest, [tag | pending_tags], acc)
+
+      # @tag key: value — extract the key as a tag
+      Regex.match?(~r/^@tag\s+[a-z_][a-z_0-9]*:/, trimmed) ->
+        case Regex.run(~r/^@tag\s+([a-z_][a-z_0-9]*):/, trimmed) do
+          [_, key] ->
+            tag = String.to_atom(key)
+            extract_test_metas(rest, [tag | pending_tags], acc)
+
+          _ ->
+            extract_test_metas(rest, pending_tags, acc)
+        end
+
+      # @moduletag :atom
+      String.starts_with?(trimmed, "@moduletag :") ->
+        tag_str = trimmed |> String.replace_prefix("@moduletag :", "") |> String.trim()
+        tag = String.to_atom(tag_str)
+        extract_test_metas(rest, [tag | pending_tags], acc)
+
+      # test "name" or property "name"
+      Regex.match?(~r/^(test|property)\s+"/, trimmed) ->
+        case Regex.run(~r/^(?:test|property)\s+"([^"]*)"/, trimmed) do
+          [_, name] ->
+            meta = %{name: name, tags: pending_tags}
+            # Reset pending tags after emitting a test (tags accumulate per test).
+            extract_test_metas(rest, [], [meta | acc])
+
+          _ ->
+            extract_test_metas(rest, [], acc)
+        end
+
+      true ->
+        extract_test_metas(rest, pending_tags, acc)
     end
-  end
-
-  # Parse AC-N tokens marked as meta (exempt from the linkage gate).
-  # An AC is meta if ANY occurrence in the section text is immediately followed
-  # by "(meta)" (optionally with surrounding ** bold markers and optional
-  # whitespace between the token and the marker).
-  defp parse_meta_ac_tokens(section_text) do
-    meta_pattern = ~r/\bAC-(\d+)\s*\(meta\)/
-
-    Regex.scan(meta_pattern, section_text, capture: :all_but_first)
-    |> List.flatten()
-    |> Enum.map(&"AC-#{&1}")
-    |> MapSet.new()
-  end
-
-  # Parse all AC-N and D-NNN tokens from the given text.
-  defp parse_ac_tokens(section_text) do
-    ac_pattern = ~r/\bAC-\d+\b/
-    d_pattern = ~r/\bD-\d+\b/
-
-    ac_tokens = Regex.scan(ac_pattern, section_text) |> List.flatten()
-    d_tokens = Regex.scan(d_pattern, section_text) |> List.flatten()
-
-    (ac_tokens ++ d_tokens) |> Enum.uniq()
-  end
-
-  # Check if a token (e.g. "AC-1" or "D-200") is covered in any source.
-  # Normalises to tag form: "AC-1" -> "ac_1", "D-200" -> "d_200".
-  defp token_covered?(token, sources) do
-    tag_form = token |> String.downcase() |> String.replace("-", "_")
-
-    Enum.any?(sources, fn source ->
-      String.contains?(source, ":#{tag_form}") or
-        String.contains?(source, "\"#{token}") or
-        String.contains?(source, "\"#{tag_form}")
-    end)
   end
 end
