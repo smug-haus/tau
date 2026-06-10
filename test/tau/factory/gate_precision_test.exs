@@ -9,7 +9,7 @@ defmodule Tau.Factory.GatePrecisionTest do
   AC-1, AC-3, AC-6 are meta-ACs (CI/inspection-verified) and are out of
   this file's scope.
   """
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Mix.Gate.AcLinkage
   alias Mix.Gate.Mutation

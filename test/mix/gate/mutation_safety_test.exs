@@ -8,7 +8,7 @@ defmodule Mix.Gate.MutationSafetyTest do
   safety contract that closes the partial-revert gap noted in
   `.code_audit/00-synthesis.md` §9 finding #14.
   """
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Mix.Gate.Mutation
 
