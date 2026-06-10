@@ -25,7 +25,7 @@ defmodule Mix.Tasks.Tau.Gate.Mutation do
 
   | code | meaning |
   |------|---------|
-  | 0    | ≥1 gating test failed against the reverted tree (discriminating); OR N/A (project-creation PR — no pre-implementer code to mutate) |
+  | 0    | ≥1 gating test failed against the reverted tree (discriminating); OR N/A (project-creation PR, or test-only/docs-only change — no production delta to mutate) |
   | 1    | all gating tests passed against the reverted tree (vacuous suite) |
   | 2    | usage error |
   | 3    | test runner crashed — gate could not evaluate (compile error or process crash) |
@@ -47,7 +47,7 @@ defmodule Mix.Tasks.Tau.Gate.Mutation do
 
           :not_applicable ->
             Mix.shell().info(
-              "tau.gate.mutation: N/A — project-creation PR; no pre-implementer production code to mutate"
+              "tau.gate.mutation: N/A — no production delta outside gating-test paths; mutation check not applicable"
             )
 
           {:error, :all_passed} ->

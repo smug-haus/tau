@@ -10,7 +10,7 @@ defmodule Tau.Factory.GateTest do
 
   Each test references the AC it gates (AC-1 / AC-2 / AC-3).
   """
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Mix.Gate.AcLinkage
   alias Mix.Gate.Masking
