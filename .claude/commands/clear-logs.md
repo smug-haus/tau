@@ -1,8 +1,9 @@
 ---
 name: clear-logs
 description: >
-  Reset harness runtime state: clear observations, kill signals, and
-  solution tree. Use between tasks or to recover from a stuck state.
+  Reset harness runtime state: clear observations and kill signals. Use
+  between tasks or to recover from a stuck state. (The solution tree is no
+  longer a file — #410; durable factory state lives in the Ledger.)
 allowed-tools: Bash
 ---
 
@@ -27,7 +28,6 @@ Report which files were removed and which were absent. Example:
 Cleared:
   observations.jsonl — removed
   kill-signal.json — removed
-  solution-tree.json — absent (nothing to clear)
 
 Harness state reset. Ready for next task.
 ```

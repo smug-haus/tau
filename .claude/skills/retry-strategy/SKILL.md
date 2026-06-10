@@ -3,130 +3,155 @@ name: retry-strategy
 description: >
   Structured retry decision-making for failed agent attempts. Use when
   an implementation attempt has been killed or failed evaluation and
-  you need to decide next steps (refine, pivot, or give up).
-  Provides solution tree management guidance.
+  you need to decide next steps (refine, pivot, or escalate). The
+  decision logic maps to the factory's bounded refine→pivot→escalate
+  ladder (SPEC-FACTORY-CORE D-318).
 ---
 
 # Retry Strategy
 
-Use this skill immediately after an attempt is killed or fails evaluation. The goal is to decide: refine, pivot, or give up — and to set up the next attempt correctly.
+Use this skill immediately after an attempt is killed or fails the gate. The
+goal is to decide: **refine, pivot, or escalate** — and to set up the next
+attempt correctly.
+
+> **State-store note (#410 / 2026-06).** `.claude/logs/solution-tree.json` was
+> deleted (ADR-0023, #401); it is no longer the source of truth. Cross-attempt
+> state now lives in:
+> - **Interim (current Claude-harness factory):** the **draft PR** — its body is
+>   the plan-of-record and attempt log; `gh pr comment` / `gh issue comment`
+>   carry per-attempt findings. Query with `gh`, not a JSON file.
+> - **Target (the supervised OTP factory):** the **durable Ledger (L)** — the
+>   per-PR `Tau.Factory.Unit` FSM holds `attempt_count` and the verdict/challenge
+>   history durably (`SPEC-FACTORY-CORE` D-315/D-318), and the Coordinator resumes
+>   from it on crash. The "solution tree" is that Ledger, not a hand-curated file.
+>
+> The **decision logic below is unchanged** — only where the record lives moved.
 
 ---
 
-## 1. Branch Selection
+## 1. Branch selection (the refine → pivot → escalate ladder)
+
+This is the product-level retry ladder (`SPEC-FACTORY-CORE` §3.3, D-318): bounded
+at **N refines**, then one **pivot**, then **escalate**.
 
 ### Refine
 The approach was directionally correct but execution failed.
 
 **When to refine**:
-- Tactical kill reason (wrong file path, specific test failure, minor logic error, syntax error)
-- Evaluation failure on a specific, identifiable issue
-- Errors are different each attempt (indicating forward progress)
+- Tactical kill/gate reason (wrong file path, specific test failure, minor logic
+  error, syntax error).
+- Gate FAIL on a specific, identifiable finding.
+- Errors are different each attempt (forward progress).
 
 **How to refine**:
-1. Identify the exact error from the kill reason or evaluation
-2. Add it explicitly to the avoidance list in the solution tree
-3. Inject the correction as targeted instructions in the next attempt's preamble
-4. Do not change the overall approach
+1. Identify the exact finding from the kill reason or gate verdict.
+2. Record it on the **draft PR** (body attempt-log entry + a `gh pr comment`) —
+   interim; the FSM records it durably in the target.
+3. Inject the correction as targeted guidance for the next attempt; stay on the
+   **same draft PR / same diff base**.
+4. Do not change the overall approach.
 
 ### Pivot
 The approach is wrong. A different strategy is needed.
 
 **When to pivot**:
-- Strategic kill reason (wrong architecture, design constraint violation)
-- Same error class recurring across 3+ attempts
-- Cascading failures — fixing one thing breaks another
-- Multiple heuristics triggered simultaneously
-- The attempted approach contradicts a fundamental project constraint
+- Strategic kill reason (wrong architecture, design-constraint violation).
+- Same error class recurring across the refine bound (N).
+- Cascading failures — fixing one thing breaks another.
+- The approach contradicts a fundamental project constraint (an OTP
+  non-negotiable, a SPEC §4 contract).
 
 **How to pivot**:
-1. Summarize what was tried and the core reason it failed
-2. Identify the fundamental assumption that was wrong
-3. Choose a different approach — do not iterate on the same strategy
-4. Record the failed approach in the solution tree so the next agent does not repeat it
+1. Summarize what was tried and the core reason it failed (on the PR).
+2. Identify the wrong assumption.
+3. Choose a materially different approach on a **fresh diff** — do not iterate
+   the same strategy. (In the target, a pivot opens a fresh draft PR and resets
+   the refine count.)
 
-### Give up
-Max attempts exhausted or task is genuinely impossible.
+### Escalate (was "give up")
+The retry ladder is exhausted, or a blocker needs a human.
 
-**When to give up**:
-- 5 attempts completed with no convergence
-- A fundamental blocker has been identified that cannot be resolved by the agent (requires human decision, external dependency, spec change)
+**When to escalate**:
+- N refines + a failed pivot with no green gate (`E-RETRY-EXHAUSTED`).
+- A blocker the agent cannot resolve: needs human product judgement, an external
+  dependency, or a SPEC change (`E-AMBIGUITY`).
+- See the full, total escalation set `E` in `heuristic-analysis` and
+  `docs/arch/02-requirements/liveness.md`.
 
-**How to give up**:
-1. Summarize all attempts: what was tried, why each failed
-2. Identify the specific blocker preventing progress
-3. Recommend the specific human action needed to unblock
-4. Do not attempt a sixth time
-
----
-
-## 2. Solution Tree Management
-
-The solution tree is the single source of truth for retry decisions. Every attempt must be recorded before launching the next.
-
-**Per-attempt record** (keep under 500 tokens):
-- `approach_summary`: What strategy was used (1-2 sentences)
-- `outcome`: `killed`, `completed`, or `failed_evaluation`
-- `kill_reason`: Exact kill reason string from the heuristic (or null)
-- `evaluation`: Key finding from code review (or null)
-- `files_modified`: List of files that were changed
-- `key_decisions`: 2-3 decisions made during the attempt that constrained the approach
-
-**What not to record**:
-- Full error output — summarize the key insight instead
-- Tool call transcripts — these belong in logs, not the solution tree
-- Intermediate states — record final state only
-
-The solution tree is read by the SubagentStart hook to generate the preamble for the next attempt. Keep it parseable and concise.
+**How to escalate**:
+1. Summarize all attempts: what was tried, why each failed.
+2. Name the specific blocker and the exact human action needed to unblock.
+3. Record the escalation reason + state to the PR (interim) / Ledger (target);
+   halting on a safety condition is **correct**, not failure.
 
 ---
 
-## 3. Context Injection Rules
+## 2. Where retry state lives (replaces "Solution Tree Management")
 
-The SubagentStart hook generates a preamble injected at the start of each new subagent's context. This prevents the new agent from inheriting the confusion of previous attempts.
+Record, before launching the next attempt, the minimum that lets a fresh agent
+resume — but **in the PR / Ledger, never a context-window-held tree**:
 
-**Preamble contains**:
-- Task description (from solution tree)
-- Summary of each previous attempt (from solution tree — one paragraph each)
-- Explicit avoidance list: things tried that didn't work
-- Chosen strategy: refine or pivot, with brief rationale
+**Per-attempt record** (keep terse; on the draft PR body + a `gh` comment):
+- `approach_summary` — the strategy (1–2 sentences).
+- `outcome` — `killed` | `gated_fail` | `merged`.
+- `kill_reason` / `gate_finding` — the exact string (or null).
+- `files_touched` — the changed-file set (the gating-test paths are frozen and
+  off-limits to the implementer).
+- `key_decisions` — 2–3 constraints chosen this attempt.
 
-**Preamble constraints**:
-- Maximum 500 tokens per attempt summary
-- Total preamble should not exceed 1500 tokens (3 summaries × 500)
-- Do not include raw error output
-- Do not include file contents
+**Do not record**: full error output (summarize the insight), tool transcripts
+(those are logs), intermediate states (final only).
 
-The preamble's purpose is to give the new agent situational awareness without contaminating it with the failed agent's reasoning chains.
+In the **target factory** this record is the `Tau.Factory.Unit` FSM's
+per-transition snapshot to L (`durable-spine.md`); you do not hand-maintain it.
 
 ---
 
-## 4. Meta-Restart Protocol
+## 3. Cross-attempt context (replaces hook-injected preamble)
 
-After 3 consecutive failed attempts: **mandatory meta-restart**.
+The previous mechanism — a `SubagentStart` hook reading the JSON tree to build a
+preamble — is **retired** with the tree. Cross-attempt context now comes from the
+**durable plan-of-record**:
 
-This is a hard rule, not a judgment call.
+- **Interim:** the next implementer is briefed from the **draft-PR body** (the
+  single source of brief + plan — no brief/PR drift) plus the prior attempts'
+  `gh` comments. `inject-retry-context.py` already degrades gracefully when the
+  tree is absent; treat its output as best-effort, the PR as authoritative.
+- **Target:** the implementer worker is spawned with the Unit FSM's durable
+  state as its brief; there is no context-window tree to inject.
 
-**Steps**:
-1. Compress all attempt history into a single briefing document (maximum 1000 tokens total)
-   - What was tried (each approach in one sentence)
-   - What failed (each failure in one sentence)
-   - What to avoid (explicit list)
-2. Clear the working context entirely
-3. Restart with only:
-   - The briefing document
-   - The current solution tree
-   - The original task description
-4. Do not carry forward any reasoning, partial implementations, or intermediate conclusions from the failed attempts
+Give the new agent situational awareness (what was tried, the avoidance list, the
+chosen branch + rationale) **without** the failed agent's reasoning chains.
 
-**Rationale**: After 3 failures, the accumulated context is likely contributing to the problem. A fresh start with a compact summary is more productive than continuing with a contaminated context.
+---
+
+## 4. The 3-failure rule is context hygiene, NOT a product retry mechanism
+
+> **Deprecated as a state mechanism.** The old "meta-restart: compress history to
+> ≤1000 tokens, clear context, restart from the solution tree" existed *only
+> because* factory state was a degrading context window. With durable state
+> (interim: the PR; target: the Ledger, RPO=0) there is **no volatile tree to
+> rehydrate** — the Coordinator resumes from L. Do not port the meta-restart as a
+> product mechanism (`docs/arch/.../migration.md` §7).
+
+What remains: the harness **3-consecutive-failure** rule (`CLAUDE.md` Hard Rules)
+is a *context-hygiene* reset of the **coordinator's working context** — it
+changes *how the coordinator is run*, never *what the loop decided*. It is
+orthogonal to the product retry bound (N), and **escalation always wins over a
+restart** (`factory-loop.md` "Reconciling N = 3 with the harness meta-restart").
+On a hygiene reset, resume from the PR/Ledger — the durable record is the single
+source of truth across the reset.
 
 ---
 
 ## 5. Reference
 
-For the solution tree JSON schema and a complete example:
-→ Read `reference/solution-tree-schema.md`
-
 For detailed decision examples with worked scenarios:
 → Read `reference/decision-framework.md`
+
+For the kill-reason → escalation-reason taxonomy:
+→ Use the `heuristic-analysis` skill.
+
+For the durable-state model that supersedes the JSON tree:
+→ `docs/spec/SPEC-FACTORY-CORE.md` (the Unit FSM, the Ledger, D-318/D-315) and
+   `docs/arch/04-software-architecture/{control-plane,durable-spine}.md`.

@@ -78,6 +78,12 @@ Block-to-SPEC allocation:
 | D-120 – D-129 | SPEC-EXTENSIONS |
 | D-130 – D-139 | reserved — SPEC-CLUSTER (future) |
 | D-180 – D-189 | SPEC-WEB-DASHBOARD |
+| D-300 – D-303, D-341 | SPEC-FACTORY-MERGE |
+| D-304 – D-308, D-322, D-323, D-354 | SPEC-FACTORY-GATE |
+| D-309 – D-311, D-313, D-314, D-316, D-334 | SPEC-FACTORY-FLEET |
+| D-312, D-315, D-317, D-318, D-320, D-321, D-330 – D-333, D-335, D-336, D-340, D-342 – D-344 | SPEC-FACTORY-CORE |
+| D-319, D-351 – D-353 | SPEC-FACTORY-GOV |
+| D-300 – D-360 | reserved — SPEC-FACTORY-\* family (autonomous factory; `docs/arch/`) |
 
 A SPEC needing a D-NNN outside its allocated block MUST update this table
 in the same change.

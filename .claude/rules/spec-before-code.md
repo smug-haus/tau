@@ -131,6 +131,45 @@ The current spec catalog:
   D-180..D-189 live here. Spec home for #374 (M7 foundation) and #43–#48
   (dashboard features).
 
+- `docs/spec/SPEC-FACTORY-CORE.md` — the `:tau_factory` control core: the
+  Coordinator loop (K), durable Ledger (L, SQLite/Exqlite, RPO=0), Scheduler /
+  admission authority (S), and per-PR Unit FSM (U). Owns total-escalation,
+  durable-decision, conflict-gated-admission, and bounded-retry. Mandatory for
+  any PR touching `lib/tau/factory/coordinator.ex`,
+  `lib/tau/factory/scheduler.ex`, `lib/tau/factory/conflict_check.ex`,
+  `lib/tau/factory/unit.ex`, `lib/tau/factory/retry.ex`,
+  `lib/tau/factory/escalation.ex`, `lib/tau/factory/kill_switch.ex`,
+  `lib/tau/factory/ledger/`, `lib/tau/factory/budget/`, the
+  `Tau.Factory.Supervisor` entry in `lib/tau/application.ex`, or
+  `test/tau/factory/` for those modules. Triage 5/5; D-312, D-315, D-317, D-318,
+  D-320, D-321, D-330–D-333, D-335, D-336, D-340, D-342–D-344 live here. Resolves
+  #410 (durable solution tree replaces the deleted JSON).
+- `docs/spec/SPEC-FACTORY-MERGE.md` — the serialized Merge Authority (M): the
+  single `gen_statem` sole-writer of `origin/main`, the CAS merge (live-verdict
+  read + `--force-with-lease`), and the merge-train. Mandatory for any PR
+  touching `lib/tau/factory/merge_authority.ex` or `lib/tau/factory/merge/`.
+  Triage 5/5; D-300–D-303, D-341 live here. Cross-refs #320.
+- `docs/spec/SPEC-FACTORY-GATE.md` — the Gate (G) + polyglot Toolchain behaviour:
+  the three path-based mechanical gates, engine-owned test execution (HR-3), and
+  the anti-gaming floor. Mandatory for any PR touching `lib/tau/factory/gate/`,
+  `lib/tau/factory/toolchain.ex`, `lib/tau/factory/toolchains/`,
+  `lib/tau/factory/engine/`, `lib/tau/factory/report_parser.ex`, or `lib/mix/gate/`.
+  Triage 5/5; D-304–D-308, D-322, D-323, D-354 live here. Closes #383.
+- `docs/spec/SPEC-FACTORY-FLEET.md` — the Worker fleet (W): the
+  `DynamicSupervisor`+`Registry` worker population, complete per-worker isolation,
+  and capture-before-destroy via an independent monitor. Mandatory for any PR
+  touching `lib/tau/factory/worker_supervisor.ex`, `lib/tau/factory/worker/`,
+  `lib/tau/factory/fleet/`, or the `WorkspaceJanitor`/`WorkerRegistry` modules.
+  Triage 5/5; D-309–D-311, D-313, D-314, D-316, D-334 live here. Cross-refs
+  #297, #329.
+- `docs/spec/SPEC-FACTORY-GOV.md` — the Governance plane: the egress chain
+  (RateLimiter→CircuitBreaker→Budget), the engine-clamped Policy plane, the
+  ActionClassifier, and observability/audit lineage. Mandatory for any PR
+  touching `lib/tau/factory/egress.ex`, `lib/tau/factory/policy.ex`,
+  `lib/tau/factory/action_classifier.ex`, or the factory-namespace wiring of
+  `lib/tau/circuit_breaker/`, `lib/tau/providers/rate_limiter/`,
+  `lib/tau/otel_reporter/`. Triage 4/5; D-319, D-351–D-353 live here.
+
 Future SPECs land here as new components reach triage threshold.
 
 ## What this rule requires

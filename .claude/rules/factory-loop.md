@@ -5,6 +5,19 @@ continuous autonomous factory: it spawns implementer teams, gates every PR, and
 merges — with no per-step human checkpoints. The gate is mandatory and complete;
 it is never optional, partial, or deferred.
 
+> **Transition note (2026-06 — being superseded).** This prose loop, executed by
+> a Claude-harness coordinator, is being replaced by a **supervised OTP factory**
+> (`docs/arch/`, `docs/spec/SPEC-FACTORY-*`): the Coordinator becomes a
+> `gen_statem`, the "solution tree" becomes the durable **Ledger (L)**
+> (`SPEC-FACTORY-CORE` D-315 — RPO=0), and the prose MUSTs here become
+> structurally-enforced `D-NNN` invariants. Until the OTP factory lands, this
+> document remains the operating procedure, run by the coordinator in
+> **supervised mode** (the autonomous `/loop` driver stays paused while the gate
+> integrity is being restored — `main` was merged red, #411–#414). Treat the
+> "solution tree" throughout this document as a *concept* (now the Ledger), not a
+> file: the `.claude/logs/solution-tree.json` it once named was deleted (#410,
+> ADR-0023); interim state is `gh` issues/PRs.
+
 ## Using this document
 
 Read this document once at the start of a factory run; it then lives in the
@@ -36,10 +49,12 @@ not guess — it asks the user which milestone to work, then proceeds.
 - `gh issue list --milestone "<title>" --state open` — the assigned milestone's
   remaining open issues.
 
-**Tracking progress.** `.claude/logs/solution-tree.json` records every factory
-step and its outcome. The assigned milestone's open-issue count is the
-completion signal — done at zero. Reconcile the solution tree against
-`gh issue list --milestone` so no step is lost or double-counted.
+**Tracking progress.** The solution tree records every factory step and its
+outcome — **interim** in the draft PRs + `gh` (the `.claude/logs/solution-tree.json`
+file is deleted, #410); **target** in the durable Ledger (`SPEC-FACTORY-CORE`
+D-315). The assigned milestone's open-issue count is the completion signal —
+done at zero. Reconcile the solution tree against `gh issue list --milestone` so
+no step is lost or double-counted (CON-2 / D-331).
 
 ## Inherited rules
 

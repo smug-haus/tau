@@ -83,7 +83,34 @@ When the checklist is ambiguous, default to **Refine** for attempt 1–2, **Pivo
 
 ---
 
-## 4. Reference
+## 4. The escalation tier — mapping to the total set `E`
+
+Refine and pivot are the first two rungs; the third is **escalate**. When the
+retry ladder is exhausted or a blocker needs a human, the kill reason maps to
+**exactly one** reason in the factory's *total* escalation set `E`
+(`SPEC-FACTORY-CORE` §5 / `docs/arch/02-requirements/liveness.md`). This replaces
+the v1 "give up" with a structured, total taxonomy — every non-progress state
+names exactly why it cannot proceed (the D-317 totality property).
+
+| Condition / kill reason | Escalation reason `e ∈ E` |
+|---|---|
+| Retry ladder exhausted (N refines + a failed pivot, still red) | `E-RETRY-EXHAUSTED` |
+| Design-constraint / spec ambiguity needing human product judgement | `E-AMBIGUITY` |
+| > 2 upheld implementer challenges on one PR | `E-CHALLENGE` |
+| Destructive / irreversible action requested | `E-DESTRUCTIVE` |
+| Budget (token/cost/time/iteration) exhausted | `E-BUDGET` |
+| Post-merge `main` health check red | `E-RED-MAIN` |
+| Unresolvable merge conflict | `E-CONFLICT` |
+| A non-progress state matching none of the above (a defect signal) | `E-UNCLASSIFIED` |
+
+In the target factory the Coordinator performs this mapping with the pure
+`Tau.Factory.Escalation.classify/1` (D-317); halting on a safety condition is
+**correct** behaviour, not failure. Use the `retry-strategy` skill for the
+refine/pivot/escalate decision itself.
+
+---
+
+## 5. Reference
 
 For the full heuristic catalog with detection logic, confidence levels, and kill reason templates:
 
