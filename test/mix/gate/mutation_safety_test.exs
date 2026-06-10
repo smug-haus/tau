@@ -1,12 +1,17 @@
 defmodule Mix.Gate.MutationSafetyTest do
   @moduledoc """
-  Safety tests for the `try/after` restore guarantee in `Mix.Gate.Mutation`.
+  Safety tests for the `try/after` restore guarantee in `Mix.Gate.Mutation`
+  and the no-production-delta `:not_applicable` exemption.
 
   Verifies that `mutation_check_in` restores the working tree to its HEAD
   state unconditionally — covering both normal completion and scenarios where
   the working tree is modified before the check runs. This exercises the
   safety contract that closes the partial-revert gap noted in
   `.code_audit/00-synthesis.md` §9 finding #14.
+
+  Also verifies Gate 5.3 returns `:not_applicable` when the PR's entire diff
+  lies within the declared gating-test paths (test-only / docs-only change),
+  fixing the false FAIL reported in issue #423.
   """
   use ExUnit.Case, async: false
 
@@ -104,5 +109,63 @@ defmodule Mix.Gate.MutationSafetyTest do
 
     assert restored == head_prod_content,
            "expected HEAD content after restore, got: #{inspect(restored)}"
+  end
+
+  # Test for issue #423: Gate 5.3 must return :not_applicable (exit 0) when
+  # the PR's entire diff lies within the declared gating-test paths — i.e.
+  # a test-only or docs-only change with no production delta.
+  #
+  # Scenario: base commit has lib/widget.ex unchanged; HEAD only adds a new
+  # gating test file. The only change between base_ref and HEAD is the gating
+  # test itself. Reverting everything outside gating-test paths reverts nothing
+  # — no production delta to mutate.
+  test "returns :not_applicable when PR has no production delta outside gating-test paths (#423)",
+       %{tmp_dir: tmp_dir} do
+    # Build a fresh isolated repo inside tmp_dir/test_only_repo so it does
+    # not share git history with the outer setup repo.
+    repo = Path.join(tmp_dir, "test_only_repo")
+    File.mkdir_p!(Path.join(repo, "lib"))
+    File.mkdir_p!(Path.join(repo, "test"))
+    run = fn args -> {_, 0} = System.cmd("git", args, cd: repo) end
+
+    run.(["init", "-q"])
+    run.(["config", "user.email", "test@example.com"])
+    run.(["config", "user.name", "Test"])
+
+    # base commit: production file only (no gating test yet)
+    prod = Path.join(repo, "lib/widget.ex")
+    File.write!(prod, "defmodule Widget do\n  def run, do: :value\nend\n")
+    run.(["add", "-A"])
+    run.(["commit", "-q", "-m", "base"])
+    {base_ref, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo)
+    base_ref = String.trim(base_ref)
+
+    # HEAD commit: production file UNCHANGED; only a new gating test added.
+    # This simulates a test-only PR where the implementer already shipped the
+    # production code and this PR only adds the gating test.
+    gating = Path.join(repo, "test/widget_gate_test.exs")
+
+    File.write!(gating, """
+    defmodule WidgetGateTest do
+      use ExUnit.Case
+      test "widget returns expected value" do
+        assert Widget.run() == :value
+      end
+    end
+    """)
+
+    run.(["add", "-A"])
+    run.(["commit", "-q", "-m", "add gating test only"])
+
+    # Run mutation check with the gating test as the only declared path.
+    # The production file (lib/widget.ex) is identical at base_ref and HEAD,
+    # so there is no production delta to revert — gate must return :not_applicable.
+    result =
+      File.cd!(repo, fn ->
+        Mutation.mutation_check(["test/widget_gate_test.exs"], base_ref)
+      end)
+
+    assert result == :not_applicable,
+           "expected :not_applicable for test-only PR (no production delta), got: #{inspect(result)}"
   end
 end

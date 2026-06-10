@@ -21,9 +21,11 @@ defmodule Mix.Gate.Mutation do
 
   Returns:
   - `:ok` — ≥1 gating test fails against the reverted tree (suite is discriminating).
-  - `:not_applicable` — every declared gating-test path lives in a Mix project
-    whose nearest-ancestor `mix.exs` is absent at `base_ref` (PR-created project;
-    no pre-implementer code to mutate).
+  - `:not_applicable` — either (a) every declared gating-test path lives in a Mix
+    project whose nearest-ancestor `mix.exs` is absent at `base_ref` (PR-created
+    project; no pre-implementer code to mutate), or (b) the PR's entire diff lies
+    within the declared gating-test paths (no production delta outside those
+    paths — test-only or docs-only change; nothing to mutate).
   - `{:error, :all_passed}` — all gating tests pass against the reverted tree
     (vacuous suite).
   - `{:error, {:runner_crashed, detail}}` — `mix test` exited without producing
@@ -109,19 +111,42 @@ defmodule Mix.Gate.Mutation do
   end
 
   defp mutation_check_in(gating_test_paths, base_ref, repo_dir) do
-    gating_snapshots = snapshot_files(gating_test_paths, repo_dir)
-
     {all_files_str, 0} = System.cmd("git", ["ls-files"], cd: repo_dir)
     all_files = all_files_str |> String.split("\n", trim: true)
 
     paths_to_revert = all_files -- gating_test_paths
 
-    try do
-      revert_to_base(paths_to_revert, base_ref, repo_dir)
-      restore_snapshots(gating_snapshots, repo_dir)
-      run_gating_tests(gating_test_paths, repo_dir)
-    after
-      restore_head(all_files, repo_dir)
+    if no_production_delta?(paths_to_revert, base_ref, repo_dir) do
+      :not_applicable
+    else
+      gating_snapshots = snapshot_files(gating_test_paths, repo_dir)
+
+      try do
+        revert_to_base(paths_to_revert, base_ref, repo_dir)
+        restore_snapshots(gating_snapshots, repo_dir)
+        run_gating_tests(gating_test_paths, repo_dir)
+      after
+        restore_head(all_files, repo_dir)
+      end
+    end
+  end
+
+  # Returns true iff none of the non-gating paths differ from base_ref — i.e.
+  # the PR's entire diff lies within the gating-test path set (test-only change).
+  # Uses `git diff --quiet base_ref -- <paths>` which exits 0 when there is no
+  # diff, non-zero when there is one. An empty paths_to_revert list trivially has
+  # no production delta.
+  defp no_production_delta?([], _base_ref, _repo_dir), do: true
+
+  defp no_production_delta?(paths_to_revert, base_ref, repo_dir) do
+    case System.cmd(
+           "git",
+           ["diff", "--quiet", base_ref, "--" | paths_to_revert],
+           cd: repo_dir,
+           stderr_to_stdout: true
+         ) do
+      {_, 0} -> true
+      _ -> false
     end
   end
 
