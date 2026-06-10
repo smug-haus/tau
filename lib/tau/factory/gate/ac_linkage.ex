@@ -25,7 +25,7 @@ defmodule Tau.Factory.Gate.AcLinkage do
   - `:tags` — a list of atoms (e.g. `[:ac_1, :property]`)
   """
 
-  @typedoc "An `AC-N` or `D-NNN` token string, e.g. `\"AC-1\"` or `\"D-200\"`."
+  @typedoc ~S'An `AC-N` or `D-NNN` token string, e.g. `"AC-1"` or `"D-200"`.'
   @type token :: String.t()
 
   @typedoc "Minimal test metadata map: `%{name: String.t(), tags: [atom()]}`."
