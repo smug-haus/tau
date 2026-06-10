@@ -111,6 +111,72 @@ defmodule Mix.Gate.MutationSafetyTest do
            "expected HEAD content after restore, got: #{inspect(restored)}"
   end
 
+  # f-3 positive-control: a real production delta must NOT return :not_applicable.
+  # Guards against a no_production_delta?/3 that wrongly returns true unconditionally.
+  test "does NOT return :not_applicable when production file is changed (positive-control f-3)",
+       %{tmp_dir: tmp_dir, base_ref: base_ref} do
+    # The outer setup repo already has lib/widget.ex changed base→HEAD.
+    # mutation_check must NOT short-circuit; it runs the real check.
+    result =
+      File.cd!(tmp_dir, fn ->
+        Mutation.mutation_check(["test/widget_gate_test.exs"], base_ref)
+      end)
+
+    assert result != :not_applicable,
+           "expected non-:not_applicable when production file differs base→HEAD, got: #{inspect(result)}"
+  end
+
+  # f-1 delete-only case: a production file deleted in HEAD (vs base) is a
+  # production delta — must NOT return :not_applicable.
+  # Verifies no_production_delta?/3 uses git diff --name-only (which reports
+  # deletions) rather than git ls-files (which only lists HEAD-present files).
+  test "does NOT return :not_applicable when production file is deleted in HEAD (f-1 delete-only)",
+       %{tmp_dir: tmp_dir} do
+    repo = Path.join(tmp_dir, "delete_repo")
+    File.mkdir_p!(Path.join(repo, "lib"))
+    File.mkdir_p!(Path.join(repo, "test"))
+    run = fn args -> {_, 0} = System.cmd("git", args, cd: repo) end
+
+    run.(["init", "-q"])
+    run.(["config", "user.email", "test@example.com"])
+    run.(["config", "user.name", "Test"])
+
+    # base commit: production file exists
+    prod = Path.join(repo, "lib/widget.ex")
+    File.write!(prod, "defmodule Widget do\n  def run, do: :value\nend\n")
+    run.(["add", "-A"])
+    run.(["commit", "-q", "-m", "base"])
+    {base_ref, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: repo)
+    base_ref = String.trim(base_ref)
+
+    # HEAD commit: production file DELETED; gating test added
+    File.rm!(prod)
+
+    gating = Path.join(repo, "test/widget_gate_test.exs")
+
+    File.write!(gating, """
+    defmodule WidgetGateTest do
+      use ExUnit.Case
+      test "placeholder — production file deleted" do
+        assert true
+      end
+    end
+    """)
+
+    run.(["add", "-A"])
+    run.(["commit", "-q", "-m", "delete prod, add gating test"])
+
+    # Production file was deleted in HEAD — that IS a production delta.
+    # Gate 5.3 must NOT return :not_applicable.
+    result =
+      File.cd!(repo, fn ->
+        Mutation.mutation_check(["test/widget_gate_test.exs"], base_ref)
+      end)
+
+    assert result != :not_applicable,
+           "expected non-:not_applicable for delete-only production change, got: #{inspect(result)}"
+  end
+
   # Test for issue #423: Gate 5.3 must return :not_applicable (exit 0) when
   # the PR's entire diff lies within the declared gating-test paths — i.e.
   # a test-only or docs-only change with no production delta.

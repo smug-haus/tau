@@ -23,9 +23,10 @@ defmodule Mix.Gate.Mutation do
   - `:ok` — ≥1 gating test fails against the reverted tree (suite is discriminating).
   - `:not_applicable` — either (a) every declared gating-test path lives in a Mix
     project whose nearest-ancestor `mix.exs` is absent at `base_ref` (PR-created
-    project; no pre-implementer code to mutate), or (b) the PR's entire diff lies
-    within the declared gating-test paths (no production delta outside those
-    paths — test-only or docs-only change; nothing to mutate).
+    project; no pre-implementer code to mutate), or (b) `git diff --name-only
+    base_ref HEAD` reports no changed paths outside the declared gating-test paths
+    (no production delta — test-only, docs-only, or delete-only change where the
+    deleted files are all within the gating-test set; nothing to mutate).
   - `{:error, :all_passed}` — all gating tests pass against the reverted tree
     (vacuous suite).
   - `{:error, {:runner_crashed, detail}}` — `mix test` exited without producing
@@ -116,7 +117,7 @@ defmodule Mix.Gate.Mutation do
 
     paths_to_revert = all_files -- gating_test_paths
 
-    if no_production_delta?(paths_to_revert, base_ref, repo_dir) do
+    if no_production_delta?(gating_test_paths, base_ref, repo_dir) do
       :not_applicable
     else
       gating_snapshots = snapshot_files(gating_test_paths, repo_dir)
@@ -131,22 +132,30 @@ defmodule Mix.Gate.Mutation do
     end
   end
 
-  # Returns true iff none of the non-gating paths differ from base_ref — i.e.
-  # the PR's entire diff lies within the gating-test path set (test-only change).
-  # Uses `git diff --quiet base_ref -- <paths>` which exits 0 when there is no
-  # diff, non-zero when there is one. An empty paths_to_revert list trivially has
-  # no production delta.
-  defp no_production_delta?([], _base_ref, _repo_dir), do: true
-
-  defp no_production_delta?(paths_to_revert, base_ref, repo_dir) do
+  # Returns true iff the PR's entire diff (base_ref → HEAD) lies within the
+  # declared gating-test paths — i.e. no production delta outside those paths.
+  #
+  # Uses `git diff --name-only base_ref HEAD` which reports ALL changed paths
+  # regardless of whether they are additions, modifications, deletions, or
+  # renames (unlike `git ls-files`, which only lists files present at HEAD and
+  # therefore silently omits deleted production files). If the set of changed
+  # paths minus the gating-test paths is empty, there is no production delta.
+  defp no_production_delta?(gating_test_paths, base_ref, repo_dir) do
     case System.cmd(
            "git",
-           ["diff", "--quiet", base_ref, "--" | paths_to_revert],
+           ["diff", "--name-only", base_ref, "HEAD"],
            cd: repo_dir,
            stderr_to_stdout: true
          ) do
-      {_, 0} -> true
-      _ -> false
+      {output, 0} ->
+        changed = output |> String.split("\n", trim: true)
+        production_changed = changed -- gating_test_paths
+        production_changed == []
+
+      _ ->
+        # If the diff command fails (e.g. invalid base_ref), assume there IS a
+        # production delta so we don't silently skip the mutation check.
+        false
     end
   end
 
