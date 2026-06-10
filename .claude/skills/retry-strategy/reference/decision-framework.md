@@ -1,6 +1,13 @@
 # Retry Decision Framework — Worked Examples
 
-Four scenarios showing how to apply the refine/pivot/give-up decision.
+> **State-store note (#410).** These examples were authored when
+> `.claude/logs/solution-tree.json` was the record. That file is deleted; the
+> *decision reasoning* below still stands, but the record now lives on the
+> **draft PR** (interim) / the durable **Ledger** (target) — see
+> `../SKILL.md` §2. Read the "attempt record" JSON blocks as illustrations of
+> *what to capture*, not as a live file schema.
+
+Four scenarios showing how to apply the refine / pivot / escalate decision.
 
 ---
 
@@ -19,7 +26,7 @@ H-003: Repeated identical call. Tool Bash called with identical arguments 3 time
 
 **Decision**: Refine.
 
-**Solution tree entry**:
+**Attempt record** (on the PR / Ledger):
 ```json
 {
   "attempt_id": 1,
@@ -51,7 +58,7 @@ H-001: Edit-undo cycle detected on .claude/logs/solution_tree.json. File returne
 
 **Decision**: Pivot.
 
-**Solution tree entry**:
+**Attempt record** (on the PR / Ledger):
 ```json
 {
   "attempt_id": 2,
@@ -100,7 +107,7 @@ H-005: Context burn. 62 tool calls with no writes or test improvement.
 
 **Decision**: Refine.
 
-**Solution tree entry**:
+**Attempt record** (on the PR / Ledger):
 ```json
 {
   "attempt_id": 1,
