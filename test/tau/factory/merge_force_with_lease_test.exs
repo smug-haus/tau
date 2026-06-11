@@ -26,6 +26,7 @@ defmodule Tau.Factory.MergeForceWithLeaseTest do
   # Runtime module references — file compiles even when modules do not yet exist.
   @merge_authority Tau.Factory.MergeAuthority
   @writer Tau.Factory.Ledger.Writer
+  @cas Tau.Factory.Merge.Cas
 
   # ---------------------------------------------------------------------------
   # Helpers
@@ -264,7 +265,7 @@ defmodule Tau.Factory.MergeForceWithLeaseTest do
       # Now old_oid is stale. Call cas_push with the stale expected_old_oid.
       # This must return {:error, :stale_ref}.
       result =
-        apply(Tau.Factory.Merge.Cas, :cas_push, [work_path, tip, old_oid])
+        @cas.cas_push(work_path, tip, old_oid)
 
       assert match?({:error, :stale_ref}, result),
              "AC-4 / D-301: Merge.Cas.cas_push/3 must return {:error, :stale_ref} " <>
@@ -304,11 +305,7 @@ defmodule Tau.Factory.MergeForceWithLeaseTest do
       end
 
       result =
-        apply(Tau.Factory.Merge.Cas, :assert_all_verdicts_live, [
-          writer,
-          [unit],
-          [:critic, :reviewer]
-        ])
+        @cas.assert_all_verdicts_live(writer, [unit], [:critic, :reviewer])
 
       assert result == :all_pass,
              "AC-4 / D-301: assert_all_verdicts_live must return :all_pass when all halves are :pass; " <>
@@ -365,11 +362,7 @@ defmodule Tau.Factory.MergeForceWithLeaseTest do
         })
 
       result =
-        apply(Tau.Factory.Merge.Cas, :assert_all_verdicts_live, [
-          writer,
-          [unit],
-          [:critic, :reviewer]
-        ])
+        @cas.assert_all_verdicts_live(writer, [unit], [:critic, :reviewer])
 
       assert match?({:revoked, _}, result),
              "AC-4 / D-301: assert_all_verdicts_live must return {:revoked, unit} " <>
