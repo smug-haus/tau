@@ -40,6 +40,7 @@ defmodule Tau.Factory.Supervisor do
     required_halves = Keyword.get(opts, :required_halves, [:critic, :reviewer])
     merge_authority_opts = Keyword.get(opts, :merge_authority_opts, [])
     budget_opts = Keyword.get(opts, :budget_opts)
+    scheduler_opts = Keyword.get(opts, :scheduler_opts)
 
     # Derive a per-supervisor writer name so concurrent supervisor instances
     # (e.g. isolated test instances) do not conflict on the writer's name.
@@ -72,6 +73,7 @@ defmodule Tau.Factory.Supervisor do
     children =
       base_children
       |> maybe_add_budget_owner(budget_opts, writer_name)
+      |> maybe_add_scheduler(scheduler_opts, budget_opts)
       |> maybe_add_merge_authority(
         repo_dir,
         ma_name,
@@ -98,6 +100,31 @@ defmodule Tau.Factory.Supervisor do
       |> Keyword.put(:ledger, writer_name)
 
     children ++ [{Tau.Factory.Budget.Owner, owner_opts}]
+  end
+
+  # Add Scheduler as a child only when scheduler_opts are provided.
+  # The budget tuple is wired from budget_opts (owner name) when both are present.
+  defp maybe_add_scheduler(children, nil, _budget_opts), do: children
+
+  defp maybe_add_scheduler(children, scheduler_opts, budget_opts) do
+    # If budget_opts provide a Budget.Owner name, wire it into the Scheduler.
+    scheduler_opts =
+      case budget_opts do
+        nil ->
+          scheduler_opts
+
+        budget_opts ->
+          owner_name = Keyword.fetch!(budget_opts, :name)
+          dims = Keyword.get(scheduler_opts, :budget_dimensions, [])
+
+          if dims == [] do
+            scheduler_opts
+          else
+            Keyword.put(scheduler_opts, :budget, {owner_name, dims})
+          end
+      end
+
+    children ++ [{Tau.Factory.Scheduler, scheduler_opts}]
   end
 
   # Add MergeAuthority as a child only when repo_dir is provided.
