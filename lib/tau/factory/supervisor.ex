@@ -70,6 +70,22 @@ defmodule Tau.Factory.Supervisor do
       {Task.Supervisor, name: tasks_name}
     ]
 
+    unit_opts = Keyword.get(opts, :unit_opts)
+
+    unit_registry_name =
+      if sup_name == __MODULE__ do
+        Tau.Factory.UnitRegistry
+      else
+        :"#{sup_name}_unit_registry"
+      end
+
+    unit_supervisor_name =
+      if sup_name == __MODULE__ do
+        Tau.Factory.UnitSupervisor
+      else
+        :"#{sup_name}_unit_supervisor"
+      end
+
     children =
       base_children
       |> maybe_add_budget_owner(budget_opts, writer_name)
@@ -82,6 +98,7 @@ defmodule Tau.Factory.Supervisor do
         required_halves,
         merge_authority_opts
       )
+      |> maybe_add_unit_subsystem(unit_opts, unit_registry_name, unit_supervisor_name)
 
     Supervisor.init(children, strategy: :one_for_one)
   end
@@ -158,6 +175,18 @@ defmodule Tau.Factory.Supervisor do
       ] ++ merge_authority_opts
 
     children ++ [{Tau.Factory.MergeAuthority, ma_opts}]
+  end
+
+  # Add UnitRegistry + UnitSupervisor only when unit_opts are provided.
+  # Both are name-scoped; the default app tree starts neither by default.
+  defp maybe_add_unit_subsystem(children, nil, _registry_name, _sup_name), do: children
+
+  defp maybe_add_unit_subsystem(children, _unit_opts, registry_name, sup_name) do
+    children ++
+      [
+        {Tau.Factory.UnitRegistry, name: registry_name},
+        {Tau.Factory.UnitSupervisor, name: sup_name}
+      ]
   end
 
   defp default_db_path do
