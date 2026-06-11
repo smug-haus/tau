@@ -74,17 +74,36 @@ defmodule Tau.Factory.WorkerIsolationPropertyTest do
     end)
   end
 
+  # Generates pairs of distinct worktree paths that include prefix-colliding
+  # cases such as ("/tmp/ws_1", "/tmp/ws_12") and ("/tmp/ws_1", "/tmp/ws_1x").
+  # This ensures the cross-worker disjointness property is proven against the
+  # exact segment-boundary collision that the D-311/F-6 bug exploits.
   defp two_distinct_worktrees_gen do
-    StreamData.bind(
-      StreamData.tuple({StreamData.positive_integer(), StreamData.positive_integer()}),
-      fn {a, b} ->
-        if a == b do
-          StreamData.constant({"/tmp/ws_#{a}", "/tmp/ws_#{b + 1}"})
-        else
-          StreamData.constant({"/tmp/ws_#{a}", "/tmp/ws_#{b}"})
+    # Pool includes well-separated pairs AND adjacent-integer / shared-prefix
+    # pairs that share a string prefix but are at distinct path segments.
+    prefix_colliding_pairs = [
+      {"/tmp/ws_1", "/tmp/ws_12"},
+      {"/tmp/ws_1", "/tmp/ws_1x"},
+      {"/tmp/ws_10", "/tmp/ws_100"},
+      {"/tmp/ws_2", "/tmp/ws_20"},
+      {"/tmp/ws_9", "/tmp/ws_99"}
+    ]
+
+    StreamData.one_of([
+      # Well-separated integer pairs
+      StreamData.bind(
+        StreamData.tuple({StreamData.positive_integer(), StreamData.positive_integer()}),
+        fn {a, b} ->
+          if a == b do
+            StreamData.constant({"/tmp/ws_#{a}", "/tmp/ws_#{b + 1}"})
+          else
+            StreamData.constant({"/tmp/ws_#{a}", "/tmp/ws_#{b}"})
+          end
         end
-      end
-    )
+      ),
+      # Prefix-colliding pairs
+      StreamData.member_of(prefix_colliding_pairs)
+    ])
   end
 
   # Generates a non-empty list of ResourceNS structs with distinct vars.
@@ -249,6 +268,41 @@ defmodule Tau.Factory.WorkerIsolationPropertyTest do
     observed = %{pwd: ws <> "/work", head: head, branch: "feat-actual"}
     expected = %{head: head, branch: "feat-expected"}
     assert {:error, _} = @mod.verify_position(ws, observed, expected)
+  end
+
+  # D-311/F-6: Segment-exact boundary — the prefix-sibling collision.
+  #
+  # "/tmp/ws_12/work" starts with "/tmp/ws_1" as a STRING, but "/tmp/ws_12"
+  # is a DIFFERENT worktree (a sibling sharing a string prefix, not a child).
+  # A String.starts_with?-based implementation returns :ok here — wrong.
+  # The correct segment-aware implementation must return {:error, :not_in_worktree}.
+  #
+  # This test FAILS against the current String.starts_with? production code
+  # (it gets :ok where {:error, :not_in_worktree} is required) and passes only
+  # after a segment-exact fix.
+  @tag :property
+  test "D-311 F-6 prefix-sibling: verify_position rejects pwd in a sibling worktree that shares a string prefix" do
+    # worktree is "/tmp/ws_1"; sibling is "/tmp/ws_12" — shares prefix "/tmp/ws_1"
+    ws = "/tmp/ws_1"
+    head = String.duplicate("d", 40)
+    branch = "feat-sibling"
+    # pwd is INSIDE the sibling "/tmp/ws_12", not inside "/tmp/ws_1"
+    observed = %{pwd: "/tmp/ws_12/work", head: head, branch: branch}
+    expected = %{head: head, branch: branch}
+
+    # Must be {:error, :not_in_worktree} — NOT :ok
+    assert {:error, :not_in_worktree} = @mod.verify_position(ws, observed, expected)
+  end
+
+  # Complement: the legitimate case — pwd inside ws itself (exact segment) → :ok
+  @tag :property
+  test "D-311 F-6 prefix-sibling complement: verify_position accepts pwd directly inside worktree" do
+    ws = "/tmp/ws_1"
+    head = String.duplicate("e", 40)
+    branch = "feat-inws"
+    observed = %{pwd: "/tmp/ws_1/work", head: head, branch: branch}
+    expected = %{head: head, branch: branch}
+    assert :ok == @mod.verify_position(ws, observed, expected)
   end
 
   # ---------------------------------------------------------------------------
