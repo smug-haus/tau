@@ -8,48 +8,51 @@ defmodule Tau.Providers.RateLimiter429Test do
 
   alias Tau.Providers.RateLimiter
 
-  defmodule FakeProviderForFiveTwentyNine do
-    @moduledoc false
-  end
-
-  setup do
-    on_exit(fn ->
-      case RateLimiter.state(FakeProviderForFiveTwentyNine) do
-        :no_limiter -> :ok
-        _ -> Tau.Providers.RateLimiter.Supervisor.stop(FakeProviderForFiveTwentyNine)
-      end
-    end)
-
-    :ok
+  # Each test gets a unique provider atom to prevent on_exit cleanup from a
+  # prior test racing against a subsequent test's GenServer. ExUnit runs
+  # on_exit callbacks in a separate cleanup process; under full-suite load
+  # those can overlap with the next test's setup — stop/1 on a shared atom
+  # kills the limiter mid-cast, so the telemetry event never fires.
+  # See same pattern + comment in test/tau/providers/rate_limiter_test.exs.
+  defp unique_provider do
+    String.to_atom("FakeProvider429_#{System.unique_integer([:positive])}")
   end
 
   test "429 record_response halves bucket; next acquire sees the smaller cap" do
+    provider = unique_provider()
+    on_exit(fn -> Tau.Providers.RateLimiter.Supervisor.stop(provider) end)
+
     {:ok, _} =
       Tau.Providers.RateLimiter.Supervisor.ensure_started(
-        FakeProviderForFiveTwentyNine,
+        provider,
         rpm: 600,
         tpm: 6_000
       )
 
-    original = RateLimiter.state(FakeProviderForFiveTwentyNine)
+    original = RateLimiter.state(provider)
     assert original.rpm_bucket.size == 600
     assert original.tpm_bucket.size == 6_000
 
-    RateLimiter.record_response(FakeProviderForFiveTwentyNine, %{status: 429})
-    Process.sleep(20)
+    RateLimiter.record_response(provider, %{status: 429})
 
-    halved = RateLimiter.state(FakeProviderForFiveTwentyNine)
+    # record_response/2 is a GenServer.cast (async). Flush by calling
+    # RateLimiter.state/1 — a GenServer.call that queues behind the cast for
+    # the same process, so it returns only after handle_cast/2 has landed.
+    halved = RateLimiter.state(provider)
     assert halved.rpm_bucket.size == 300
     assert halved.tpm_bucket.size == 3_000
 
     # And acquire still works against the smaller cap.
-    assert :ok = RateLimiter.acquire(FakeProviderForFiveTwentyNine, 100, 1_000)
+    assert :ok = RateLimiter.acquire(provider, 100, 1_000)
   end
 
   test "telemetry :halved fires on 429" do
+    provider = unique_provider()
+    on_exit(fn -> Tau.Providers.RateLimiter.Supervisor.stop(provider) end)
+
     {:ok, _} =
       Tau.Providers.RateLimiter.Supervisor.ensure_started(
-        FakeProviderForFiveTwentyNine,
+        provider,
         rpm: 200,
         tpm: 2_000
       )
@@ -66,8 +69,16 @@ defmodule Tau.Providers.RateLimiter429Test do
 
     on_exit(fn -> :telemetry.detach(handler_id) end)
 
-    RateLimiter.record_response(FakeProviderForFiveTwentyNine, %{status: 429})
+    RateLimiter.record_response(provider, %{status: 429})
 
-    assert_receive {:halved, %{provider: FakeProviderForFiveTwentyNine, new_size: 100}}, 500
+    # record_response/2 is a GenServer.cast (async). Flush by calling
+    # RateLimiter.state/1 — a GenServer.call that queues behind the cast for
+    # the same process, so it returns only after handle_cast/2 has emitted
+    # :halved. The telemetry handler send/2s to this test pid from inside
+    # handle_cast, so by the time state/1 returns, {:halved, ...} is already
+    # in our mailbox — assert_receive then matches a delivered message instead
+    # of racing the 500ms budget.
+    _ = RateLimiter.state(provider)
+    assert_receive {:halved, %{provider: ^provider, new_size: 100}}, 500
   end
 end
