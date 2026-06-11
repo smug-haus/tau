@@ -35,9 +35,9 @@ defmodule Tau.Providers.RateLimiter429Test do
 
     RateLimiter.record_response(provider, %{status: 429})
 
-    # record_response/2 is a GenServer.cast (async). Flush the mailbox by
-    # issuing a subsequent GenServer.call — calls queue behind casts for the
-    # same process, so state/1 returns only after the cast has landed.
+    # record_response/2 is a GenServer.cast (async). Flush by calling
+    # RateLimiter.state/1 — a GenServer.call that queues behind the cast for
+    # the same process, so it returns only after handle_cast/2 has landed.
     halved = RateLimiter.state(provider)
     assert halved.rpm_bucket.size == 300
     assert halved.tpm_bucket.size == 3_000
@@ -71,6 +71,14 @@ defmodule Tau.Providers.RateLimiter429Test do
 
     RateLimiter.record_response(provider, %{status: 429})
 
+    # record_response/2 is a GenServer.cast (async). Flush by calling
+    # RateLimiter.state/1 — a GenServer.call that queues behind the cast for
+    # the same process, so it returns only after handle_cast/2 has emitted
+    # :halved. The telemetry handler send/2s to this test pid from inside
+    # handle_cast, so by the time state/1 returns, {:halved, ...} is already
+    # in our mailbox — assert_receive then matches a delivered message instead
+    # of racing the 500ms budget.
+    _ = RateLimiter.state(provider)
     assert_receive {:halved, %{provider: ^provider, new_size: 100}}, 500
   end
 end
