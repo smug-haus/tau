@@ -220,7 +220,8 @@ defmodule Tau.Factory.WorkerTest do
       {:ok, worker_id} =
         @worker_supervisor.spawn(sup, :implementer, "brief", base_ref,
           repo_dir: repo_dir,
-          agent_bin: agent_bin
+          agent_bin: agent_bin,
+          registry: registry_name
         )
 
       assert is_binary(worker_id),
@@ -271,13 +272,15 @@ defmodule Tau.Factory.WorkerTest do
       {:ok, worker_id1} =
         @worker_supervisor.spawn(sup, :implementer, "brief1", base_ref,
           repo_dir: repo_dir,
-          agent_bin: agent_bin
+          agent_bin: agent_bin,
+          registry: registry_name
         )
 
       {:ok, worker_id2} =
         @worker_supervisor.spawn(sup, :test_author, "brief2", base_ref,
           repo_dir: repo_dir,
-          agent_bin: agent_bin
+          agent_bin: agent_bin,
+          registry: registry_name
         )
 
       refute worker_id1 == worker_id2,
@@ -354,7 +357,8 @@ defmodule Tau.Factory.WorkerTest do
       result =
         @worker_supervisor.spawn(sup, :implementer, "brief", bad_base_ref,
           repo_dir: repo_dir,
-          agent_bin: bin_path
+          agent_bin: bin_path,
+          registry: registry_name
         )
 
       # Allow the worker process to complete its failing init.
@@ -426,7 +430,8 @@ defmodule Tau.Factory.WorkerTest do
         @worker_supervisor.spawn(sup, :implementer, "brief", commit_a,
           repo_dir: repo_dir,
           agent_bin: bin_path,
-          expected_head: commit_b
+          expected_head: commit_b,
+          registry: registry_name
         )
 
       # Allow the worker process to complete its failing init.
@@ -484,14 +489,16 @@ defmodule Tau.Factory.WorkerTest do
         @worker_supervisor.spawn(sup, :implementer, "brief1", base_ref,
           repo_dir: repo_dir,
           agent_bin: agent_bin,
-          report_to: report_to
+          report_to: report_to,
+          registry: registry_name
         )
 
       {:ok, worker_id2} =
         @worker_supervisor.spawn(sup, :critic, "brief2", base_ref,
           repo_dir: repo_dir,
           agent_bin: agent_bin,
-          report_to: report_to
+          report_to: report_to,
+          registry: registry_name
         )
 
       # Resolve pids via registry — never store pids durably ([C218]).
@@ -557,7 +564,8 @@ defmodule Tau.Factory.WorkerTest do
         @worker_supervisor.spawn(sup, :implementer, "test brief", base_ref,
           repo_dir: repo_dir,
           agent_bin: agent_bin,
-          report_to: report_to
+          report_to: report_to,
+          registry: registry_name
         )
 
       # B1: spawn/5 must return {:ok, worker_id}.
@@ -604,7 +612,8 @@ defmodule Tau.Factory.WorkerTest do
       {:ok, worker_id} =
         @worker_supervisor.spawn(sup, :reviewer, "brief", base_ref,
           repo_dir: repo_dir,
-          agent_bin: agent_bin
+          agent_bin: agent_bin,
+          registry: registry_name
         )
 
       # Resolve pid from registry using the logical key — this is [C218].
@@ -640,7 +649,8 @@ defmodule Tau.Factory.WorkerTest do
         @worker_supervisor.spawn(sup, :implementer, "brief", base_ref,
           repo_dir: repo_dir,
           agent_bin: agent_bin,
-          report_to: report_to
+          report_to: report_to,
+          registry: registry_name
         )
 
       [{pid, _}] = Registry.lookup(registry_name, worker_id)
