@@ -628,6 +628,48 @@ defmodule Tau.Factory.WorkerTest do
       Process.exit(pid, :kill)
     end
 
+    @tag :dynsup_contract
+    test "spawn/5 requires :registry — fail-closed contract of the DynamicSupervisor design" do
+      # Discriminating test for gate 5.3.
+      #
+      # OLD code: WorkerSupervisor held the registry in GenServer state and
+      # tolerated a missing per-call :registry opt — spawn would succeed.
+      #
+      # NEW code: WorkerSupervisor is a plain DynamicSupervisor; the registry
+      # is a REQUIRED per-call opt resolved via `Keyword.fetch!(opts, :registry)`.
+      # Omitting :registry raises KeyError immediately — no partial execution.
+      #
+      # TRUE for the new contract, FALSE for the old: genuine gate 5.3 discriminator.
+      tmp_dir =
+        System.tmp_dir!() |> Path.join("tau_dynsup_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(tmp_dir)
+      on_exit(fn -> File.rm_rf!(tmp_dir) end)
+
+      %{repo_dir: repo_dir, base_ref: base_ref} = setup_git_repo(tmp_dir)
+      agent_bin = dummy_agent_bin(tmp_dir, "_dynsup")
+
+      n = System.unique_integer([:positive])
+      sup_name = :"dynsup_contract_sup_#{n}"
+
+      {:ok, sup} =
+        start_supervised(
+          {@worker_supervisor, name: sup_name},
+          id: :"dynsup_sup_#{n}"
+        )
+
+      # Calling spawn/5 WITHOUT :registry MUST raise KeyError.
+      # The DynamicSupervisor design enforces fail-closed: no registry in state,
+      # so per-call :registry is always required.
+      assert_raise KeyError, fn ->
+        @worker_supervisor.spawn(sup, :implementer, "brief", base_ref,
+          repo_dir: repo_dir,
+          agent_bin: agent_bin
+          # :registry intentionally omitted
+        )
+      end
+    end
+
     @tag :b1_b4
     test "B1/B4: :kill on worker delivers {:worker_exit, worker_id, :kill} via monitor" do
       tmp_dir =
