@@ -19,6 +19,9 @@ defmodule Tau.Application do
        runs schema migrations in `init/1` before reporting `:ok`.
        Must follow Watcher (needs `data_dir/0`) and precede Finch
        (embedding pipeline in PR3 uses Finch). D-045/D-046/D-047.
+    5b. **Factory.Supervisor** — `Tau.Factory.Ledger.Writer` owner process;
+        WAL-committed verdict ledger (D-315 RPO=0). Must follow Watcher
+        (needs `data_dir/0`). D-312/D-315/D-335 / SPEC-FACTORY-CORE.
     6. **Permissions.RuleSet** — subscribes to settings PubSub,
        compiles rules from Settings.Cache.
     7. **Finch** — HTTP client, used by providers.
@@ -74,6 +77,11 @@ defmodule Tau.Application do
         # :rest_for_one a crash cascades forward — intentional; a broken
         # memory store should not allow new sessions to start.
         Tau.Memory.Supervisor,
+        # Factory ledger. Must follow Memory.Supervisor (data_dir/0 depends on
+        # Settings.Watcher, same requirement). Under :rest_for_one a crash
+        # cascades forward — intentional; a broken ledger should not allow the
+        # factory to continue operating. D-315 / SPEC-FACTORY-CORE.
+        Tau.Factory.Supervisor,
         Tau.Permissions.RuleSet,
         {Finch, name: Tau.Providers.Finch},
         Tau.Providers.RateLimiter.Supervisor,

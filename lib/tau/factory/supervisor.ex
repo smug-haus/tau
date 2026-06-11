@@ -1,0 +1,63 @@
+defmodule Tau.Factory.Supervisor do
+  @moduledoc """
+  Supervision subtree for the factory control components.
+
+  Hosts `Tau.Factory.Ledger.Writer` under a `one_for_one` strategy. Sits in
+  `Tau.Application`'s `:rest_for_one` child list after `Tau.Memory.Supervisor`
+  (which resolves `data_dir/0` — required before the ledger can open its DB).
+
+  Supports `start_link/1` with `db_path:` and `name:` options for test
+  isolation — each test can spin up an isolated supervisor against a tmp-dir DB
+  without touching the application-started instance.
+
+  See `docs/spec/SPEC-FACTORY-CORE.md`.
+  """
+
+  use Supervisor
+
+  @doc """
+  Start the factory supervisor (called by `Tau.Application` or tests).
+
+  Options:
+    - `:db_path` — path to the SQLite ledger DB file (required when not using
+      the application default).
+    - `:name` — registered name for this supervisor process (defaults to
+      `__MODULE__`). The `Ledger.Writer` child is registered under a derived
+      name (`{:via, name}` convention: `:"<name>_writer"`) so multiple isolated
+      supervisor instances can coexist (e.g. in tests).
+  """
+  @spec start_link(keyword()) :: Supervisor.on_start()
+  def start_link(opts \\ []) do
+    sup_name = Keyword.get(opts, :name, __MODULE__)
+    Supervisor.start_link(__MODULE__, opts, name: sup_name)
+  end
+
+  @impl true
+  def init(opts) do
+    db_path = Keyword.get(opts, :db_path, default_db_path())
+    sup_name = Keyword.get(opts, :name, __MODULE__)
+
+    # Derive a per-supervisor writer name so concurrent supervisor instances
+    # (e.g. isolated test instances) do not conflict on the writer's name.
+    writer_name =
+      if sup_name == __MODULE__ do
+        Tau.Factory.Ledger.Writer
+      else
+        :"#{sup_name}_writer"
+      end
+
+    children = [
+      {Tau.Factory.Ledger.Writer, db_path: db_path, name: writer_name}
+    ]
+
+    Supervisor.init(children, strategy: :one_for_one)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Private helpers
+  # ---------------------------------------------------------------------------
+
+  defp default_db_path do
+    Path.join(Tau.Settings.data_dir(), "factory_ledger.db")
+  end
+end
