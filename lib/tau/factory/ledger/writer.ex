@@ -108,6 +108,32 @@ defmodule Tau.Factory.Ledger.Writer do
     GenServer.call(server, {:latest_verdict_status, coord})
   end
 
+  @doc """
+  Append a budget-debit row for the given `unit_id`, `dimension`, and `cost`.
+
+  This is append-only — no UPDATE or upsert. Multiple calls with the same
+  `(unit_id, dimension)` each produce a separate row. WAL-before-ack: the
+  `{:ok, ref}` reply arrives only after the SQLite WAL commit is durable (D-315,
+  D-320).
+
+  Returns `{:ok, ref}` where `ref` is the inserted row id.
+  """
+  @spec debit_budget(GenServer.server(), String.t(), atom(), non_neg_integer()) ::
+          {:ok, ref()}
+  def debit_budget(server, unit_id, dimension, cost) do
+    GenServer.call(server, {:debit_budget, unit_id, dimension, cost})
+  end
+
+  @doc """
+  Return a map of `%{dimension_atom => total_cost}` by summing all recorded
+  debit rows per dimension. Used by `Tau.Factory.Budget.Owner.init/1` to
+  rebuild the ETS snapshot from Ledger truth.
+  """
+  @spec budget_debited(GenServer.server()) :: %{atom() => non_neg_integer()}
+  def budget_debited(server) do
+    GenServer.call(server, :budget_debited)
+  end
+
   # ---------------------------------------------------------------------------
   # GenServer callbacks
   # ---------------------------------------------------------------------------
@@ -141,6 +167,16 @@ defmodule Tau.Factory.Ledger.Writer do
 
   def handle_call({:latest_verdict_status, coord}, _from, %{db: db} = state) do
     result = do_latest_verdict_status(db, coord)
+    {:reply, result, state}
+  end
+
+  def handle_call({:debit_budget, unit_id, dimension, cost}, _from, %{db: db} = state) do
+    result = do_debit_budget(db, unit_id, dimension, cost)
+    {:reply, result, state}
+  end
+
+  def handle_call(:budget_debited, _from, %{db: db} = state) do
+    result = do_budget_debited(db)
     {:reply, result, state}
   end
 
@@ -311,6 +347,56 @@ defmodule Tau.Factory.Ledger.Writer do
     else
       _ -> nil
     end
+  end
+
+  # Insert an append-only budget-debit row. No UPDATE/upsert path.
+  # WAL-before-ack: reply sent only after step/2 (commit) returns.
+  defp do_debit_budget(db, unit_id, dimension, cost) do
+    dimension_text = Atom.to_string(dimension)
+
+    sql = """
+    INSERT INTO budget_debits (unit_id, dimension, cost)
+    VALUES (?1, ?2, ?3)
+    """
+
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, String.trim(sql)),
+         :ok <- Exqlite.Sqlite3.bind(stmt, [unit_id, dimension_text, cost]),
+         step_result <- Exqlite.Sqlite3.step(db, stmt),
+         :ok <- Exqlite.Sqlite3.release(db, stmt) do
+      case step_result do
+        :done -> {:ok, fetch_last_rowid(db)}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
+  # SELECT dimension, SUM(cost) GROUP BY dimension; return as %{atom => integer}.
+  # Converts stored text back to atom via String.to_existing_atom/1.
+  # Unknown atoms (not pre-existing in the atom table) are skipped gracefully.
+  defp do_budget_debited(db) do
+    sql = """
+    SELECT dimension, SUM(cost) FROM budget_debits GROUP BY dimension
+    """
+
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, String.trim(sql)),
+         {:ok, rows} <- Exqlite.Sqlite3.fetch_all(db, stmt),
+         :ok <- Exqlite.Sqlite3.release(db, stmt) do
+      Enum.reduce(rows, %{}, fn [dim_text, sum], acc ->
+        case safe_to_existing_atom(dim_text) do
+          {:ok, dim_atom} -> Map.put(acc, dim_atom, sum)
+          :error -> acc
+        end
+      end)
+    else
+      _ -> %{}
+    end
+  end
+
+  # Safely convert a string to an existing atom; return :error if unknown.
+  defp safe_to_existing_atom(text) do
+    {:ok, String.to_existing_atom(text)}
+  rescue
+    ArgumentError -> :error
   end
 
   defp atom_to_half(:critic), do: "critic"

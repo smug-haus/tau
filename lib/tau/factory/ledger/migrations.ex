@@ -46,6 +46,16 @@ defmodule Tau.Factory.Ledger.Migrations do
      CREATE UNIQUE INDEX IF NOT EXISTS verdicts_original_uidx
        ON verdicts (hash, run, half)
        WHERE supersedes_id IS NULL
+     """},
+    {"20260611_004_budget_debits",
+     """
+     CREATE TABLE IF NOT EXISTS budget_debits (
+       id          INTEGER PRIMARY KEY AUTOINCREMENT,
+       unit_id     TEXT    NOT NULL,
+       dimension   TEXT    NOT NULL,
+       cost        INTEGER NOT NULL,
+       inserted_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+     )
      """}
   ]
 

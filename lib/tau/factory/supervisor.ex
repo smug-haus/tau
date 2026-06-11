@@ -39,6 +39,7 @@ defmodule Tau.Factory.Supervisor do
     repo_dir = Keyword.get(opts, :repo_dir)
     required_halves = Keyword.get(opts, :required_halves, [:critic, :reviewer])
     merge_authority_opts = Keyword.get(opts, :merge_authority_opts, [])
+    budget_opts = Keyword.get(opts, :budget_opts)
 
     # Derive a per-supervisor writer name so concurrent supervisor instances
     # (e.g. isolated test instances) do not conflict on the writer's name.
@@ -69,20 +70,16 @@ defmodule Tau.Factory.Supervisor do
     ]
 
     children =
-      if repo_dir do
-        ma_opts =
-          [
-            name: ma_name,
-            ledger: writer_name,
-            repo_dir: repo_dir,
-            tasks_name: tasks_name,
-            required_halves: required_halves
-          ] ++ merge_authority_opts
-
-        base_children ++ [{Tau.Factory.MergeAuthority, ma_opts}]
-      else
-        base_children
-      end
+      base_children
+      |> maybe_add_budget_owner(budget_opts, writer_name)
+      |> maybe_add_merge_authority(
+        repo_dir,
+        ma_name,
+        writer_name,
+        tasks_name,
+        required_halves,
+        merge_authority_opts
+      )
 
     Supervisor.init(children, strategy: :one_for_one)
   end
@@ -90,6 +87,51 @@ defmodule Tau.Factory.Supervisor do
   # ---------------------------------------------------------------------------
   # Private helpers
   # ---------------------------------------------------------------------------
+
+  # Add Budget.Owner as a child only when budget_opts are provided.
+  # Requires :totals and :name in budget_opts; threads :ledger from writer_name.
+  defp maybe_add_budget_owner(children, nil, _writer_name), do: children
+
+  defp maybe_add_budget_owner(children, budget_opts, writer_name) do
+    owner_opts =
+      budget_opts
+      |> Keyword.put(:ledger, writer_name)
+
+    children ++ [{Tau.Factory.Budget.Owner, owner_opts}]
+  end
+
+  # Add MergeAuthority as a child only when repo_dir is provided.
+  defp maybe_add_merge_authority(
+         children,
+         nil,
+         _ma_name,
+         _writer_name,
+         _tasks_name,
+         _halves,
+         _ma_opts
+       ),
+       do: children
+
+  defp maybe_add_merge_authority(
+         children,
+         repo_dir,
+         ma_name,
+         writer_name,
+         tasks_name,
+         required_halves,
+         merge_authority_opts
+       ) do
+    ma_opts =
+      [
+        name: ma_name,
+        ledger: writer_name,
+        repo_dir: repo_dir,
+        tasks_name: tasks_name,
+        required_halves: required_halves
+      ] ++ merge_authority_opts
+
+    children ++ [{Tau.Factory.MergeAuthority, ma_opts}]
+  end
 
   defp default_db_path do
     Path.join(Tau.Settings.data_dir(), "factory_ledger.db")
