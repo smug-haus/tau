@@ -10,10 +10,25 @@ defmodule Tau.Factory.Unit do
       any non-terminal + :state_timeout → escalated (C107)
       worker :DOWN → escalated (B8/C105 infra path, gate never called)
 
-  D-318: total gate invocations == N_refine + N_pivot (exactly, bounded retry via
-  `Tau.Factory.Retry.next/3`). The pivot IS a real implementing attempt that goes
-  back through gating; only after pivot's gate-fail does `Retry.next` return
-  `:exhausted` and escalation occurs.
+  D-318: total gate invocations == 1 + N_refine + N_pivot (exactly, bounded
+  retry via `Tau.Factory.Retry.next/3`). The `gating` state ALWAYS calls
+  `gate_fun` on entry — for refine attempts AND the pivot attempt alike.
+  The only difference is which `Retry.next` decision fires on gate-fail:
+    - `{:refine, k}` → bump `refine_count` → back to `:implementing`
+    - `:pivot`        → bump `pivot_count`  → back to `:implementing` (the pivot
+                        attempt; this attempt's gate call is counted and gated)
+    - `:exhausted`   → `escalate(:E_RETRY_EXHAUSTED)` (reached after the
+                        pivot attempt's gate fails: `Retry.next(_, 3, 1)`)
+
+  All-fail trace (N_REFINE=3, N_PIVOT=1):
+    gate#1 fail → Retry.next(_,0,0) = {:refine,0} → refine_count=1 → implementing
+    gate#2 fail → Retry.next(_,1,0) = {:refine,1} → refine_count=2 → implementing
+    gate#3 fail → Retry.next(_,2,0) = {:refine,2} → refine_count=3 → implementing
+    gate#4 fail → Retry.next(_,3,0) = :pivot      → pivot_count=1  → implementing
+    gate#5 fail → Retry.next(_,3,1) = :exhausted  → escalated
+  Total gate calls = 1 + N_REFINE + N_PIVOT = 5.
+
+  A gate#5 :pass → awaiting_merge → merged (the successful-pivot path).
 
   D-340: every terminal state sends `{:unit_terminal, unit_id, outcome, provenance}`
   to `report_to` and releases from the Scheduler before stopping.
@@ -24,6 +39,10 @@ defmodule Tau.Factory.Unit do
 
   C105: semantic gate failures (retry ladder) and infra failures (:state_timeout,
   :DOWN) are distinct code paths. Gate is NEVER called on the infra path.
+
+  UnitRegistry: the Unit registers itself under its `unit_id` in the registry
+  named by `:registry_name` (if provided) on start, so live units are
+  discoverable via `Tau.Factory.UnitRegistry.lookup/2`.
 
   See `docs/spec/SPEC-FACTORY-CORE.md` §5, D-318, D-340.
   """
@@ -69,6 +88,8 @@ defmodule Tau.Factory.Unit do
     - `:merge_fun`      — `(unit_id, hash -> :queued | {:error, reason})`.
 
   Optional options:
+    - `:registry_name`  — atom; if given, the Unit registers itself under its
+                          `unit_id` in that Registry on start (f-6).
     - `:timeouts`       — keyword with `:state_timeout_ms` (default 30_000).
   """
   @spec start_link(keyword()) :: :ignore | {:ok, pid()} | {:error, term()}
@@ -93,8 +114,14 @@ defmodule Tau.Factory.Unit do
     worker_fun = Keyword.fetch!(opts, :worker_fun)
     gate_fun = Keyword.fetch!(opts, :gate_fun)
     merge_fun = Keyword.fetch!(opts, :merge_fun)
+    registry_name = Keyword.get(opts, :registry_name, nil)
     timeouts = Keyword.get(opts, :timeouts, [])
     state_timeout_ms = Keyword.get(timeouts, :state_timeout_ms, @default_state_timeout_ms)
+
+    # f-6: register in UnitRegistry when a registry_name was provided.
+    if registry_name do
+      Registry.register(registry_name, unit_id, self())
+    end
 
     data = %{
       unit_id: unit_id,
@@ -113,11 +140,6 @@ defmodule Tau.Factory.Unit do
       # Retry counters.
       refine_count: 0,
       pivot_count: 0,
-      # True when the next gating entry is the pivot's gate call. After the
-      # pivot's gate_fun runs (and fails), we escalate directly without
-      # consulting Retry.next again. This ensures gate_fun is called exactly
-      # N_REFINE + N_PIVOT times (D-318).
-      in_pivot: false,
       # Total times implementing state was entered (non-terminal attempts).
       attempt_count: 0,
       # Last gate findings (nil until a gate failure occurs).
@@ -262,60 +284,48 @@ defmodule Tau.Factory.Unit do
   # ---------------------------------------------------------------------------
   # State: :gating
   # Calls gate_fun() synchronously on entry via an internal event.
-  # :pass → awaiting_merge.
-  # {:fail, findings} → retry ladder → implementing (refine/pivot) | escalated.
+  # ALWAYS calls gate_fun — for refine attempts AND the pivot attempt alike.
   #
-  # D-318 retry ladder:
-  #   {:refine, k}  → bump refine_count → back to :implementing
-  #   :pivot        → bump pivot_count  → back to :implementing (real attempt!)
-  #   :exhausted    → escalate :E_RETRY_EXHAUSTED
+  # :pass → awaiting_merge (this is how a successful pivot reaches merge).
+  # {:fail, findings} → Retry.next(:gate_fail, refine_count, pivot_count):
+  #   {:refine, k} → bump refine_count → back to :implementing
+  #   :pivot       → bump pivot_count  → back to :implementing (the pivot attempt)
+  #   :exhausted   → escalate :E_RETRY_EXHAUSTED (reached after pivot's gate fails:
+  #                  Retry.next(_, N_REFINE, N_PIVOT) = :exhausted)
+  #
+  # D-318 all-fail trace (N_REFINE=3, N_PIVOT=1, total=5 gate calls):
+  #   gate#1 → {:refine,0} → refine_count=1 → implementing
+  #   gate#2 → {:refine,1} → refine_count=2 → implementing
+  #   gate#3 → {:refine,2} → refine_count=3 → implementing
+  #   gate#4 → :pivot       → pivot_count=1  → implementing (pivot attempt)
+  #   gate#5 → :exhausted   → escalated
   # ---------------------------------------------------------------------------
 
   def gating(:internal, :on_enter, data) do
-    # D-318 exact-count gate discipline (fix f-1):
-    #
-    # The retry ladder gate call count is N_REFINE + N_PIVOT (exactly).
-    # Semantics:
-    #   - N_REFINE gate calls each return {:refine, k} → go back to implementing.
-    #   - 1 gate call (the N_REFINE+1-th... wait, Retry returns :pivot at N_REFINE)
-    #     returns :pivot → go to implementing ONE MORE TIME (the "pivot attempt").
-    #     After the pivot implementing completes, escalate WITHOUT a gate call.
-    #     This makes the gate-call count N_REFINE + N_PIVOT where N_PIVOT counts the
-    #     gate calls that DECIDE pivot (1 call returning :pivot), not a gate call
-    #     following the pivot implementing.
-    #
-    # in_pivot: true ↔ the implementing that just completed was the pivot attempt.
-    # In this case, escalate WITHOUT calling gate_fun (budget exhausted, D-318).
-    if data.in_pivot do
-      escalate(data, :E_RETRY_EXHAUSTED)
-    else
-      case data.gate_fun.() do
-        :pass ->
-          {:next_state, :awaiting_merge, data, [{:next_event, :internal, :on_enter}]}
+    case data.gate_fun.() do
+      :pass ->
+        {:next_state, :awaiting_merge, data, [{:next_event, :internal, :on_enter}]}
 
-        {:fail, findings} ->
-          new_data = %{data | last_findings: findings}
+      {:fail, findings} ->
+        new_data = %{data | last_findings: findings}
 
-          case Retry.next(:gate_fail, new_data.refine_count, new_data.pivot_count) do
-            {:refine, _k} ->
-              # Bump refine_count; go back to implementing for another attempt.
-              bumped = %{new_data | refine_count: new_data.refine_count + 1}
-              {:next_state, :implementing, bumped, [{:next_event, :internal, :on_enter}]}
+        case Retry.next(:gate_fail, new_data.refine_count, new_data.pivot_count) do
+          {:refine, _k} ->
+            # Bump refine_count; go back to implementing for another attempt.
+            bumped = %{new_data | refine_count: new_data.refine_count + 1}
+            {:next_state, :implementing, bumped, [{:next_event, :internal, :on_enter}]}
 
-            :pivot ->
-              # D-318: this gate call counted as the "pivot decision" gate call.
-              # Do one more implementing attempt (the pivot attempt) and then
-              # escalate — in_pivot: true ensures the subsequent gating entry
-              # escalates WITHOUT calling gate_fun. Gate call count = N_REFINE + 1
-              # (for :pivot) = N_REFINE + N_PIVOT (since N_PIVOT = 1 counts this call).
-              bumped = %{new_data | pivot_count: new_data.pivot_count + 1, in_pivot: true}
-              {:next_state, :implementing, bumped, [{:next_event, :internal, :on_enter}]}
+          :pivot ->
+            # The pivot attempt: go back to implementing one more time.
+            # On that attempt's gate-fail, Retry.next(_, N_REFINE, 1) = :exhausted.
+            bumped = %{new_data | pivot_count: new_data.pivot_count + 1}
+            {:next_state, :implementing, bumped, [{:next_event, :internal, :on_enter}]}
 
-            :exhausted ->
-              # Both N_REFINE refines and N_PIVOT decisions have been consumed.
-              escalate(new_data, :E_RETRY_EXHAUSTED)
-          end
-      end
+          :exhausted ->
+            # Reached after the pivot attempt's gate fails:
+            # Retry.next(_, N_REFINE, N_PIVOT) → :exhausted → terminal.
+            escalate(new_data, :E_RETRY_EXHAUSTED)
+        end
     end
   end
 
