@@ -76,7 +76,8 @@ defmodule Tau.Factory.Worker.Isolation do
           :ok | {:error, atom() | {atom(), term()}}
   def verify_position(worktree_abs, observed, expected) do
     cond do
-      not String.starts_with?(observed.pwd, worktree_abs) ->
+      not (observed.pwd == worktree_abs or
+               String.starts_with?(observed.pwd, worktree_abs <> "/")) ->
         {:error, :not_in_worktree}
 
       observed.head != expected.head ->
