@@ -19,6 +19,7 @@ defmodule Tau.Factory.MergeAuthority do
   @behaviour :gen_statem
 
   alias Tau.Factory.Merge.Cas
+  alias Tau.Factory.Merge.Health
 
   require Logger
 
@@ -181,7 +182,8 @@ defmodule Tau.Factory.MergeAuthority do
     {:next_state, :committing, next_data, [commit_action]}
   end
 
-  # Task result: build failed (expected failure path, not a crash).
+  # Task result: build failed — health_red means eject (D-303, B=1); other
+  # failures requeue for the next train attempt.
   def integrating(:info, {ref, {:build_failed, reason}}, %{task_ref: ref} = data) do
     Process.demonitor(ref, [:flush])
     Logger.warning("[MergeAuthority] build failed: #{inspect(reason)}")
@@ -189,7 +191,16 @@ defmodule Tau.Factory.MergeAuthority do
     train = data.train
     telemetry(:reject, %{hash: hd_hash(train)}, %{reason: :build_failed, units: train})
 
-    next_data = requeue_train(data)
+    next_data =
+      case reason do
+        {:health_red, _report} ->
+          # Eject the train; do NOT requeue — health failure is terminal for this tip.
+          eject_train(data)
+
+        _other ->
+          requeue_train(data)
+      end
+
     transition_from_idle(next_data)
   end
 
@@ -329,6 +340,12 @@ defmodule Tau.Factory.MergeAuthority do
     requeue_units(%{data | train: []}, train)
   end
 
+  # Eject the current train without requeuing its units. Used for D-303 health
+  # failures — a red tip is discarded; the caller decides on future action.
+  defp eject_train(data) do
+    %{data | train: [], task_ref: nil, task_pid: nil}
+  end
+
   defp requeue_units(%{queue: queue} = data, units) do
     %{data | queue: units ++ queue, task_ref: nil, task_pid: nil, train: []}
   end
@@ -347,7 +364,8 @@ defmodule Tau.Factory.MergeAuthority do
     String.trim(oid)
   end
 
-  # Default build_fun: fetch + rebase unit branch onto base, return tip.
+  # Default build_fun: fetch + rebase unit branch onto base, run health check,
+  # then return the tip or a build_failed result.
   defp default_build(repo_dir, [unit | _] = units, base) do
     git = fn args ->
       System.cmd("git", args, cd: repo_dir, stderr_to_stdout: true)
@@ -358,7 +376,14 @@ defmodule Tau.Factory.MergeAuthority do
          {_, 0} <- git.(["rebase", base]),
          {tip_raw, 0} <- git.(["rev-parse", "HEAD"]) do
       tip = String.trim(tip_raw)
-      {:built, units, base, tip}
+
+      case Health.check(repo_dir, :elixir, %{}) do
+        :green ->
+          {:built, units, base, tip}
+
+        {:red, report} ->
+          {:build_failed, {:health_red, report}}
+      end
     else
       {output, code} ->
         {:build_failed, {:git_error, code, output}}
