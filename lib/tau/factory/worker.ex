@@ -8,35 +8,28 @@ defmodule Tau.Factory.Worker do
        `Worker.Isolation.resolve_namespace/2` and creates the directories.
     3. Verifies its position with `Worker.Isolation.verify_position/3` —
        aborts with `{:stop, {:position_unverified, ws, base_ref}}` on mismatch.
+       Honors `opts[:expected_head]` as the expected HEAD SHA when provided.
     4. Opens a linked `Port` to the agent executable in the private worktree.
-    5. When the Port exits (clean or crash), sends
-       `{:worker_exit, worker_id, reason}` to `report_to` and stops normally.
+    5. When the Port exits, the Worker stops; the death-certificate
+       `{:worker_exit, worker_id, reason}` is delivered exclusively by an
+       unlinked monitor process that observes the worker's `:DOWN` event.
 
-  ## Port exit — drain window
+  ## Death-certificate delivery (C202 single-writer discipline)
 
-  When the Port exits (agent done or crashed), the Worker does NOT stop
-  immediately. Instead it enters a brief drain window (`@drain_ms`, default
-  250 ms) during which it remains alive and registered. After the drain
-  window it sends the death certificate and stops normally.
+  An unlinked monitor process is spawned at init. It holds the sole writer
+  role for `{:worker_exit, worker_id, reason}` to `report_to`. The Worker
+  itself does NOT send the certificate — it simply stops when the Port exits.
+  The monitor fires on the `:DOWN` event regardless of exit reason:
 
-  The drain window exists so that callers can look up the worker's pid from
-  the registry RIGHT after spawning, even when a fast-exiting dummy agent
-  causes the Port to exit before the test's next statement runs. Without the
-  drain, a 56-scheduler BEAM would race the GenServer exit against the
-  caller's Registry.lookup, producing flaky failures.
-
-  The drain window is an intentional implementation choice for P4d-2. The
-  WorkspaceJanitor (P4d-3) provides the authoritative reclaim-on-exit path;
-  the drain window is a bounded delay, not a permanent hold.
+    * `:normal`  → `{:worker_exit, id, :normal}`
+    * `:killed`  → `{:worker_exit, id, :kill}`
+    * other      → `{:worker_exit, id, other}`
 
   ## Crash containment (D-316)
 
   The Port is linked to the Worker, so an agent crash propagates to the
   Worker. The Worker is `:temporary`, so the supervisor does NOT restart it.
-  A death-certificate `{:worker_exit, worker_id, reason}` is delivered to
-  `report_to` on ALL exit types including `:kill`, via a lightweight monitor
-  spawned at init (the full WorkspaceJanitor with capture-before-destroy is
-  P4d-3).
+  The unlinked monitor survives `:kill` and delivers the death-certificate.
 
   Worker is addressed via `WorkerRegistry` by its logical `worker_id`
   string key; pids are never stored durably ([C218], SPEC-FACTORY-FLEET §4).
@@ -48,11 +41,6 @@ defmodule Tau.Factory.Worker do
 
   alias Tau.Factory.Worker.Isolation
   alias Tau.Factory.Toolchain
-
-  # Drain window in ms: the worker stays alive this long after Port exit
-  # before sending the death certificate and stopping. This prevents a race
-  # between fast-exiting agents and Registry.lookup in callers.
-  @drain_ms 250
 
   # ---------------------------------------------------------------------------
   # Public API
@@ -75,6 +63,8 @@ defmodule Tau.Factory.Worker do
     - `:toolchain`           — atom (default: `:elixir`).
     - `:report_to`           — pid that receives death-certificate messages.
     - `:heartbeat_interval`  — ms; enables periodic heartbeat telemetry.
+    - `:expected_head`       — SHA string; expected HEAD after worktree add
+                               (overrides resolved base_ref SHA for testing).
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -104,6 +94,7 @@ defmodule Tau.Factory.Worker do
     toolchain_key = Keyword.get(opts, :toolchain, :elixir)
     report_to = Keyword.get(opts, :report_to)
     heartbeat_interval = Keyword.get(opts, :heartbeat_interval)
+    expected_head_override = Keyword.get(opts, :expected_head)
 
     # Unique private worktree path under the parent repo's parent dir.
     ws = Path.join([Path.dirname(repo_dir), ".worker-wt-#{worker_id}"])
@@ -125,6 +116,7 @@ defmodule Tau.Factory.Worker do
           toolchain_key: toolchain_key,
           report_to: report_to,
           heartbeat_interval: heartbeat_interval,
+          expected_head_override: expected_head_override,
           ws: ws
         }
 
@@ -137,29 +129,18 @@ defmodule Tau.Factory.Worker do
     end
   end
 
-  # Port exited: enter drain window (@drain_ms), then send death cert and stop.
+  # Port exited: stop the worker. The death-certificate is delivered by the
+  # unlinked monitor, NOT by the worker itself (C202 single-writer discipline).
   @impl GenServer
   def handle_info({port, {:exit_status, n}}, %{port: port} = state) do
-    reason = if n == 0, do: :normal, else: {:exit_status, n}
-
     :telemetry.execute(
       [:tau, :factory, :worker, :exit],
       %{status: n},
       %{worker_id: state.worker_id, role: state.role}
     )
 
-    # Schedule the drain-window expiry. The worker stays alive until then.
-    Process.send_after(self(), {:drain_expired, reason}, @drain_ms)
-    {:noreply, %{state | port: nil}}
-  end
-
-  # Drain window expired: send death certificate and stop normally.
-  def handle_info({:drain_expired, reason}, state) do
-    if state.report_to do
-      send(state.report_to, {:worker_exit, state.worker_id, reason})
-    end
-
-    {:stop, :normal, state}
+    reason = if n == 0, do: :normal, else: {:exit_status, n}
+    {:stop, reason, state}
   end
 
   # Data from agent — ignore for now (future: forward to Unit FSM).
@@ -216,13 +197,27 @@ defmodule Tau.Factory.Worker do
     Enum.each(ns, fn {_var, dir} -> File.mkdir_p!(dir) end)
 
     # Step 3: verify position
-    %{base_ref: base_ref, repo_dir: repo_dir} = ctx
+    # Resolve the actual HEAD SHA in the worktree (after `git worktree add`).
+    %{base_ref: base_ref, repo_dir: repo_dir, expected_head_override: expected_head_override} = ctx
     observed_head = git_rev_parse(ws, "HEAD")
     observed_branch = git_rev_parse(ws, "--abbrev-ref", "HEAD")
-    expected_head = git_rev_parse_in_repo(repo_dir, base_ref)
+
+    # expected_head: use injected override if provided (for testing HEAD-mismatch
+    # without breaking git worktree add); otherwise resolve base_ref to its SHA.
+    expected_head =
+      if expected_head_override do
+        expected_head_override
+      else
+        git_rev_parse_in_repo(repo_dir, base_ref)
+      end
+
+    # expected_branch: derive from base_ref (not from observed_branch, to make
+    # the check non-vacuous). For a SHA ref (detached HEAD), the expected branch
+    # is "HEAD"; for a branch-name ref it resolves to that branch.
+    expected_branch = derive_expected_branch(base_ref, ws, repo_dir)
 
     observed = %{pwd: ws, head: observed_head, branch: observed_branch}
-    expected = %{head: expected_head, branch: observed_branch}
+    expected = %{head: expected_head, branch: expected_branch}
 
     case Isolation.verify_position(ws, observed, expected) do
       :ok ->
@@ -264,9 +259,8 @@ defmodule Tau.Factory.Worker do
         {:cd, ws}
       ])
 
-    # Arm a monitor so we deliver death-certificate on :kill (drain_expired
-    # covers normal exits; monitor covers forced kills where terminate/2
-    # does not run).
+    # Spawn the unlinked monitor — sole writer of the death-certificate.
+    # It fires on the `:DOWN` event for ALL exit reasons (C202).
     spawn_death_monitor(worker_id, report_to)
 
     # Step 5: arm heartbeat timer.
@@ -297,34 +291,39 @@ defmodule Tau.Factory.Worker do
      }}
   end
 
-  # Spawn a lightweight monitor process that watches this worker and delivers
-  # the death-certificate to report_to on forced exits (:kill).
+  # Spawn a lightweight unlinked monitor process that watches this worker and
+  # delivers the death-certificate to report_to on the `:DOWN` event.
   #
-  # Normal Port exits are handled via the drain_expired path above. The monitor
-  # only delivers for reasons OTHER than :normal and :shutdown (which are
-  # drain-path exits). This prevents double-delivery for normal Port exits.
+  # This is the SOLE writer of `{:worker_exit, worker_id, reason}` (C202).
+  # The worker itself does NOT send the certificate — it just stops.
+  #
+  # Reason mapping:
+  #   :normal  → {:worker_exit, id, :normal}
+  #   :killed  → {:worker_exit, id, :kill}
+  #   other    → {:worker_exit, id, other}
   defp spawn_death_monitor(_worker_id, nil), do: :ok
 
   defp spawn_death_monitor(worker_id, report_to) do
     worker_pid = self()
 
-    spawn(fn ->
-      ref = Process.monitor(worker_pid)
+    Elixir.Process.spawn(
+      fn ->
+        ref = Process.monitor(worker_pid)
 
-      receive do
-        {:DOWN, ^ref, :process, ^worker_pid, reason} ->
-          case reason do
-            # These reasons indicate a drain-path or graceful stop;
-            # the drain_expired handler already sent (or will send) the cert.
-            :normal -> :ok
-            :shutdown -> :ok
-            # Forced kill — drain_expired will NOT run; we are the sole cert path.
-            :killed -> send(report_to, {:worker_exit, worker_id, :kill})
-            # Any other exit reason (e.g. a crash) — deliver verbatim.
-            other -> send(report_to, {:worker_exit, worker_id, other})
-          end
-      end
-    end)
+        receive do
+          {:DOWN, ^ref, :process, ^worker_pid, reason} ->
+            cert_reason =
+              case reason do
+                :normal -> :normal
+                :killed -> :kill
+                other -> other
+              end
+
+            send(report_to, {:worker_exit, worker_id, cert_reason})
+        end
+      end,
+      []
+    )
   end
 
   # ---------------------------------------------------------------------------
@@ -352,6 +351,26 @@ defmodule Tau.Factory.Worker do
     case System.cmd("git", ["rev-parse", base_ref], cd: repo_dir, stderr_to_stdout: true) do
       {out, 0} -> String.trim(out)
       {_out, _} -> ""
+    end
+  end
+
+  # Derive the expected branch name from the base_ref.
+  # For a SHA (40 hex chars) → worktree is in detached HEAD state → "HEAD".
+  # For a branch name → resolve it to the checked-out branch name (same as the ref).
+  # Falls back to the observed branch in the worktree.
+  defp derive_expected_branch(base_ref, ws, _repo_dir) do
+    if Regex.match?(~r/\A[0-9a-fA-F]{40}\z/, base_ref) do
+      # SHA ref → detached HEAD
+      "HEAD"
+    else
+      # Branch or tag ref → use what git worktree add checked out
+      case System.cmd("git", ["rev-parse", "--abbrev-ref", "HEAD"],
+             cd: ws,
+             stderr_to_stdout: true
+           ) do
+        {out, 0} -> String.trim(out)
+        {_out, _} -> "HEAD"
+      end
     end
   end
 

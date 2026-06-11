@@ -9,38 +9,42 @@ defmodule Tau.Factory.WorkerSupervisor do
   Workers are addressed via `Tau.Factory.WorkerRegistry` by their logical
   `worker_id` string key; pids are never stored durably ([C218]).
 
+  Implemented as a `GenServer` that owns an inner `DynamicSupervisor`.
+  The registry atom is held in the GenServer's state and retrieved via
+  a single `GenServer.call/2` at spawn time — no global mutable ETS.
+
   See `docs/spec/SPEC-FACTORY-FLEET.md`, D-309, D-316.
   """
 
-  use DynamicSupervisor
-
-  # ETS table name used to map supervisor pid → registry atom.
-  # Written at supervisor start; read at spawn time. Avoids :sys.get_state latency.
-  @registry_table :tau_worker_sup_registry_map
+  use GenServer
 
   @doc """
   Start the WorkerSupervisor and register it under `:name`.
 
   Options:
-    - `:name`     — atom; registered name for this supervisor (required).
+    - `:name`     — atom; registered name for this GenServer (required).
     - `:registry` — atom; registered name of the `WorkerRegistry` (required).
   """
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts) do
     name = Keyword.fetch!(opts, :name)
+    GenServer.start_link(__MODULE__, opts, name: name)
+  end
 
-    case DynamicSupervisor.start_link(__MODULE__, opts, name: name) do
-      {:ok, pid} = result ->
-        # Store registry mapping in ETS so spawn/5 can retrieve it without
-        # calling :sys.get_state (which adds latency and races with fast-exiting workers).
-        registry = Keyword.fetch!(opts, :registry)
-        ensure_registry_table()
-        :ets.insert(@registry_table, {pid, registry})
-        result
+  @doc """
+  Returns a child spec for embedding in a supervisor tree.
+  """
+  @spec child_spec(keyword()) :: map()
+  def child_spec(opts) do
+    name = Keyword.fetch!(opts, :name)
 
-      other ->
-        other
-    end
+    %{
+      id: name,
+      start: {__MODULE__, :start_link, [opts]},
+      type: :worker,
+      restart: :permanent,
+      shutdown: 5_000
+    }
   end
 
   @doc """
@@ -62,11 +66,32 @@ defmodule Tau.Factory.WorkerSupervisor do
     - `:report_to`           — pid receiving `{:worker_exit, worker_id, reason}`.
     - `:heartbeat_interval`  — ms (optional).
     - `:worker_id`           — override the generated id (optional).
+    - `:expected_head`       — SHA string (optional; overrides expected HEAD in
+                               verify_position; used by tests to inject a mismatch).
   """
   @spec spawn(atom() | pid(), atom(), String.t(), String.t(), keyword()) ::
           {:ok, String.t()} | {:error, term()}
   def spawn(supervisor, role, brief, base_ref, opts) do
-    registry = get_registry(supervisor)
+    GenServer.call(supervisor, {:spawn_worker, role, brief, base_ref, opts})
+  end
+
+  # ---------------------------------------------------------------------------
+  # GenServer callbacks
+  # ---------------------------------------------------------------------------
+
+  @impl GenServer
+  def init(opts) do
+    registry = Keyword.fetch!(opts, :registry)
+
+    # Start the inner DynamicSupervisor linked to this GenServer.
+    {:ok, dyn_sup} =
+      DynamicSupervisor.start_link(strategy: :one_for_one)
+
+    {:ok, %{registry: registry, dyn_sup: dyn_sup}}
+  end
+
+  @impl GenServer
+  def handle_call({:spawn_worker, role, brief, base_ref, opts}, _from, state) do
     worker_id = Keyword.get(opts, :worker_id, generate_worker_id())
 
     worker_opts =
@@ -75,7 +100,7 @@ defmodule Tau.Factory.WorkerSupervisor do
       |> Keyword.put(:role, role)
       |> Keyword.put(:brief, brief)
       |> Keyword.put(:base_ref, base_ref)
-      |> Keyword.put(:registry, registry)
+      |> Keyword.put(:registry, state.registry)
 
     child_spec = %{
       id: make_ref(),
@@ -84,24 +109,22 @@ defmodule Tau.Factory.WorkerSupervisor do
       type: :worker
     }
 
-    case DynamicSupervisor.start_child(supervisor, child_spec) do
-      {:ok, _pid} ->
-        {:ok, worker_id}
+    result =
+      case DynamicSupervisor.start_child(state.dyn_sup, child_spec) do
+        {:ok, _pid} ->
+          {:ok, worker_id}
 
-      {:ok, _pid, _info} ->
-        {:ok, worker_id}
+        {:ok, _pid, _info} ->
+          {:ok, worker_id}
 
-      {:error, {:already_started, _pid}} ->
-        {:ok, worker_id}
+        {:error, {:already_started, _pid}} ->
+          {:ok, worker_id}
 
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
+        {:error, reason} ->
+          {:error, reason}
+      end
 
-  @impl DynamicSupervisor
-  def init(_opts) do
-    DynamicSupervisor.init(strategy: :one_for_one)
+    {:reply, result, state}
   end
 
   # ---------------------------------------------------------------------------
@@ -118,37 +141,5 @@ defmodule Tau.Factory.WorkerSupervisor do
 
       "#{a}-#{b}-#{c}-#{d}-#{e}"
     end)
-  end
-
-  # Retrieve the registry name for the given supervisor.
-  # Fast ETS lookup — no cross-process call, no scheduling delay.
-  defp get_registry(supervisor) do
-    pid =
-      case supervisor do
-        pid when is_pid(pid) -> pid
-        name when is_atom(name) -> Process.whereis(name)
-      end
-
-    ensure_registry_table()
-
-    case :ets.lookup(@registry_table, pid) do
-      [{^pid, registry}] ->
-        registry
-
-      [] ->
-        raise "WorkerSupervisor: no registry registered for supervisor #{inspect(supervisor)}"
-    end
-  end
-
-  # Create the ETS table if it does not exist yet.
-  # Uses :public + :set so any process can read/write.
-  defp ensure_registry_table do
-    if :ets.whereis(@registry_table) == :undefined do
-      :ets.new(@registry_table, [:named_table, :public, :set])
-    end
-  rescue
-    ArgumentError ->
-      # Table was created concurrently — benign.
-      :ok
   end
 end
