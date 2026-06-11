@@ -123,7 +123,6 @@ defmodule Tau.Factory.UnitTerminationTest do
   # @mod.fun(args) form; NOT apply/2,3 (Credo strict).
   # ---------------------------------------------------------------------------
 
-  @unit Tau.Factory.Unit
   @unit_supervisor Tau.Factory.UnitSupervisor
   @scheduler Tau.Factory.Scheduler
 
@@ -258,24 +257,29 @@ defmodule Tau.Factory.UnitTerminationTest do
   end
 
   # ---------------------------------------------------------------------------
-  # D-340b / D-318 — Gate-fail ladder → escalated at EXACT attempt count (fix f-2)
+  # D-340b / D-318 — Gate-fail ladder → escalated at EXACT attempt count (fix f-4)
   #
   # The SPEC §5 ladder (line 315):
   #   k < N_REFINE  → refine → back to implementing
-  #   k = N_REFINE  → pivot  → back to implementing (REAL extra attempt)
+  #   k = N_REFINE  → pivot  → back to implementing (REAL extra attempt, GATED)
   #   pivot gate red → escalated [E-RETRY-EXHAUSTED]
   #
-  # With N_REFINE=3, N_PIVOT=1: gate MUST be called EXACTLY 4 times.
-  # A buggy FSM that escalates immediately on :pivot (skipping the pivot's
-  # implementing attempt) makes only 3 gate calls. Both 3 and 4 satisfy ≤4,
-  # so the prior ≤4 assertion was too weak to catch the skip.
-  # == 4 is the discriminating assertion: it fails when gate_calls == 3.
+  # Gated-pivot gate-call trace (N_REFINE=3, N_PIVOT=1):
+  #   attempt 1 (initial)  → gate #1 fail → Retry.next(_,0,0) = {:refine,0}
+  #   attempt 2            → gate #2 fail → Retry.next(_,1,0) = {:refine,1}
+  #   attempt 3            → gate #3 fail → Retry.next(_,2,0) = {:refine,2}
+  #   attempt 4            → gate #4 fail → Retry.next(_,3,0) = :pivot  → re-implement
+  #   attempt 5 (pivot)    → gate #5 fail → Retry.next(_,3,1) = :exhausted → escalated
+  #
+  # Total gate calls = 1 + N_REFINE + N_PIVOT = 5.
+  # A buggy FSM that escalates the pivot UNGATED makes only 4 gate calls.
+  # == 5 is the discriminating assertion (fix f-4, supersedes f-2's == 4).
   # ---------------------------------------------------------------------------
 
   describe "D-340b / D-318 — gate-fail ladder escalates at EXACT attempt count" do
     @tag :d_340
     @tag :d_318
-    test "D-340b / D-318: gate always fails → :escalated with E-RETRY-EXHAUSTED, gate_calls == N_refine + N_pivot (exact)" do
+    test "D-340b / D-318: gate always fails → :escalated with E-RETRY-EXHAUSTED, gate_calls == 1 + N_refine + N_pivot (exact)" do
       test_pid = self()
       unit_id = "u-ladder-#{System.unique_integer([:positive])}"
       scheduler_name = :"sched_ladder_#{System.unique_integer([:positive])}"
@@ -294,8 +298,9 @@ defmodule Tau.Factory.UnitTerminationTest do
 
       n_refine = Retry.n_refine()
       n_pivot = Retry.n_pivot()
-      # With N_REFINE=3, N_PIVOT=1: exactly 4 gate calls expected.
-      expected_gate_calls = n_refine + n_pivot
+      # 1 initial attempt + N_REFINE refine attempts + N_PIVOT pivot attempt, all gated.
+      # With N_REFINE=3, N_PIVOT=1: exactly 5 gate calls expected.
+      expected_gate_calls = 1 + n_refine + n_pivot
 
       opts =
         base_unit_opts(unit_id, scheduler_name, test_pid,
@@ -307,9 +312,9 @@ defmodule Tau.Factory.UnitTerminationTest do
       unit_pid = @unit_supervisor.start_unit(sup_name, opts)
       assert is_pid(unit_pid)
 
-      # Drive oracle (1 delivery) then each refine/pivot implementing cycle
-      # (expected_gate_calls deliveries). Total: expected_gate_calls + 1.
-      # Add slack iterations to avoid race with FSM scheduling.
+      # Drive oracle (1 delivery) then each implementing cycle (expected_gate_calls
+      # deliveries — one per gated attempt including the pivot attempt).
+      # Add slack iterations to avoid races with FSM scheduling.
       for _i <- 1..(expected_gate_calls + 3) do
         deliver_worker_done(unit_pid)
         :timer.sleep(60)
@@ -326,19 +331,116 @@ defmodule Tau.Factory.UnitTerminationTest do
 
       gate_calls = :counters.get(gate_count_ref, 1)
 
-      # EXACT assertion (strengthened from ≤ to ==) — fix f-2.
-      # gate_calls == n_refine (3) means the pivot attempt was skipped: buggy FSM.
-      # gate_calls == n_refine + n_pivot (4) means pivot attempt happened: correct FSM.
+      # EXACT assertion (fix f-4: gated-pivot semantics).
+      # gate_calls == 4 means the pivot was escalated UNGATED (buggy FSM from f-2).
+      # gate_calls == 3 means the pivot attempt was skipped entirely (f-2's original bug).
+      # gate_calls == 5 means all 5 attempts were gated, including the pivot: correct FSM.
       assert gate_calls == expected_gate_calls,
-             "D-318 (f-2): gate must be called EXACTLY #{expected_gate_calls} times " <>
-               "(#{n_refine} refine attempts + #{n_pivot} pivot attempt); " <>
+             "D-318 (f-4): gate must be called EXACTLY #{expected_gate_calls} times " <>
+               "(1 initial + #{n_refine} refine attempts + #{n_pivot} pivot attempt, all gated); " <>
                "got #{gate_calls} — " <>
-               "a count of #{n_refine} indicates the pivot attempt was skipped (buggy FSM)"
+               "count 4 means pivot was escalated ungated (f-4 bug); " <>
+               "count 3 means pivot attempt was skipped entirely (f-2 bug)"
 
       in_flight = @scheduler.in_flight(scheduler_name)
 
       refute Map.has_key?(in_flight, unit_id),
              "D-340b: after :escalated, unit must be released from Scheduler in_flight"
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # D-318 / f-5 — Successful pivot: pivot attempt's gate PASSES → :merged
+  #
+  # This is the discriminating case for gated-pivot semantics (f-4).
+  # gate_fun script: [{:fail,_}, {:fail,_}, {:fail,_}, {:fail,_}, :pass]
+  #   attempt 1 (initial)  → gate #1 {:fail,_} → refine
+  #   attempt 2            → gate #2 {:fail,_} → refine
+  #   attempt 3            → gate #3 {:fail,_} → refine
+  #   attempt 4            → gate #4 {:fail,_} → pivot → re-implement
+  #   attempt 5 (pivot)    → gate #5 :pass      → awaiting_merge → :merged
+  #
+  # Against an ungated-pivot FSM: the pivot attempt is escalated without gating,
+  # so gate #5 is never called and the unit terminates :escalated — test FAILS.
+  # Against the correct gated FSM: gate #5 fires, unit proceeds to :merged — test PASSES.
+  # ---------------------------------------------------------------------------
+
+  describe "D-318 / f-5 — successful pivot: pivot attempt's gate passes → :merged" do
+    @tag :d_340
+    @tag :d_318
+    test "D-318 (f-5): gate fails 4 times then passes on pivot attempt → :merged, gate_calls == 5" do
+      test_pid = self()
+      unit_id = "u-pivot-pass-#{System.unique_integer([:positive])}"
+      scheduler_name = :"sched_pivot_pass_#{System.unique_integer([:positive])}"
+      sup_name = :"sup_pivot_pass_#{System.unique_integer([:positive])}"
+      start_scheduler(scheduler_name)
+      start_supervised!({@unit_supervisor, name: sup_name}, id: sup_name)
+
+      n_refine = Retry.n_refine()
+      n_pivot = Retry.n_pivot()
+      # Total attempts before pivot pass: 1 initial + N_REFINE refines = 4 fails,
+      # then the pivot attempt (call #5) returns :pass.
+      total_gate_calls = 1 + n_refine + n_pivot
+
+      gate_count_ref = :counters.new(1, [:atomics])
+
+      # Script: first (1 + n_refine) calls → {:fail,_}; the pivot call → :pass.
+      gate_fun = fn ->
+        call_n =
+          :counters.add(gate_count_ref, 1, 1) |> then(fn _ -> :counters.get(gate_count_ref, 1) end)
+
+        if call_n <= 1 + n_refine do
+          {:fail, ["scripted-fail-#{call_n}"]}
+        else
+          :pass
+        end
+      end
+
+      merge_fun = fn _uid, _hash -> :queued end
+
+      opts =
+        base_unit_opts(unit_id, scheduler_name, test_pid,
+          gate_fun: gate_fun,
+          merge_fun: merge_fun,
+          timeouts: [state_timeout_ms: 5_000]
+        )
+
+      unit_pid = @unit_supervisor.start_unit(sup_name, opts)
+      assert is_pid(unit_pid)
+
+      # Drive oracle + all implementing attempts (initial + refines + pivot).
+      # Add slack iterations; the pivot attempt reaching gating requires one extra
+      # worker-done delivery.
+      for _i <- 1..(total_gate_calls + 3) do
+        deliver_worker_done(unit_pid)
+        :timer.sleep(60)
+      end
+
+      # Allow FSM to reach awaiting_merge after the pivot gate passes.
+      :timer.sleep(150)
+
+      # Deliver :merged to complete the terminal path.
+      send(unit_pid, {:merge_result, :merged})
+
+      # The pivot attempt's gate passed → unit must reach :merged, NOT :escalated.
+      assert_receive {:unit_terminal, ^unit_id, :merged, provenance},
+                     10_000,
+                     "D-318 (f-5): pivot gate passed — expected {:unit_terminal, _, :merged, _}; " <>
+                       "if :escalated arrived, the FSM escalated the pivot UNGATED (f-4 bug)"
+
+      assert is_map(provenance),
+             "D-318 (f-5): provenance must be a map; got #{inspect(provenance)}"
+
+      gate_calls = :counters.get(gate_count_ref, 1)
+
+      assert gate_calls == total_gate_calls,
+             "D-318 (f-5): gate must be called exactly #{total_gate_calls} times " <>
+               "(#{1 + n_refine} fails + 1 pivot pass); got #{gate_calls}"
+
+      in_flight = @scheduler.in_flight(scheduler_name)
+
+      refute Map.has_key?(in_flight, unit_id),
+             "D-318 (f-5): after :merged, unit must be released from Scheduler in_flight"
     end
   end
 
