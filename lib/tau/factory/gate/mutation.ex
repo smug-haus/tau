@@ -106,4 +106,38 @@ defmodule Tau.Factory.Gate.Mutation do
       _ -> {:pass, Enum.map(failed, & &1.id)}
     end
   end
+
+  @doc """
+  Strictly-ordered cross-check: assert `killed_ids ⊆ passing_ids(real_report)`.
+
+  Given:
+  - `killed_ids`  — the `:failed` case ids from the reverted-run report (from
+    `judge/1`'s `{:pass, killed_ids}` result).
+  - `real_report` — the engine-parsed report from the real (green) tree.
+
+  Returns `:pass` iff every id in `killed_ids` appears with status `:passed`
+  in `real_report`. Returns `{:fail, :cross_check_failed}` otherwise.
+
+  Empty `killed_ids` vacuously satisfies the subset condition (∅ ⊆ anything).
+
+  Pure function (P-MU4): no I/O, referentially transparent.
+
+  SPEC-FACTORY-GATE §3 [C203-B3], §4 B3, D-306.
+  """
+  @spec cross_check([term()], report()) :: :pass | {:fail, :cross_check_failed}
+  def cross_check(killed_ids, real_report) when is_list(killed_ids) do
+    passing_ids =
+      real_report
+      |> Map.get(:cases, [])
+      |> Enum.filter(&(&1.status == :passed))
+      |> MapSet.new(& &1.id)
+
+    killed_set = MapSet.new(killed_ids)
+
+    if MapSet.subset?(killed_set, passing_ids) do
+      :pass
+    else
+      {:fail, :cross_check_failed}
+    end
+  end
 end
