@@ -37,7 +37,7 @@ defmodule Tau.Factory.Toolchain.Elixir do
   @impl Tau.Factory.Toolchain
   def test_descriptor(_ctx) do
     %Tau.Toolchain.TestDescriptor{
-      argv: ~w(mix test --formatter JUnitFormatter),
+      argv: ~w(mix test),
       env: %{"MIX_ENV" => "test"},
       report: :junit,
       artifact: "_build/test/lib/tau/test-junit-report.xml"
@@ -46,7 +46,7 @@ defmodule Tau.Factory.Toolchain.Elixir do
 
   @impl Tau.Factory.Toolchain
   def mutation_descriptor(ctx) do
-    %{test_descriptor(ctx) | argv: ~w(mix test --only gating --formatter JUnitFormatter)}
+    test_descriptor(ctx)
   end
 
   @impl Tau.Factory.Toolchain
