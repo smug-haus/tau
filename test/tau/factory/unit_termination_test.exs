@@ -35,12 +35,17 @@ defmodule Tau.Factory.UnitTerminationTest do
     `:hash`           — String.t(); content hash for the PR.
     `:scheduler`      — atom() | pid(); name/pid of a running Scheduler.
     `:report_to`      — pid(); receives `{:unit_terminal, unit_id, outcome, provenance}`.
-    `:worker_fun`     — (role :: atom() -> {:ok, ref :: reference()} | {:error, reason})
+    `:worker_fun`     — (role :: atom() -> {:ok, worker_pid :: pid()} | {:error, reason})
                         Called when the FSM needs to spawn a worker for a role.
-                        The test controls worker completion: send `{:worker_done, ref}`
-                        to the Unit pid to advance oracle→implementing or
-                        implementing→gating. The Unit arms a monitor on the returned
-                        ref so a `:DOWN` is also handled.
+                        Returns a REAL process pid that the Unit MUST monitor via
+                        `Process.monitor(worker_pid)`. The Unit MUST store the worker
+                        pid in state data under the key `:worker_pid` (test-observable
+                        via `:sys.get_state/1`). The test controls worker completion
+                        by sending `{:worker_done, worker_pid}` to the Unit pid.
+                        A worker crash is signalled by killing the worker pid; the
+                        Unit's monitor delivers `{:DOWN, monitor_ref, :process,
+                        worker_pid, reason}` and the Unit routes to the infra-failure
+                        path (B8/C105 — NOT a gate call).
     `:gate_fun`       — (-> :pass | {:fail, findings :: [term()]})
                         Called when the FSM enters gating state. The seam's return
                         determines the gate outcome synchronously (i.e. the Unit
@@ -89,7 +94,19 @@ defmodule Tau.Factory.UnitTerminationTest do
       reason: atom() | nil                 # escalation reason (e.g. :E_RETRY_EXHAUSTED) or nil
     }
 
-  AC/D-NNN linkage: D-340, D-318.
+  ### Worker seam shape (PINNED — implementer MUST conform exactly, B8)
+
+  `worker_fun.(role) -> {:ok, worker_pid :: pid()}`
+
+  The Unit MUST:
+    1. Call `Process.monitor(worker_pid)` to obtain a monitor ref (B8 liveness).
+    2. Store `worker_pid` in state data under the key `:worker_pid` (test-observable
+       via `:sys.get_state/1` so the test can deliver :worker_done or kill the pid).
+    3. Match `{:worker_done, ^worker_pid}` for normal worker completion.
+    4. Match `{:DOWN, _monitor_ref, :process, ^worker_pid, _reason}` for crash.
+       On crash: route to infra-failure → `escalated`; do NOT call `gate_fun` (C105).
+
+  AC/D-NNN linkage: D-340, D-318, B8, C105.
   """
 
   use ExUnit.Case, async: true
@@ -134,10 +151,18 @@ defmodule Tau.Factory.UnitTerminationTest do
     )
   end
 
+  # Spawn a long-lived worker process the Unit will monitor via Process.monitor/1.
+  # The test kills it (abnormal) or delivers {:worker_done, pid} (normal).
+  defp spawn_worker do
+    spawn(fn ->
+      receive do
+        :stop -> :ok
+      end
+    end)
+  end
+
   # Build base Unit opts with seam funs injected by the caller.
-  # `merge_deliver_pid` is the pid that will receive merge result delivery
-  # requests from merge_fun; tests send `{:merge_result, outcome}` to the
-  # Unit pid themselves (or via a spawned sender).
+  # worker_fun now returns {:ok, pid} where pid is a REAL monitorable process (B8).
   defp base_unit_opts(unit_id, scheduler_name, report_to, overrides) do
     defaults = [
       unit_id: unit_id,
@@ -145,14 +170,34 @@ defmodule Tau.Factory.UnitTerminationTest do
       hash: "hash-#{unit_id}",
       scheduler: scheduler_name,
       report_to: report_to,
-      # Default seams (overridden per test):
-      worker_fun: fn _role -> {:ok, make_ref()} end,
+      # Default seams (overridden per test).
+      # worker_fun returns a real monitorable pid (B8 contract).
+      worker_fun: fn _role -> {:ok, spawn_worker()} end,
       gate_fun: fn -> :pass end,
       merge_fun: fn _uid, _hash -> :queued end,
       timeouts: [state_timeout_ms: 5_000]
     ]
 
     Keyword.merge(defaults, overrides)
+  end
+
+  # Deliver :worker_done for the worker pid the FSM is currently waiting on.
+  # The Unit MUST expose :worker_pid in state data (pinned seam contract, B8).
+  # The Unit matches {:worker_done, ^worker_pid} for normal completion.
+  defp deliver_worker_done(unit_pid) do
+    :timer.sleep(50)
+
+    case :sys.get_state(unit_pid) do
+      {state, data} when state in [:oracle, :implementing] ->
+        worker_pid = Map.get(data, :worker_pid)
+
+        if is_pid(worker_pid) do
+          send(unit_pid, {:worker_done, worker_pid})
+        end
+
+      _ ->
+        :ok
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -168,68 +213,27 @@ defmodule Tau.Factory.UnitTerminationTest do
       scheduler_name = :"sched_happy_#{System.unique_integer([:positive])}"
       sup_name = :"sup_happy_#{System.unique_integer([:positive])}"
       start_scheduler(scheduler_name)
-
       start_supervised!({@unit_supervisor, name: sup_name}, id: sup_name)
 
-      # worker_fun: capture the Unit pid so we can deliver worker_done and merge_result.
-      # The Unit process registers in UnitRegistry; we hold the pid from start_unit.
-      worker_fun = fn _role ->
-        ref = make_ref()
-        # Spawn a process to deliver :worker_done after a brief yield.
-        # The sender needs the Unit pid; we delay slightly to let start_unit return.
-        Process.send_after(self(), {:_worker_ref_capture, ref}, 1)
-        {:ok, ref}
-      end
-
-      merge_fun = fn _uid, _hash -> :queued end
-
       gate_fun = fn -> :pass end
+      merge_fun = fn _uid, _hash -> :queued end
 
       opts =
         base_unit_opts(unit_id, scheduler_name, test_pid,
-          worker_fun: worker_fun,
           gate_fun: gate_fun,
           merge_fun: merge_fun,
           timeouts: [state_timeout_ms: 5_000]
         )
 
-      # Unit start triggers: planned → (Scheduler.admit) → oracle → worker_fun call.
       unit_pid = @unit_supervisor.start_unit(sup_name, opts)
       assert is_pid(unit_pid), "start_unit must return a pid"
 
-      # Drive oracle phase: deliver worker_done for the oracle worker.
-      # The Unit should be waiting in oracle state with a ref from worker_fun.
-      # We ask the Unit for its current worker ref via sys.get_state, then send done.
-      # Allow up to 500 ms for the FSM to reach oracle and call worker_fun.
+      # Drive oracle phase.
+      deliver_worker_done(unit_pid)
+
+      # Allow FSM to advance; drive implementing phase.
       :timer.sleep(50)
-      {state_name, state_data} = :sys.get_state(unit_pid)
-
-      assert state_name in [:oracle, :implementing],
-             "After start, Unit must be in oracle or implementing; got #{inspect(state_name)}"
-
-      # Deliver worker_done for oracle (or implementing, same message shape).
-      # We extract the ref from state_data — implementer exposes :worker_ref key.
-      worker_ref = Map.get(state_data, :worker_ref) || Map.get(state_data, :current_worker_ref)
-
-      if worker_ref do
-        send(unit_pid, {:worker_done, worker_ref})
-      else
-        # Fallback: send a synthetic done — the FSM handles unknown refs gracefully.
-        send(unit_pid, {:worker_done, make_ref()})
-      end
-
-      # Allow FSM to advance to implementing if it was in oracle.
-      :timer.sleep(50)
-
-      {state_name2, state_data2} = :sys.get_state(unit_pid)
-
-      if state_name2 == :implementing do
-        impl_ref = Map.get(state_data2, :worker_ref) || Map.get(state_data2, :current_worker_ref)
-
-        if impl_ref do
-          send(unit_pid, {:worker_done, impl_ref})
-        end
-      end
+      deliver_worker_done(unit_pid)
 
       # Allow transition through gating (gate_fun → :pass) to awaiting_merge.
       :timer.sleep(100)
@@ -254,13 +258,24 @@ defmodule Tau.Factory.UnitTerminationTest do
   end
 
   # ---------------------------------------------------------------------------
-  # D-340b / D-318 — Gate-fail ladder → escalated, bounded attempt count
+  # D-340b / D-318 — Gate-fail ladder → escalated at EXACT attempt count (fix f-2)
+  #
+  # The SPEC §5 ladder (line 315):
+  #   k < N_REFINE  → refine → back to implementing
+  #   k = N_REFINE  → pivot  → back to implementing (REAL extra attempt)
+  #   pivot gate red → escalated [E-RETRY-EXHAUSTED]
+  #
+  # With N_REFINE=3, N_PIVOT=1: gate MUST be called EXACTLY 4 times.
+  # A buggy FSM that escalates immediately on :pivot (skipping the pivot's
+  # implementing attempt) makes only 3 gate calls. Both 3 and 4 satisfy ≤4,
+  # so the prior ≤4 assertion was too weak to catch the skip.
+  # == 4 is the discriminating assertion: it fails when gate_calls == 3.
   # ---------------------------------------------------------------------------
 
-  describe "D-340b / D-318 — gate-fail ladder exhausts to :escalated within attempt bound" do
+  describe "D-340b / D-318 — gate-fail ladder escalates at EXACT attempt count" do
     @tag :d_340
     @tag :d_318
-    test "D-340b / D-318: gate always fails → :escalated with E-RETRY-EXHAUSTED, attempts ≤ N_refine + N_pivot" do
+    test "D-340b / D-318: gate always fails → :escalated with E-RETRY-EXHAUSTED, gate_calls == N_refine + N_pivot (exact)" do
       test_pid = self()
       unit_id = "u-ladder-#{System.unique_integer([:positive])}"
       scheduler_name = :"sched_ladder_#{System.unique_integer([:positive])}"
@@ -268,12 +283,8 @@ defmodule Tau.Factory.UnitTerminationTest do
       start_scheduler(scheduler_name)
       start_supervised!({@unit_supervisor, name: sup_name}, id: sup_name)
 
-      # Count gate invocations so we can bound them.
       gate_count_ref = :counters.new(1, [:atomics])
 
-      worker_fun = fn _role -> {:ok, make_ref()} end
-
-      # Always-fail gate: records each invocation.
       gate_fun = fn ->
         :counters.add(gate_count_ref, 1, 1)
         {:fail, ["finding-#{:counters.get(gate_count_ref, 1)}"]}
@@ -281,9 +292,13 @@ defmodule Tau.Factory.UnitTerminationTest do
 
       merge_fun = fn _uid, _hash -> :queued end
 
+      n_refine = Retry.n_refine()
+      n_pivot = Retry.n_pivot()
+      # With N_REFINE=3, N_PIVOT=1: exactly 4 gate calls expected.
+      expected_gate_calls = n_refine + n_pivot
+
       opts =
         base_unit_opts(unit_id, scheduler_name, test_pid,
-          worker_fun: worker_fun,
           gate_fun: gate_fun,
           merge_fun: merge_fun,
           timeouts: [state_timeout_ms: 5_000]
@@ -292,45 +307,34 @@ defmodule Tau.Factory.UnitTerminationTest do
       unit_pid = @unit_supervisor.start_unit(sup_name, opts)
       assert is_pid(unit_pid)
 
-      # Drive each implementing phase by delivering worker_done whenever the
-      # FSM reaches implementing. The FSM will enter gating, fail, re-enter
-      # implementing, etc. We poll and deliver up to max_attempts+2 times.
-      n_refine = Retry.n_refine()
-      n_pivot = Retry.n_pivot()
-      max_attempts = n_refine + n_pivot
-
-      # Deliver worker_done up to max_attempts + 2 times to cover each cycle.
-      # Each delivery either finishes oracle, implementing, or a refine re-attempt.
-      for _i <- 1..(max_attempts + 4) do
+      # Drive oracle (1 delivery) then each refine/pivot implementing cycle
+      # (expected_gate_calls deliveries). Total: expected_gate_calls + 1.
+      # Add slack iterations to avoid race with FSM scheduling.
+      for _i <- 1..(expected_gate_calls + 3) do
+        deliver_worker_done(unit_pid)
         :timer.sleep(60)
-
-        case :sys.get_state(unit_pid) do
-          {state, data} when state in [:oracle, :implementing] ->
-            ref = Map.get(data, :worker_ref) || Map.get(data, :current_worker_ref)
-            if ref, do: send(unit_pid, {:worker_done, ref})
-
-          _ ->
-            :ok
-        end
       end
 
       assert_receive {:unit_terminal, ^unit_id, :escalated, provenance},
                      10_000,
                      "D-340b / D-318: expected {:unit_terminal, _, :escalated, _} within 10s"
 
-      # Provenance must carry the escalation reason.
       reason = Map.get(provenance, :reason)
 
       assert reason == :E_RETRY_EXHAUSTED,
              "D-318: escalated provenance must carry :E_RETRY_EXHAUSTED; got #{inspect(reason)}"
 
-      # Gate must not have been called more than N_refine + N_pivot times (D-318).
       gate_calls = :counters.get(gate_count_ref, 1)
 
-      assert gate_calls <= max_attempts,
-             "D-318: gate called #{gate_calls} times; must be ≤ #{max_attempts} (N_refine=#{n_refine} + N_pivot=#{n_pivot})"
+      # EXACT assertion (strengthened from ≤ to ==) — fix f-2.
+      # gate_calls == n_refine (3) means the pivot attempt was skipped: buggy FSM.
+      # gate_calls == n_refine + n_pivot (4) means pivot attempt happened: correct FSM.
+      assert gate_calls == expected_gate_calls,
+             "D-318 (f-2): gate must be called EXACTLY #{expected_gate_calls} times " <>
+               "(#{n_refine} refine attempts + #{n_pivot} pivot attempt); " <>
+               "got #{gate_calls} — " <>
+               "a count of #{n_refine} indicates the pivot attempt was skipped (buggy FSM)"
 
-      # Scheduler must have released the unit.
       in_flight = @scheduler.in_flight(scheduler_name)
 
       refute Map.has_key?(in_flight, unit_id),
@@ -353,14 +357,12 @@ defmodule Tau.Factory.UnitTerminationTest do
       start_scheduler(scheduler_name)
       start_supervised!({@unit_supervisor, name: sup_name}, id: sup_name)
 
-      # gate_fun is a sentinel: if called, the FSM confused semantic failure with
-      # infra stall. We record any call so the test can assert it was NOT called
-      # as the stall termination path.
+      # gate_fun sentinel: if called, FSM confused infra stall with semantic failure.
       gate_called_ref = :counters.new(1, [:atomics])
 
-      # worker_fun returns a ref but the corresponding :worker_done is NEVER sent.
-      # The Unit must arm a :state_timeout and escalate on timeout.
-      worker_fun = fn _role -> {:ok, make_ref()} end
+      # worker_fun returns real monitorable pid but :worker_done is never sent.
+      # Unit must arm :state_timeout and escalate on expiry.
+      worker_fun = fn _role -> {:ok, spawn_worker()} end
 
       gate_fun = fn ->
         :counters.add(gate_called_ref, 1, 1)
@@ -374,7 +376,7 @@ defmodule Tau.Factory.UnitTerminationTest do
           worker_fun: worker_fun,
           gate_fun: gate_fun,
           merge_fun: merge_fun,
-          # Very short timeout so the stall path is fast.
+          # Very short timeout so the stall path completes quickly in CI.
           timeouts: [state_timeout_ms: 80]
         )
 
@@ -386,15 +388,12 @@ defmodule Tau.Factory.UnitTerminationTest do
                      5_000,
                      "D-340c / C107: expected :escalated from :state_timeout within 5s"
 
-      # The provenance reason must be infrastructure-stall-derived, not the
-      # gate-fail derived :E_RETRY_EXHAUSTED.
       reason = Map.get(provenance, :reason)
 
       refute reason == nil,
              "D-340c: provenance must carry a reason; got nil"
 
-      # C105 / C107: stall path is NOT the same as semantic gate fail.
-      # Gate should not have been called on a stall-only path.
+      # C105 / C107: stall path is NOT the gate-fail path. Gate must not be called.
       gate_calls = :counters.get(gate_called_ref, 1)
 
       assert gate_calls == 0,
@@ -424,18 +423,11 @@ defmodule Tau.Factory.UnitTerminationTest do
       start_scheduler(scheduler_name)
       start_supervised!({@unit_supervisor, name: sup_name}, id: sup_name)
 
-      # gate_fun always passes so we can focus on the re-gate edge.
       gate_fun = fn -> :pass end
-
-      # merge_fun: the test drives outcomes by sending {:merge_result, _} to
-      # the unit pid after the merge_fun is called. merge_fun itself just returns :queued.
       merge_fun = fn _uid, _hash -> :queued end
-
-      worker_fun = fn _role -> {:ok, make_ref()} end
 
       opts =
         base_unit_opts(unit_id, scheduler_name, test_pid,
-          worker_fun: worker_fun,
           gate_fun: gate_fun,
           merge_fun: merge_fun,
           timeouts: [state_timeout_ms: 5_000]
@@ -444,24 +436,10 @@ defmodule Tau.Factory.UnitTerminationTest do
       unit_pid = @unit_supervisor.start_unit(sup_name, opts)
       assert is_pid(unit_pid)
 
-      # Helper: deliver worker_done for whichever worker the FSM is waiting on.
-      deliver_worker_done = fn ->
-        :timer.sleep(50)
-
-        case :sys.get_state(unit_pid) do
-          {state, data} when state in [:oracle, :implementing] ->
-            ref = Map.get(data, :worker_ref) || Map.get(data, :current_worker_ref)
-            if ref, do: send(unit_pid, {:worker_done, ref})
-
-          _ ->
-            :ok
-        end
-      end
-
       # Advance through oracle and implementing.
-      deliver_worker_done.()
+      deliver_worker_done(unit_pid)
       :timer.sleep(50)
-      deliver_worker_done.()
+      deliver_worker_done(unit_pid)
 
       # Allow FSM to reach awaiting_merge (gate :pass → awaiting_merge).
       :timer.sleep(100)
@@ -470,7 +448,6 @@ defmodule Tau.Factory.UnitTerminationTest do
       send(unit_pid, {:merge_result, :rejected})
 
       # Allow FSM to re-gate and re-enter awaiting_merge.
-      # gate_fun returns :pass again, so FSM should reach awaiting_merge a second time.
       :timer.sleep(150)
 
       # Second merge result: :merged → terminal.
@@ -509,11 +486,11 @@ defmodule Tau.Factory.UnitTerminationTest do
 
       gate_fun = fn -> {:fail, last_findings} end
 
-      worker_fun = fn _role -> {:ok, make_ref()} end
+      n_refine = Retry.n_refine()
+      n_pivot = Retry.n_pivot()
 
       opts =
         base_unit_opts(unit_id, scheduler_name, test_pid,
-          worker_fun: worker_fun,
           gate_fun: gate_fun,
           merge_fun: fn _uid, _hash -> :queued end,
           timeouts: [state_timeout_ms: 5_000]
@@ -522,20 +499,9 @@ defmodule Tau.Factory.UnitTerminationTest do
       unit_pid = @unit_supervisor.start_unit(sup_name, opts)
       assert is_pid(unit_pid)
 
-      n_refine = Retry.n_refine()
-      n_pivot = Retry.n_pivot()
-
-      for _i <- 1..(n_refine + n_pivot + 4) do
+      for _i <- 1..(n_refine + n_pivot + 3) do
+        deliver_worker_done(unit_pid)
         :timer.sleep(60)
-
-        case :sys.get_state(unit_pid) do
-          {state, data} when state in [:oracle, :implementing] ->
-            ref = Map.get(data, :worker_ref) || Map.get(data, :current_worker_ref)
-            if ref, do: send(unit_pid, {:worker_done, ref})
-
-          _ ->
-            :ok
-        end
       end
 
       assert_receive {:unit_terminal, ^unit_id, :escalated, provenance},
@@ -551,6 +517,117 @@ defmodule Tau.Factory.UnitTerminationTest do
 
       assert reported_findings == last_findings,
              "C111: provenance.last_findings must be #{inspect(last_findings)}; got #{inspect(reported_findings)}"
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # D-318 / B8 / C105 — Worker CRASH → infra-failure path → :escalated (fix f-3)
+  #
+  # SPEC-FACTORY-CORE §4 B8 (line 279): the Unit holds a Process.monitor/1 ref on
+  # the worker for liveness. A worker CRASH (abnormal :DOWN) is an infra failure
+  # distinct from a stall (:state_timeout) and from a gate {:fail} (C105).
+  #
+  # The monitorable seam: worker_fun.(role) -> {:ok, pid} where pid is a REAL
+  # process (not make_ref()). The Unit monitors it. Killing the pid delivers
+  # {:DOWN, monitor_ref, :process, pid, :killed} to the Unit's mailbox.
+  # The Unit MUST route to infra-failure → escalated WITHOUT calling gate_fun.
+  # ---------------------------------------------------------------------------
+
+  describe "D-318 / B8 / C105 — worker process crash → infra-failure path, gate not called" do
+    @tag :d_340
+    @tag :d_318
+    @tag :b8
+    @tag :c105
+    test "B8/C105: worker process killed in implementing state → :escalated, gate_fun NOT called" do
+      test_pid = self()
+      unit_id = "u-crash-#{System.unique_integer([:positive])}"
+      scheduler_name = :"sched_crash_#{System.unique_integer([:positive])}"
+      sup_name = :"sup_crash_#{System.unique_integer([:positive])}"
+      start_scheduler(scheduler_name)
+      start_supervised!({@unit_supervisor, name: sup_name}, id: sup_name)
+
+      # The test captures the implementing worker pid so it can kill it.
+      # We use a named ETS table owned by this test process.
+      ets_name = :"wpid_#{System.unique_integer([:positive])}"
+      worker_pid_ets = :ets.new(ets_name, [:set, :public])
+
+      worker_fun = fn role ->
+        pid = spawn_worker()
+        :ets.insert(worker_pid_ets, {role, pid})
+        {:ok, pid}
+      end
+
+      # Sentinel: if gate_fun is called, the FSM routed a :DOWN through the
+      # semantic gate-fail path — a C105 violation.
+      gate_called_ref = :counters.new(1, [:atomics])
+
+      gate_fun = fn ->
+        :counters.add(gate_called_ref, 1, 1)
+        :pass
+      end
+
+      merge_fun = fn _uid, _hash -> :queued end
+
+      opts =
+        base_unit_opts(unit_id, scheduler_name, test_pid,
+          worker_fun: worker_fun,
+          gate_fun: gate_fun,
+          merge_fun: merge_fun,
+          timeouts: [state_timeout_ms: 5_000]
+        )
+
+      unit_pid = @unit_supervisor.start_unit(sup_name, opts)
+      assert is_pid(unit_pid)
+
+      # Drive oracle phase to completion; let FSM enter :implementing.
+      deliver_worker_done(unit_pid)
+      :timer.sleep(80)
+
+      # Verify the FSM is in :implementing with worker_pid exposed in state data.
+      # This is the discriminating check for the monitorable seam (B8 / fix f-3):
+      # the old seam returned make_ref() (unmonitorable); the new seam returns a pid.
+      {fsm_state, state_data} = :sys.get_state(unit_pid)
+
+      assert fsm_state == :implementing,
+             "B8: expected FSM in :implementing after oracle delivery; got :#{fsm_state}. " <>
+               "Check worker_fun seam and oracle→implementing transition timing."
+
+      worker_pid = Map.get(state_data, :worker_pid)
+
+      assert is_pid(worker_pid),
+             "B8 (f-3): Unit FSM in :implementing MUST expose :worker_pid in state data " <>
+               "(real pid, not a ref — enables Process.monitor/1); " <>
+               "got #{inspect(state_data)}"
+
+      # Kill the worker abnormally. The Unit's Process.monitor/1 ref delivers
+      # {:DOWN, monitor_ref, :process, worker_pid, :killed} to the Unit mailbox.
+      # The Unit must route this to the infra-failure path, not the gate-fail path.
+      Process.exit(worker_pid, :kill)
+
+      assert_receive {:unit_terminal, ^unit_id, :escalated, provenance},
+                     5_000,
+                     "B8/C105: expected :escalated from worker crash (:DOWN) within 5s"
+
+      reason = Map.get(provenance, :reason)
+
+      refute reason == nil,
+             "B8: provenance must carry an escalation reason after worker crash; got nil"
+
+      # C105 (fix f-3): a worker crash is an infra event — gate_fun MUST NOT be called.
+      # If gate_fun was called, the FSM treated the :DOWN as a semantic gate failure.
+      gate_calls = :counters.get(gate_called_ref, 1)
+
+      assert gate_calls == 0,
+             "C105 (f-3): gate_fun must NOT be called for a worker crash (infra-failure path); " <>
+               "called #{gate_calls} times — FSM incorrectly treated :DOWN as a gate outcome"
+
+      # Scheduler must release the unit after crash escalation.
+      in_flight = @scheduler.in_flight(scheduler_name)
+
+      refute Map.has_key?(in_flight, unit_id),
+             "B8: after worker-crash escalation, unit must be released from Scheduler in_flight"
+
+      :ets.delete(worker_pid_ets)
     end
   end
 end
