@@ -36,6 +36,9 @@ defmodule Tau.Factory.Supervisor do
   def init(opts) do
     db_path = Keyword.get(opts, :db_path, default_db_path())
     sup_name = Keyword.get(opts, :name, __MODULE__)
+    repo_dir = Keyword.get(opts, :repo_dir)
+    required_halves = Keyword.get(opts, :required_halves, [:critic, :reviewer])
+    merge_authority_opts = Keyword.get(opts, :merge_authority_opts, [])
 
     # Derive a per-supervisor writer name so concurrent supervisor instances
     # (e.g. isolated test instances) do not conflict on the writer's name.
@@ -46,9 +49,40 @@ defmodule Tau.Factory.Supervisor do
         :"#{sup_name}_writer"
       end
 
-    children = [
-      {Tau.Factory.Ledger.Writer, db_path: db_path, name: writer_name}
+    tasks_name =
+      if sup_name == __MODULE__ do
+        Tau.Factory.MergeTasks
+      else
+        :"#{sup_name}_tasks"
+      end
+
+    ma_name =
+      if sup_name == __MODULE__ do
+        Tau.Factory.MergeAuthority
+      else
+        :"#{sup_name}_merge_authority"
+      end
+
+    base_children = [
+      {Tau.Factory.Ledger.Writer, db_path: db_path, name: writer_name},
+      {Task.Supervisor, name: tasks_name}
     ]
+
+    children =
+      if repo_dir do
+        ma_opts =
+          [
+            name: ma_name,
+            ledger: writer_name,
+            repo_dir: repo_dir,
+            tasks_name: tasks_name,
+            required_halves: required_halves
+          ] ++ merge_authority_opts
+
+        base_children ++ [{Tau.Factory.MergeAuthority, ma_opts}]
+      else
+        base_children
+      end
 
     Supervisor.init(children, strategy: :one_for_one)
   end
