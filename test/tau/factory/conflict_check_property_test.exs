@@ -350,6 +350,72 @@ defmodule Tau.Factory.ConflictCheckPropertyTest do
 
   @tag :ac_3
   @tag :d_312
+  test "P-CC-5 disjoint_codepoints clause: shared codepoint (disjoint files/specs/resources/deps) yields {:conflict, :disjoint_codepoints} (AC-3 / D-312)" do
+    shared_codepoint = {"lib/tau/factory/scheduler.ex", :admit_unit}
+
+    # Files are prefix-tagged to guarantee disjointness — clause 2 must pass
+    # so clause 3 fires first.
+    scope_a = %{
+      deps: [],
+      files: MapSet.new(["a_lib/tau/factory/coordinator.ex"]),
+      codepoints: MapSet.new([shared_codepoint]),
+      specs: MapSet.new(),
+      resources: MapSet.new()
+    }
+
+    scope_b = %{
+      deps: [],
+      files: MapSet.new(["b_lib/tau/factory/unit.ex"]),
+      codepoints: MapSet.new([shared_codepoint]),
+      specs: MapSet.new(),
+      resources: MapSet.new()
+    }
+
+    result = @cc_mod.clear?(scope_a, %{"unit_b" => scope_b})
+    assert result == {:conflict, :disjoint_codepoints}
+  end
+
+  @tag :ac_3
+  @tag :d_312
+  @tag :d_343
+  test "P-CC-5 no_dependency monotonicity: conflict persists when in_flight grows (AC-3 / D-312 / D-343)" do
+    blocked_on_id = "unit_b"
+
+    scope_a = %{
+      deps: [blocked_on_id],
+      files: MapSet.new(["lib/tau/factory/coordinator.ex"]),
+      codepoints: MapSet.new(),
+      specs: MapSet.new(),
+      resources: MapSet.new()
+    }
+
+    scope_b = %{
+      deps: [],
+      files: MapSet.new(["lib/tau/factory/unit.ex"]),
+      codepoints: MapSet.new(),
+      specs: MapSet.new(),
+      resources: MapSet.new()
+    }
+
+    scope_extra = %{
+      deps: [],
+      files: MapSet.new(["lib/tau/factory/ledger.ex"]),
+      codepoints: MapSet.new(),
+      specs: MapSet.new(),
+      resources: MapSet.new()
+    }
+
+    base = %{blocked_on_id => scope_b}
+    assert @cc_mod.clear?(scope_a, base) == {:conflict, :no_dependency}
+
+    extended = Map.put(base, "unit_extra", scope_extra)
+
+    assert @cc_mod.clear?(scope_a, extended) == {:conflict, :no_dependency},
+           "Monotonicity violated: adding a disjoint unit to in_flight cleared a :no_dependency conflict"
+  end
+
+  @tag :ac_3
+  @tag :d_312
   test "P-CC-5 empty in_flight yields :clear (AC-3 / D-312)" do
     scope = %{
       deps: [],
