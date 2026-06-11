@@ -157,15 +157,20 @@ defmodule Tau.Factory.Budget.Owner do
   # ---------------------------------------------------------------------------
 
   # Decrement the ETS remaining counter by `cost`, flooring at 0.
+  #
+  # Uses `:ets.update_counter/3` with a threshold guard so the decrement is
+  # atomic — no read-modify-write window. Tuple layout: {dimension, remaining},
+  # so remaining is at position 2. The op `{2, -cost, 0, 0}` means:
+  # decrement position 2 by `cost`; if the result would go below 0, set to 0.
+  #
+  # Guards with `:ets.member/2` first so that a debit on an unconfigured
+  # dimension (no ETS row) is a silent no-op rather than a raised error — the
+  # same graceful behaviour as the previous `[]` branch.
   defp update_ets_remaining(table, dimension, cost) do
-    case :ets.lookup(table, dimension) do
-      [{^dimension, remaining}] ->
-        new_remaining = max(0, remaining - cost)
-        :ets.insert(table, {dimension, new_remaining})
-
-      [] ->
-        # Dimension not in totals — no ETS entry; nothing to update.
-        :ok
+    if :ets.member(table, dimension) do
+      :ets.update_counter(table, dimension, {2, -cost, 0, 0})
     end
+
+    :ok
   end
 end
