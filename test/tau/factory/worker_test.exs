@@ -220,7 +220,8 @@ defmodule Tau.Factory.WorkerTest do
       {:ok, worker_id} =
         @worker_supervisor.spawn(sup, :implementer, "brief", base_ref,
           repo_dir: repo_dir,
-          agent_bin: agent_bin
+          agent_bin: agent_bin,
+          registry: registry_name
         )
 
       assert is_binary(worker_id),
@@ -271,13 +272,15 @@ defmodule Tau.Factory.WorkerTest do
       {:ok, worker_id1} =
         @worker_supervisor.spawn(sup, :implementer, "brief1", base_ref,
           repo_dir: repo_dir,
-          agent_bin: agent_bin
+          agent_bin: agent_bin,
+          registry: registry_name
         )
 
       {:ok, worker_id2} =
         @worker_supervisor.spawn(sup, :test_author, "brief2", base_ref,
           repo_dir: repo_dir,
-          agent_bin: agent_bin
+          agent_bin: agent_bin,
+          registry: registry_name
         )
 
       refute worker_id1 == worker_id2,
@@ -354,7 +357,8 @@ defmodule Tau.Factory.WorkerTest do
       result =
         @worker_supervisor.spawn(sup, :implementer, "brief", bad_base_ref,
           repo_dir: repo_dir,
-          agent_bin: bin_path
+          agent_bin: bin_path,
+          registry: registry_name
         )
 
       # Allow the worker process to complete its failing init.
@@ -426,7 +430,8 @@ defmodule Tau.Factory.WorkerTest do
         @worker_supervisor.spawn(sup, :implementer, "brief", commit_a,
           repo_dir: repo_dir,
           agent_bin: bin_path,
-          expected_head: commit_b
+          expected_head: commit_b,
+          registry: registry_name
         )
 
       # Allow the worker process to complete its failing init.
@@ -484,14 +489,16 @@ defmodule Tau.Factory.WorkerTest do
         @worker_supervisor.spawn(sup, :implementer, "brief1", base_ref,
           repo_dir: repo_dir,
           agent_bin: agent_bin,
-          report_to: report_to
+          report_to: report_to,
+          registry: registry_name
         )
 
       {:ok, worker_id2} =
         @worker_supervisor.spawn(sup, :critic, "brief2", base_ref,
           repo_dir: repo_dir,
           agent_bin: agent_bin,
-          report_to: report_to
+          report_to: report_to,
+          registry: registry_name
         )
 
       # Resolve pids via registry — never store pids durably ([C218]).
@@ -557,7 +564,8 @@ defmodule Tau.Factory.WorkerTest do
         @worker_supervisor.spawn(sup, :implementer, "test brief", base_ref,
           repo_dir: repo_dir,
           agent_bin: agent_bin,
-          report_to: report_to
+          report_to: report_to,
+          registry: registry_name
         )
 
       # B1: spawn/5 must return {:ok, worker_id}.
@@ -604,7 +612,8 @@ defmodule Tau.Factory.WorkerTest do
       {:ok, worker_id} =
         @worker_supervisor.spawn(sup, :reviewer, "brief", base_ref,
           repo_dir: repo_dir,
-          agent_bin: agent_bin
+          agent_bin: agent_bin,
+          registry: registry_name
         )
 
       # Resolve pid from registry using the logical key — this is [C218].
@@ -617,6 +626,48 @@ defmodule Tau.Factory.WorkerTest do
       assert Process.alive?(pid), "B1: the registered worker process must be alive"
 
       Process.exit(pid, :kill)
+    end
+
+    @tag :dynsup_contract
+    test "spawn/5 requires :registry — fail-closed contract of the DynamicSupervisor design" do
+      # Discriminating test for gate 5.3.
+      #
+      # OLD code: WorkerSupervisor held the registry in GenServer state and
+      # tolerated a missing per-call :registry opt — spawn would succeed.
+      #
+      # NEW code: WorkerSupervisor is a plain DynamicSupervisor; the registry
+      # is a REQUIRED per-call opt resolved via `Keyword.fetch!(opts, :registry)`.
+      # Omitting :registry raises KeyError immediately — no partial execution.
+      #
+      # TRUE for the new contract, FALSE for the old: genuine gate 5.3 discriminator.
+      tmp_dir =
+        System.tmp_dir!() |> Path.join("tau_dynsup_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(tmp_dir)
+      on_exit(fn -> File.rm_rf!(tmp_dir) end)
+
+      %{repo_dir: repo_dir, base_ref: base_ref} = setup_git_repo(tmp_dir)
+      agent_bin = dummy_agent_bin(tmp_dir, "_dynsup")
+
+      n = System.unique_integer([:positive])
+      sup_name = :"dynsup_contract_sup_#{n}"
+
+      {:ok, sup} =
+        start_supervised(
+          {@worker_supervisor, name: sup_name},
+          id: :"dynsup_sup_#{n}"
+        )
+
+      # Calling spawn/5 WITHOUT :registry MUST raise KeyError.
+      # The DynamicSupervisor design enforces fail-closed: no registry in state,
+      # so per-call :registry is always required.
+      assert_raise KeyError, fn ->
+        @worker_supervisor.spawn(sup, :implementer, "brief", base_ref,
+          repo_dir: repo_dir,
+          agent_bin: agent_bin
+          # :registry intentionally omitted
+        )
+      end
     end
 
     @tag :b1_b4
@@ -640,7 +691,8 @@ defmodule Tau.Factory.WorkerTest do
         @worker_supervisor.spawn(sup, :implementer, "brief", base_ref,
           repo_dir: repo_dir,
           agent_bin: agent_bin,
-          report_to: report_to
+          report_to: report_to,
+          registry: registry_name
         )
 
       [{pid, _}] = Registry.lookup(registry_name, worker_id)

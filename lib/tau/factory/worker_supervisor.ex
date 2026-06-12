@@ -9,26 +9,25 @@ defmodule Tau.Factory.WorkerSupervisor do
   Workers are addressed via `Tau.Factory.WorkerRegistry` by their logical
   `worker_id` string key; pids are never stored durably ([C218]).
 
-  Implemented as a `GenServer` that owns an inner `DynamicSupervisor`.
-  The registry atom is held in the GenServer's state and retrieved via
-  a single `GenServer.call/2` at spawn time — no global mutable ETS.
+  Implemented as a plain `DynamicSupervisor`. The registry atom is passed
+  per-call via `spawn/5` opts — no GenServer wrapper, no inner-sup-inside-init,
+  no ETS.
 
   See `docs/spec/SPEC-FACTORY-FLEET.md`, D-309, D-316.
   """
 
-  use GenServer
+  use DynamicSupervisor
 
   @doc """
   Start the WorkerSupervisor and register it under `:name`.
 
   Options:
-    - `:name`     — atom; registered name for this GenServer (required).
-    - `:registry` — atom; registered name of the `WorkerRegistry` (required).
+    - `:name` — atom; registered name for this DynamicSupervisor (required).
   """
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts) do
     name = Keyword.fetch!(opts, :name)
-    GenServer.start_link(__MODULE__, opts, name: name)
+    DynamicSupervisor.start_link(__MODULE__, opts, name: name)
   end
 
   @doc """
@@ -41,10 +40,15 @@ defmodule Tau.Factory.WorkerSupervisor do
     %{
       id: name,
       start: {__MODULE__, :start_link, [opts]},
-      type: :worker,
+      type: :supervisor,
       restart: :permanent,
-      shutdown: 5_000
+      shutdown: :infinity
     }
+  end
+
+  @impl DynamicSupervisor
+  def init(_opts) do
+    DynamicSupervisor.init(strategy: :one_for_one)
   end
 
   @doc """
@@ -60,6 +64,7 @@ defmodule Tau.Factory.WorkerSupervisor do
   the worker may still stop asynchronously if `init/1` fails.
 
   Options (all passed through to `Tau.Factory.Worker`):
+    - `:registry`            — atom; registered name of the WorkerRegistry (required).
     - `:repo_dir`            — path to the git repo (required).
     - `:agent_bin`           — path to the executable (required).
     - `:toolchain`           — atom (default: `:elixir`).
@@ -72,27 +77,8 @@ defmodule Tau.Factory.WorkerSupervisor do
   @spec spawn(atom() | pid(), atom(), String.t(), String.t(), keyword()) ::
           {:ok, String.t()} | {:error, term()}
   def spawn(supervisor, role, brief, base_ref, opts) do
-    GenServer.call(supervisor, {:spawn_worker, role, brief, base_ref, opts})
-  end
-
-  # ---------------------------------------------------------------------------
-  # GenServer callbacks
-  # ---------------------------------------------------------------------------
-
-  @impl GenServer
-  def init(opts) do
-    registry = Keyword.fetch!(opts, :registry)
-
-    # Start the inner DynamicSupervisor linked to this GenServer.
-    {:ok, dyn_sup} =
-      DynamicSupervisor.start_link(strategy: :one_for_one)
-
-    {:ok, %{registry: registry, dyn_sup: dyn_sup}}
-  end
-
-  @impl GenServer
-  def handle_call({:spawn_worker, role, brief, base_ref, opts}, _from, state) do
     worker_id = Keyword.get(opts, :worker_id, generate_worker_id())
+    registry = Keyword.fetch!(opts, :registry)
 
     worker_opts =
       opts
@@ -100,7 +86,7 @@ defmodule Tau.Factory.WorkerSupervisor do
       |> Keyword.put(:role, role)
       |> Keyword.put(:brief, brief)
       |> Keyword.put(:base_ref, base_ref)
-      |> Keyword.put(:registry, state.registry)
+      |> Keyword.put(:registry, registry)
 
     child_spec = %{
       id: make_ref(),
@@ -109,22 +95,19 @@ defmodule Tau.Factory.WorkerSupervisor do
       type: :worker
     }
 
-    result =
-      case DynamicSupervisor.start_child(state.dyn_sup, child_spec) do
-        {:ok, _pid} ->
-          {:ok, worker_id}
+    case DynamicSupervisor.start_child(supervisor, child_spec) do
+      {:ok, _pid} ->
+        {:ok, worker_id}
 
-        {:ok, _pid, _info} ->
-          {:ok, worker_id}
+      {:ok, _pid, _info} ->
+        {:ok, worker_id}
 
-        {:error, {:already_started, _pid}} ->
-          {:ok, worker_id}
+      {:error, {:already_started, _pid}} ->
+        {:ok, worker_id}
 
-        {:error, reason} ->
-          {:error, reason}
-      end
-
-    {:reply, result, state}
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   # ---------------------------------------------------------------------------
