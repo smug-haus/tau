@@ -49,6 +49,7 @@ defmodule Tau.Factory.Unit do
 
   @behaviour :gen_statem
 
+  alias Tau.Factory.Ledger.Writer, as: LedgerWriter
   alias Tau.Factory.Retry
   alias Tau.Factory.Scheduler
 
@@ -88,6 +89,10 @@ defmodule Tau.Factory.Unit do
     - `:merge_fun`      — `(unit_id, hash -> :queued | {:error, reason})`.
 
   Optional options:
+    - `:ledger`         — `GenServer.server()` | `nil`; when present and non-nil,
+                          the Unit calls `Ledger.Writer.snapshot_unit/2` on each
+                          state entry (WAL-before-ack, D-318). When `nil` or absent,
+                          snapshotting is a no-op — existing callers unaffected.
     - `:registry_name`  — atom; if given, the Unit registers itself under its
                           `unit_id` in that Registry on start (f-6).
     - `:timeouts`       — keyword with `:state_timeout_ms` (default 30_000).
@@ -114,6 +119,7 @@ defmodule Tau.Factory.Unit do
     worker_fun = Keyword.fetch!(opts, :worker_fun)
     gate_fun = Keyword.fetch!(opts, :gate_fun)
     merge_fun = Keyword.fetch!(opts, :merge_fun)
+    ledger = Keyword.get(opts, :ledger, nil)
     registry_name = Keyword.get(opts, :registry_name, nil)
     timeouts = Keyword.get(opts, :timeouts, [])
     state_timeout_ms = Keyword.get(timeouts, :state_timeout_ms, @default_state_timeout_ms)
@@ -129,6 +135,7 @@ defmodule Tau.Factory.Unit do
       hash: hash,
       scheduler: scheduler,
       report_to: report_to,
+      ledger: ledger,
       worker_fun: worker_fun,
       gate_fun: gate_fun,
       merge_fun: merge_fun,
@@ -156,6 +163,8 @@ defmodule Tau.Factory.Unit do
   # ---------------------------------------------------------------------------
 
   def planned(:internal, :on_enter, data) do
+    snapshot_state(:planned, data)
+
     case Scheduler.admit(data.scheduler, data.unit_id, data.declared_scope) do
       :admit ->
         {:next_state, :oracle, data, [{:next_event, :internal, :on_enter}]}
@@ -177,6 +186,8 @@ defmodule Tau.Factory.Unit do
   # ---------------------------------------------------------------------------
 
   def oracle(:internal, :on_enter, data) do
+    snapshot_state(:oracle, data)
+
     case data.worker_fun.(:test_author) do
       {:ok, worker_pid} ->
         mref = Process.monitor(worker_pid)
@@ -229,6 +240,7 @@ defmodule Tau.Factory.Unit do
 
   def implementing(:internal, :on_enter, data) do
     new_data = %{data | attempt_count: data.attempt_count + 1}
+    snapshot_state(:implementing, new_data)
 
     case new_data.worker_fun.(:implementer) do
       {:ok, worker_pid} ->
@@ -302,6 +314,8 @@ defmodule Tau.Factory.Unit do
   # ---------------------------------------------------------------------------
 
   def gating(:internal, :on_enter, data) do
+    snapshot_state(:gating, data)
+
     case data.gate_fun.() do
       :pass ->
         {:next_state, :awaiting_merge, data, [{:next_event, :internal, :on_enter}]}
@@ -341,6 +355,7 @@ defmodule Tau.Factory.Unit do
   # ---------------------------------------------------------------------------
 
   def awaiting_merge(:internal, :on_enter, data) do
+    snapshot_state(:awaiting_merge, data)
     _result = data.merge_fun.(data.unit_id, data.hash)
     timeout_ms = data.state_timeout_ms
     {:keep_state, data, [{:state_timeout, timeout_ms, :merge_stalled}]}
@@ -409,6 +424,9 @@ defmodule Tau.Factory.Unit do
       reason: reason
     }
 
+    # D-318: snapshot BEFORE external effects (WAL-before-ack, D-315).
+    snapshot_state(outcome, data)
+
     Scheduler.release(data.scheduler, data.unit_id)
     send(data.report_to, {:unit_terminal, data.unit_id, outcome, provenance})
 
@@ -426,6 +444,26 @@ defmodule Tau.Factory.Unit do
       %{attempt_count: provenance.attempt_count},
       %{unit_id: data.unit_id, reason: provenance.reason}
     )
+  end
+
+  # Durably snapshot the Unit's current state to the Ledger (D-318 / WAL-before-ack).
+  # Idempotency key: "#{unit_id}:snapshot:#{state}" — deterministic per {unit_id,
+  # kind, coordinate}. INSERT OR IGNORE in the Writer means re-entering the same
+  # state (e.g. :gating during a refine cycle) is a no-op; highest row id wins
+  # in latest_unit_snapshots/1. No-op when ledger is nil (back-compat, D-318 §4 B3).
+  @spec snapshot_state(atom(), map()) :: :ok
+  defp snapshot_state(_state, %{ledger: nil}), do: :ok
+
+  defp snapshot_state(state, data) do
+    idempotency_key = "#{data.unit_id}:snapshot:#{state}"
+
+    LedgerWriter.snapshot_unit(data.ledger, %{
+      unit_id: data.unit_id,
+      state: state,
+      idempotency_key: idempotency_key
+    })
+
+    :ok
   end
 
   # Drop a spurious internal on_enter if it arrives in a terminal state,

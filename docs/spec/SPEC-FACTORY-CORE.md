@@ -301,6 +301,30 @@ Used exclusively by `Coordinator.init/1` to rebuild the in-flight set on
 resume (D-344). Terminal units (`:merged`/`:escalated`) appear in the map;
 the Coordinator filters them. Returns `%{}` when no snapshots exist.
 
+#### B3 — Unit `:ledger` start option (durable per-transition snapshotting, D-318 / P5c-1)
+
+`Unit.start_link/1` accepts an optional `:ledger` key:
+
+```
+:ledger — GenServer.server() | nil
+```
+
+When `:ledger` is present and non-nil, the Unit calls
+`Ledger.Writer.snapshot_unit(ledger, attrs)` on **each state entry**, before the
+state's external effect (WAL-before-ack, D-315). This makes the Unit's FSM
+state crash-durable and enables the Coordinator's D-344 resume to rehydrate
+**real** units (not only the injected test seam).
+
+The `idempotency_key` coordinate is `"#{unit_id}:snapshot:#{state}"` —
+deterministic per `{unit_id, kind, coordinate}`. Re-entering the same FSM
+state (e.g. `:gating` during a refine cycle) produces the same key: `INSERT OR
+IGNORE` makes the repeated write a no-op (D-315). The highest row `id` per
+`unit_id` records the most-recently-written state; `latest_unit_snapshots/1`
+returns that state for resume.
+
+When `:ledger` is `nil` or absent, snapshotting is a **no-op** — existing
+callers that pass no `:ledger` opt are unaffected (back-compat).
+
 ### B4: Scheduler (C4) ↔ Budget.Owner (C2)
 
 - `budget_precheck/1 :: (unit_id) -> :ok | {:exhausted, dimension}` — reads the
