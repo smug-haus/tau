@@ -3,73 +3,59 @@ defmodule Tau.Factory.CoordinatorRecoveryTest do
   Gating test for PR #455 (P5b — Coordinator durable resume from the Ledger).
 
   Enforces **D-344 (Recovery progress, liveness)** / **AC-8**: after a
-  Coordinator crash the loop resumes from the durable Ledger (L) and continues;
-  in-flight units rehydrate at their snapshotted state; **no terminal work is
-  re-done** (exactly-once on resume).
+  Coordinator crash the *supervisor restarts it*, the restart resumes from the
+  durable Ledger (L) and continues; in-flight units rehydrate at their
+  snapshotted state; **no terminal work is re-done** (exactly-once on resume).
+
+  ## Why this drives the SUPERVISED restart path (the strongest oracle)
+
+  D-344's "resumes and continues" is only meaningful in production if the thing
+  that triggers a resume — a *supervisor restart of the crashed Coordinator* —
+  actually fires. Production wires the Coordinator into `Tau.Factory.Supervisor`
+  via its `child_spec` (`start: {Coordinator, :start_link, [opts]}`,
+  `restart: :permanent`, strategy `:one_for_one`). For the supervisor to detect
+  the crash and restart, `start_link/1` MUST establish a link (the supervisor's
+  link to its child). A `start_link` that calls `:gen_statem.start` (UNLINKED)
+  registers a child the supervisor can never observe crashing — it is never
+  restarted, and D-344 is structurally unenforceable in production.
+
+  This test therefore exercises the REAL production trigger: it starts the
+  Coordinator UNDER A SUPERVISOR (`start_supervised!/2`, which honours the
+  child_spec's `restart`), KILLS it, and asserts THE SUPERVISOR RESTARTS IT
+  (a new pid re-registers under the same name) and that the restart resumes
+  from L. The test relies on the supervisor's link to the Coordinator; it never
+  links the Coordinator to the *test* process, so a properly-linking
+  `start_link` does not cascade the `:kill` into the suite.
+
+  ## Fail-before validity
+
+  On a branch where `start_link/1` is UNLINKED (`:gen_statem.start`), the
+  supervisor never restarts the killed Coordinator: the registered name stays
+  unbound, no new pid appears, and the resume-from-L oracles never hold — so
+  THIS TEST FAILS. It passes only once `start_link/1` relinks
+  (`:gen_statem.start_link`) so the production supervisor can restart and the
+  restart resumes. A test that passed against the unlinked `start_link` would be
+  wrong-path (it would never exercise the supervised restart that actually
+  triggers D-344 in production).
 
   SPEC sources (docs/spec/SPEC-FACTORY-CORE.md):
     - §5 Coordinator state table: `running` entry = "start (resume from L)".
     - §4 B3 {Coordinator,Unit} ↔ Ledger.Writer: `snapshot_unit/2` is the durable
-      write op recording a unit's transition state; every write carries an
-      idempotency key `{unit_id, kind, coordinate}`; "a coordinator restart
-      resumes from L with no decision lost or re-applied" (D-315, RPO=0).
-    - §6 D-344: enforced by `coordinator_recovery_test.exs` — kill the Coordinator
-      mid-drive; assert resume + idempotent rehydrate; no terminal work re-done.
-
-  Written BEFORE the resume implementation exists (oracle-separation phase,
-  factory-loop §4b). On current `main` the Coordinator's `init/1` does NOT take a
-  `:ledger` opt and does NOT resume from L, and `Ledger.Writer` does not yet
-  expose `snapshot_unit/2`. This test therefore FAILS now (the resume behaviour
-  is precisely what is absent) and passes only once P5b lands. A test that passes
-  against the absent behaviour would be vacuous.
-
-  ## Pinned API contract (the implementer MUST conform exactly)
-
-  ### Tau.Factory.Ledger.Writer — durable unit-snapshot op (B3)
-
-  `snapshot_unit(server, attrs) :: {:ok, ref} | {:error, term}`
-    `attrs` is a map:
-      `:unit_id` — String.t(); the PR/unit identifier.
-      `:state`   — atom(); the Unit FSM state at this snapshot, one of
-                   `#{inspect([:planned, :oracle, :implementing, :gating, :refine_k, :awaiting_merge, :merged, :escalated])}`
-                   (§5 Unit state enumeration). `:merged` / `:escalated` are
-                   terminal sinks.
-      `:idempotency_key` — String.t(); deterministic per `{unit_id, kind,
-                   coordinate}` (B3 Pre). A replayed write with the same key is a
-                   no-op (B3 Post; D-315).
-    WAL-before-ack: the `{:ok, ref}` reply arrives only after the SQLite WAL
-    commit is durable, so a snapshot survives a Coordinator crash.
-
-  `latest_unit_snapshots(server) :: %{unit_id => state_atom}`
-    Returns the latest snapshotted state per unit_id (highest row id wins),
-    across the whole ledger. This is the resume-read the Coordinator uses to
-    rebuild its in-flight set and to learn which units already reached a
-    terminal sink. (The §4 B3 contract names the write op `snapshot_unit/2` but
-    is silent on the resume-read op; see the SPEC-gap note in the test-author
-    report. This name is the test's pinned contract; an amendment may rename it,
-    in which case this test is updated in lockstep.)
-
-  ### Tau.Factory.Coordinator — durable resume (D-344)
-
-  `start_link/1` gains one option:
-      `:ledger` — `GenServer.server()` reference to a running `Ledger.Writer`.
-                  When present, `init/1` reads `latest_unit_snapshots/1` and:
-                    - rehydrates each NON-terminal unit at its snapshotted state
-                      (drives it forward — resume continues the loop), and
-                    - re-does NO work for any unit already at a terminal sink
-                      (`:merged` / `:escalated`) — exactly-once on resume (D-344).
+      write op; every write carries an idempotency key `{unit_id, kind,
+      coordinate}`; "a coordinator restart resumes from L with no decision lost
+      or re-applied" (D-315, RPO=0).
+    - §6 D-344: kill the Coordinator; assert SUPERVISED restart + resume +
+      idempotent rehydrate; no terminal work re-done.
 
   AC/D-NNN linkage: AC-8, D-344.
   """
 
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   @moduletag :capture_log
   @moduletag :ac_8
   @moduletag :d_344
 
-  # Runtime module references. File compiles while the resume surfaces are
-  # absent; the test fails at runtime (UndefinedFunctionError / behaviour gap).
   @coordinator Tau.Factory.Coordinator
   @writer Tau.Factory.Ledger.Writer
 
@@ -82,7 +68,7 @@ defmodule Tau.Factory.CoordinatorRecoveryTest do
     :"#{base}_#{suffix}"
   end
 
-  # Start a real Ledger.Writer against an isolated temp DB and return its name.
+  # Start a real Ledger.Writer against an isolated temp DB; return its name.
   defp start_ledger do
     db_path = Briefly.create!(extname: ".db")
     writer_name = unique_name(:rec_ledger)
@@ -96,39 +82,43 @@ defmodule Tau.Factory.CoordinatorRecoveryTest do
   end
 
   # ---------------------------------------------------------------------------
-  # AC-8 / D-344: Coordinator killed mid-drive resumes from L; no terminal
-  # work is re-done; the in-flight unit rehydrates at its snapshotted state.
+  # AC-8 / D-344: a SUPERVISOR restarts the killed Coordinator; the restart
+  # resumes from L; the in-flight unit rehydrates at its snapshotted state; no
+  # terminal work is re-done.
   #
   # Timeline:
   #   1. Real Ledger (L) holds two snapshotted units:
-  #        - terminal_unit at :merged   (a terminal sink — already done).
-  #        - inflight_unit at :implementing (NON-terminal — was in flight).
-  #   2. Start Coordinator wired to L. select_fun returns nil (no NEW external
-  #      work), so any drive the Coordinator performs can ONLY come from
-  #      rehydrating L state — isolating the resume behaviour under test.
-  #      drive_fun records every unit_id it is asked to drive into an Agent.
-  #   3. KILL the Coordinator with :kill (terminate/2 cannot help — resume MUST
-  #      come from L alone).
-  #   4. Restart the Coordinator against the SAME L.
+  #        - terminal_unit at :merged       (a terminal sink — already done).
+  #        - inflight_unit at :implementing  (NON-terminal — was in flight).
+  #   2. Start the Coordinator UNDER A SUPERVISOR (start_supervised!), wired to
+  #      L, with select_fun returning nil (no NEW external work) so any drive can
+  #      ONLY come from rehydrating L — isolating the resume behaviour. drive_fun
+  #      records every driven unit_id into an EXTERNAL Agent that OUTLIVES the
+  #      Coordinator restart (owned by the test, closed over).
+  #   3. Resolve the running Coordinator's pid by registered name, then KILL it
+  #      with :kill. Because it is supervised (not linked to the test process),
+  #      the :kill does NOT reach the test — the SUPERVISOR restarts it.
+  #   4. Poll the registered name until it resolves to a pid DIFFERENT from the
+  #      killed one (bounded; never hangs). This is the production restart.
   #   5. Assert (load-bearing oracles):
-  #        a. the terminal unit is NEVER driven post-resume (exactly-once / no
-  #           terminal work re-done — the D-344 crux),
-  #        b. the in-flight unit IS rehydrated (driven) — resumed, not dropped,
-  #        c. resume is reflected in the Coordinator's rebuilt state
-  #           (:sys.get_state shows the in-flight unit, terminal unit absent).
+  #        a. the SUPERVISOR RESTARTED it — new pid ≠ killed pid, same name,
+  #        b. the restart RESUMED from L — :sys.get_state shows the in-flight
+  #           unit rehydrated, terminal unit absent,
+  #        c. NO terminal work re-done — the terminal unit's id is NEVER recorded
+  #           as driven by drive_fun after the restart (exactly-once).
   # ---------------------------------------------------------------------------
 
   @tag :ac_8
   @tag :d_344
-  test "AC-8 / D-344: Coordinator killed mid-drive resumes from L; terminal work is not re-done (exactly-once rehydrate)" do
+  test "AC-8 / D-344: supervisor restarts a killed Coordinator, which resumes from L without re-doing terminal work" do
     ledger = start_ledger()
 
     terminal_unit = "unit-terminal-#{System.unique_integer([:positive])}"
     inflight_unit = "unit-inflight-#{System.unique_integer([:positive])}"
 
     # --- Seed L with the two unit snapshots via the REAL durable write op. ---
-    # A unit that already reached a terminal sink (:merged): no work may be
-    # re-done for it on resume.
+    # A unit already at a terminal sink (:merged): no work may be re-done on
+    # resume.
     assert {:ok, _} =
              @writer.snapshot_unit(ledger, %{
                unit_id: terminal_unit,
@@ -136,8 +126,8 @@ defmodule Tau.Factory.CoordinatorRecoveryTest do
                idempotency_key: "#{terminal_unit}:snapshot:merged"
              })
 
-    # A unit that was in flight (non-terminal :implementing) when the crash hit:
-    # it must rehydrate at this state and be driven forward on resume.
+    # A unit in flight (non-terminal :implementing) at crash time: it must
+    # rehydrate at this state and be driven forward on resume.
     assert {:ok, _} =
              @writer.snapshot_unit(ledger, %{
                unit_id: inflight_unit,
@@ -145,19 +135,22 @@ defmodule Tau.Factory.CoordinatorRecoveryTest do
                idempotency_key: "#{inflight_unit}:snapshot:implementing"
              })
 
-    # --- A drive seam that records every unit_id it is asked to drive. ---
-    # Bound in THIS (test) process and closed over, so the recording target is
-    # the test pid, never the coordinator's self() (the #452 mis-targeting trap).
+    # --- External drive-record store that SURVIVES a Coordinator restart. ---
+    # The Agent is owned by the test process, not the Coordinator, so a kill of
+    # the Coordinator does not destroy the record. Closed over by drive_fun.
     {:ok, drive_log} = Agent.start_link(fn -> [] end)
+    on_exit(fn -> if Process.alive?(drive_log), do: Agent.stop(drive_log) end)
+
     test_pid = self()
-    coord = coord_name()
+    coord = unique_name(:coord_recovery)
 
     drive_fun = fn work ->
       unit_id = work
       Agent.update(drive_log, fn log -> log ++ [unit_id] end)
       send(test_pid, {:driven, unit_id})
-      # The rehydrated unit "completes" immediately so the loop can quiesce;
-      # the coordinator pid is resolved by registered name at drive time.
+      # The rehydrated unit "completes" immediately so the loop can quiesce; the
+      # coordinator pid is resolved by registered name at drive time (it is the
+      # currently-registered incarnation, original or restarted).
       coord_pid = Process.whereis(coord)
       if is_pid(coord_pid), do: send(coord_pid, {:unit_terminal, unit_id, :merged})
       :ok
@@ -166,71 +159,82 @@ defmodule Tau.Factory.CoordinatorRecoveryTest do
     # No NEW external work: any drive observed comes from L rehydration alone.
     select_fun = fn -> nil end
 
-    # --- Start the Coordinator wired to L, then KILL it mid-drive. ---
-    {:ok, pid1} =
-      @coordinator.start_link(
-        name: coord,
-        pubsub: Tau.PubSub,
-        select_fun: select_fun,
-        drive_fun: drive_fun,
-        scheduler: nil,
-        ledger: ledger
-      )
+    opts = [
+      name: coord,
+      pubsub: Tau.PubSub,
+      select_fun: select_fun,
+      drive_fun: drive_fun,
+      scheduler: nil,
+      ledger: ledger
+    ]
 
-    # Let the first incarnation begin its resume/drive, then kill it hard.
-    Process.sleep(50)
-    Process.exit(pid1, :kill)
+    # --- Start the Coordinator UNDER A SUPERVISOR (production restart path). ---
+    # start_supervised!/1 starts {Coordinator, opts} via its child_spec, which
+    # declares restart: :permanent. For the supervisor to restart on crash,
+    # start_link/1 MUST link the Coordinator to the supervisor.
+    start_supervised!({@coordinator, opts})
 
-    refute Process.alive?(pid1)
+    # The first incarnation rehydrates the in-flight unit from L.
+    assert_receive {:driven, ^inflight_unit}, 2000
 
-    # Wait for the registered name to clear so the restart can re-register it.
-    wait_until_unregistered(coord)
+    # Capture the running Coordinator's pid by registered name.
+    pid1 = Process.whereis(coord)
+    assert is_pid(pid1), "Coordinator did not register under #{inspect(coord)}"
 
-    # Reset the drive log: we assert about POST-RESUME drives specifically.
+    # Reset the drive log: we assert about POST-RESTART drives specifically.
     Agent.update(drive_log, fn _ -> [] end)
     drain_driven_messages()
 
-    # --- Restart the Coordinator against the SAME L. ---
-    {:ok, _pid2} =
-      @coordinator.start_link(
-        name: coord,
-        pubsub: Tau.PubSub,
-        select_fun: select_fun,
-        drive_fun: drive_fun,
-        scheduler: nil,
-        ledger: ledger
-      )
+    # --- KILL the Coordinator. Because it is SUPERVISED (linked to the
+    # supervisor, NOT to this test process), the :kill does not reach the test —
+    # the supervisor restarts it. ---
+    Process.exit(pid1, :kill)
+    refute Process.alive?(pid1)
 
-    # The in-flight unit MUST be rehydrated and driven on resume (resumed at its
-    # snapshotted state, not cold-dropped). select_fun returns nil, so this drive
-    # can only originate from L rehydration.
+    # --- Oracle (a): the SUPERVISOR RESTARTED it. Poll the registered name
+    # until it resolves to a NEW pid (different from the killed one), under the
+    # SAME name. This is the production D-344 trigger. ---
+    pid2 = wait_for_restart(coord, pid1)
+
+    assert is_pid(pid2),
+           "D-344 violation: the supervisor did NOT restart the killed Coordinator " <>
+             "(name #{inspect(coord)} never re-registered a new pid). This is the " <>
+             "structural failure an UNLINKED start_link induces."
+
+    assert pid2 != pid1,
+           "Expected a freshly-restarted Coordinator pid under #{inspect(coord)}; " <>
+             "got the same pid #{inspect(pid2)} (no restart occurred)."
+
+    # The restarted incarnation rehydrates the in-flight unit from L again
+    # (resume continues the loop). This drive can only originate from L.
     assert_receive {:driven, ^inflight_unit},
                    2000,
-                   "D-344 violation: in-flight unit was not rehydrated/resumed from L"
+                   "D-344 violation: the restarted Coordinator did not resume the " <>
+                     "in-flight unit from L"
 
-    # Give the loop a moment to (incorrectly) re-drive the terminal unit if the
-    # resume is NOT idempotent. With correct resume, no such drive occurs.
+    # Give the restarted loop a moment to (incorrectly) re-drive the terminal
+    # unit if resume is not idempotent. With correct resume, no such drive occurs.
     Process.sleep(150)
 
-    post_resume_drives = Agent.get(drive_log, & &1)
+    post_restart_drives = Agent.get(drive_log, & &1)
 
-    # Oracle (a): exactly-once / no terminal work re-done — the terminal unit is
-    # NEVER driven after resume. This is the D-344 crux.
-    refute terminal_unit in post_resume_drives,
-           "D-344 violation: a unit already :merged in L was re-driven on resume " <>
-             "(post-resume drives: #{inspect(post_resume_drives)})"
+    # --- Oracle (c): exactly-once / no terminal work re-done — the terminal
+    # unit is NEVER driven after the restart. This is the D-344 crux. ---
+    refute terminal_unit in post_restart_drives,
+           "D-344 violation: a unit already :merged in L was re-driven after the " <>
+             "supervised restart (post-restart drives: #{inspect(post_restart_drives)})"
 
-    # Oracle (b): the in-flight unit was driven exactly once on resume — resumed,
-    # not duplicated.
-    inflight_count = Enum.count(post_resume_drives, &(&1 == inflight_unit))
+    # The in-flight unit was driven exactly once on resume — resumed, not
+    # duplicated.
+    inflight_count = Enum.count(post_restart_drives, &(&1 == inflight_unit))
 
     assert inflight_count == 1,
            "Expected the in-flight unit driven exactly once on resume; " <>
-             "got #{inflight_count} (drives: #{inspect(post_resume_drives)})"
+             "got #{inflight_count} (drives: #{inspect(post_restart_drives)})"
 
-    # Oracle (c): resume is reflected in the rebuilt Coordinator state. The
-    # restarted Coordinator's data must know about the in-flight unit it
-    # rehydrated and must NOT carry the terminal unit as work to do.
+    # --- Oracle (b): resume is reflected in the RESTARTED Coordinator's rebuilt
+    # state. The restarted incarnation must know about the in-flight unit it
+    # rehydrated and must NOT carry the terminal unit as work to do. ---
     {_state_name, data} = :sys.get_state(coord)
     resumed = resumed_unit_ids(data)
 
@@ -247,21 +251,10 @@ defmodule Tau.Factory.CoordinatorRecoveryTest do
   # Local helpers used by the test body.
   # ---------------------------------------------------------------------------
 
-  # A single stable registered name for the coordinator-under-test, so the
-  # drive_fun closure (built before start) can resolve the pid by name and the
-  # restart re-registers the same name.
-  defp coord_name do
-    Process.get(:rec_coord_name) ||
-      (
-        name = unique_name(:coord_recovery)
-        Process.put(:rec_coord_name, name)
-        name
-      )
-  end
-
   # Collect every unit_id the rebuilt Coordinator data treats as live/in-flight,
   # tolerant of how the resume records them (a single :in_flight id, a list, or a
-  # map keyed by unit_id). Terminal units, correctly resumed, never appear here.
+  # map keyed by unit_id, under any of several plausible field names). Terminal
+  # units, correctly resumed, never appear here.
   defp resumed_unit_ids(data) when is_map(data) do
     direct =
       case Map.get(data, :in_flight) do
@@ -287,11 +280,15 @@ defmodule Tau.Factory.CoordinatorRecoveryTest do
 
   defp resumed_unit_ids(_), do: []
 
-  defp wait_until_unregistered(name) do
-    Enum.reduce_while(1..200, :waiting, fn _, _ ->
+  # Poll the registered name until it resolves to a pid different from `old_pid`
+  # (the killed incarnation). Returns the new pid, or `nil` if no restart was
+  # observed within the bound — never hangs. A `nil` result IS the fail-before
+  # signal on an unlinked `start_link` (no supervisor restart).
+  defp wait_for_restart(name, old_pid) do
+    Enum.reduce_while(1..200, nil, fn _, _ ->
       case Process.whereis(name) do
-        nil -> {:halt, :ok}
-        _ -> Process.sleep(10) && {:cont, :waiting}
+        pid when is_pid(pid) and pid != old_pid -> {:halt, pid}
+        _ -> Process.sleep(10) && {:cont, nil}
       end
     end)
   end
