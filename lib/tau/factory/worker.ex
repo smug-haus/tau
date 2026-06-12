@@ -256,7 +256,18 @@ defmodule Tau.Factory.Worker do
       ns: ns
     } = ctx
 
-    # Step 4: open Port (linked by default — agent crash propagates to worker).
+    # Step 4: register with the janitor (or arm the death-monitor) BEFORE
+    # opening the Port, so that any raise during Port.open is caught by the
+    # janitor's :DOWN handler — no unmonitored worktree leak (D-314, SPEC B5).
+    ns_dirs = Map.values(ns)
+
+    if janitor do
+      WorkspaceJanitor.register(janitor, worker_id, self(), ws, ns_dirs, report_to)
+    else
+      spawn_death_monitor(worker_id, report_to)
+    end
+
+    # Step 5: open Port (linked by default — agent crash propagates to worker).
     env_list =
       Enum.map(ns, fn {var, dir} ->
         {String.to_charlist(var), String.to_charlist(dir)}
@@ -271,18 +282,7 @@ defmodule Tau.Factory.Worker do
         {:cd, ws}
       ])
 
-    # When a janitor is provided, register with it (it becomes the sole writer
-    # of the death-certificate and the capture-before-destroy executor).
-    # Otherwise fall back to the P4d-2 built-in unlinked death-monitor.
-    ns_dirs = Map.values(ns)
-
-    if janitor do
-      WorkspaceJanitor.register(janitor, worker_id, self(), ws, ns_dirs, report_to)
-    else
-      spawn_death_monitor(worker_id, report_to)
-    end
-
-    # Step 5: arm heartbeat timer.
+    # Step 6: arm heartbeat timer.
     timer =
       if heartbeat_interval do
         Process.send_after(self(), :heartbeat, heartbeat_interval)

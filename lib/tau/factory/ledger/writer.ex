@@ -152,7 +152,7 @@ defmodule Tau.Factory.Ledger.Writer do
 
   Returns `{:ok, ref}` where `ref` is the inserted row id.
   """
-  @spec capture(GenServer.server(), String.t(), capture_attrs()) :: {:ok, ref()}
+  @spec capture(GenServer.server(), String.t(), capture_attrs()) :: {:ok, ref()} | {:error, term()}
   def capture(server, worker_id, attrs) do
     GenServer.call(server, {:capture, worker_id, attrs})
   end
