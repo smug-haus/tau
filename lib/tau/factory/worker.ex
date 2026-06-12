@@ -41,6 +41,7 @@ defmodule Tau.Factory.Worker do
 
   alias Tau.Factory.Worker.Isolation
   alias Tau.Factory.Toolchain
+  alias Tau.Factory.WorkspaceJanitor
 
   # ---------------------------------------------------------------------------
   # Public API
@@ -65,6 +66,9 @@ defmodule Tau.Factory.Worker do
     - `:heartbeat_interval`  — ms; enables periodic heartbeat telemetry.
     - `:expected_head`       — SHA string; expected HEAD after worktree add
                                (overrides resolved base_ref SHA for testing).
+    - `:janitor`             — pid or name of `WorkspaceJanitor`; when present,
+                               the janitor is used as the independent monitor
+                               instead of the built-in death-monitor process.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -95,6 +99,7 @@ defmodule Tau.Factory.Worker do
     report_to = Keyword.get(opts, :report_to)
     heartbeat_interval = Keyword.get(opts, :heartbeat_interval)
     expected_head_override = Keyword.get(opts, :expected_head)
+    janitor = Keyword.get(opts, :janitor)
 
     # Unique private worktree path under the parent repo's parent dir.
     ws = Path.join([Path.dirname(repo_dir), ".worker-wt-#{worker_id}"])
@@ -117,6 +122,7 @@ defmodule Tau.Factory.Worker do
           report_to: report_to,
           heartbeat_interval: heartbeat_interval,
           expected_head_override: expected_head_override,
+          janitor: janitor,
           ws: ws
         }
 
@@ -127,6 +133,11 @@ defmodule Tau.Factory.Worker do
         # Surface as position_unverified (D-311).
         {:stop, {:position_unverified, ws, base_ref}}
     end
+  end
+
+  @impl GenServer
+  def handle_call(:get_ws, _from, state) do
+    {:reply, {:ok, state.ws}, state}
   end
 
   # Port exited: stop the worker. The death-certificate is delivered by the
@@ -240,6 +251,7 @@ defmodule Tau.Factory.Worker do
       registry: registry,
       report_to: report_to,
       heartbeat_interval: heartbeat_interval,
+      janitor: janitor,
       ws: ws,
       ns: ns
     } = ctx
@@ -259,9 +271,16 @@ defmodule Tau.Factory.Worker do
         {:cd, ws}
       ])
 
-    # Spawn the unlinked monitor — sole writer of the death-certificate.
-    # It fires on the `:DOWN` event for ALL exit reasons (C202).
-    spawn_death_monitor(worker_id, report_to)
+    # When a janitor is provided, register with it (it becomes the sole writer
+    # of the death-certificate and the capture-before-destroy executor).
+    # Otherwise fall back to the P4d-2 built-in unlinked death-monitor.
+    ns_dirs = Map.values(ns)
+
+    if janitor do
+      WorkspaceJanitor.register(janitor, worker_id, self(), ws, ns_dirs, report_to)
+    else
+      spawn_death_monitor(worker_id, report_to)
+    end
 
     # Step 5: arm heartbeat timer.
     timer =

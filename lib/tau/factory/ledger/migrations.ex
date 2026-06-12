@@ -56,6 +56,18 @@ defmodule Tau.Factory.Ledger.Migrations do
        cost        INTEGER NOT NULL,
        inserted_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
      )
+     """},
+    {"20260611_005_captures",
+     """
+     CREATE TABLE IF NOT EXISTS captures (
+       id             INTEGER PRIMARY KEY AUTOINCREMENT,
+       worker_id      TEXT    NOT NULL,
+       patch          TEXT    NOT NULL DEFAULT '',
+       untracked_tgz  BLOB,
+       status         TEXT    NOT NULL DEFAULT '',
+       disposition    TEXT    NOT NULL DEFAULT 'captured',
+       inserted_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+     )
      """}
   ]
 
