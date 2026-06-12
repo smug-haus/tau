@@ -134,6 +134,40 @@ defmodule Tau.Factory.Ledger.Writer do
     GenServer.call(server, :budget_debited)
   end
 
+  @type capture_attrs :: %{
+          patch: binary(),
+          untracked_tgz: binary() | nil,
+          status: binary(),
+          disposition: atom()
+        }
+
+  @doc """
+  Append a capture row for the given `worker_id`.
+
+  Append-only — no UPDATE path. WAL-before-ack: the `{:ok, ref}` reply
+  arrives only after the SQLite WAL commit is durable (D-315, D-334).
+
+  `attrs.untracked_tgz` may be `nil` (no untracked files) or a binary
+  holding gzip-compressed tar bytes.
+
+  Returns `{:ok, ref}` where `ref` is the inserted row id.
+  """
+  @spec capture(GenServer.server(), String.t(), capture_attrs()) :: {:ok, ref()} | {:error, term()}
+  def capture(server, worker_id, attrs) do
+    GenServer.call(server, {:capture, worker_id, attrs})
+  end
+
+  @doc """
+  Return all capture rows for `worker_id`, most-recent-first.
+
+  Each row is a map `%{patch: binary, untracked_tgz: binary | nil,
+  status: binary, disposition: atom}`.
+  """
+  @spec captures_for(GenServer.server(), String.t()) :: [map()]
+  def captures_for(server, worker_id) do
+    GenServer.call(server, {:captures_for, worker_id})
+  end
+
   # ---------------------------------------------------------------------------
   # GenServer callbacks
   # ---------------------------------------------------------------------------
@@ -177,6 +211,16 @@ defmodule Tau.Factory.Ledger.Writer do
 
   def handle_call(:budget_debited, _from, %{db: db} = state) do
     result = do_budget_debited(db)
+    {:reply, result, state}
+  end
+
+  def handle_call({:capture, worker_id, attrs}, _from, %{db: db} = state) do
+    result = do_capture(db, worker_id, attrs)
+    {:reply, result, state}
+  end
+
+  def handle_call({:captures_for, worker_id}, _from, %{db: db} = state) do
+    result = do_captures_for(db, worker_id)
     {:reply, result, state}
   end
 
@@ -397,6 +441,67 @@ defmodule Tau.Factory.Ledger.Writer do
     {:ok, String.to_existing_atom(text)}
   rescue
     ArgumentError -> :error
+  end
+
+  # Insert an append-only capture row. No UPDATE/upsert path.
+  # WAL-before-ack: reply sent only after step/2 (commit) returns.
+  # untracked_tgz is stored as a BLOB (binary or nil).
+  defp do_capture(db, worker_id, %{
+         patch: patch,
+         untracked_tgz: untracked_tgz,
+         status: status,
+         disposition: disposition
+       }) do
+    disposition_text = Atom.to_string(disposition)
+
+    sql = """
+    INSERT INTO captures (worker_id, patch, untracked_tgz, status, disposition)
+    VALUES (?1, ?2, ?3, ?4, ?5)
+    """
+
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, String.trim(sql)),
+         :ok <-
+           Exqlite.Sqlite3.bind(stmt, [worker_id, patch, untracked_tgz, status, disposition_text]),
+         step_result <- Exqlite.Sqlite3.step(db, stmt),
+         :ok <- Exqlite.Sqlite3.release(db, stmt) do
+      case step_result do
+        :done -> {:ok, fetch_last_rowid(db)}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
+  # SELECT captures for worker_id, most-recent-first.
+  # Returns a list of maps with string->atom conversion for disposition.
+  defp do_captures_for(db, worker_id) do
+    sql = """
+    SELECT patch, untracked_tgz, status, disposition
+    FROM captures
+    WHERE worker_id = ?1
+    ORDER BY id DESC
+    """
+
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, String.trim(sql)),
+         :ok <- Exqlite.Sqlite3.bind(stmt, [worker_id]),
+         {:ok, rows} <- Exqlite.Sqlite3.fetch_all(db, stmt),
+         :ok <- Exqlite.Sqlite3.release(db, stmt) do
+      Enum.map(rows, fn [patch, untracked_tgz, status, disposition_text] ->
+        disposition =
+          case safe_to_existing_atom(disposition_text) do
+            {:ok, atom} -> atom
+            :error -> String.to_atom(disposition_text)
+          end
+
+        %{
+          patch: patch || "",
+          untracked_tgz: untracked_tgz,
+          status: status || "",
+          disposition: disposition
+        }
+      end)
+    else
+      _ -> []
+    end
   end
 
   defp atom_to_half(:critic), do: "critic"
