@@ -49,6 +49,7 @@ defmodule Tau.Factory.Unit do
 
   @behaviour :gen_statem
 
+  alias Tau.Factory.Ledger.Reader, as: LedgerReader
   alias Tau.Factory.Ledger.Writer, as: LedgerWriter
   alias Tau.Factory.Retry
   alias Tau.Factory.Scheduler
@@ -365,9 +366,26 @@ defmodule Tau.Factory.Unit do
 
   def awaiting_merge(:internal, :on_enter, data) do
     data = snapshot_state(:awaiting_merge, data)
-    _result = data.merge_fun.(data.unit_id, data.hash)
-    timeout_ms = data.state_timeout_ms
-    {:keep_state, data, [{:state_timeout, timeout_ms, :merge_stalled}]}
+
+    # D-355 / D-344 — Reconcile-on-entry: before calling merge_fun, check the
+    # durable Ledger for an already-decided outcome. This prevents re-doing
+    # terminal work after a crash-resume (D-344 "re-does no terminal work"):
+    #   :merged   → already landed; transition to terminal :merged immediately.
+    #   :rejected → was rejected (INV-2); re-gate without re-calling merge_fun.
+    #   :none     → no prior outcome; proceed with the normal merge_fun call.
+    case reconcile_merge_outcome(data) do
+      {:merged, _commit_sha} ->
+        terminal(data, :merged, nil, nil)
+
+      {:rejected, _reason} ->
+        # INV-2: re-gate on rejection (same as receiving {:merge_result, :rejected}).
+        {:next_state, :gating, data, [{:next_event, :internal, :on_enter}]}
+
+      :none ->
+        _result = data.merge_fun.(data.unit_id, data.hash)
+        timeout_ms = data.state_timeout_ms
+        {:keep_state, data, [{:state_timeout, timeout_ms, :merge_stalled}]}
+    end
   end
 
   def awaiting_merge(:info, {:merge_result, :merged}, data) do
@@ -482,6 +500,18 @@ defmodule Tau.Factory.Unit do
     })
 
     %{data | entry_seq: seq + 1}
+  end
+
+  # D-355 / D-344 — read the durable merge outcome from the Ledger.
+  # Returns {:merged, sha} | {:rejected, reason} | :none.
+  # When ledger is nil (snapshot disabled), always returns :none so the
+  # existing merge_fun path is taken unchanged (back-compat).
+  @spec reconcile_merge_outcome(map()) ::
+          {:merged, String.t()} | {:rejected, term()} | :none
+  defp reconcile_merge_outcome(%{ledger: nil}), do: :none
+
+  defp reconcile_merge_outcome(%{ledger: ledger, unit_id: unit_id}) do
+    LedgerReader.merge_outcome_for(ledger, unit_id)
   end
 
   # Drop a spurious internal on_enter if it arrives in a terminal state,

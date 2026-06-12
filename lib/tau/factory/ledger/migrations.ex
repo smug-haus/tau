@@ -111,6 +111,21 @@ defmodule Tau.Factory.Ledger.Migrations do
      CREATE UNIQUE INDEX IF NOT EXISTS verdicts_v2_original_uidx
        ON verdicts_v2 (hash, run, half)
        WHERE supersedes_id IS NULL
+     """},
+    # PR #465 (D-355): Durable merge-outcome row. Append-only; no UPDATE/DELETE.
+    # WAL-before-ack (D-315): the Writer replies only after step/2 (WAL commit)
+    # returns. outcome CHECK restricts to the two valid terminal outcomes.
+    {"20260612_010_merge_outcomes",
+     """
+     CREATE TABLE IF NOT EXISTS merge_outcomes (
+       id          INTEGER PRIMARY KEY AUTOINCREMENT,
+       unit_id     TEXT    NOT NULL,
+       outcome     TEXT    NOT NULL CHECK (outcome IN ('merged', 'rejected')),
+       commit_sha  TEXT,
+       reason      TEXT,
+       run         TEXT    NOT NULL,
+       inserted_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+     )
      """}
   ]
 
