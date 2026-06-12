@@ -28,16 +28,21 @@ defmodule Tau.Factory.Gate do
   `Stub` implementation is used (deterministic, hermetic). When absent, the
   `Real` implementation is selected (LLM-backed, lands in P5c-3).
 
-  ## Mutation half (HR-3 / D-306)
+  ## Mutation half (HR-3 / D-306 / §C203-B3)
 
-  The mutation half runs directly in the `workspace` directory (the engine-
-  isolated checkout). It uses `Tau.Factory.Gate.Mutation.plan/2` (pure planner)
-  and `Tau.Factory.Gate.Mutation.judge/1` (pure judge) as the two seams, never
-  bypassing them with an ad-hoc inline judgement.
+  The mutation half uses `Tau.Factory.Engine.TestRun.execute/2` (the engine-owned,
+  reverted-worktree-capable test primitive) and `Tau.Toolchain.ReportParser` to
+  produce real `%Tau.Toolchain.TestReport{}` structs with REAL, stable test ids
+  (classname.testname, never positional "test_N" fakes). This is the §C203-B3
+  anti-forgery guarantee: `killed_ids ⊆ passing_ids(real)` is verified BY REAL
+  ID, not by count.
 
-  The §C203 ordered cross-check is applied: run the real (un-reverted) gating
-  tests → `passing_ids`; run the reverted tree → `killed_ids`; assert
-  `killed_ids ⊆ passing_ids`. PASS iff judge={:pass,_} ∧ cross-check=:pass.
+  The §C203 mandated order:
+    1. Run the REVERTED tree (tracked ∖ gating_paths → merge_base) FIRST → reverted_report.
+    2. Apply `Mutation.judge/1` to reverted_report → `{:pass, killed_ids}` (real ids).
+    3. Run the REAL (un-reverted) tree SECOND → real_report.
+    4. Apply `Mutation.cross_check/2`: `killed_ids ⊆ passing_ids(real_report)` by real id.
+    5. PASS iff judge={:pass,_} ∧ cross-check=:pass.
 
   Fail-closed (D-306 / HR-3): a runner crash on the reverted tree (e.g. the
   gating test fails to compile because it references an absent production module)
@@ -46,8 +51,10 @@ defmodule Tau.Factory.Gate do
   discriminating PASS.
   """
 
+  alias Tau.Factory.Engine.TestRun
   alias Tau.Factory.Gate.{Mutation, Oracle, Request, Verdict}
   alias Tau.Factory.Ledger.Writer
+  alias Tau.Toolchain.TestDescriptor
 
   require Logger
 
@@ -190,17 +197,21 @@ defmodule Tau.Factory.Gate do
   end
 
   # ---------------------------------------------------------------------------
-  # Mutation half — engine-owned execution (HR-3 / D-306)
+  # Mutation half — engine-owned execution (HR-3 / D-306 / §C203-B3)
   # ---------------------------------------------------------------------------
 
-  # The mutation half applies the §C203 ordered cross-check:
+  # The mutation half applies the §C203 ordered cross-check using
+  # Engine.TestRun.execute/2 (the engine-owned, reverted-worktree-capable test
+  # primitive) and Toolchain.ReportParser to produce real %TestReport{} structs.
+  # Real, stable test ids from the parsed artifact (never positional "test_N" fakes)
+  # are what make killed_ids ⊆ passing_ids(real) meaningful (§C203-B3).
   #
-  #   1. Run the REAL (un-reverted) gating tests → real_report.
-  #   2. Revert tracked ∖ frozen_paths to merge_base in workspace (engine-owned).
-  #   3. Run the gating tests on the reverted tree → reverted_report or crash.
-  #   4. Apply Mutation.judge/1 to reverted_report (pure judge — no ad-hoc logic).
-  #   5. Apply Mutation.cross_check/2: killed_ids ⊆ passing_ids(real_report).
-  #   6. PASS iff judge={:pass,_} ∧ cross-check=:pass.
+  # §C203 mandated order:
+  #   1. REVERTED tree first (tracked ∖ gating_paths → merge_base) → reverted_report.
+  #   2. Mutation.judge/1 on reverted_report → {judge_result, killed_ids} (real ids).
+  #   3. REAL tree second (HEAD restored) → real_report.
+  #   4. Mutation.cross_check/2: killed_ids ⊆ passing_ids(real_report) by real id.
+  #   5. PASS iff judge={:pass,_} ∧ cross-check=:pass.
   #
   # Fail-closed (D-306 / HR-3): a reverted-tree runner crash → :fail, never :pass.
   defp run_mutation_half(%Request{} = req) do
@@ -208,18 +219,13 @@ defmodule Tau.Factory.Gate do
     workspace = req.workspace
     merge_base = req.merge_base
 
-    # Plan is the pure data record for the engine seam (Mutation.plan/2).
-    _plan = Mutation.plan(merge_base, req.frozen_paths)
+    # plan/2 produces the pure data record for the engine seam (used below).
+    plan = Mutation.plan(merge_base, req.frozen_paths)
 
-    # The gate orchestrator always runs the mutation check — the N/A shortcut
-    # ("no production delta → skip") used by Mix.Gate.Mutation for CI is NOT
-    # applied here: a suite that passes with zero production code is exactly
-    # the vacuous-test hole (D-306 / AC-4). We do apply the project-creation
-    # N/A (mix.exs absent at merge_base → no production to revert → pass).
     if project_creation_na?(gating_paths, merge_base, workspace) do
       :pass
     else
-      execute_mutation_check(gating_paths, merge_base, workspace)
+      execute_mutation_check(plan, gating_paths, workspace)
     end
   end
 
@@ -264,20 +270,8 @@ defmodule Tau.Factory.Gate do
     end
   end
 
-  defp execute_mutation_check(gating_paths, merge_base, workspace) do
-    # Step 1: run the REAL (un-reverted) tree to get passing_ids for the cross-check.
-    case run_test_subprocess(gating_paths, workspace) do
-      {:error, :runner_crashed} ->
-        # Real tree itself crashes: infrastructure failure → fail-closed.
-        Logger.warning("Mutation half: real-tree runner crashed in #{workspace}")
-        :fail
-
-      {:ok, real_report} ->
-        execute_reverted_check(gating_paths, merge_base, workspace, real_report)
-    end
-  end
-
-  defp execute_reverted_check(gating_paths, merge_base, workspace, real_report) do
+  defp execute_mutation_check(plan, gating_paths, workspace) do
+    # Snapshots preserve the gating-test file contents across the revert.
     {all_files_str, 0} = System.cmd("git", ["ls-files"], cd: workspace)
     all_files = all_files_str |> String.split("\n", trim: true)
     paths_to_revert = all_files -- gating_paths
@@ -285,48 +279,230 @@ defmodule Tau.Factory.Gate do
     gating_snapshots = snapshot_files(gating_paths, workspace)
 
     try do
-      # Step 2: revert tracked ∖ gating_paths to merge_base.
-      revert_to_base(paths_to_revert, merge_base, workspace)
+      # §C203 step 1: REVERTED tree first.
+      # Revert tracked ∖ gating_paths to merge_base; restore frozen gating files.
+      revert_to_base(paths_to_revert, plan.merge_base, workspace)
       restore_snapshots(gating_snapshots, workspace)
 
-      # Step 3: run the reverted tree.
-      case run_test_subprocess(gating_paths, workspace) do
-        {:error, :runner_crashed} ->
+      case run_via_engine(gating_paths, workspace) do
+        {:error, reason} ->
           # Reverted-tree crash → fail-closed (D-306 / HR-3). A crash is
-          # indistinguishable from infrastructure failure: MUST NOT be :pass.
+          # indistinguishable from an infrastructure failure: MUST NOT be :pass.
           Logger.warning(
-            "Mutation half: reverted-tree runner crashed (fail-closed) in #{workspace}"
+            "Mutation half: reverted-tree runner crashed (fail-closed) in #{workspace}: #{inspect(reason)}"
           )
 
-          {:error, {:runner_crashed, :compile_error}}
+          {:error, {:runner_crashed, reason}}
 
         {:ok, reverted_report} ->
-          # Step 4: apply Mutation.judge/1 (pure — no inline ad-hoc judgement).
-          case Mutation.judge(reverted_report) do
-            {:fail, reason} ->
-              Logger.debug("Mutation half: reverted-tree judge fail — #{inspect(reason)}")
+          # §C203 step 2: judge the reverted report (pure — no inline ad-hoc judgement).
+          reverted_judge = Mutation.judge(reverted_report)
+
+          # §C203 step 3: restore HEAD then run the REAL tree.
+          restore_head(all_files, workspace)
+          restore_snapshots(gating_snapshots, workspace)
+
+          case run_via_engine(gating_paths, workspace) do
+            {:error, reason} ->
+              # Real-tree crash: infrastructure failure → fail-closed.
+              Logger.warning(
+                "Mutation half: real-tree runner crashed in #{workspace}: #{inspect(reason)}"
+              )
+
               :fail
 
-            {:pass, killed_ids} ->
-              # Step 5: §C203 cross-check: killed_ids ⊆ passing_ids(real_report).
-              case Mutation.cross_check(killed_ids, real_report) do
-                :pass ->
-                  :pass
-
-                {:fail, :cross_check_failed} ->
-                  Logger.warning(
-                    "Mutation half: §C203 cross-check failed — " <>
-                      "killed_ids not a subset of real passing_ids in #{workspace}"
-                  )
-
-                  :fail
-              end
+            {:ok, real_report} ->
+              # §C203 step 4–5: apply judge result + cross-check.
+              apply_judge_and_cross_check(reverted_judge, real_report, workspace)
           end
       end
     after
+      # Always restore HEAD so the workspace is left clean.
       restore_head(all_files, workspace)
+      restore_snapshots(gating_snapshots, workspace)
     end
   end
+
+  defp apply_judge_and_cross_check(reverted_judge, real_report, workspace) do
+    case reverted_judge do
+      {:na, :project_created} ->
+        :pass
+
+      {:fail, reason} ->
+        Logger.debug("Mutation half: reverted-tree judge fail — #{inspect(reason)}")
+        :fail
+
+      {:pass, killed_ids} ->
+        # §C203 step 5: cross-check killed_ids ⊆ passing_ids(real_report) by real id.
+        case Mutation.cross_check(killed_ids, real_report) do
+          :pass ->
+            :pass
+
+          {:fail, :cross_check_failed} ->
+            Logger.warning(
+              "Mutation half: §C203 cross-check failed — " <>
+                "killed_ids not a subset of real passing_ids in #{workspace}"
+            )
+
+            :fail
+        end
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Engine seam — Engine.TestRun.execute/2 + Toolchain.ReportParser (§C203-B3)
+  # ---------------------------------------------------------------------------
+
+  # Run the gating tests via Engine.TestRun.execute/2, which internally calls
+  # Toolchain.ReportParser.parse/2 to produce a real %TestReport{} with stable,
+  # non-positional test ids. Never falls back to text-scraping or positional ids.
+  #
+  # Writes a TAP-producing elixir script to the workspace, builds a TestDescriptor
+  # pointing to it and the artifact file, calls Engine.TestRun.execute/2, then
+  # cleans up the temp files. The TAP formatter produces stable test ids of the
+  # form "ModuleName.test name" (to_string(module) <> "." <> to_string(test.name)).
+  defp run_via_engine(gating_paths, workspace) do
+    nonce = :erlang.unique_integer([:positive])
+    script_rel = "_gate_runner_#{nonce}.exs"
+    artifact_rel = "_gate_report_#{nonce}.tap"
+    script_abs = Path.join(workspace, script_rel)
+    artifact_abs = Path.join(workspace, artifact_rel)
+
+    lib_files = find_lib_ex_files(workspace)
+
+    script = build_tap_runner(lib_files, gating_paths, artifact_abs)
+    File.write!(script_abs, script)
+
+    descriptor = %TestDescriptor{
+      argv: ["elixir", script_rel],
+      env: %{},
+      report: :tap,
+      artifact: artifact_rel
+    }
+
+    try do
+      case TestRun.execute(descriptor, workspace) do
+        {:ok, %{cases: _} = report} ->
+          {:ok, report}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    after
+      _ = File.rm(script_abs)
+      _ = File.rm(artifact_abs)
+    end
+  end
+
+  # Build a TAP-producing elixir script that runs the gating tests and writes
+  # TAP output to `artifact_abs`. The script:
+  #   1. Defines an inline GenServer TAP formatter that captures test events.
+  #   2. Starts ExUnit with the custom formatter (autorun: false).
+  #   3. Compiles lib source files so production modules are available.
+  #   4. Requires the gating test files (registers test cases with ExUnit).
+  #   5. Runs ExUnit; the formatter writes TAP to the artifact file.
+  #
+  # Uses ~S sigil for the formatter module body to avoid Elixir interpolation of
+  # the module's own string literals when building the script string.
+  defp build_tap_runner(lib_files, gating_paths, artifact_abs) do
+    lib_compiles =
+      Enum.map_join(lib_files, "\n", fn f ->
+        ~s[Code.compile_file("#{f}")]
+      end)
+
+    test_requires =
+      Enum.map_join(gating_paths, "\n", fn f ->
+        ~s[Code.require_file("#{f}")]
+      end)
+
+    # Formatter module: uses ~S to avoid #{} interpolation in this compile unit.
+    # The formatter collects test events and writes TAP on suite_finished.
+    formatter_mod = ~S"""
+    defmodule Gate.TapFormatter do
+      use GenServer
+
+      def init(opts) do
+        {:ok, %{artifact: opts[:artifact], cases: []}}
+      end
+
+      def handle_cast({:test_finished, %ExUnit.Test{} = test}, state) do
+        status =
+          cond do
+            test.state == nil -> :passed
+            match?({:failed, _}, test.state) -> :failed
+            match?({:invalid, _}, test.state) -> :failed
+            match?({:skip, _}, test.state) -> :skipped
+            true -> :passed
+          end
+
+        id = to_string(test.module) <> "." <> to_string(test.name)
+        {:noreply, %{state | cases: [{id, status} | state.cases]}}
+      end
+
+      def handle_cast({:suite_finished, _}, state) do
+        cases = Enum.reverse(state.cases)
+        total = length(cases)
+        header = "TAP version 13\n1.." <> Integer.to_string(total)
+
+        tap_lines =
+          cases
+          |> Enum.with_index(1)
+          |> Enum.map(fn {{id, status}, n} ->
+            prefix = if status == :failed, do: "not ok", else: "ok"
+            prefix <> " " <> Integer.to_string(n) <> " " <> id
+          end)
+
+        content = Enum.join([header | tap_lines], "\n") <> "\n"
+        File.write!(state.artifact, content)
+        {:noreply, state}
+      end
+
+      def handle_cast(_, state), do: {:noreply, state}
+    end
+    """
+
+    """
+    #{formatter_mod}
+    ExUnit.start(autorun: false, formatters: [Gate.TapFormatter], artifact: "#{artifact_abs}")
+    #{lib_compiles}
+    #{test_requires}
+    ExUnit.run()
+    """
+  end
+
+  # Collect all .ex source files under `workspace/lib/`.
+  defp find_lib_ex_files(workspace) do
+    lib_dir = Path.join(workspace, "lib")
+
+    if File.dir?(lib_dir) do
+      do_find_ex_files(lib_dir, workspace)
+    else
+      []
+    end
+  end
+
+  defp do_find_ex_files(dir, workspace) do
+    case File.ls(dir) do
+      {:error, _} ->
+        []
+
+      {:ok, entries} ->
+        Enum.flat_map(entries, fn entry ->
+          abs = Path.join(dir, entry)
+          rel = Path.relative_to(abs, workspace)
+
+          cond do
+            File.regular?(abs) and String.ends_with?(entry, ".ex") -> [rel]
+            File.dir?(abs) -> do_find_ex_files(abs, workspace)
+            true -> []
+          end
+        end)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Revert / restore helpers (workspace-level git ops for the mutation check)
+  # ---------------------------------------------------------------------------
 
   defp snapshot_files(paths, workspace) do
     Enum.map(paths, fn rel_path ->
@@ -382,132 +558,6 @@ defmodule Tau.Factory.Gate do
   defp restore_head(paths, workspace) do
     {_, _} = System.cmd("git", ["checkout", "HEAD", "--" | paths], cd: workspace)
     :ok
-  end
-
-  # Run the gating tests in `workspace`, returning a report map compatible with
-  # `Mutation.judge/1`:
-  #   {:ok, %{cases: [%{id: String.t(), status: :passed | :failed}]}}
-  # or
-  #   {:error, :runner_crashed}   — no valid summary (compile crash, etc.)
-  #
-  # We build a synthetic report from the ExUnit text summary line. Individual
-  # test IDs are not available from ExUnit text output; we use positional keys
-  # ("test_N") consistently across both real-tree and reverted-tree runs so
-  # Mutation.cross_check/2 can compare killed_ids to real passing_ids.
-  #
-  # Fallback: if mix test fails to produce a summary (e.g. minimal fixture has
-  # no test_helper.exs), we fall back to the elixir runner. If that also fails
-  # to produce a summary, we return {:error, :runner_crashed}.
-  defp run_test_subprocess(gating_paths, workspace) do
-    mix_output =
-      if File.exists?(Path.join(workspace, "mix.exs")) do
-        run_via_mix(gating_paths, workspace)
-      else
-        nil
-      end
-
-    output =
-      case mix_output && parse_test_summary(mix_output) do
-        {:ok, _, _} ->
-          # mix produced a valid summary; use it.
-          mix_output
-
-        _ ->
-          # Fall back to the elixir runner for minimal repos without mix setup.
-          run_via_elixir(gating_paths, workspace)
-      end
-
-    case parse_test_summary(output) do
-      {:ok, total, failures} ->
-        cases =
-          if total == 0 do
-            []
-          else
-            Enum.map(1..total, fn i ->
-              status = if i <= failures, do: :failed, else: :passed
-              %{id: "test_#{i}", status: status}
-            end)
-          end
-
-        {:ok, %{cases: cases}}
-
-      :no_summary ->
-        {:error, :runner_crashed}
-    end
-  end
-
-  defp run_via_mix(gating_paths, workspace) do
-    {output, _} =
-      System.cmd("mix", ["test" | gating_paths], cd: workspace, stderr_to_stdout: true)
-
-    output
-  end
-
-  defp run_via_elixir(gating_paths, workspace) do
-    lib_files = find_lib_files_recursive(workspace)
-
-    requires =
-      (lib_files ++ gating_paths)
-      |> Enum.map_join("\n", fn p -> ~s[Code.require_file("#{p}", "#{workspace}")] end)
-
-    runner = """
-    ExUnit.start()
-    #{requires}
-    ExUnit.run()
-    """
-
-    runner_path =
-      Path.join(workspace, "_gate_runner_#{:erlang.unique_integer([:positive])}.exs")
-
-    File.write!(runner_path, runner)
-
-    {output, _} =
-      try do
-        System.cmd("elixir", [runner_path], cd: workspace, stderr_to_stdout: true)
-      after
-        File.rm(runner_path)
-      end
-
-    output
-  end
-
-  defp parse_test_summary(output) do
-    case Regex.run(~r/(\d+) tests?,\s*(\d+) failures?/, output) do
-      [_, total_str, failures_str] ->
-        {:ok, String.to_integer(total_str), String.to_integer(failures_str)}
-
-      nil ->
-        :no_summary
-    end
-  end
-
-  defp find_lib_files_recursive(workspace) do
-    lib_dir = Path.join(workspace, "lib")
-
-    if File.dir?(lib_dir) do
-      do_find_ex_files(lib_dir, workspace)
-    else
-      []
-    end
-  end
-
-  defp do_find_ex_files(dir, workspace) do
-    case File.ls(dir) do
-      {:error, _} ->
-        []
-
-      {:ok, entries} ->
-        Enum.flat_map(entries, fn entry ->
-          abs = Path.join(dir, entry)
-          rel = Path.relative_to(abs, workspace)
-
-          cond do
-            File.regular?(abs) and String.ends_with?(entry, ".ex") -> [rel]
-            File.dir?(abs) -> do_find_ex_files(abs, workspace)
-            true -> []
-          end
-        end)
-    end
   end
 
   # ---------------------------------------------------------------------------
