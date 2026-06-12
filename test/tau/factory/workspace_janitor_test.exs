@@ -104,10 +104,15 @@ defmodule Tau.Factory.WorkspaceJanitorTest do
   defp slow_agent_bin(tmp_dir, suffix \\ "") do
     bin_path = Path.join(tmp_dir, "slow_janitor_agent#{suffix}")
 
+    # Blocking agent that stays alive until the Port closes, with NO
+    # un-reaped grandchild. `exec cat` REPLACES the shell so the process the
+    # BEAM SIGKILLs on Port close IS the blocker; `cat` reads the Port's
+    # stdin pipe and exits on EOF. A `while true; do sleep 60; done` would
+    # leak an orphaned `sleep` (reparented to init) that holds the Port pipe
+    # FD open and stalls BEAM shutdown — hanging `mix test` post-summary.
     File.write!(bin_path, """
     #!/bin/sh
-    # blocking agent — stays alive until the process is killed
-    while true; do sleep 60; done
+    exec cat
     """)
 
     File.chmod!(bin_path, 0o755)
