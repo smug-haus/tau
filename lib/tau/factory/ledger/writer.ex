@@ -196,6 +196,54 @@ defmodule Tau.Factory.Ledger.Writer do
     GenServer.call(server, {:captures_for, worker_id})
   end
 
+  @type merge_outcome_attrs :: %{
+          unit_id: String.t(),
+          outcome: :merged | :rejected,
+          commit_sha: String.t() | nil,
+          reason: term() | nil,
+          run: String.t()
+        }
+
+  @doc """
+  Append a durable merge-outcome row for `unit_id`.
+
+  Append-only — no UPDATE/DELETE path (D-355). WAL-before-ack (D-315): the
+  `{:ok, ref}` reply arrives only after the SQLite WAL commit is durable, so
+  the caller's ack is strictly ordered after the write's visibility.
+
+  `attrs` fields:
+    - `:unit_id`    — `String.t()`; the unit's `:id`.
+    - `:outcome`    — `:merged | :rejected`.
+    - `:commit_sha` — `String.t() | nil`; the merged tip for `:merged`; `nil`
+                      for `:rejected`.
+    - `:reason`     — `term() | nil`; the reject reason for `:rejected`; `nil`
+                      for `:merged`.
+    - `:run`        — `String.t()`; the unit's run id.
+
+  Returns `{:ok, ref}` where `ref` is the inserted row id.
+  """
+  @spec record_merge_outcome(GenServer.server(), merge_outcome_attrs()) :: {:ok, ref()}
+  def record_merge_outcome(server, attrs) do
+    GenServer.call(server, {:record_merge_outcome, attrs})
+  end
+
+  @doc """
+  Return the latest merge outcome for `unit_id`.
+
+  Reads from `merge_outcomes` (PR #465, D-355). Rows are append-only; the
+  latest outcome is the row with the highest `id` for the given `unit_id`.
+
+  Returns:
+    - `{:merged, commit_sha}` — the unit was merged; `commit_sha` is the tip.
+    - `{:rejected, reason}` — the unit's merge was rejected.
+    - `:none` — no outcome row exists for this `unit_id`.
+  """
+  @spec merge_outcome_for(GenServer.server(), String.t()) ::
+          {:merged, String.t()} | {:rejected, term()} | :none
+  def merge_outcome_for(server, unit_id) do
+    GenServer.call(server, {:merge_outcome_for, unit_id})
+  end
+
   # ---------------------------------------------------------------------------
   # GenServer callbacks
   # ---------------------------------------------------------------------------
@@ -259,6 +307,16 @@ defmodule Tau.Factory.Ledger.Writer do
 
   def handle_call({:captures_for, worker_id}, _from, %{db: db} = state) do
     result = do_captures_for(db, worker_id)
+    {:reply, result, state}
+  end
+
+  def handle_call({:record_merge_outcome, attrs}, _from, %{db: db} = state) do
+    result = do_record_merge_outcome(db, attrs)
+    {:reply, result, state}
+  end
+
+  def handle_call({:merge_outcome_for, unit_id}, _from, %{db: db} = state) do
+    result = do_merge_outcome_for(db, unit_id)
     {:reply, result, state}
   end
 
@@ -623,6 +681,80 @@ defmodule Tau.Factory.Ledger.Writer do
       _ -> []
     end
   end
+
+  # Insert an append-only merge-outcome row. No UPDATE/DELETE path (D-355).
+  # WAL-before-ack: reply sent only after step/2 (WAL commit) returns (D-315).
+  # reason is serialised via inspect/1 so arbitrary terms are stored as text.
+  defp do_record_merge_outcome(db, %{
+         unit_id: unit_id,
+         outcome: outcome,
+         commit_sha: commit_sha,
+         reason: reason,
+         run: run
+       }) do
+    outcome_text = atom_to_outcome(outcome)
+    reason_text = if reason == nil, do: nil, else: inspect(reason)
+
+    sql = """
+    INSERT INTO merge_outcomes (unit_id, outcome, commit_sha, reason, run)
+    VALUES (?1, ?2, ?3, ?4, ?5)
+    """
+
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, String.trim(sql)),
+         :ok <- Exqlite.Sqlite3.bind(stmt, [unit_id, outcome_text, commit_sha, reason_text, run]),
+         step_result <- Exqlite.Sqlite3.step(db, stmt),
+         :ok <- Exqlite.Sqlite3.release(db, stmt) do
+      case step_result do
+        :done -> {:ok, fetch_last_rowid(db)}
+        {:error, reason_err} -> {:error, reason_err}
+      end
+    end
+  end
+
+  # Return the latest merge outcome for unit_id (highest id row).
+  # Returns {:merged, commit_sha} | {:rejected, reason_term} | :none.
+  # reason is stored as inspect/1 text; we return it as-is (a string) since
+  # the test checks against the originally-stored term shape.
+  defp do_merge_outcome_for(db, unit_id) do
+    sql = """
+    SELECT outcome, commit_sha, reason
+    FROM merge_outcomes
+    WHERE unit_id = ?1
+    ORDER BY id DESC
+    LIMIT 1
+    """
+
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, String.trim(sql)),
+         :ok <- Exqlite.Sqlite3.bind(stmt, [unit_id]),
+         {:ok, rows} <- Exqlite.Sqlite3.fetch_all(db, stmt),
+         :ok <- Exqlite.Sqlite3.release(db, stmt) do
+      case rows do
+        [["merged", commit_sha, _reason]] ->
+          {:merged, commit_sha}
+
+        [["rejected", _commit_sha, reason_text]] ->
+          {:rejected, parse_reason(reason_text)}
+
+        [] ->
+          :none
+      end
+    end
+  end
+
+  # Parse a stored reason: try Code.eval_string for simple atoms/terms,
+  # fall back to the raw string on any error.
+  defp parse_reason(nil), do: nil
+
+  defp parse_reason(text) do
+    case Code.eval_string(text) do
+      {term, _} -> term
+    end
+  rescue
+    _ -> text
+  end
+
+  defp atom_to_outcome(:merged), do: "merged"
+  defp atom_to_outcome(:rejected), do: "rejected"
 
   defp atom_to_half(:critic), do: "critic"
   defp atom_to_half(:reviewer), do: "reviewer"

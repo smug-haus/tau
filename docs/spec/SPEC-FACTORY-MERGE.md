@@ -16,6 +16,12 @@ what makes the read sound), D-306 + D-303-health-via-Toolchain
 SPEC-FACTORY-GOV). Verdict store is L (SQLite/Exqlite, SPEC-FACTORY-CORE);
 `origin/main` mutation is via `git` subprocesses only.
 
+**Amendment (2026-06-12, PR #465):** Introduces D-355 (durable merge-outcome,
+RPO=0). Adds §4 B9 (M COMMIT → L merge-outcome write, WAL-before-ack, BEFORE
+telemetry projection). Updates §5 `:committing` exit description and §6 D-NNN
+block. Cited by SPEC-FACTORY-CORE §4 B3 (Unit `:awaiting_merge` reconcile-on-entry,
+D-344 amendment).
+
 ## 0. Why this spec exists
 
 M is the **crux** of the autonomous factory: it is the one component where the
@@ -301,6 +307,25 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
   Spans also feed the `T_int` model the §sizing rule depends on — measurement is
   a binding input, not optional instrumentation.
 
+### B9: Merge Authority COMMIT (C1) ↔ Ledger merge-outcome write (*D-355, PR #465*)
+
+- `record_merge_outcome/2 :: (ledger, attrs) -> {:ok, ref}` — append-only row in
+  `merge_outcomes`; WAL-before-ack (D-315 / RPO=0). `attrs` carries `:unit_id`,
+  `:outcome` (`:merged`), `:commit_sha` (the landed tip), `:reason` (`nil` for
+  `:merged`), `:run`.
+- **Ordering constraint (D-355):** M appends the durable outcome row **BEFORE** the
+  ephemeral `telemetry(:merged, …)` projection fires. Telemetry/PubSub is a derived
+  projection of the durable row — not the primary decision record.
+- Pre: `cas_push` returned `:ok` (the ref advanced atomically).
+- Post: the outcome row is WAL-committed and readable via
+  `Ledger.Reader.merge_outcome_for/2` by the time any observer receives the
+  telemetry projection (WAL-before-ack: `GenServer.call` reply arrives only after
+  `step/2` returns).
+- Invariant (**D-355**, durable-merge-outcome): every landed merge is recorded in L
+  before its ephemeral projection fires; the outcome survives the producer's death
+  (RPO=0). Enforced by `merge_outcome_durability_test.exs` — oracle-separated gating
+  test; PR #465.
+
 ## 5. State enumeration
 
 ### Merge Authority (M) — `gen_statem`, `state_functions`
@@ -336,7 +361,7 @@ submitted(green) ─enqueue→ wait-queue (FIFO + aging by restale_count)
        assert_all_verdicts_live(train):
          {:revoked,u} → eject u, retry rest         (FC-4 — value-staleness)
          :all_pass    → cas_push(tip, base):
-            :ok        → COMMIT: broadcast :merged ∀ member; advance origin/main
+            :ok        → COMMIT: record_merge_outcome(L) WAL-before-ack (D-355); broadcast :merged ∀ member; advance origin/main
             :stale_ref → requeue all, rebase onto new head, re-gate  (FC-3 — TOCTOU)
   post-merge main re-check RED → E-RED-MAIN (global halt; main left red, named)
 ```
@@ -405,6 +430,18 @@ halts the loop with `main` red and named. Enforced by `merge_health_test.exs`: a
 red batch tip ⇒ bisect + eject, no push; a post-merge red main ⇒ `E-RED-MAIN` +
 no further push. (Health-recipe ownership cited from SPEC-FACTORY-GATE.)
 
+**D-355 — Durable merge outcome, WAL-before-ack (RPO=0):**
+Every successfully-landed merge is recorded in a durable, append-only
+`merge_outcomes` row in L (via `Ledger.Writer.record_merge_outcome/2`,
+WAL-before-ack, D-315) **before** the ephemeral `telemetry(:merged, …)`
+projection fires. The row survives the producer (MergeAuthority) dying — RPO=0.
+`Ledger.Reader.merge_outcome_for/2` returns `{:merged, commit_sha}` from this
+row, enabling U to reconcile on resume without re-submitting an already-landed
+merge (D-344 / PR #465). Owned by this SPEC (§4 B9); cited by
+SPEC-FACTORY-CORE (Unit `:awaiting_merge` reconcile, D-344 amendment).
+Enforced by `merge_outcome_durability_test.exs` (oracle-separated; the
+MergeAuthority/Unit gating test for PR #465).
+
 **D-341 — Fair merge progress, no starvation (LIV-2):**
 M serves merge-ready units from a **FIFO + aging** wait-queue;
 `effective_priority(seq, restale_count) = seq − aging_weight · restale_count` is
@@ -464,8 +501,14 @@ Each is expressed against an observable signal. PR groupings are indicative.
 
 Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 
-- `lib/tau/factory/merge_authority.ex` (C1; D-300, D-301, D-302, D-303, D-341 —
-  the `gen_statem`, `:idle`/`:integrating`/`:committing`) — PR-MERGE-1..4
+- `lib/tau/factory/merge_authority.ex` (C1; D-300, D-301, D-302, D-303, D-341,
+  D-355 — the `gen_statem`, `:idle`/`:integrating`/`:committing`) — PR-MERGE-1..5/PR#465
+- `lib/tau/factory/ledger/migrations.ex` (D-355 migration `20260612_010_merge_outcomes`) — PR#465
+- `lib/tau/factory/ledger/writer.ex` (D-355 `record_merge_outcome/2`,
+  `merge_outcome_for/2`) — PR#465
+- `lib/tau/factory/ledger/reader.ex` (D-355 `merge_outcome_for/2` projection) — PR#465
+- `lib/tau/factory/unit.ex` (D-355/D-344 reconcile-on-entry in `:awaiting_merge`) — PR#465
+- `test/tau/factory/merge_outcome_durability_test.exs` (D-355/D-344 gating test) — PR#465
 - `lib/tau/factory/merge/train.ex` (C2; assemble/bisect, D-303 tip) — PR-MERGE-3
 - `lib/tau/factory/merge/cas.ex` (C3; `assert_all_verdicts_live` + `cas_push`,
   D-300, D-301) — PR-MERGE-2/3

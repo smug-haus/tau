@@ -301,7 +301,7 @@ Used exclusively by `Coordinator.init/1` to rebuild the in-flight set on
 resume (D-344). Terminal units (`:merged`/`:escalated`) appear in the map;
 the Coordinator filters them. Returns `%{}` when no snapshots exist.
 
-#### B3 — Unit `:ledger` start option (durable per-transition snapshotting, D-318 / P5c-1)
+#### B3 — Unit `:ledger` start option (durable per-transition snapshotting, D-318 / P5c-1; D-355 merge-outcome reconcile / PR #465)
 
 `Unit.start_link/1` accepts an optional `:ledger` key:
 
@@ -314,6 +314,20 @@ When `:ledger` is present and non-nil, the Unit calls
 state's external effect (WAL-before-ack, D-315). This makes the Unit's FSM
 state crash-durable and enables the Coordinator's D-344 resume to rehydrate
 **real** units (not only the injected test seam).
+
+**D-355 reconcile-on-entry amendment (PR #465):** additionally, when entering
+`:awaiting_merge`, the Unit reads `Ledger.Reader.merge_outcome_for(ledger, unit_id)`
+(routed via `Ledger.Writer`) **before** calling `merge_fun`:
+
+- `{:merged, sha}` → the merge already landed; transition immediately to terminal
+  `:merged` WITHOUT calling `merge_fun` (no double-submit, D-344).
+- `{:rejected, reason}` → the merge was rejected; route back to `:gating`
+  (re-gate, INV-2) WITHOUT calling `merge_fun`.
+- `:none` → no prior outcome; call `merge_fun` (current behaviour, unchanged).
+
+This composes with D-344: the Coordinator rehydrates the Unit at `:awaiting_merge`
+and the Unit reconciles on re-entry — exactly-once on resume. When `:ledger` is
+`nil` or absent, reconcile is a no-op (back-compat).
 
 The `idempotency_key` coordinate is `"<unit_id>:snapshot:<entry_seq>"` —
 per-entry-unique because `entry_seq` is a monotonic counter (initialised to 0
@@ -560,6 +574,14 @@ reachable admit→withdraw→re-admit cycle. Enforced by `conflict_check_propert
 resumes from L and continues; in-flight units rehydrate at their snapshotted
 state; no terminal work is re-done. Enforced by `coordinator_recovery_test.exs`
 (kill the Coordinator mid-drive; assert resume + idempotent rehydrate).
+
+*Amendment (PR #465 / D-355):* a Unit resuming at `:awaiting_merge` reconciles
+against the durable merge-outcome (via `Ledger.Reader.merge_outcome_for/2`) on
+re-entry **before** calling `merge_fun` — so a merge that already landed is
+never re-submitted on crash-resume. This closes the lone RPO=0 hole identified
+by PR #465 (the ephemeral-telemetry-only outcome path). D-355 (owned by
+SPEC-FACTORY-MERGE §6) is the invariant enforcing the write ordering; D-344
+consumes it to guarantee no double-submit on resume.
 
 ## 7. Acceptance criteria
 

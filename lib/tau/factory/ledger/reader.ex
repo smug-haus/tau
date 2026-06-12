@@ -12,6 +12,9 @@ defmodule Tau.Factory.Ledger.Reader do
     `unit_id` (highest row id wins) across the whole ledger. Used by
     `Tau.Factory.Coordinator.init/1` to resume from the durable Ledger after a
     crash (D-344, D-315 / RPO=0).
+  - `merge_outcome_for/2` — return the latest durable merge outcome for a unit
+    (D-355 / RPO=0). Used by `Tau.Factory.Unit` at `:awaiting_merge` entry to
+    reconcile without re-submitting an already-landed merge (D-344).
 
   ## Why reads go through the Writer process
 
@@ -21,6 +24,8 @@ defmodule Tau.Factory.Ledger.Reader do
   reads are rare (once per Coordinator restart) the marginal cost of routing
   through the Writer's mailbox is negligible, and the design stays simple.
   """
+
+  alias Tau.Factory.Ledger.Writer
 
   @doc """
   Return the latest snapshotted Unit FSM state per `unit_id`.
@@ -36,5 +41,22 @@ defmodule Tau.Factory.Ledger.Reader do
   @spec latest_unit_snapshots(GenServer.server()) :: %{String.t() => atom()}
   def latest_unit_snapshots(server) do
     GenServer.call(server, :latest_unit_snapshots)
+  end
+
+  @doc """
+  Return the latest durable merge outcome for `unit_id` (D-355 / RPO=0).
+
+  Used by `Tau.Factory.Unit` at `:awaiting_merge` on-entry to reconcile against
+  the Ledger before re-calling `merge_fun` (D-344 — re-does no terminal work).
+
+  Returns:
+    - `{:merged, commit_sha}` — the unit was merged; `commit_sha` is the tip.
+    - `{:rejected, reason}` — the unit's merge was rejected.
+    - `:none` — no outcome row exists (fresh; proceed with `merge_fun`).
+  """
+  @spec merge_outcome_for(GenServer.server(), String.t()) ::
+          {:merged, String.t()} | {:rejected, term()} | :none
+  def merge_outcome_for(server, unit_id) do
+    Writer.merge_outcome_for(server, unit_id)
   end
 end

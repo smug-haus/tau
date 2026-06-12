@@ -18,6 +18,7 @@ defmodule Tau.Factory.MergeAuthority do
 
   @behaviour :gen_statem
 
+  alias Tau.Factory.Ledger.Writer, as: LedgerWriter
   alias Tau.Factory.Merge.Cas
   alias Tau.Factory.Merge.Health
 
@@ -261,6 +262,21 @@ defmodule Tau.Factory.MergeAuthority do
         case cas.cas_push(repo_dir, tip, base) do
           :ok ->
             Logger.info("[MergeAuthority] merged tip #{tip}")
+
+            # D-355 / WAL-before-ack: write the durable merge-outcome row BEFORE
+            # the ephemeral telemetry projection fires. Telemetry/PubSub becomes a
+            # derived projection of the durable row. reply arrives only after the
+            # WAL commit is durable (D-315, RPO=0).
+            Enum.each(units, fn unit ->
+              LedgerWriter.record_merge_outcome(ledger, %{
+                unit_id: unit.id,
+                outcome: :merged,
+                commit_sha: tip,
+                reason: nil,
+                run: unit.run
+              })
+            end)
+
             telemetry(:merged, %{hash: hd_hash(units)}, %{tip: tip, units: units})
             transition_from_idle(data)
 
