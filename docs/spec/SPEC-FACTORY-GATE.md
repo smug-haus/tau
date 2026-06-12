@@ -241,7 +241,29 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
 
 ### B1: Unit (U) ↔ Gate (C1) — *cited edge, SPEC-FACTORY-CORE*
 
-- `run/1 :: (%Request{unit, diff, frozen_paths, policy_pin}) -> %Verdict{}`.
+- `run/1 :: (%Request{unit, diff, frozen_paths, policy_pin, workspace, merge_base,
+  hash, run, ledger}) -> %Verdict{}`.
+
+  **Full `%Request{}` field set (§4 amendment — PR #464):**
+  - `:unit` — `String.t()` PR/unit identifier.
+  - `:diff` — `String.t()` unified diff between `merge_base` and `hash`.
+  - `:frozen_paths` — `MapSet.t(String.t())` declared gating-test path set
+    (oracle-separation boundary; D-304).
+  - `:policy_pin` — `map()` policy overrides pinned at admission (HR-8).
+    Recognised keys: `:gate_manifest`, `:gate_concurrency`, `:gate_timeout`,
+    and `:oracle` (the deterministic oracle injection seam — see below).
+  - `:workspace` — `String.t()` absolute path to the host-isolated git checkout
+    the engine-owned mutation half operates in (D-309 / C201).
+  - `:merge_base` — `String.t()` git ref of the pre-implementer state; the
+    mutation half reverts `tracked ∖ frozen_paths` to this ref (D-306).
+  - `:hash` — `String.t()` HEAD SHA of the implementer's commit; used as the
+    Ledger coordinate `(hash, run, half)` (D-335).
+  - `:run` — `String.t()` run identifier; together with `:hash` forms the
+    Ledger coordinate (D-335).
+  - `:ledger` — `GenServer.server()` reference to the active
+    `Tau.Factory.Ledger.Writer`; the gate appends verdicts WAL-before-ack
+    (D-335).
+
 - Pre: `policy_pin` present (manifest pinned at admission, HR-8); `frozen_paths`
   is the declared gating-test path set (empty ⇒ AcLinkage/Mutation skipped per
   the `AC-N`/`D-NNN`-free exemption).
@@ -251,16 +273,33 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
   `compose/1` re-asserts floor membership rather than trusting the pin. A policy
   that omits a floor member is rejected, not honoured.
 
-### B2: Gate (C1) ↔ mechanical halves (C2–C5)
+### B2: Gate (C1) ↔ mechanical halves (C2–C5) + Oracle (C7)
 
 - `AcLinkage.check/2 :: (pr_body, gating_tests) -> {:pass, []} | {:fail, [token]}`.
 - `Masking.scan/2 :: (diff, gating_paths) -> {:clean | :flagged, [Finding]}`.
 - `Mutation.plan/2 :: (merge_base, gating_paths) -> %Plan{}`;
   `Mutation.judge/1 :: (report) -> {:pass, [id]} | {:fail, :no_test_failed} | {:na, reason}`.
 - `SpecMembership.check/3 :: (diff, pr_body, source_maps) -> {:pass, []} | {:fail, [boundary]}`.
-- Invariant (**D-306 / D-322**, properties §6): all four are **pure**
-  (referentially transparent, property-testable in isolation); `plan/2` and
+- Invariant (**D-306 / D-322**, properties §6): all four pure modules are
+  referentially transparent and property-testable in isolation; `plan/2` and
   `judge/1` perform **no I/O**.
+
+  **Oracle-injection seam (§4 amendment — PR #464):** The `Gate.Oracle` behaviour
+  provides the critic/reviewer floor halves with a deterministic injection seam for
+  hermetic tests. `Gate.run/1` selects the oracle implementation by inspecting
+  `policy_pin.oracle`:
+
+  - When `policy_pin.oracle` is a `map()` (e.g. `%{critic: :pass, reviewer: :pass}`),
+    the `Gate.Oracle.Stub` implementation is selected. It reads the pre-pinned result
+    for each half directly from the map — no LLM worker is spawned. This is the
+    **deterministic hermetic-test seam**.
+  - When `policy_pin.oracle` is absent or `nil`, `Gate.Oracle.Real` is selected
+    (LLM-backed; lands in P5c-3).
+
+  Both implementations satisfy `@behaviour Gate.Oracle` via a single
+  `judge/2 :: (half :: :critic | :reviewer, policy_pin :: map()) -> :pass | :fail | {:error, term()}`
+  callback. Selection is by `Oracle.select/1` — atom/struct pattern-match, never
+  string dispatch (OTP non-negotiable #2).
 
 ### B3: Mutation (C4) ↔ Engine.TestRun (C6) — *HR-3 boundary*
 
@@ -308,6 +347,19 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
 - Invariant: G is the **sole legal producer** of a verdict; M (SPEC-FACTORY-MERGE,
   D-300) reads the **latest** status inside its CAS. Value-staleness is closed by
   append-only immutability (cite D-335 / HR-2), not by G.
+
+  **Verdict-row granularity (§4 amendment — PR #464):** G appends **one row per
+  half** (per-half granularity), not a single folded row. The `(hash, run, half)`
+  coordinate uniquely identifies each row; `half ∈ {'critic', 'reviewer', 'mutation'}`.
+  The `:mutation` half was absent from the original schema CHECK (which only listed
+  `'critic'` and `'reviewer'`); migration `20260612_007_verdicts_extend_half_check`
+  (PR #464) adds `verdicts_v2` with the extended CHECK:
+  `CHECK (half IN ('critic', 'reviewer', 'mutation'))`. The `Writer.append_verdict/2`
+  API and `atom_to_half/1` mapping are extended accordingly. The `verdicts_v2` table
+  carries all rows migrated from `verdicts` (migration `20260612_008_verdicts_migrate_rows`)
+  plus the new partial unique index (`20260612_009_verdicts_v2_original_uidx`).
+  Append-only invariant (D-335) is preserved: no UPDATE statements exist; the table
+  rename is the only schema change.
 
 ### B8: Engine.TestRun (C6) ↔ Worker workspace W — *cited, SPEC-FACTORY-FLEET / D-309*
 

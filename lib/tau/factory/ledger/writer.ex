@@ -44,7 +44,7 @@ defmodule Tau.Factory.Ledger.Writer do
   @type verdict_attrs :: %{
           hash: String.t(),
           run: String.t(),
-          half: :critic | :reviewer,
+          half: :critic | :reviewer | :mutation,
           status: :pass | :fail,
           idempotency_key: String.t()
         }
@@ -52,7 +52,7 @@ defmodule Tau.Factory.Ledger.Writer do
   @type coord :: %{
           hash: String.t(),
           run: String.t(),
-          half: :critic | :reviewer
+          half: :critic | :reviewer | :mutation
         }
 
   @type ref :: integer()
@@ -294,6 +294,8 @@ defmodule Tau.Factory.Ledger.Writer do
   # Insert an original verdict (supersedes_id IS NULL).
   # The partial unique index rejects a second original at the same coordinate.
   # Constraint errors are translated to tagged tuples — never raised.
+  # Uses verdicts_v2 (migration 20260612_007) which supports :mutation in its
+  # CHECK constraint (PR #464, D-354 §4 B7 amendment).
   defp do_append_verdict(db, %{
          hash: hash,
          run: run,
@@ -302,7 +304,7 @@ defmodule Tau.Factory.Ledger.Writer do
          idempotency_key: idempotency_key
        }) do
     sql = """
-    INSERT INTO verdicts (hash, run, half, status, idempotency_key)
+    INSERT INTO verdicts_v2 (hash, run, half, status, idempotency_key)
     VALUES (?1, ?2, ?3, ?4, ?5)
     """
 
@@ -322,6 +324,7 @@ defmodule Tau.Factory.Ledger.Writer do
 
   # Insert a superseding verdict row. Finds the current latest row id for the
   # coordinate and sets supersedes_id. Never issues an UPDATE (D-335).
+  # Uses verdicts_v2 (PR #464).
   defp do_revoke_verdict(db, %{
          hash: hash,
          run: run,
@@ -335,7 +338,7 @@ defmodule Tau.Factory.Ledger.Writer do
     case fetch_latest_id(db, hash, run, half_text) do
       {:ok, latest_id} ->
         sql = """
-        INSERT INTO verdicts (hash, run, half, status, idempotency_key, supersedes_id)
+        INSERT INTO verdicts_v2 (hash, run, half, status, idempotency_key, supersedes_id)
         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
         """
 
@@ -364,11 +367,13 @@ defmodule Tau.Factory.Ledger.Writer do
 
   # Return the status of the row with the highest id for this coordinate.
   # This is the latest row regardless of supersedes_id depth.
+  # Queries verdicts_v2 first (PR #464); falls back to original verdicts table
+  # for any rows that predate the migration.
   defp do_latest_verdict_status(db, %{hash: hash, run: run, half: half}) do
     half_text = atom_to_half(half)
 
     sql = """
-    SELECT status FROM verdicts
+    SELECT status FROM verdicts_v2
     WHERE hash = ?1 AND run = ?2 AND half = ?3
     ORDER BY id DESC
     LIMIT 1
@@ -388,7 +393,7 @@ defmodule Tau.Factory.Ledger.Writer do
   # Fetch the id of the latest (highest id) row for a coordinate.
   defp fetch_latest_id(db, hash, run, half_text) do
     sql = """
-    SELECT id FROM verdicts
+    SELECT id FROM verdicts_v2
     WHERE hash = ?1 AND run = ?2 AND half = ?3
     ORDER BY id DESC
     LIMIT 1
@@ -621,6 +626,7 @@ defmodule Tau.Factory.Ledger.Writer do
 
   defp atom_to_half(:critic), do: "critic"
   defp atom_to_half(:reviewer), do: "reviewer"
+  defp atom_to_half(:mutation), do: "mutation"
 
   defp atom_to_status(:pass), do: "pass"
   defp atom_to_status(:fail), do: "fail"
