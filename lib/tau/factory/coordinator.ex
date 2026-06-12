@@ -61,13 +61,7 @@ defmodule Tau.Factory.Coordinator do
   @spec start_link(keyword()) :: :gen_statem.start_ret()
   def start_link(opts) do
     name = Keyword.fetch!(opts, :name)
-    # Use start (not start_link) so that a hard :kill of the Coordinator does
-    # not propagate to the calling process. When started under a Supervisor the
-    # supervisor establishes its own monitor/link; for test isolation and
-    # recovery testing, the unlinked start is required (D-344: the test must
-    # kill the coordinator and restart it in the same test process without
-    # cascading).
-    :gen_statem.start({:local, name}, __MODULE__, opts, [])
+    :gen_statem.start_link({:local, name}, __MODULE__, opts, [])
   end
 
   @doc false
