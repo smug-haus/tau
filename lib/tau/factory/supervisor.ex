@@ -41,6 +41,8 @@ defmodule Tau.Factory.Supervisor do
     merge_authority_opts = Keyword.get(opts, :merge_authority_opts, [])
     budget_opts = Keyword.get(opts, :budget_opts)
     scheduler_opts = Keyword.get(opts, :scheduler_opts)
+    kill_switch_opts = Keyword.get(opts, :kill_switch_opts)
+    coordinator_opts = Keyword.get(opts, :coordinator_opts)
 
     # Derive a per-supervisor writer name so concurrent supervisor instances
     # (e.g. isolated test instances) do not conflict on the writer's name.
@@ -86,6 +88,20 @@ defmodule Tau.Factory.Supervisor do
         :"#{sup_name}_unit_supervisor"
       end
 
+    ks_name =
+      if sup_name == __MODULE__ do
+        Tau.Factory.KillSwitch
+      else
+        :"#{sup_name}_kill_switch"
+      end
+
+    coord_name =
+      if sup_name == __MODULE__ do
+        Tau.Factory.Coordinator
+      else
+        :"#{sup_name}_coordinator"
+      end
+
     children =
       base_children
       |> maybe_add_budget_owner(budget_opts, writer_name)
@@ -99,6 +115,8 @@ defmodule Tau.Factory.Supervisor do
         merge_authority_opts
       )
       |> maybe_add_unit_subsystem(unit_opts, unit_registry_name, unit_supervisor_name)
+      |> maybe_add_kill_switch(kill_switch_opts, ks_name, sup_name)
+      |> maybe_add_coordinator(coordinator_opts, coord_name, ks_name, sup_name)
 
     Supervisor.init(children, strategy: :one_for_one)
   end
@@ -187,6 +205,23 @@ defmodule Tau.Factory.Supervisor do
         {Tau.Factory.UnitRegistry, name: registry_name},
         {Tau.Factory.UnitSupervisor, name: sup_name}
       ]
+  end
+
+  # Add KillSwitch as a child only when kill_switch_opts are provided.
+  defp maybe_add_kill_switch(children, nil, _ks_name, _sup_name), do: children
+
+  defp maybe_add_kill_switch(children, kill_switch_opts, ks_name, _sup_name) do
+    opts = Keyword.put_new(kill_switch_opts, :name, ks_name)
+    children ++ [{Tau.Factory.KillSwitch, opts}]
+  end
+
+  # Add Coordinator as a child only when coordinator_opts are provided.
+  # Coordinator is started after KillSwitch (depends on PubSub already running).
+  defp maybe_add_coordinator(children, nil, _coord_name, _ks_name, _sup_name), do: children
+
+  defp maybe_add_coordinator(children, coordinator_opts, coord_name, _ks_name, _sup_name) do
+    opts = Keyword.put_new(coordinator_opts, :name, coord_name)
+    children ++ [{Tau.Factory.Coordinator, opts}]
   end
 
   defp default_db_path do
