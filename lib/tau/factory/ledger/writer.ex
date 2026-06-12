@@ -134,12 +134,40 @@ defmodule Tau.Factory.Ledger.Writer do
     GenServer.call(server, :budget_debited)
   end
 
+  @type unit_snapshot_attrs :: %{
+          unit_id: String.t(),
+          state: atom(),
+          idempotency_key: String.t()
+        }
+
   @type capture_attrs :: %{
           patch: binary(),
           untracked_tgz: binary() | nil,
           status: binary(),
           disposition: atom()
         }
+
+  @doc """
+  Append a durable unit-snapshot row recording a Unit FSM state transition.
+
+  Append-only — no UPDATE path. WAL-before-ack: the `{:ok, ref}` reply
+  arrives only after the SQLite WAL commit is durable (D-315, RPO=0).
+
+  Idempotency: if `attrs.idempotency_key` already exists, the write is a
+  no-op and `{:ok, ref}` is returned for the existing row's id (D-315 — a
+  replayed write with the same key is a no-op).
+
+  `attrs` fields:
+    - `:unit_id`         — `String.t()`; the PR/unit identifier.
+    - `:state`           — `atom()`; the Unit FSM state at this snapshot.
+    - `:idempotency_key` — `String.t()`; deterministic per `{unit_id, kind, coordinate}`.
+
+  Returns `{:ok, ref}` where `ref` is the inserted (or existing) row id.
+  """
+  @spec snapshot_unit(GenServer.server(), unit_snapshot_attrs()) :: {:ok, ref()} | {:error, term()}
+  def snapshot_unit(server, attrs) do
+    GenServer.call(server, {:snapshot_unit, attrs})
+  end
 
   @doc """
   Append a capture row for the given `worker_id`.
@@ -211,6 +239,16 @@ defmodule Tau.Factory.Ledger.Writer do
 
   def handle_call(:budget_debited, _from, %{db: db} = state) do
     result = do_budget_debited(db)
+    {:reply, result, state}
+  end
+
+  def handle_call({:snapshot_unit, attrs}, _from, %{db: db} = state) do
+    result = do_snapshot_unit(db, attrs)
+    {:reply, result, state}
+  end
+
+  def handle_call(:latest_unit_snapshots, _from, %{db: db} = state) do
+    result = do_latest_unit_snapshots(db)
     {:reply, result, state}
   end
 
@@ -441,6 +479,83 @@ defmodule Tau.Factory.Ledger.Writer do
     {:ok, String.to_existing_atom(text)}
   rescue
     ArgumentError -> :error
+  end
+
+  # Insert a unit snapshot row. Uses INSERT OR IGNORE for idempotency — if the
+  # idempotency_key already exists the row is skipped and we return the existing
+  # row id. Append-only; WAL-before-ack (D-315, RPO=0).
+  defp do_snapshot_unit(db, %{
+         unit_id: unit_id,
+         state: state,
+         idempotency_key: idempotency_key
+       }) do
+    state_text = Atom.to_string(state)
+
+    sql = """
+    INSERT OR IGNORE INTO unit_snapshots (unit_id, state, idempotency_key)
+    VALUES (?1, ?2, ?3)
+    """
+
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, String.trim(sql)),
+         :ok <- Exqlite.Sqlite3.bind(stmt, [unit_id, state_text, idempotency_key]),
+         step_result <- Exqlite.Sqlite3.step(db, stmt),
+         :ok <- Exqlite.Sqlite3.release(db, stmt) do
+      case step_result do
+        :done ->
+          # Row was inserted or already existed. Fetch the id for the key.
+          {:ok, fetch_snapshot_id_for_key(db, idempotency_key)}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  # Fetch the id for a unit_snapshot row by idempotency_key (covers both the
+  # freshly-inserted case and the idempotent-replay case).
+  defp fetch_snapshot_id_for_key(db, idempotency_key) do
+    sql = "SELECT id FROM unit_snapshots WHERE idempotency_key = ?1 LIMIT 1"
+
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, sql),
+         :ok <- Exqlite.Sqlite3.bind(stmt, [idempotency_key]),
+         {:ok, rows} <- Exqlite.Sqlite3.fetch_all(db, stmt),
+         :ok <- Exqlite.Sqlite3.release(db, stmt) do
+      case rows do
+        [[id]] -> id
+        _ -> fetch_last_rowid(db)
+      end
+    else
+      _ -> fetch_last_rowid(db)
+    end
+  end
+
+  # Return the latest (highest id) state per unit_id across all unit_snapshots.
+  # Uses a GROUP BY / MAX(id) subquery to find the winning row per unit_id.
+  # Converts stored state text back to atom via String.to_existing_atom/1;
+  # unknown atoms (not pre-existing in the atom table) are skipped gracefully.
+  defp do_latest_unit_snapshots(db) do
+    sql = """
+    SELECT s.unit_id, s.state
+    FROM unit_snapshots s
+    INNER JOIN (
+      SELECT unit_id, MAX(id) AS max_id
+      FROM unit_snapshots
+      GROUP BY unit_id
+    ) latest ON s.unit_id = latest.unit_id AND s.id = latest.max_id
+    """
+
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, String.trim(sql)),
+         {:ok, rows} <- Exqlite.Sqlite3.fetch_all(db, stmt),
+         :ok <- Exqlite.Sqlite3.release(db, stmt) do
+      Enum.reduce(rows, %{}, fn [unit_id, state_text], acc ->
+        case safe_to_existing_atom(state_text) do
+          {:ok, state_atom} -> Map.put(acc, unit_id, state_atom)
+          :error -> acc
+        end
+      end)
+    else
+      _ -> %{}
+    end
   end
 
   # Insert an append-only capture row. No UPDATE/upsert path.

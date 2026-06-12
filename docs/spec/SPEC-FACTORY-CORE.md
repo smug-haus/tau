@@ -11,6 +11,12 @@
 **Changelog:** Initial draft — §0–§7 + Appendix B. Introduces D-312, D-315,
 D-317, D-318, D-320, D-321, D-330–D-333, D-335, D-336, D-340, D-342, D-343,
 D-344. Cites (does not own) D-300–D-303 (SPEC-FACTORY-MERGE),
+P5b amendment (PR #455): §4 B3 — adds precise contract for `snapshot_unit/2`
+(WAL-before-ack, idempotency-keyed) and `latest_unit_snapshots/1` (resume-read
+op, routed through Writer); §5 — adds Coordinator `:ledger` start option and
+`init/1` resume semantics (D-344); §3 — adds [C113-B3] resume-read routing
+constraint. D-344 is now fully specified and enforced by
+`coordinator_recovery_test.exs`.
 D-304–D-308/D-322/D-323 (SPEC-FACTORY-GATE),
 D-309–D-311/D-313/D-314/D-316/**D-334** (SPEC-FACTORY-FLEET — D-334/CON-5 is
 owned by FLEET, whose capture mechanism is the enforcer; CORE only audits the
@@ -164,6 +170,13 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
 - **[C112-B10]** The external tracker is the authority for *what to build*; L is
   the authority for *what has been done*. The reconciliation pass crosses this
   boundary read-only (the tracker is projected, never a second writer of L).
+- **★ [C113-B3]** **Resume-read routed through the writer process.** The
+  resume-read op `Ledger.Reader.latest_unit_snapshots/1` is routed through
+  the `Ledger.Writer` GenServer process via `GenServer.call/2` — NOT through a
+  separate SQLite connection. This guarantees that the read sees all prior
+  WAL-committed writes (visibility ⊐ commit, D-315). Opening a second
+  connection for reads would require WAL-reader synchronisation and is
+  forbidden for this low-frequency op.
 
 ### Q5: Where are the feedback loops, and are they bounded?
 
@@ -243,6 +256,38 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
   WHERE kind='verdict'` enforces one original per coordinate; a revoke is a new
   row with `supersedes_id`. No `update` changeset exists for verdicts.
 
+#### B3 — `snapshot_unit/2` (durable unit-state write op, D-344 / P5b)
+
+```
+Ledger.Writer.snapshot_unit(server, attrs) :: {:ok, ref} | {:error, term}
+  attrs :: %{
+    unit_id:         String.t(),   # PR/unit identifier
+    state:           atom(),       # Unit FSM state at this snapshot
+                                   # (one of: planned | oracle | implementing |
+                                   #  gating | refine_k | awaiting_merge |
+                                   #  merged | escalated)
+    idempotency_key: String.t()    # deterministic per {unit_id, kind, coordinate}
+  }
+```
+
+Append-only (no UPDATE path); WAL-before-ack (D-315). A replay with the same
+`idempotency_key` is a no-op: `INSERT OR IGNORE` returns the existing row id.
+`{:ok, ref}` arrives only after the SQLite WAL commit is durable, so a snapshot
+survives a Coordinator crash. `:merged` and `:escalated` are terminal sinks.
+
+#### B3 — `latest_unit_snapshots/1` (resume-read op, D-344 / P5b)
+
+```
+Ledger.Reader.latest_unit_snapshots(server) :: %{unit_id => state_atom}
+```
+
+Returns the latest snapshotted state per `unit_id` (highest row `id` wins)
+across the whole ledger. Routed through the `Ledger.Writer` process (sole
+connection owner) to guarantee reads see all prior WAL-committed writes.
+Used exclusively by `Coordinator.init/1` to rebuild the in-flight set on
+resume (D-344). Terminal units (`:merged`/`:escalated`) appear in the map;
+the Coordinator filters them. Returns `%{}` when no snapshots exist.
+
 ### B4: Scheduler (C4) ↔ Budget.Owner (C2)
 
 - `budget_precheck/1 :: (unit_id) -> :ok | {:exhausted, dimension}` — reads the
@@ -304,6 +349,28 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
 
 `running` is the **only** non-progress-capable state; the totality argument
 (D-317) is discharged there.
+
+#### Coordinator `:ledger` start option and `init/1` resume semantics (D-344 / P5b)
+
+`Coordinator.start_link/1` accepts an optional `:ledger` key:
+
+```
+:ledger — GenServer.server() | nil
+```
+
+When `:ledger` is present and non-nil, `init/1` performs a **durable resume**:
+
+1. Calls `Ledger.Reader.latest_unit_snapshots(ledger)` to read the snapshotted
+   state per `unit_id` at crash time.
+2. **Rehydrates** each NON-terminal unit (state ∉ {`:merged`, `:escalated`}) by
+   driving it forward — these units resume the loop at their snapshotted state.
+3. **Skips** every unit already at a terminal sink (`:merged` / `:escalated`) —
+   no work is re-done; exactly-once on resume (D-344 crux).
+4. After rehydration the loop falls through to `select_fun` as normal.
+
+The `running` state entry text "start (resume from L)" refers to this path
+(D-344, D-315 / RPO=0). The `data` map carries a `rehydrated` key that
+records which unit_ids were resumed (observable via `:sys.get_state/1`).
 
 ### Unit (U) — `gen_statem`, one per PR
 

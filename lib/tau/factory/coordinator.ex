@@ -19,9 +19,12 @@ defmodule Tau.Factory.Coordinator do
 
   @behaviour :gen_statem
 
+  alias Tau.Factory.Ledger.Reader, as: LedgerReader
   alias Tau.Factory.Scheduler
 
   require Logger
+
+  @terminal_states [:merged, :escalated]
 
   # ---------------------------------------------------------------------------
   # Public API
@@ -46,6 +49,14 @@ defmodule Tau.Factory.Coordinator do
                       is called before driving.
     - `:on_halted`  — pid; notified with `:coordinator_halted` when the
                       Coordinator reaches `:halted`.
+    - `:ledger`     — `GenServer.server()` reference to a running
+                      `Ledger.Writer`. When present, `init/1` reads
+                      `Ledger.Reader.latest_unit_snapshots/1` and rehydrates
+                      each NON-terminal unit at its snapshotted state (driving
+                      it forward). Units already at a terminal sink
+                      (`:merged`/`:escalated`) are skipped — exactly-once on
+                      resume (D-344 / §5 Coordinator `running` entry =
+                      "start (resume from L)").
   """
   @spec start_link(keyword()) :: :gen_statem.start_ret()
   def start_link(opts) do
@@ -79,8 +90,31 @@ defmodule Tau.Factory.Coordinator do
     drive_fun = Keyword.fetch!(opts, :drive_fun)
     scheduler = Keyword.get(opts, :scheduler)
     on_halted = Keyword.get(opts, :on_halted)
+    ledger = Keyword.get(opts, :ledger)
 
     :ok = Phoenix.PubSub.subscribe(pubsub, "factory:control")
+
+    # Resume from L when a ledger is provided (D-344, §5 "start (resume from L)").
+    # Read latest_unit_snapshots/1 to discover which units were in flight at crash
+    # time. Non-terminal units are rehydrated (driven). Terminal sinks are skipped.
+    {rehydrated, init_events} =
+      if ledger do
+        snapshots = LedgerReader.latest_unit_snapshots(ledger)
+
+        non_terminal =
+          snapshots
+          |> Enum.reject(fn {_uid, state} -> state in @terminal_states end)
+          |> Map.new()
+
+        if map_size(non_terminal) > 0 do
+          # Schedule rehydration of all non-terminal units.
+          {non_terminal, [{:next_event, :internal, {:rehydrate, non_terminal}}]}
+        else
+          {%{}, [{:next_event, :internal, :loop}]}
+        end
+      else
+        {%{}, [{:next_event, :internal, :loop}]}
+      end
 
     data = %{
       pubsub: pubsub,
@@ -89,16 +123,35 @@ defmodule Tau.Factory.Coordinator do
       scheduler: scheduler,
       on_halted: on_halted,
       halt_pending: false,
-      in_flight: nil
+      in_flight: nil,
+      # Track rehydrated units so :sys.get_state reveals them (Oracle c).
+      rehydrated: rehydrated
     }
 
-    # Kick off the loop immediately: try to find and drive first work item.
-    {:ok, :running, data, [{:next_event, :internal, :loop}]}
+    {:ok, :running, data, init_events}
   end
 
   # ---------------------------------------------------------------------------
   # State: :running
   # ---------------------------------------------------------------------------
+
+  # Resume rehydration: drive each non-terminal unit that was in flight at crash
+  # time. Each drive is sequential (one at a time), using the existing loop
+  # mechanism. We drive the first one immediately; the loop handles subsequent
+  # ones via {:unit_terminal, ...} → :loop after each completes.
+  def running(:internal, {:rehydrate, non_terminal}, data) when map_size(non_terminal) == 0 do
+    # All rehydrated — fall through to the normal select loop.
+    {:keep_state, data, [{:next_event, :internal, :loop}]}
+  end
+
+  def running(:internal, {:rehydrate, non_terminal}, data) do
+    # Pop one unit_id and drive it; store the remainder for post-terminal replay.
+    [{unit_id, _state} | rest] = Map.to_list(non_terminal)
+    remaining = Map.new(rest)
+    data = drive_unit(data, unit_id, unit_id)
+    data = Map.put(data, :rehydrate_queue, remaining)
+    {:keep_state, data}
+  end
 
   # Internal loop event: select next work and drive it (or idle).
   def running(:internal, :loop, data) do
@@ -133,10 +186,41 @@ defmodule Tau.Factory.Coordinator do
   end
 
   def running(:info, {:unit_terminal, _unit_id, _outcome}, data) do
-    # Loop: select and drive next work.
     telemetry(:unit_terminal, %{}, %{halt_pending: false})
     data = %{data | in_flight: nil}
-    {:keep_state, data, [{:next_event, :internal, :loop}]}
+
+    # If rehydration of recovered units is still in progress, drive the next one.
+    case Map.get(data, :rehydrate_queue, %{}) do
+      queue when map_size(queue) > 0 ->
+        {:keep_state, data, [{:next_event, :internal, {:rehydrate, queue}}]}
+
+      _ ->
+        # Loop: select and drive next work.
+        {:keep_state, data, [{:next_event, :internal, :loop}]}
+    end
+  end
+
+  # Also handle the 4-arg variant sent by the real Unit FSM (D-340).
+  def running(
+        :info,
+        {:unit_terminal, _unit_id, _outcome, _provenance},
+        %{halt_pending: true} = data
+      ) do
+    telemetry(:unit_terminal, %{}, %{halt_pending: true})
+    {:next_state, :halting, %{data | in_flight: nil}, [{:next_event, :internal, :drain}]}
+  end
+
+  def running(:info, {:unit_terminal, _unit_id, _outcome, _provenance}, data) do
+    telemetry(:unit_terminal, %{}, %{halt_pending: false})
+    data = %{data | in_flight: nil}
+
+    case Map.get(data, :rehydrate_queue, %{}) do
+      queue when map_size(queue) > 0 ->
+        {:keep_state, data, [{:next_event, :internal, {:rehydrate, queue}}]}
+
+      _ ->
+        {:keep_state, data, [{:next_event, :internal, :loop}]}
+    end
   end
 
   # Global escalation → halting.
