@@ -18,9 +18,11 @@ op, routed through Writer); §5 — adds Coordinator `:ledger` start option and
 constraint. D-344 is now fully specified and enforced by
 `coordinator_recovery_test.exs`.
 D-304–D-308/D-322/D-323 (SPEC-FACTORY-GATE),
-D-309–D-311/D-313/D-314/D-316/**D-334** (SPEC-FACTORY-FLEET — D-334/CON-5 is
-owned by FLEET, whose capture mechanism is the enforcer; CORE only audits the
-disposition), D-319 (SPEC-FACTORY-GOV). Durable store decided:
+D-309–D-311/D-313/D-314/D-316/**D-334**/**D-326** (SPEC-FACTORY-FLEET — D-334/CON-5
+is owned by FLEET, whose capture mechanism is the enforcer, and **D-326** the
+worker-completion `work_ready` contract; CORE only audits the disposition and
+consumes the `worker_event` set at U's `implementing → gating` edge — §4 B8,
+[C111b-B8]), D-319 (SPEC-FACTORY-GOV). Durable store decided:
 **SQLite/Exqlite** (arch OQ-1).
 
 ## 0. Why this spec exists
@@ -167,6 +169,17 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
   `escalated` / `rejected`) is preserved with its full provenance (attempt count,
   last verdict hash, challenge log). No outcome is reduced to a bare boolean —
   the conservation laws need the full lineage (NFR-AUDIT).
+- **★ [C111b-B8]** **Worker completion crosses as an asserted event, not an exit
+  code (cited D-326, owned by FLEET).** The fact "the agent produced a stable
+  diff" crosses to U **only** as `work_ready(worker_id, branch, head_sha)` — an
+  in-band frame the agent emits before exit. A clean Port exit (`:exit_status 0`)
+  carries one bit and **loses** the distinction between "did the work / pushed a
+  real diff", "ran and pushed nothing", and "crashed but exited 0"; U must not
+  infer completion from it. The `branch`/`head_sha` is the evidence U needs to
+  confirm a non-empty diff before `request_gate`; exit-0-without-`work_ready`
+  crosses as `worker_exit(w, :no_work_product)` and is routed to the retry
+  ladder, never gated. The three worker-outcome events (`work_ready`,
+  `worker_exit`, `worker_stalled`) are disjoint and keyed by `worker_id`.
 - **[C112-B10]** The external tracker is the authority for *what to build*; L is
   the authority for *what has been done*. The reconciliation pass crosses this
   boundary read-only (the tracker is projected, never a second writer of L).
@@ -321,9 +334,18 @@ the Coordinator filters them. Returns `%{}` when no snapshots exist.
 
 ### B8: Unit (C6) ↔ Worker fleet (W) — *cited, SPEC-FACTORY-FLEET*
 
-- `spawn(role, brief, ref)`; U holds a `Process.monitor/1` ref for liveness; W
-  emits heartbeats and a `worker_stalled` synthetic event on absence ([C107]).
-  W owns isolation/capture D-309..D-311, D-313, D-314, D-316.
+- `spawn(role, brief, ref)`; U holds a `Process.monitor/1` ref for liveness. W
+  surfaces the **disjoint** `worker_event` set, all keyed by `worker_id`, which U
+  consumes (U `E_in`): `work_ready(w, branch, head_sha)` (**success** — the agent
+  asserted a stable diff in-band; the sole trigger of `implementing → gating`),
+  `worker_exit(w, reason)` (the `:DOWN` death certificate — infra path,
+  gate NOT called), and `worker_stalled(w)` (the watchdog's synthetic
+  heartbeat-absence trigger, [C107]). U tags the **current** `worker_id` and
+  discards events from a superseded worker. Clean Port exit (`:exit_status 0`)
+  without `work_ready` is NOT completion — it arrives as
+  `worker_exit(w, :no_work_product)` (**D-326, cited owner: SPEC-FACTORY-FLEET**).
+  W owns isolation/capture D-309..D-311, D-313, D-314, D-316 and the completion
+  contract D-326.
 
 ### B9: KillSwitch (C9) ↔ Coordinator (C3)
 
@@ -377,7 +399,8 @@ records which unit_ids were resumed (observable via `:sys.get_state/1`).
 ```
 state ∈ {planned, oracle, implementing, gating, refine_k, awaiting_merge, merged, escalated}
 
- planned ─admit(S)→ oracle ─test-author frozen→ implementing ─request_gate→ gating
+ planned ─admit(S)→ oracle ─test-author frozen→ implementing ─work_ready(w,branch,head_sha) ⇒ request_gate→ gating
+                                                            (D-326: in-band success event keyed by worker_id; NOT exit 0)
    gating + :pass            → awaiting_merge ─M :merged→ merged (terminal)
    gating + {:fail,f}        → refine_k        (k<N → implementing; k=N → pivot → implementing; pivot red → escalated [E-RETRY-EXHAUSTED])
    awaiting_merge + M reject → gating          (re-gate; INV-2)
