@@ -64,10 +64,9 @@ defmodule Tau.Factory.MergeOutcomeDurabilityTest do
   always re-submits). A test that passed against the current code would be
   vacuous.
 
-  D-NNN linkage: this PR allocates a NEW invariant id (durable merge outcome) in
-  its SPEC §4/§6 amendment. Until that id is pinned, the new-invariant tag is the
-  descriptive placeholder `:merge_outcome_durable`; the apt established tags
-  `:d_315` (RPO=0 / WAL-before-ack) and `:d_344` (resume reconcile) also apply.
+  D-NNN linkage: D-355 (durable merge outcome, allocated in SPEC-FACTORY-MERGE §6
+  by this PR). Established tags `:d_315` (RPO=0 / WAL-before-ack) and `:d_344`
+  (resume reconcile) also apply.
   """
 
   use ExUnit.Case, async: false
@@ -77,7 +76,7 @@ defmodule Tau.Factory.MergeOutcomeDurabilityTest do
   alias Tau.Factory.MergeAuthority
 
   @moduletag :capture_log
-  @moduletag :merge_outcome_durable
+  @moduletag :d_355
   @moduletag :d_315
   @moduletag :d_344
 
@@ -212,10 +211,10 @@ defmodule Tau.Factory.MergeOutcomeDurabilityTest do
   # fires (WAL-before-ack: durable BEFORE the ephemeral projection).
   # ---------------------------------------------------------------------------
 
-  describe "merge_outcome_durable / d_315 — outcome is a durable Ledger row written WAL-before-ack" do
-    @tag :merge_outcome_durable
+  describe "D-355 / d_315 — outcome is a durable Ledger row written WAL-before-ack" do
+    @tag :d_355
     @tag :d_315
-    test "merge_outcome_durable/d_315: a completed merge records {:merged, commit_sha} in L, durable before the telemetry projection" do
+    test "D-355/d_315: a completed merge records {:merged, commit_sha} in L, durable before the telemetry projection" do
       ledger = start_ledger()
       test_pid = self()
 
@@ -276,10 +275,10 @@ defmodule Tau.Factory.MergeOutcomeDurabilityTest do
   # be there — the merge outcome's RPO is 0.
   # ---------------------------------------------------------------------------
 
-  describe "merge_outcome_durable / d_315 — the outcome survives a producer crash (RPO=0)" do
-    @tag :merge_outcome_durable
+  describe "D-355 / d_315 — the outcome survives a producer crash (RPO=0)" do
+    @tag :d_355
     @tag :d_315
-    test "merge_outcome_durable/d_315: after the MergeAuthority dies, the merged outcome is still in L" do
+    test "D-355/d_315: after the MergeAuthority dies, the merged outcome is still in L" do
       ledger = start_ledger()
       test_pid = self()
 
@@ -335,10 +334,10 @@ defmodule Tau.Factory.MergeOutcomeDurabilityTest do
   # appearing in the recorded merge_fun calls.
   # ---------------------------------------------------------------------------
 
-  describe "merge_outcome_durable / d_344 — reconcile-on-resume does not re-submit an already-landed merge" do
-    @tag :merge_outcome_durable
+  describe "D-355 / d_344 — reconcile-on-resume does not re-submit an already-landed merge" do
+    @tag :d_355
     @tag :d_344
-    test "merge_outcome_durable/d_344: a Unit reaching :awaiting_merge with a recorded :merged outcome does NOT call merge_fun" do
+    test "D-355/d_344: a Unit reaching :awaiting_merge with a recorded :merged outcome does NOT call merge_fun" do
       ledger = start_ledger()
       test_pid = self()
 
@@ -411,9 +410,9 @@ defmodule Tau.Factory.MergeOutcomeDurabilityTest do
                "merge_outcome_for/2 and skip the re-submit (D-344 — re-does no terminal work)."
     end
 
-    @tag :merge_outcome_durable
+    @tag :d_355
     @tag :d_344
-    test "merge_outcome_durable/d_344: a Unit reaching :awaiting_merge with a recorded :rejected outcome routes to re-gate, not re-merge" do
+    test "D-355/d_344: a Unit reaching :awaiting_merge with a recorded :rejected outcome routes to re-gate, not re-merge" do
       ledger = start_ledger()
       test_pid = self()
 
