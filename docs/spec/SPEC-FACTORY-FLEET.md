@@ -9,7 +9,10 @@
 | **Issue** | TBD — file before the first implementation PR (`tau-github-workflow`); reference as `Closes #N`. |
 
 **Changelog:** Initial draft — §0–§7 + Appendix B. Introduces D-309, D-310,
-D-311, D-313, D-314, D-316, D-334. Cites (does not own) D-304/D-305/D-306
+D-311, D-313, D-314, D-316, D-334.
+ARCH-GAP #460 amendment — adds **D-326** (worker completion is an asserted
+in-band `work_ready` event, the success counterpart of the `worker_exit` death
+certificate; §3 C210b-B9, §4 B1/B4, §6). Cites (does not own) D-304/D-305/D-306
 (SPEC-FACTORY-GATE — the worker enforces only the spawn-order + author-identity
 *mechanism* of D-304, HR-7; the invariant is GATE's), D-300–D-303
 (SPEC-FACTORY-MERGE — sole `origin/main` writer, the other half of INV-11),
@@ -82,7 +85,7 @@ Boundaries (B-N attach contracts in §4):
 
 | # | Boundary | Operation |
 |---|----------|-----------|
-| B1 | **U** (SPEC-FACTORY-CORE) ↔ C1 WorkerSupervisor | `spawn(role, brief, base_ref)` → `{:ok, worker_id}`; async `worker_exit(worker_id, reason)`. **Cited owner: CORE (B8).** |
+| B1 | **U** (SPEC-FACTORY-CORE) ↔ C1 WorkerSupervisor | `spawn(role, brief, base_ref)` → `{:ok, worker_id}`; async `work_ready(worker_id, branch, head_sha)` (success, D-326) ∥ `worker_exit(worker_id, reason)` (death cert). **Cited owner: CORE (B8).** |
 | B2 | C2 Worker ↔ git checkout | private worktree fork from a *system-established* `base_ref`; self-verify pwd/HEAD/branch, abort on mismatch. |
 | B3 | C2 Worker ↔ C5 Isolation (resource namespace) | `resolve_namespace(ws, Toolchain.resource_namespace(tc))` → total `env` map of per-worker dirs **inside** the worktree. |
 | B4 | C2 Worker ↔ agent `Port` | length-framed structured I/O (`{:packet,4}`, `:exit_status`); launched with `env: ns`, `cd: ws`; linked into the worker (agent crash domain ⊆ worker crash domain). |
@@ -176,6 +179,17 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
   formats and `IO`-scraping are forbidden (OTP non-negotiable; GAP-4). The
   per-worker namespace (`env: ns`) crosses into the `Port`'s subprocess so the
   sub-agent inherits isolation too.
+- **★ [C210b-B9]** **Normal completion is an explicit in-band event, not an exit
+  status (D-326).** When the agent finishes successfully it emits a
+  `work_ready(branch, head_sha)` frame over its `Port` *before* exiting; the
+  worker decodes it (the same `decode_event` path as C210-B4) and surfaces
+  `work_ready(worker_id, branch, head_sha)` to the owning Unit. Clean Port exit
+  (`:exit_status 0`) is **not** completion: a single exit bit cannot distinguish
+  "did the work, pushed a real diff" from "ran and pushed nothing" from "crashed
+  but happened to exit 0". The `branch`/`head_sha` payload is the **evidence** U
+  needs to confirm a non-empty diff before gating — without it the mutation gate
+  (D-306) degenerates on an empty diff into a false-green. The success event and
+  the death certificate are **disjoint**: `work_ready` ≠ `worker_exit`.
 - **[C211-B1]** A worker `:DOWN` crosses to the Unit FSM as `worker_exit(id,
   reason)` carrying the reason — an **outcome to decide**, never an instruction
   to auto-restart. A gate FAIL or bad LLM output is a *semantic* outcome (Unit
@@ -243,9 +257,26 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
   `WorkerRegistry`. The Unit holds `worker_id`, never a pid.
 - `worker_exit(worker_id, reason)` is surfaced asynchronously (the
   death-certificate). It is an **outcome the Unit decides**, never an auto-restart.
+- `work_ready(worker_id, branch, head_sha)` is the **success** counterpart of
+  `worker_exit`, surfaced asynchronously when the agent reports a stable diff
+  (D-326). The two are **disjoint** worker-outcome events keyed by `worker_id`;
+  together with the watchdog's `worker_stalled(worker_id)` (B7) they form the
+  complete `worker_event` set the Unit FSM consumes. `work_ready` is the **only**
+  trigger of U's `implementing → gating` edge.
 - Invariant (**D-316, crash containment**): `crashes(w) → blast_radius(w) = {w}`
   — the `:temporary` supervisor issues the certificate without disturbing other
   workers or the coordinator. No `try/rescue`/`:exit`-catch crosses the boundary.
+- Invariant (**D-326, completion is an asserted in-band event**): a worker's
+  *normal completion* is signalled **only** by an in-band `work_ready` frame the
+  agent emits over its `Port` (B4) before exit; clean Port exit (`:exit_status
+  0`) is **never** by itself surfaced as completion. Formally, with
+  `wire(w) ∈ {work_ready(w,b,h), exit_status(w,n), —}` the agent's last frame
+  and exit:
+  `□( surfaces_work_ready(w) ⇒ ∃ b,h. wire-frame work_ready(w,b,h) was received )`
+  ∧ `□( exit_status(w,0) ∧ ¬received work_ready(w,_,_) ⇒ surfaces worker_exit(w,:no_work_product), NOT work_ready )`.
+  The `branch`/`head_sha` payload lets U confirm a non-empty diff before
+  `request_gate`; an exit-0-without-`work_ready` is a *no-op*, routed to the
+  Unit's retry ladder as a semantic non-completion, never gated.
 
 ### B2: Worker (C2) ↔ git checkout
 
@@ -284,8 +315,26 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
 - Inbound frames decode to typed `%Tau.Provider.Event{}` / agent-event structs;
   `{:exit_status, n}` is the agent terminal signal. **No** stdout scraping, **no**
   ad-hoc event format.
-- Invariant (**D-316**): the agent's crash domain ⊆ the worker's crash domain — an
-  agent crash is contained to one worker, never the fleet, never the coordinator.
+- **Completion frame (D-326).** Among the decoded event types is a terminal
+  *work-product-ready* frame — modelled as a struct under the existing event
+  taxonomy (extend `Tau.Provider.Event`, mirroring the in-band
+  `%Tau.CodingAgent.Event.Done{}` already used by `Tau.Session`; **never** an
+  ad-hoc format). On decoding it the worker emits `work_ready(worker_id, branch,
+  head_sha)` to `report_to`. The worker forwarding this frame is the **only**
+  source of a U completion trigger; `{:exit_status, 0}` arriving with no prior
+  `work_ready` is surfaced as `worker_exit(worker_id, :no_work_product)`, not as
+  a success. This is the success counterpart of the `worker_exit` death
+  certificate (single-writer discipline: the worker is the sole forwarder of
+  `work_ready`, just as the independent monitor is the sole writer of
+  `worker_exit`).
+- **Ordering (the V1-load-bearing fact).** A single `Port`'s `{:data, _}` frames
+  and its `{:exit_status, n}` are delivered to the owning process **in order** —
+  the BEAM flushes all buffered Port output to the worker mailbox *before* the
+  `:exit_status` message. So a `work_ready` frame the agent writes before exit is
+  observed by the worker *before* the exit, making the `work_ready_seen?`
+  predicate well-defined at exit time. This holds **only within one Port**; it is
+  NOT a cross-process ordering claim (no wall-clock, no cross-worker order — the
+  ordering invariant is per-`worker_id`, V9-clean).
 
 ### B5: WorkspaceJanitor (C4) ↔ Worker (C2) — the `:DOWN` capture
 
@@ -442,6 +491,28 @@ untracked kind is conserved explicitly (a naïve `git diff` omits it). Enforced 
 kind, terminate it, and assert the join `committed ⊎ captured ⊎
 discarded_by_decision` covers every hunk with no remainder).
 
+**D-326 — Worker completion is an asserted in-band event, not an exit status
+(closes ARCH-GAP #460):**
+A worker's *normal completion* crosses to the owning Unit FSM **only** as
+`work_ready(worker_id, branch, head_sha)` — a typed frame the agent emits over
+its `Port` (extending `Tau.Provider.Event`, mirroring
+`%Tau.CodingAgent.Event.Done{}`) **before** it exits, decoded and forwarded by
+the worker. `work_ready`, `worker_exit` (death certificate), and `worker_stalled`
+(watchdog) are **disjoint** worker-outcome events, all keyed by `worker_id`; they
+constitute the complete `worker_event` set U consumes, and `work_ready` is the
+sole trigger of U's `implementing → gating` edge. Clean Port exit (`:exit_status
+0`) without a prior `work_ready` is surfaced as
+`worker_exit(worker_id, :no_work_product)` — a semantic non-completion routed to
+U's retry ladder, **never** gated. The `branch`/`head_sha` payload is the
+evidence U uses to confirm a non-empty diff before `request_gate` (without it the
+mutation gate D-306 degenerates on an empty diff into a false-green). Enforced by
+`worker_completion_event_test.exs`: (a) an agent that emits `work_ready` then
+exits 0 surfaces `work_ready(id, branch, head_sha)` to its Unit and drives
+`implementing → gating`; (b) an agent that exits 0 **without** emitting
+`work_ready` surfaces `worker_exit(id, :no_work_product)` and does **not** reach
+`gating`; (c) a `work_ready` from a superseded `worker_id` is discarded. The
+boundary is the **typed event**, never the exit code.
+
 ## 7. Acceptance criteria
 
 Each is expressed against the user-facing path with an observable signal. PR
@@ -496,13 +567,20 @@ groupings are indicative.
 - **AC-12 (meta):** the gating tests above run in CI as a blocking job under a
   per-worker `XDG_DATA_HOME` so the F-5 reproduction (AC-4) is itself isolated.
   *(meta — verified by CI wiring; exempt from the unit-test-linkage check.)*
+- **AC-13 (PR-FLEET / P5c-3, D-326):** `worker_completion_event_test.exs` passes —
+  an agent emitting `work_ready` then exiting 0 surfaces
+  `work_ready(worker_id, branch, head_sha)` to its Unit (driving
+  `implementing → gating`); an agent exiting 0 **without** `work_ready` surfaces
+  `worker_exit(worker_id, :no_work_product)` and does **not** reach `gating`; a
+  `work_ready` from a superseded `worker_id` is discarded. Signal: the Unit's
+  observable state after each case matches the disjoint-outcome table.
 
 ## Appendix B — Source map
 
 Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 
 - `lib/tau/factory/worker_supervisor.ex` (C1; D-316, death-certificate) — PR-FLEET-1
-- `lib/tau/factory/worker.ex` (C2; D-309, D-310, D-311, D-316 + heartbeat emission) — PR-FLEET-1/2
+- `lib/tau/factory/worker.ex` (C2; D-309, D-310, D-311, D-316 + heartbeat emission; D-326 `work_ready` decode/forward in `handle_info({port,{:data,_}},…)`) — PR-FLEET-1/2; D-326 wiring is P5c-3
 - `lib/tau/factory/worker_registry.ex` (C3; key-not-pid identity) — PR-FLEET-1
 - `lib/tau/factory/worker/isolation.ex` (C5; D-309, D-311 — pure namespace/verify helpers) — PR-FLEET-2
 - `lib/tau/factory/workspace_janitor.ex` (C4; D-313, D-314, D-334 — `:DOWN` monitor) — PR-FLEET-3
@@ -517,6 +595,7 @@ Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 - `test/tau/factory/worker_crash_containment_test.exs` (D-316) — PR-FLEET-4
 - `test/tau/factory/worker_no_shared_tree_test.exs` (D-310) — PR-FLEET-4
 - `test/tau/factory/worker_stalled_test.exs` (watchdog; feeds CORE D-317) — PR-FLEET-4
+- `test/tau/factory/worker_completion_event_test.exs` (D-326 — `work_ready` vs exit-0 no-op vs stale `worker_id`) — P5c-3
 - `test/tau/factory/oracle_spawn_order_test.exs` (D-304 mechanism, cited) — PR-FLEET-4
 
 **Cross-SPEC boundaries (cited, not owned here):** B1/B6/B7 → `SPEC-FACTORY-CORE`

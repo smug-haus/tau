@@ -221,7 +221,34 @@ port = Port.open({:spawn_executable, agent_bin},
 # Inbound frames decode to typed events — extend Tau.Provider.Event, never an ad-hoc format:
 def handle_info({port, {:data, frame}}, st), do: dispatch(decode_event(frame), st)
 def handle_info({port, {:exit_status, n}}, st), do: handle_agent_exit(n, st)
+
+# D-326: a normal completion is an ASSERTED in-band event, not exit status.
+# The agent emits a typed work-product-ready frame BEFORE exiting; on decoding
+# it the worker forwards work_ready(worker_id, branch, head_sha) to its Unit.
+defp dispatch(%WorkReady{branch: b, head: h}, st) do
+  send(st.report_to, {:work_ready, st.worker_id, b, h})   # the U `implementing → gating` trigger
+  {:noreply, %{st | work_ready_seen?: true}}
+end
+# An exit 0 with NO prior work_ready is a no-op, surfaced as a death cert, NOT success:
+defp handle_agent_exit(0, %{work_ready_seen?: false} = st),
+  do: {:stop, {:shutdown, :no_work_product}, st}          # → worker_exit(id, :no_work_product)
 ```
+
+**Completion is an asserted event, not an exit code (D-326, closes ARCH-GAP
+#460).** A clean Port exit (`:exit_status 0`) carries a single bit and cannot
+distinguish "did the work / pushed a real diff" from "ran and pushed nothing"
+from "crashed but exited 0". So the agent's *success* is signalled by an in-band
+`work_ready(branch, head_sha)` frame (a struct under the same event taxonomy,
+mirroring the in-band `%Tau.CodingAgent.Event.Done{}` already used by
+`Tau.Session`), decoded and forwarded as `work_ready(worker_id, branch,
+head_sha)` — the **sole** trigger of U's `implementing → gating` edge. The
+`branch`/`head_sha` payload is the evidence U needs to confirm a non-empty diff
+before gating. `work_ready` is the success counterpart of the `worker_exit`
+death certificate (§6); the two are disjoint, and an `exit_status 0` without a
+prior `work_ready` is surfaced as `worker_exit(worker_id, :no_work_product)`,
+routed to the Unit's retry ladder, never gated. This realises today's
+`handle_info({port, {:data, _}}, st)` "future: forward to Unit FSM" stub (the
+conforming wiring is P5c-3).
 
 - **Structured events, not scraping.** Inbound frames decode to typed
   `%Tau.Provider.Event{}` / agent-event structs; a tool result is structured

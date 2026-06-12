@@ -341,7 +341,8 @@ state ∈ {planned, oracle, implementing, gating, refine_k, awaiting_merge, merg
 
   planned ──admit(S)──▶ oracle ──test-author frozen (INV-5)──▶ implementing
                                                                   │
-                                            request_gate (stable diff)
+                            work_ready(w,branch,head_sha) ⇒ request_gate
+                                  (D-326: in-band success signal; NOT exit 0)
                                                                   ▼
                                                                gating
                           ┌──────────── gate FAIL (FR-8.2, an OUTCOME) ──────────┐
@@ -424,6 +425,51 @@ reachable non-progress state eventually produces a trigger**, which the
 classifier (§1.4) then maps to exactly one `e ∈ E`. Totality over `classify/1`'s
 domain is necessary but not sufficient on its own; the mandatory timeouts make it
 sufficient over reachable *states*.
+
+### 3.2.1 The `implementing ──request_gate──▶ gating` trigger (D-326)
+
+The `implementing → gating` edge has exactly **one** trigger: a `work_ready`
+*work-product-ready* event the agent emits **in-band over its `Port`**, decoded
+to a typed struct (`worker-fleet.md` §4 — `dispatch(decode_event(frame), st)`),
+and surfaced by the worker to its owning U keyed by `worker_id`:
+
+```elixir
+# implementing: the ONLY legal completion trigger is the in-band work_ready event.
+def implementing(:info, {:work_ready, w, branch, head_sha}, %{worker_id: w} = data) do
+  # The agent has declared a stable diff; verify it is non-empty before gating
+  # (a clean exit conflates "did the work" with "ran and pushed nothing" — V1).
+  {:next_state, :gating, %{data | branch: branch, head_sha: head_sha},
+   [{:next_event, :internal, :request_gate}]}
+end
+# A work_ready from a SUPERSEDED worker (stale worker_id) is discarded, not gated.
+def implementing(:info, {:work_ready, _other, _b, _s}, data), do: {:keep_state, data}
+```
+
+Three keyed-by-`worker_id` worker triggers are **disjoint** and U distinguishes
+them structurally (the `worker_event` family of system-architecture.md §1, U
+`E_in`):
+
+| trigger | meaning | U action |
+|---------|---------|----------|
+| `work_ready(w, branch, head_sha)` | agent declared a **stable diff** (success) | → `gating` (`request_gate`) |
+| `worker_exit(w, reason)` (`:DOWN`) | worker/agent **crashed or exited** | infra path → `escalated`; gate NOT called (FR-8.2) |
+| `worker_stalled(w)` | watchdog saw **heartbeat absence** (wedged, no `:DOWN`) | retry ladder (semantic stall) → refine/pivot/escalate |
+
+**Why a clean Port exit is NOT the completion trigger (the load-bearing
+decision).** The discriminating question is operational: *can a normally-exiting
+agent ("did the work, pushed a real diff") be distinguished from a no-op exit
+("ran, pushed nothing") and from a crash that happens to exit 0, by exit status
+alone?* It cannot — `:exit_status 0` is a single bit that conflates all three.
+Trusting it would let U fire `request_gate` on an **empty or absent diff**, and
+the gate's mutation check (D-306, "≥1 gating test fails on the reverted tree")
+silently degenerates when there is no production change to revert — a false-green
+path into merge. The in-band `work_ready(branch, head_sha)` frame carries the
+**evidence** (the branch and head SHA the agent pushed) U needs to confirm the
+diff is real *before* gating; exit status remains only the `worker_exit`
+death-certificate input, never a success signal. This mirrors the existing
+in-band `{:coding_agent_event, pid, %Event.Done{}}` contract in `Tau.Session`:
+completion is a typed event the agent *asserts*, never an exit code the harness
+*infers* (D-326; OTP non-negotiable — extend `Tau.Provider.Event`, never scrape).
 
 ### 3.3 Bounded retry ladder (INV-19, HR-8 clamp)
 
@@ -548,8 +594,8 @@ never `Process.whereis |> send`** (OTP non-negotiable #4; research §6).
 | K → S `admit(unit, scope)` | `GenServer.call` | **`call`** — the admit/defer reply *is* back-pressure on the control path; a `cast` would let K outrun S's view of `F` (research §3). |
 | K → U drive / S → U admitted | `gen_statem` event (`call` for the synchronous handshake) | **`call`** on the control path; the reply gates K's next select. |
 | U → G `request_gate` | monitored `Task` (gate fan-out) + result message | `async_nolink` + monitor: a gate-task crash is *data* (a `:DOWN`), not a cascade into U (research §5). |
-| U → M `request_merge` | `GenServer.call` to MergeAuthority | **`call`** — M is concurrency-1; the reply (merged / rejected) is the merge back-pressure; a `cast` into M is a mailbox time-bomb (supervision-tree.md Step 4). |
-| U → W spawn / `:DOWN` | `DynamicSupervisor.start_child` + `Process.monitor` | monitored ref for point-to-point liveness (§3.4). |
+| U → M `request_merge` ; M → U `merge_result` | `cast`/enqueue to MergeAuthority **+ async result on PubSub `"factory:pr:#{id}"`** | **NOT a blocking `call`** — M is concurrency-1 and a single integration is a *minutes-long* merge-train build; a synchronous `call` across it would block U (and pin a caller process) for the whole build and risk a `call` timeout misclassifying "still merging" as failure (final-validation H-1b). U enqueues the request, then `awaiting_merge` consumes `{:merge_result, :merged \| :rejected}` from the per-PR PubSub topic; M's reply *is* the back-pressure, decoupled. A `:rejected` (stale/revoked verdict, ref moved) re-gates (INV-2). |
+| U → W spawn / `work_ready` / `:DOWN` | `DynamicSupervisor.start_child` + `Process.monitor` + in-band `Port` event | monitored ref for point-to-point liveness (the `:DOWN` → `worker_exit`, §3.4); the **success** trigger `work_ready(w, branch, head_sha)` arrives as a decoded in-band `Port` event keyed by `worker_id` (§3.2.1, D-326) — never inferred from exit status. |
 | K/U/M → L record/verdict/debit | `GenServer.call` to the single writer | **`call`** — WAL-before-ack; a `cast` would risk losing a decision on crash (INV-16). |
 | any → K `escalation` | `GenServer.call` (or PubSub for fan-out notice) | **`call`** for the control decision; PubSub `"factory:escalation"` for the *observer* fan-out (dashboard, OTel). |
 | KillSwitch → K | PubSub `"factory:control"` | a *fan-out* control signal K consumes at a unit boundary (§1.5); not request/reply. |

@@ -80,8 +80,14 @@ justified by the distinct invariant(s) it structurally enforces.
 - **S:** live workers; per-worker isolation boundary (private checkout +
   complete resource namespace declared by the Toolchain adapter).
 - **E_in:** `spawn(role, brief, ref)`, `worker_exit(w, reason)`.
-- **E_out:** `workspace_ready(w)`, `captured(w, dirty)`, `reclaimed(w)`,
-  structured agent I/O events.
+- **E_out:** `workspace_ready(w)`, `work_ready(w, branch, head_sha)`,
+  `captured(w, dirty)`, `reclaimed(w)`, `worker_heartbeat(w)`,
+  `worker_stalled(w)`, structured agent I/O events. `work_ready` is the
+  **success** counterpart of `worker_exit` (the death certificate): an explicit
+  *work-product-ready* signal carried **in-band over the agent `Port` before the
+  agent exits**, keyed by `worker_id`. It is the sole trigger for the U
+  `implementing ──request_gate──▶ gating` edge; clean Port exit (`:exit_status
+  0`) alone is NOT treated as completion (D-326).
 - **δ:** spawn allocates a *complete* isolation boundary (git + HOME/cache/XDG +
   network-cache namespace) and sets position; the worker verifies its own
   position before work (HR via INV-12). On exit (incl. crash): **capture all
@@ -96,6 +102,13 @@ justified by the distinct invariant(s) it structurally enforces.
 - **S:** `state ∈ {planned, oracle, implementing, gating, refine_k,
   awaiting_merge, merged, escalated}`; attempt count k; frozen scope; policy pin.
 - **E_in:** `gate_outcome`, `worker_event`, `challenge_event`, `merge_result`.
+  `worker_event` is the family of worker-originated triggers U consumes; it is
+  the **disjoint sum** of three keyed-by-`worker_id` cases U must distinguish
+  (D-326): `work_ready(w, branch, head_sha)` (success — the agent reported a
+  stable diff; → `request_gate`), `worker_exit(w, reason)` (crash/death cert —
+  infra-failure path, gate NOT called), and `worker_stalled(w)` (the watchdog's
+  synthetic wedged-worker trigger). U tags the **current** worker by `worker_id`
+  and discards events from a stale/superseded worker.
 - **E_out:** `request_gate`, `request_merge`, `unit_terminal(u,outcome)`,
   `escalate(e)`.
 - **δ:** the per-unit lifecycle is owned by **one** component (not smeared —
@@ -165,7 +178,7 @@ justified by the distinct invariant(s) it structurally enforces.
 |------|----------------------------|----------------|
 | K→S select | one candidate at a time; FIFO+priority | K crash ⇒ resume from L (INV-16); no double-select (idempotent on L) |
 | S→U admit | only after conflict-check clears on *declared* sets | admit denied ⇒ defer, monotone (LIV-4) |
-| U→W spawn | test-author frozen *before* implementer; identity recorded | worker crash ⇒ W captures dirty + reclaims (INV-14/15/17); U sees `worker_exit`, decides outcome (not a restart) |
+| U→W spawn | test-author frozen *before* implementer; identity recorded; on normal completion the agent emits `work_ready(w, branch, head_sha)` in-band, keyed by `worker_id` (D-326) ⇒ U fires `request_gate` | worker crash ⇒ W captures dirty + reclaims (INV-14/15/17); U sees `worker_exit`, decides outcome (not a restart); wedged worker ⇒ watchdog `worker_stalled` (no `work_ready`, no `:DOWN`) |
 | W→agents | structured I/O, isolated workspace | agent crash blast-radius = {agent} (INV-17) |
 | U→G gate | full gate on exact `diff`; floor non-shrinkable | gate FAIL ⇒ U refine/pivot (FR-8.2), not a crash |
 | G→L verdict | append-only, immutable per (hash,run) | a later finding ⇒ G appends revoke; never mutates (HR-2) |
