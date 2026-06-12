@@ -50,9 +50,19 @@ defmodule Tau.Factory.WorkerReclaimTest do
   defp slow_agent_bin(tmp_dir, suffix \\ "") do
     bin_path = Path.join(tmp_dir, "slow_reclaim#{suffix}")
 
+    # Block until the Port closes, with NO un-reaped grandchild.
+    #
+    # `exec cat` REPLACES the shell, so the process the BEAM linked to (and
+    # SIGKILLs on Port close) IS the blocking process. `cat` with no args
+    # reads the Port's stdin pipe and exits on EOF when the Port closes.
+    #
+    # The previous `while true; do sleep 60; done` spawned a `sleep 60`
+    # grandchild that SIGKILL-to-the-shell did NOT reach: the orphaned
+    # `sleep` was reparented to init, kept the Port pipe FD open, and stalled
+    # BEAM shutdown — hanging `mix test` after the suite summary printed.
     File.write!(bin_path, """
     #!/bin/sh
-    while true; do sleep 60; done
+    exec cat
     """)
 
     File.chmod!(bin_path, 0o755)

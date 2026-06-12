@@ -53,9 +53,14 @@ defmodule Tau.Factory.ArtifactConservationTest do
   defp slow_agent_bin(tmp_dir, suffix \\ "") do
     bin_path = Path.join(tmp_dir, "slow_cons#{suffix}")
 
+    # Block until the Port closes with NO un-reaped grandchild. `exec cat`
+    # replaces the shell so the BEAM SIGKILLs the actual blocker on Port
+    # close; `cat` exits on EOF. `while true; do sleep 60; done` leaked an
+    # orphaned `sleep` (reparented to init) holding the Port pipe FD open,
+    # stalling BEAM shutdown and hanging `mix test` after the summary.
     File.write!(bin_path, """
     #!/bin/sh
-    while true; do sleep 60; done
+    exec cat
     """)
 
     File.chmod!(bin_path, 0o755)
