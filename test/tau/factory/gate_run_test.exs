@@ -105,11 +105,19 @@ defmodule Tau.Factory.GateRunTest do
   # Build a git repo with a merge-base commit, then an implementer commit, and
   # return its absolute path + merge-base oid + the declared gating-test paths.
   #
-  # `kind` is :genuine or :vacuous.
+  # `kind` is :genuine, :vacuous, or :crash_on_revert.
   #   :genuine — production code is introduced by the implementer commit AND the
   #     gating test depends on it (fails when production is reverted).
   #   :vacuous — the gating test passes regardless (no dependency on production);
   #     reverting production does not break it → the vacuous hole.
+  #   :crash_on_revert — production code is introduced by the implementer commit
+  #     AND the gating test references it AT COMPILE TIME (a module attribute
+  #     initialised from a production call). When production is reverted to the
+  #     merge-base (the module is absent), the gating-test FILE FAILS TO COMPILE,
+  #     so the reverted-tree test run produces NO test summary — a recipe crash.
+  #     Per SPEC-FACTORY-GATE the mutation half MUST fail-closed (D-306, HR-3):
+  #     a crash is indistinguishable from infrastructure failure, so it MUST NOT
+  #     be silently treated as a discriminating PASS.
   defp build_repo(root, kind) do
     dir = Path.join(root, "repo_#{kind}_#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
@@ -160,6 +168,33 @@ defmodule Tau.Factory.GateRunTest do
           @tag :gating
           test "tautology" do
             assert 1 == 1
+          end
+        end
+        """)
+
+      :crash_on_revert ->
+        # implementer adds production code...
+        File.write!(Path.join(dir, "lib/widget.ex"), """
+        defmodule Widget do
+          def value, do: 42
+        end
+        """)
+
+        # ...and a gating test that references it AT COMPILE TIME via a module
+        # attribute. With Widget present the file compiles and the test passes.
+        # When the mutation half reverts production (Widget is deleted at the
+        # merge-base), `Widget.value()` in the module body raises at COMPILE
+        # time, so the test file fails to compile and the reverted-tree run
+        # yields NO "N tests, M failures" summary — i.e. a recipe crash, which
+        # the mutation half MUST treat as FAIL (fail-closed; D-306 / HR-3), not
+        # as a discriminating PASS.
+        File.write!(Path.join(dir, gating_rel), """
+        defmodule WidgetTest do
+          use ExUnit.Case
+          @widget_value Widget.value()
+          @tag :gating
+          test "widget value is 42 (compile-time pinned)" do
+            assert @widget_value == 42
           end
         end
         """)
@@ -272,6 +307,55 @@ defmodule Tau.Factory.GateRunTest do
   end
 
   # ---------------------------------------------------------------------------
+  # 2b. D-306 — crash-on-revert mutation half MUST fail-closed (HR-3)
+  # ---------------------------------------------------------------------------
+  #
+  # The hole the prior 5-test suite missed (critic finding B1): when reverting
+  # the production diff to the merge-base BREAKS COMPILATION of the gating test
+  # (the test references the production module at compile time), the reverted-
+  # tree run produces no test summary — a recipe crash, indistinguishable from
+  # an infrastructure failure. SPEC-FACTORY-GATE's mutation half mandates
+  # `recipe crash → FAIL` (fail-closed, HR-3 / D-306). A crash-as-:pass would let
+  # a suite reach a green verdict on what should be a FAIL. This oracle exercises
+  # the REAL `run/1` over such a fixture and asserts the folded verdict is :fail
+  # and the mutation half result is NOT :pass.
+
+  describe "D-306 (fail-closed): a revert-time compile crash folds the mutation half FAIL" do
+    @tag :d_306
+    test "D-306: run/1 returns %Verdict{status: :fail} when reverting production crashes the gating-test compile (fail-closed on crash)",
+         %{writer: writer, fixture_root: root} do
+      # A fixture whose gating test references the production module at COMPILE
+      # TIME, so reverting production to the merge-base makes the gating-test
+      # file fail to compile → the reverted-tree run crashes (no summary).
+      repo = build_repo(root, :crash_on_revert)
+      req = build_request(repo, writer, [])
+
+      verdict = @gate.run(req)
+
+      # The mutation half result must itself be :fail (fail-closed on crash) —
+      # not :pass (the false-green the prior suite missed), not :skip.
+      mutation_result = mutation_half_result(verdict)
+
+      refute mutation_result == :pass,
+             "D-306: a revert-time compile crash (the gating test cannot compile " <>
+               "once production is reverted) is a recipe crash and MUST NOT be folded " <>
+               "as a discriminating PASS. The mutation half MUST be fail-closed (HR-3). " <>
+               "Got mutation half result: #{inspect(mutation_result)} in #{inspect(verdict)}"
+
+      assert mutation_result == :fail or match?({:error, _}, mutation_result),
+             "D-306: the mutation half MUST fail-closed (:fail or an {:error, _} crash " <>
+               "marker) when reverting production breaks the gating-test compile. " <>
+               "Got mutation half result: #{inspect(mutation_result)}"
+
+      # ...and the folded verdict MUST therefore be :fail, never a silent :pass.
+      assert verdict.status == :fail,
+             "D-306: when the mutation half fails-closed on a revert-time compile crash, " <>
+               "run/1 MUST return a :fail verdict (the crash cannot reach a PASS). " <>
+               "Got: #{inspect(verdict)}"
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # 3. D-335 — the verdict lands append-only in L
   # ---------------------------------------------------------------------------
 
@@ -361,6 +445,26 @@ defmodule Tau.Factory.GateRunTest do
   # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------
+
+  # Extract the mutation half's result from the folded verdict, robust to the
+  # `halves` field being a map keyed by half id or a list of per-half pairs /
+  # structs carrying an :id / :half key. Returns the raw per-half result
+  # (`:pass` | `:fail` | `{:error, _}`), or `:absent` if the mutation half is
+  # not present in the folded verdict.
+  defp mutation_half_result(verdict) do
+    case verdict.halves do
+      %{} = m ->
+        Map.get(m, :mutation, :absent)
+
+      list when is_list(list) ->
+        Enum.find_value(list, :absent, fn
+          {:mutation, result} -> result
+          %{id: :mutation, result: result} -> result
+          %{half: :mutation, result: result} -> result
+          _ -> false
+        end)
+    end
+  end
 
   # Extract the set of half ids present in the folded verdict, robust to the
   # `halves` field being a map keyed by half id or a list of per-half result
