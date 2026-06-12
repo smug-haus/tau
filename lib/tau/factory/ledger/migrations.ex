@@ -68,6 +68,16 @@ defmodule Tau.Factory.Ledger.Migrations do
        disposition    TEXT    NOT NULL DEFAULT 'captured',
        inserted_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
      )
+     """},
+    {"20260612_006_unit_snapshots",
+     """
+     CREATE TABLE IF NOT EXISTS unit_snapshots (
+       id               INTEGER PRIMARY KEY AUTOINCREMENT,
+       unit_id          TEXT    NOT NULL,
+       state            TEXT    NOT NULL,
+       idempotency_key  TEXT    NOT NULL UNIQUE,
+       inserted_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+     )
      """}
   ]
 
