@@ -28,11 +28,22 @@ defmodule Tau.Factory.Gate do
   `Stub` implementation is used (deterministic, hermetic). When absent, the
   `Real` implementation is selected (LLM-backed, lands in P5c-3).
 
-  ## Mutation half
+  ## Mutation half (HR-3 / D-306)
 
   The mutation half runs directly in the `workspace` directory (the engine-
-  isolated checkout). It uses the same logic as `Mix.Gate.Mutation` but
-  operates on the workspace path from the Request.
+  isolated checkout). It uses `Tau.Factory.Gate.Mutation.plan/2` (pure planner)
+  and `Tau.Factory.Gate.Mutation.judge/1` (pure judge) as the two seams, never
+  bypassing them with an ad-hoc inline judgement.
+
+  The §C203 ordered cross-check is applied: run the real (un-reverted) gating
+  tests → `passing_ids`; run the reverted tree → `killed_ids`; assert
+  `killed_ids ⊆ passing_ids`. PASS iff judge={:pass,_} ∧ cross-check=:pass.
+
+  Fail-closed (D-306 / HR-3): a runner crash on the reverted tree (e.g. the
+  gating test fails to compile because it references an absent production module)
+  yields `{:error, {:runner_crashed, _}}` → `:fail`. A crash is
+  indistinguishable from an infrastructure failure and MUST NOT be treated as a
+  discriminating PASS.
   """
 
   alias Tau.Factory.Gate.{Mutation, Oracle, Request, Verdict}
@@ -179,30 +190,36 @@ defmodule Tau.Factory.Gate do
   end
 
   # ---------------------------------------------------------------------------
-  # Mutation half — engine-owned execution (HR-3)
+  # Mutation half — engine-owned execution (HR-3 / D-306)
   # ---------------------------------------------------------------------------
 
-  # The mutation half reverts tracked ∖ frozen_paths to merge_base in the
-  # workspace (an isolated git checkout), runs the gating tests, and judges
-  # the result via Mutation.judge/1. The revert + run happen inside a try/after
-  # block that always restores HEAD unconditionally.
+  # The mutation half applies the §C203 ordered cross-check:
+  #
+  #   1. Run the REAL (un-reverted) gating tests → real_report.
+  #   2. Revert tracked ∖ frozen_paths to merge_base in workspace (engine-owned).
+  #   3. Run the gating tests on the reverted tree → reverted_report or crash.
+  #   4. Apply Mutation.judge/1 to reverted_report (pure judge — no ad-hoc logic).
+  #   5. Apply Mutation.cross_check/2: killed_ids ⊆ passing_ids(real_report).
+  #   6. PASS iff judge={:pass,_} ∧ cross-check=:pass.
+  #
+  # Fail-closed (D-306 / HR-3): a reverted-tree runner crash → :fail, never :pass.
   defp run_mutation_half(%Request{} = req) do
     gating_paths = MapSet.to_list(req.frozen_paths)
     workspace = req.workspace
     merge_base = req.merge_base
 
-    plan = Mutation.plan(merge_base, req.frozen_paths)
+    # Plan is the pure data record for the engine seam (Mutation.plan/2).
+    _plan = Mutation.plan(merge_base, req.frozen_paths)
 
-    # The gate orchestrator always runs the mutation check. The N/A shortcut
-    # ("no production delta → skip") that Mix.Gate.Mutation uses for CI is NOT
-    # applied here: a gating suite that passes with zero production code is
-    # exactly the vacuous-test hole (D-306 / AC-4). We do apply the
-    # project-creation N/A (mix.exs absent at merge_base → no production to
-    # revert → pass).
+    # The gate orchestrator always runs the mutation check — the N/A shortcut
+    # ("no production delta → skip") used by Mix.Gate.Mutation for CI is NOT
+    # applied here: a suite that passes with zero production code is exactly
+    # the vacuous-test hole (D-306 / AC-4). We do apply the project-creation
+    # N/A (mix.exs absent at merge_base → no production to revert → pass).
     if project_creation_na?(gating_paths, merge_base, workspace) do
       :pass
     else
-      execute_mutation_check(plan, gating_paths, workspace)
+      execute_mutation_check(gating_paths, merge_base, workspace)
     end
   end
 
@@ -247,7 +264,20 @@ defmodule Tau.Factory.Gate do
     end
   end
 
-  defp execute_mutation_check(plan, gating_paths, workspace) do
+  defp execute_mutation_check(gating_paths, merge_base, workspace) do
+    # Step 1: run the REAL (un-reverted) tree to get passing_ids for the cross-check.
+    case run_test_subprocess(gating_paths, workspace) do
+      {:error, :runner_crashed} ->
+        # Real tree itself crashes: infrastructure failure → fail-closed.
+        Logger.warning("Mutation half: real-tree runner crashed in #{workspace}")
+        :fail
+
+      {:ok, real_report} ->
+        execute_reverted_check(gating_paths, merge_base, workspace, real_report)
+    end
+  end
+
+  defp execute_reverted_check(gating_paths, merge_base, workspace, real_report) do
     {all_files_str, 0} = System.cmd("git", ["ls-files"], cd: workspace)
     all_files = all_files_str |> String.split("\n", trim: true)
     paths_to_revert = all_files -- gating_paths
@@ -255,23 +285,48 @@ defmodule Tau.Factory.Gate do
     gating_snapshots = snapshot_files(gating_paths, workspace)
 
     try do
-      revert_to_base(paths_to_revert, plan.merge_base, workspace)
+      # Step 2: revert tracked ∖ gating_paths to merge_base.
+      revert_to_base(paths_to_revert, merge_base, workspace)
       restore_snapshots(gating_snapshots, workspace)
-      result = run_gating_tests(gating_paths, workspace)
-      judge_mutation_result(result)
+
+      # Step 3: run the reverted tree.
+      case run_test_subprocess(gating_paths, workspace) do
+        {:error, :runner_crashed} ->
+          # Reverted-tree crash → fail-closed (D-306 / HR-3). A crash is
+          # indistinguishable from infrastructure failure: MUST NOT be :pass.
+          Logger.warning(
+            "Mutation half: reverted-tree runner crashed (fail-closed) in #{workspace}"
+          )
+
+          {:error, {:runner_crashed, :compile_error}}
+
+        {:ok, reverted_report} ->
+          # Step 4: apply Mutation.judge/1 (pure — no inline ad-hoc judgement).
+          case Mutation.judge(reverted_report) do
+            {:fail, reason} ->
+              Logger.debug("Mutation half: reverted-tree judge fail — #{inspect(reason)}")
+              :fail
+
+            {:pass, killed_ids} ->
+              # Step 5: §C203 cross-check: killed_ids ⊆ passing_ids(real_report).
+              case Mutation.cross_check(killed_ids, real_report) do
+                :pass ->
+                  :pass
+
+                {:fail, :cross_check_failed} ->
+                  Logger.warning(
+                    "Mutation half: §C203 cross-check failed — " <>
+                      "killed_ids not a subset of real passing_ids in #{workspace}"
+                  )
+
+                  :fail
+              end
+          end
+      end
     after
       restore_head(all_files, workspace)
     end
   end
-
-  # :ok → ≥1 test failed on reverted tree (discriminating) → mutation passes.
-  # {:error, :all_passed} → all tests passed (vacuous suite) → mutation fails.
-  # {:error, {:runner_crashed, _}} → the runner crashed, likely a compile error
-  # caused by the absent production code. A crash proves non-vacuity (the test
-  # did depend on the production file). Treated as pass (discriminating).
-  defp judge_mutation_result(:ok), do: :pass
-  defp judge_mutation_result({:error, :all_passed}), do: :fail
-  defp judge_mutation_result({:error, {:runner_crashed, _detail}}), do: :pass
 
   defp snapshot_files(paths, workspace) do
     Enum.map(paths, fn rel_path ->
@@ -329,7 +384,21 @@ defmodule Tau.Factory.Gate do
     :ok
   end
 
-  defp run_gating_tests(gating_paths, workspace) do
+  # Run the gating tests in `workspace`, returning a report map compatible with
+  # `Mutation.judge/1`:
+  #   {:ok, %{cases: [%{id: String.t(), status: :passed | :failed}]}}
+  # or
+  #   {:error, :runner_crashed}   — no valid summary (compile crash, etc.)
+  #
+  # We build a synthetic report from the ExUnit text summary line. Individual
+  # test IDs are not available from ExUnit text output; we use positional keys
+  # ("test_N") consistently across both real-tree and reverted-tree runs so
+  # Mutation.cross_check/2 can compare killed_ids to real passing_ids.
+  #
+  # Fallback: if mix test fails to produce a summary (e.g. minimal fixture has
+  # no test_helper.exs), we fall back to the elixir runner. If that also fails
+  # to produce a summary, we return {:error, :runner_crashed}.
+  defp run_test_subprocess(gating_paths, workspace) do
     mix_output =
       if File.exists?(Path.join(workspace, "mix.exs")) do
         run_via_mix(gating_paths, workspace)
@@ -337,23 +406,33 @@ defmodule Tau.Factory.Gate do
         nil
       end
 
-    case mix_output && parse_test_summary(mix_output) do
-      {:ok, failures} when failures > 0 ->
-        :ok
+    output =
+      case mix_output && parse_test_summary(mix_output) do
+        {:ok, _, _} ->
+          # mix produced a valid summary; use it.
+          mix_output
 
-      {:ok, 0} ->
-        {:error, :all_passed}
+        _ ->
+          # Fall back to the elixir runner for minimal repos without mix setup.
+          run_via_elixir(gating_paths, workspace)
+      end
 
-      _ ->
-        # mix test failed to produce a summary (no test_helper, compile error, etc.).
-        # Fall back to the elixir runner which handles minimal repos without mix setup.
-        elixir_output = run_via_elixir(gating_paths, workspace)
+    case parse_test_summary(output) do
+      {:ok, total, failures} ->
+        cases =
+          if total == 0 do
+            []
+          else
+            Enum.map(1..total, fn i ->
+              status = if i <= failures, do: :failed, else: :passed
+              %{id: "test_#{i}", status: status}
+            end)
+          end
 
-        case parse_test_summary(elixir_output) do
-          {:ok, failures} when failures > 0 -> :ok
-          {:ok, 0} -> {:error, :all_passed}
-          :no_summary -> {:error, {:runner_crashed, elixir_output}}
-        end
+        {:ok, %{cases: cases}}
+
+      :no_summary ->
+        {:error, :runner_crashed}
     end
   end
 
@@ -393,9 +472,12 @@ defmodule Tau.Factory.Gate do
   end
 
   defp parse_test_summary(output) do
-    case Regex.run(~r/\d+ tests?,\s*(\d+) failures?/, output) do
-      [_, failures_str] -> {:ok, String.to_integer(failures_str)}
-      nil -> :no_summary
+    case Regex.run(~r/(\d+) tests?,\s*(\d+) failures?/, output) do
+      [_, total_str, failures_str] ->
+        {:ok, String.to_integer(total_str), String.to_integer(failures_str)}
+
+      nil ->
+        :no_summary
     end
   end
 
