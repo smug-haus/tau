@@ -41,6 +41,11 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Refresh CA certificates (builds.hex.pm TLS at Setup BEAM)
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade ca-certificates
+          sudo update-ca-certificates
       - name: Setup BEAM
         id: beam
         uses: erlef/setup-beam@v1
@@ -183,6 +188,11 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Refresh CA certificates (builds.hex.pm TLS at Setup BEAM)
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade ca-certificates
+          sudo update-ca-certificates
       - name: Setup BEAM
         id: beam
         uses: erlef/setup-beam@v1
@@ -249,6 +259,11 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Refresh CA certificates (builds.hex.pm TLS at Setup BEAM)
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade ca-certificates
+          sudo update-ca-certificates
       - name: Setup BEAM
         id: beam
         uses: erlef/setup-beam@v1
@@ -358,6 +373,11 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Refresh CA certificates (builds.hex.pm TLS at Setup BEAM)
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade ca-certificates
+          sudo update-ca-certificates
       - name: Setup BEAM
         id: beam
         uses: erlef/setup-beam@v1
@@ -453,6 +473,11 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Refresh CA certificates (builds.hex.pm TLS at Setup BEAM)
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade ca-certificates
+          sudo update-ca-certificates
       - name: Setup BEAM
         if: steps.changes.outputs.build == 'true'
         uses: erlef/setup-beam@v1
@@ -533,6 +558,11 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Refresh CA certificates (builds.hex.pm TLS at Setup BEAM)
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade ca-certificates
+          sudo update-ca-certificates
       - name: Setup BEAM
         uses: erlef/setup-beam@v1
         with:
@@ -570,6 +600,11 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Refresh CA certificates (builds.hex.pm TLS at Setup BEAM)
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade ca-certificates
+          sudo update-ca-certificates
       - name: Setup BEAM
         id: beam
         uses: erlef/setup-beam@v1
