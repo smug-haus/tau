@@ -741,17 +741,20 @@ defmodule Tau.Factory.Ledger.Writer do
     end
   end
 
-  # Parse a stored reason: try Code.eval_string for simple atoms/terms,
-  # fall back to the raw string on any error.
+  # Parse a stored reason. Reasons are internal atoms stored via inspect/1, which
+  # produces ":atom_name" (with a leading colon) for atom values. Strip the colon
+  # and use String.to_existing_atom/1 to recover the original atom without eval.
+  # Falls back to the raw text if the atom is unknown or the text is not
+  # colon-prefixed (e.g. a bare reason string stored before this fix).
   defp parse_reason(nil), do: nil
 
-  defp parse_reason(text) do
-    case Code.eval_string(text) do
-      {term, _} -> term
-    end
+  defp parse_reason(":" <> atom_name) do
+    String.to_existing_atom(atom_name)
   rescue
-    _ -> text
+    ArgumentError -> atom_name
   end
+
+  defp parse_reason(text), do: text
 
   defp atom_to_outcome(:merged), do: "merged"
   defp atom_to_outcome(:rejected), do: "rejected"

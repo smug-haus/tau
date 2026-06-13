@@ -454,17 +454,23 @@ halts the loop with `main` red and named. Enforced by `merge_health_test.exs`: a
 red batch tip ⇒ bisect + eject, no push; a post-merge red main ⇒ `E-RED-MAIN` +
 no further push. (Health-recipe ownership cited from SPEC-FACTORY-GATE.)
 
-**D-355 — Durable merge outcome, WAL-before-ack (RPO=0):**
-Every successfully-landed merge is recorded in a durable, append-only
-`merge_outcomes` row in L (via `Ledger.Writer.record_merge_outcome/2`,
-WAL-before-ack, D-315) **before** the ephemeral `telemetry(:merged, …)`
-projection fires. The row survives the producer (MergeAuthority) dying — RPO=0.
-`Ledger.Reader.merge_outcome_for/2` returns `{:merged, commit_sha}` from this
-row, enabling U to reconcile on resume without re-submitting an already-landed
-merge (D-344 / PR #465). Owned by this SPEC (§4 B9); cited by
-SPEC-FACTORY-CORE (Unit `:awaiting_merge` reconcile, D-344 amendment).
-Enforced by `merge_outcome_durability_test.exs` (oracle-separated; the
-MergeAuthority/Unit gating test for PR #465).
+**D-355 — Durable merge outcome, WAL-before-ack (RPO=0) — symmetric:**
+Every **terminal** merge outcome — both a successfully-landed merge (`:merged`)
+and a terminally-rejected merge (`:rejected`) — is recorded in a durable,
+append-only `merge_outcomes` row in L (via `Ledger.Writer.record_merge_outcome/2`,
+WAL-before-ack, D-315) **before** the ephemeral telemetry projection fires. The
+row survives the producer (MergeAuthority) dying — RPO=0. Non-terminal requeues
+(`:stale_ref`, task crash, build errors that requeue) write **no** outcome row —
+only terminal outcomes are durable. `Ledger.Reader.merge_outcome_for/2` returns
+`{:merged, commit_sha}` or `{:rejected, reason}` from these rows, enabling U to
+reconcile on resume without re-submitting an already-landed or
+already-terminally-rejected merge (D-344 / PR #465, #466). Terminal rejection
+paths covered: health-red eject (`:integrating` → `{:build_failed, {:health_red,
+_}}`); verdict-revoked eject (`:committing` → `{:revoked, _}`). Owned by this
+SPEC (§4 B9); cited by SPEC-FACTORY-CORE (Unit `:awaiting_merge` reconcile,
+D-344 amendment). Enforced by `merge_outcome_durability_test.exs` (`:merged`
+side, PR #465) and `reject_durable_outcome_test.exs` (`:rejected` side, PR #466;
+oracle-separated).
 
 **D-356 — Merge-result PubSub delivery, M's emission half (the async result
 plane):**
