@@ -1,104 +1,77 @@
 defmodule Tau.Factory.UnitDriverTest do
   @moduledoc """
-  Gating tests for PR #477 (P5c-3b — `Tau.Factory.UnitDriver`, the real
-  `drive_fun` the Coordinator calls).
+  Gating tests for `Tau.Factory.UnitDriver`, the real `drive_fun` the Coordinator
+  calls (D-340), CORRECTED to the D-356 / arch-correct contract (PR #477).
 
-  Closes #473 / advances #458. Exercises D-340 — the real `drive_fun` that
-  wires a single `Tau.Factory.Unit` through the now-built substrate:
+  Advances #458 / D-340. Exercises the real `drive_fun` that wires a single
+  `Tau.Factory.Unit` through the built substrate:
 
-    * the REAL Worker fleet (`WorkerSupervisor.spawn/5` →
-      `WorkerRegistry`-resolved pid → the D-326 in-band `work_ready`
-      completion event — the `:worker_fun` seam), driven against a stub
-      `agent_bin` inside a throwaway git repo;
+    * the REAL Worker fleet (`WorkerSupervisor.spawn/5` → `WorkerRegistry`-
+      resolved pid → the D-326 in-band `work_ready` completion event), driven
+      against a stub `agent_bin` inside a throwaway git repo;
     * a `:gate_fun` seam wrapping the gate result into `:pass | {:fail, _}`;
-    * a `:merge_fun` seam that builds the `%{id, hash, run, branch}` merge map,
-      reaches a (stubbed) `MergeAuthority.request_merge/2`, and BRIDGES the
-      async merge result back to the Unit as `{:merge_result, :merged | :rejected}`
-      (merge-and-integration.md ~65-70; control-plane.md §line 597 — M's result
-      arrives on a per-PR topic, NOT a blocking call).
+    * a `:merge_fun` seam that builds the `%{id, hash, run, branch}` merge map and
+      reaches a (stubbed) `MergeAuthority.request_merge/2`. The async merge result
+      is delivered the REAL way — a `Phoenix.PubSub.broadcast` of
+      `{:merge_result, :merged | :rejected}` to `"factory:pr:\#{unit_id}"` on the
+      shared `Tau.PubSub` (SPEC-FACTORY-MERGE / SPEC-FACTORY-CORE §6 D-356) — NOT a
+      direct `send` to the unit pid, and NOT a driver-side telemetry→Unit bridge
+      (the bridge is FORBIDDEN by MERGE D-356).
 
-  The Unit emits `{:unit_terminal, unit_id, outcome, provenance}` (4-arg, D-340)
-  to the coordinator seam (`:report_to`).
+  ## Reclaim is the WorkspaceJanitor's, not the driver's (PR #477, §4 B8)
 
-  Written BEFORE production code exists (oracle-separation phase, factory-loop
-  §4b). These tests MUST FAIL against current `main` because
-  `Tau.Factory.UnitDriver` does not exist (`UndefinedFunctionError`). A
-  compile/undefined/timeout failure is the correct fail-before state and MUST
-  NOT be resolved by writing production code in this PR.
+  The `UnitDriver` threads `:janitor` (a running `Tau.Factory.WorkspaceJanitor`)
+  into the `worker_fun`'s `WorkerSupervisor.spawn/5` opts; the spawned `Worker`
+  registers itself with the janitor, which `Process.monitor/1`s it and on its
+  `:DOWN` (for ANY exit reason) executes capture-before-destroy and reclaims the
+  worktree (D-313/D-314). The UnitDriver performs ZERO worktree reclaim of its
+  own and starts NO bridge. These tests assert reclaim happened (no leaked
+  private worktree) on BOTH the merge path AND the escalation path — satisfied by
+  the janitor's `:DOWN` handler, never by a driver-side reclaim.
+
+  ## Fail-before validity (oracle separation, factory-loop §4b)
+
+  On THIS branch the production code still: (a) delivers the merge result via a
+  driver-side telemetry bridge and a direct `send` to the unit pid; (b) does NOT
+  thread `:janitor` into the worker spawn opts; and (c) the Unit does NOT
+  subscribe to `"factory:pr:\#{unit_id}"`. So a `{:merge_result, :merged}`
+  broadcast on the topic is DROPPED (the Unit is not a subscriber) — the Unit
+  never reaches `:merged` and escalates on `state_timeout`; the
+  `assert_receive {:unit_terminal, _, :merged, _}` TIMES OUT. A test that passed
+  against the current code would be vacuous.
 
   ## PINNED contract — `Tau.Factory.UnitDriver.drive/2`
 
-  `UnitDriver.drive(work_item, deps) :: pid()`
+  `UnitDriver.drive(work_item, deps) :: pid()` — returns the started Unit pid.
+  The Unit, once terminal, sends `{:unit_terminal, unit_id, outcome, provenance}`
+  to `deps.report_to`.
 
-  Returns the pid of the started `Tau.Factory.Unit` (started under the supplied
-  `UnitSupervisor` via `start_unit/2`, with `report_to: deps.report_to`). The
-  Unit, once terminal, sends `{:unit_terminal, unit_id, outcome, provenance}` to
-  `deps.report_to`.
+  `deps` carries the live substrate, INCLUDING the D-356/B8 additions:
 
-  `work_item` (a map; co-designed with P5c-4's `{issue, scope, hash, branch}`):
-
-    * `:unit_id`        — String.t(); the unit identity (== the PR/unit id used
-                          in the merge map's `:id`).
-    * `:declared_scope` — `ConflictCheck.scope()` passed to `Scheduler.admit/3`.
-    * `:hash`           — String.t(); content/HEAD hash for the PR.
-    * `:branch`         — String.t(); the feature branch (passed in the merge map).
-    * `:run`            — String.t(); the run identifier (merge-map `:run`).
-    * `:base_ref`       — String.t(); the git ref `WorkerSupervisor.spawn/5`
-                          checks out for the worker worktree.
-    * `:brief`          — String.t(); the worker brief.
-
-  `deps` (a map carrying the live substrate the driver wires the seams to):
-
-    * `:unit_supervisor`   — atom/pid of a running `UnitSupervisor`.
-    * `:unit_registry`     — atom of a running `UnitRegistry` (passed to the Unit
-                             as `:registry_name`).
-    * `:scheduler`         — atom/pid of a running `Scheduler`.
-    * `:worker_supervisor` — atom/pid of a running `WorkerSupervisor`.
-    * `:worker_registry`   — atom of a running `WorkerRegistry`.
-    * `:repo_dir`          — String.t(); the parent git repo for worker worktrees.
-    * `:agent_bin`         — String.t(); the agent executable each worker runs.
-    * `:gate_fun`          — `(-> :pass | {:fail, findings})`; the gate seam. (The
-                             driver MAY also build this from a real `Gate.run/1`
-                             over the worker worktree; this test injects it so the
-                             gate outcome is hermetic and deterministic.)
-    * `:merge_authority`   — atom/pid of a (stubbed) `MergeAuthority`; the driver's
-                             `:merge_fun` calls `request_merge/2` against it.
-    * `:report_to`         — pid receiving `{:unit_terminal, ...}` (the coordinator
-                             seam) AND the merge-result bridge anchor.
-    * `:ledger`            — optional; `GenServer.server()` | nil.
-
-  ## PINNED — the `:merge_fun` bridge (D-340 / merge-and-integration.md)
-
-  The driver constructs a `:merge_fun` of the Unit-required arity
-  `(unit_id, hash -> :queued | {:error, reason})` that:
-
-    1. builds the merge map `%{id: unit_id, hash: hash, run: run, branch: branch}`,
-    2. calls `MergeAuthority.request_merge(merge_authority, merge_map)`, and
-    3. bridges the async merge result (telemetry `[:tau, :factory, :merge, :merged]`
-       / `[:tau, :factory, :merge, :reject]`, or the per-PR PubSub projection)
-       back to the Unit pid as `{:merge_result, :merged}` / `{:merge_result, :rejected}`.
-
-  These tests assert the merge map REACHES the MergeAuthority (the stub forwards
-  it to the test) and that a `:queued`-then-merged bridge drives the Unit to
-  `:merged`.
+    * `:janitor`  — atom/pid of a running `Tau.Factory.WorkspaceJanitor`; threaded
+                    into the worker spawn opts so the janitor owns reclaim.
+    * `:pubsub`   — the shared `Phoenix.PubSub` instance (`Tau.PubSub`); the Unit
+                    subscribes to `"factory:pr:\#{unit_id}"` on awaiting_merge entry.
 
   ## AC / D-NNN linkage
     - D-340 — every test in this file.
+    - D-356 — the merge-result-via-PubSub delivery exercised by the happy/merge tests.
   """
 
   use ExUnit.Case, async: false
 
   @moduletag :capture_log
   @moduletag :d_340
+  @moduletag :d_356
 
   # Runtime module references — @mod.fun form (Credo strict), never apply/2,3.
-  # The file compiles while UnitDriver is absent; the call sites below raise
-  # UndefinedFunctionError until the implementer lands it.
   @unit_driver Tau.Factory.UnitDriver
   @unit_supervisor Tau.Factory.UnitSupervisor
   @scheduler Tau.Factory.Scheduler
   @worker_registry Tau.Factory.WorkerRegistry
   @worker_supervisor Tau.Factory.WorkerSupervisor
+  @janitor Tau.Factory.WorkspaceJanitor
+  @writer Tau.Factory.Ledger.Writer
 
   # ---------------------------------------------------------------------------
   # Hermetic git repo (mirrors worker_test.exs / worker_reclaim_test.exs idiom)
@@ -126,7 +99,6 @@ defmodule Tau.Factory.UnitDriverTest do
 
   # A stub agent_bin that emits ONE {:packet,4}-framed JSON work_ready frame then
   # exits 0 (the D-326 in-band success signal the Worker forwards to its Unit).
-  # Mirrors worker_completion_event_test.exs's framing exactly.
   defp work_ready_agent_bin(tmp_dir, branch, head_sha, suffix) do
     bin_path = Path.join(tmp_dir, "work_ready_agent#{suffix}")
 
@@ -159,7 +131,10 @@ defmodule Tau.Factory.UnitDriverTest do
     tmp_dir
   end
 
-  # Start the full substrate the UnitDriver wires its seams to.
+  # Start the full substrate the UnitDriver wires its seams to — now including a
+  # real Ledger.Writer + WorkspaceJanitor (the reclaim owner) and the shared
+  # Tau.PubSub. Mirrors the janitor wiring in workspace_janitor_test.exs /
+  # worker_reclaim_test.exs.
   defp start_substrate(tag, repo_dir, agent_bin) do
     n = System.unique_integer([:positive])
 
@@ -168,6 +143,11 @@ defmodule Tau.Factory.UnitDriverTest do
     sched = :"udrv_sched_#{tag}_#{n}"
     worker_reg = :"udrv_workerreg_#{tag}_#{n}"
     worker_sup = :"udrv_workersup_#{tag}_#{n}"
+    ledger = :"udrv_ledger_#{tag}_#{n}"
+    janitor = :"udrv_janitor_#{tag}_#{n}"
+
+    db_path = Path.join(System.tmp_dir!(), "udrv_ledger_#{tag}_#{n}.db")
+    on_exit(fn -> File.rm_rf!(db_path) end)
 
     start_supervised!({@scheduler, name: sched, w_cap: 10}, id: sched)
     start_supervised!({@unit_supervisor, name: unit_sup}, id: unit_sup)
@@ -183,27 +163,31 @@ defmodule Tau.Factory.UnitDriverTest do
     start_supervised!({@worker_registry, name: worker_reg}, id: worker_reg)
     start_supervised!({@worker_supervisor, name: worker_sup, registry: worker_reg}, id: worker_sup)
 
+    # Real Ledger.Writer (the WorkspaceJanitor's capture sink) + WorkspaceJanitor
+    # (the reclaim owner; monitors each worker, reclaims on every :DOWN — D-313/14).
+    start_supervised!({@writer, db_path: db_path, name: ledger}, id: ledger)
+    start_supervised!({@janitor, ledger: ledger, name: janitor}, id: janitor)
+
     %{
       unit_supervisor: unit_sup,
       unit_registry: unit_reg,
       scheduler: sched,
       worker_registry: worker_reg,
       worker_supervisor: worker_sup,
+      ledger: ledger,
+      janitor: janitor,
       repo_dir: repo_dir,
       agent_bin: agent_bin
     }
   end
 
   # A stubbed MergeAuthority: a tiny process exposing the `request_merge/2`
-  # contract shape via the {:"$gen_call", from, {:request_merge, map}} protocol
-  # (so `:gen_statem.call/2` / `GenServer.call/2` against it work unchanged). It
-  # forwards the received merge map to the test, then replies :queued. The
-  # :merge_result the Unit needs is delivered separately (driver bridge / test),
-  # standing in for the real async MergeAuthority result projection.
-  #
-  # The real MergeAuthority is heavy (runs a real rebase+push build), so this
-  # stub stands in at the request_merge boundary to let the test assert the
-  # EXACT merge map the driver built reaches the authority.
+  # contract shape via the {:"$gen_call", from, {:request_merge, map}} protocol.
+  # It forwards the merge map to the test, then replies :queued. The async result
+  # the Unit needs is delivered the REAL way by the test — a Phoenix.PubSub
+  # broadcast of {:merge_result, _} to "factory:pr:#{unit_id}" (D-356) — standing
+  # in for the real MergeAuthority's emission half. There is NO direct send to the
+  # unit pid and NO telemetry bridge.
   defp start_stub_merge_authority(report_to) do
     spawn(fn -> stub_merge_loop(report_to) end)
   end
@@ -220,13 +204,36 @@ defmodule Tau.Factory.UnitDriverTest do
     end
   end
 
+  defp pr_topic(unit_id), do: "factory:pr:#{unit_id}"
+
+  defp deps_for(sub, gate_fun, merge_authority, report_to) do
+    %{
+      unit_supervisor: sub.unit_supervisor,
+      unit_registry: sub.unit_registry,
+      scheduler: sub.scheduler,
+      worker_supervisor: sub.worker_supervisor,
+      worker_registry: sub.worker_registry,
+      ledger: sub.ledger,
+      janitor: sub.janitor,
+      pubsub: Tau.PubSub,
+      repo_dir: sub.repo_dir,
+      agent_bin: sub.agent_bin,
+      gate_fun: gate_fun,
+      merge_authority: merge_authority,
+      report_to: report_to
+    }
+  end
+
   # ---------------------------------------------------------------------------
   # D-340a — Happy path: real Unit + real Worker → 4-arg {:unit_terminal,…,:merged}
+  # The merge result is delivered via a Tau.PubSub broadcast on the per-PR topic
+  # (D-356). The worker worktree is reclaimed by the JANITOR (not the driver).
   # ---------------------------------------------------------------------------
 
-  describe "D-340 — UnitDriver.drive/2 happy path reaches :merged via the real substrate" do
+  describe "D-340/D-356 — UnitDriver.drive/2 happy path reaches :merged via the real substrate" do
     @tag :d_340
-    test "D-340: drive/2 runs a real Unit+Worker to a 4-arg {:unit_terminal, id, :merged, prov}; worktree created+reclaimed" do
+    @tag :d_356
+    test "D-340/D-356: drive/2 runs a real Unit+Worker to {:unit_terminal, id, :merged, prov}; janitor reclaims the worktree" do
       tmp_dir = mk_tmp("happy")
       %{repo_dir: repo_dir, base_ref: base_ref} = setup_git_repo(tmp_dir)
 
@@ -251,20 +258,7 @@ defmodule Tau.Factory.UnitDriverTest do
         brief: "implement the thing"
       }
 
-      # gate_fun PASSes deterministically (hermetic — the real Gate.run/1 is too
-      # heavy here; the driver accepts an injected gate_fun seam, per the contract).
-      deps = %{
-        unit_supervisor: sub.unit_supervisor,
-        unit_registry: sub.unit_registry,
-        scheduler: sub.scheduler,
-        worker_supervisor: sub.worker_supervisor,
-        worker_registry: sub.worker_registry,
-        repo_dir: repo_dir,
-        agent_bin: agent_bin,
-        gate_fun: fn -> :pass end,
-        merge_authority: merge_authority,
-        report_to: test_pid
-      }
+      deps = deps_for(sub, fn -> :pass end, merge_authority, test_pid)
 
       unit_pid = @unit_driver.drive(work_item, deps)
 
@@ -274,7 +268,7 @@ defmodule Tau.Factory.UnitDriverTest do
       # The driver's :merge_fun must have built the merge map and reached the
       # (stubbed) MergeAuthority with the EXACT %{id, hash, run, branch} shape.
       assert_receive {:merge_requested, merge_map},
-                     5_000,
+                     8_000,
                      "D-340: the driver's :merge_fun must call MergeAuthority.request_merge/2 " <>
                        "with a %{id, hash, run, branch} map (the merge seam was never reached)."
 
@@ -290,15 +284,19 @@ defmodule Tau.Factory.UnitDriverTest do
       assert merge_map.run == "run-1",
              "D-340: merge map :run must be the work_item run; got #{inspect(merge_map)}"
 
-      # Bridge the merge outcome back to the Unit (the driver's bridge or the test
-      # standing in for the async MergeAuthority projection). After request_merge,
-      # an external :merged result must drive the Unit to terminal :merged.
-      send(unit_pid, {:merge_result, :merged})
+      # Deliver the merge outcome the REAL way: broadcast {:merge_result, :merged}
+      # to the per-PR topic on the shared Tau.PubSub (D-356). The Unit must have
+      # subscribed to this topic on awaiting_merge entry; the broadcast reaches it
+      # off its mailbox and drives it to terminal :merged. NO direct send, NO bridge.
+      :ok = Phoenix.PubSub.broadcast(Tau.PubSub, pr_topic(unit_id), {:merge_result, :merged})
 
       # The coordinator seam receives the 4-arg D-340 terminal report.
       assert_receive {:unit_terminal, ^unit_id, :merged, provenance},
                      10_000,
-                     "D-340: coordinator seam must receive the 4-arg {:unit_terminal, id, :merged, prov}."
+                     "D-340/D-356: coordinator seam must receive {:unit_terminal, id, :merged, prov} " <>
+                       "after the {:merge_result, :merged} broadcast on #{pr_topic(unit_id)}. A " <>
+                       "timeout means the Unit never subscribed to the topic (the broadcast was " <>
+                       "dropped) — it escalated on state_timeout instead of merging."
 
       assert is_map(provenance),
              "D-340: provenance must be a map; got #{inspect(provenance)}"
@@ -309,21 +307,25 @@ defmodule Tau.Factory.UnitDriverTest do
       refute Map.has_key?(in_flight, unit_id),
              "D-340: after :merged the unit must be released from Scheduler in_flight"
 
-      # The real Worker created a private worktree under the repo and the fleet
-      # reclaimed it on the worker's normal exit (no leaked private worktree).
-      assert worker_worktrees(repo_dir) == [],
-             "D-340: all private worker worktrees must be reclaimed after the run; a leak " <>
-               "means the real Worker fleet was not driven, or reclaim did not fire."
+      # The real Worker created a private worktree under the repo and the JANITOR
+      # reclaimed it on the worker's exit (no leaked private worktree). This is the
+      # janitor's sole-ownership reclaim — NOT a driver-side reclaim.
+      assert poll_no_worker_worktrees(repo_dir, 5_000),
+             "D-340/D-356: all private worker worktrees must be reclaimed BY THE JANITOR after " <>
+               "the run; a leak means the janitor was not wired (deps.janitor not threaded into " <>
+               "the worker spawn opts) or the driver attempted its own (forbidden) reclaim."
     end
   end
 
   # ---------------------------------------------------------------------------
-  # D-340b — Gate fail drives the retry ladder → terminal :escalated
+  # D-340b — Gate fail drives the retry ladder → terminal :escalated.
+  # Reclaim still happens on EVERY worker :DOWN (the janitor reclaims on the
+  # escalation path too, not just the merge path).
   # ---------------------------------------------------------------------------
 
   describe "D-340 — a failing gate_fun drives the retry ladder to terminal :escalated" do
     @tag :d_340
-    test "D-340: a :gate_fun always returning {:fail,_} exhausts the ladder → {:unit_terminal, id, :escalated, prov}" do
+    test "D-340: a :gate_fun always returning {:fail,_} exhausts the ladder → {:unit_terminal, id, :escalated, prov}; janitor reclaims" do
       tmp_dir = mk_tmp("gatefail")
       %{repo_dir: repo_dir, base_ref: base_ref} = setup_git_repo(tmp_dir)
 
@@ -348,20 +350,7 @@ defmodule Tau.Factory.UnitDriverTest do
         brief: "implement the thing"
       }
 
-      # gate_fun ALWAYS fails → the Unit's bounded retry ladder (D-318) re-spawns
-      # workers via the driver's :worker_fun until exhaustion, then escalates.
-      deps = %{
-        unit_supervisor: sub.unit_supervisor,
-        unit_registry: sub.unit_registry,
-        scheduler: sub.scheduler,
-        worker_supervisor: sub.worker_supervisor,
-        worker_registry: sub.worker_registry,
-        repo_dir: repo_dir,
-        agent_bin: agent_bin,
-        gate_fun: fn -> {:fail, [:always_fails]} end,
-        merge_authority: merge_authority,
-        report_to: test_pid
-      }
+      deps = deps_for(sub, fn -> {:fail, [:always_fails]} end, merge_authority, test_pid)
 
       unit_pid = @unit_driver.drive(work_item, deps)
       assert is_pid(unit_pid), "D-340: drive/2 must return the Unit pid"
@@ -383,19 +372,24 @@ defmodule Tau.Factory.UnitDriverTest do
       refute_received {:merge_requested, _map},
                       "D-340: a failing gate must never request a merge."
 
-      refute_receive {:unit_terminal, ^unit_id, :merged, _},
-                     500,
-                     "D-340: a permanently-failing gate must never reach :merged."
+      # Reclaim-on-escalation: the janitor reclaims on EVERY worker :DOWN, not only
+      # the merge path. After ladder exhaustion every spawned worker has exited, so
+      # no private worktree may remain.
+      assert poll_no_worker_worktrees(repo_dir, 5_000),
+             "D-340: after :escalated all private worker worktrees must be reclaimed BY THE " <>
+               "JANITOR (it reclaims on every :DOWN, including the escalation path). A leak means " <>
+               "reclaim was tied to the merge path only (the forbidden driver-side reclaim)."
     end
   end
 
   # ---------------------------------------------------------------------------
-  # D-340c — The merge seam: request_merge map shape + the bridged :merged result
+  # D-340c — The merge seam: request_merge map shape + the PubSub-delivered result
   # ---------------------------------------------------------------------------
 
-  describe "D-340 — the merge seam bridges the async result to the Unit" do
+  describe "D-340/D-356 — the merge seam delivers the async result via the per-PR topic" do
     @tag :d_340
-    test "D-340: the :merge_fun builds %{id, hash, run, branch} for MergeAuthority and the :merged bridge reaches :merged" do
+    @tag :d_356
+    test "D-340/D-356: the :merge_fun builds %{id, hash, run, branch} for MergeAuthority and the :merged broadcast reaches :merged" do
       tmp_dir = mk_tmp("mergeseam")
       %{repo_dir: repo_dir, base_ref: base_ref} = setup_git_repo(tmp_dir)
 
@@ -421,25 +415,13 @@ defmodule Tau.Factory.UnitDriverTest do
         brief: "implement the thing"
       }
 
-      deps = %{
-        unit_supervisor: sub.unit_supervisor,
-        unit_registry: sub.unit_registry,
-        scheduler: sub.scheduler,
-        worker_supervisor: sub.worker_supervisor,
-        worker_registry: sub.worker_registry,
-        repo_dir: repo_dir,
-        agent_bin: agent_bin,
-        gate_fun: fn -> :pass end,
-        merge_authority: merge_authority,
-        report_to: test_pid
-      }
+      deps = deps_for(sub, fn -> :pass end, merge_authority, test_pid)
 
       unit_pid = @unit_driver.drive(work_item, deps)
       assert is_pid(unit_pid), "D-340: drive/2 must return the Unit pid"
 
       # The merge map reaches the (stubbed) MergeAuthority with the full,
-      # MergeAuthority-required key set %{id, hash, run, branch} (request_merge/2
-      # contract — merge_authority.ex line 70-73).
+      # MergeAuthority-required key set %{id, hash, run, branch}.
       assert_receive {:merge_requested, merge_map},
                      8_000,
                      "D-340: the driver's :merge_fun must reach MergeAuthority.request_merge/2."
@@ -453,13 +435,14 @@ defmodule Tau.Factory.UnitDriverTest do
       assert merge_map.id == unit_id and merge_map.run == run_id,
              "D-340: merge map :id/:run must round-trip the work_item; got #{inspect(merge_map)}"
 
-      # The async merge result is bridged to the Unit as {:merge_result, :merged};
-      # the Unit reaches terminal :merged (control-plane.md §line 597).
-      send(unit_pid, {:merge_result, :merged})
+      # The async merge result is delivered via the per-PR PubSub topic (D-356);
+      # the Unit (subscribed on awaiting_merge entry) reaches terminal :merged.
+      :ok = Phoenix.PubSub.broadcast(Tau.PubSub, pr_topic(unit_id), {:merge_result, :merged})
 
       assert_receive {:unit_terminal, ^unit_id, :merged, _provenance},
                      8_000,
-                     "D-340: the bridged :merged result must drive the Unit to terminal :merged."
+                     "D-340/D-356: the {:merge_result, :merged} broadcast on #{pr_topic(unit_id)} " <>
+                       "must drive the Unit to terminal :merged (it subscribed on entry)."
     end
   end
 
@@ -494,5 +477,26 @@ defmodule Tau.Factory.UnitDriverTest do
     |> Enum.reject(fn path ->
       path == "" or path == repo_dir or String.starts_with?(path, repo_dir <> "/")
     end)
+  end
+
+  # Poll until no private worker worktrees remain (janitor reclaim is async after
+  # the worker :DOWN fires) or the deadline passes.
+  defp poll_no_worker_worktrees(repo_dir, timeout_ms, interval_ms \\ 100) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_poll_no_worker_worktrees(repo_dir, deadline, interval_ms)
+  end
+
+  defp do_poll_no_worker_worktrees(repo_dir, deadline, interval_ms) do
+    cond do
+      worker_worktrees(repo_dir) == [] ->
+        true
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        false
+
+      true ->
+        Process.sleep(interval_ms)
+        do_poll_no_worker_worktrees(repo_dir, deadline, interval_ms)
+    end
   end
 end
