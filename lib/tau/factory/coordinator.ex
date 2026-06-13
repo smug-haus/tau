@@ -268,6 +268,14 @@ defmodule Tau.Factory.Coordinator do
     {:next_state, :halted, data}
   end
 
+  # Also handle the 4-arg variant sent by the real Unit FSM (D-340).
+  def halting(:info, {:unit_terminal, _unit_id, _outcome, _provenance}, data) do
+    telemetry(:unit_terminal, %{}, %{state: :halting})
+    data = %{data | in_flight: nil}
+    notify_halted(data)
+    {:next_state, :halted, data}
+  end
+
   # Absorb stray halt_requested (already halting).
   def halting(:info, :halt_requested, data) do
     {:keep_state, %{data | halt_pending: true}}
