@@ -577,14 +577,16 @@ defmodule Tau.Factory.WorkerTest do
 
       # B4: death-certificate delivered by unlinked monitor on Port exit-0.
       # No drain window — the monitor fires on :DOWN for every reason.
+      # D-326: a dummy agent that emits no work_ready frame yields :no_work_product
+      # (fail-closed). A :normal exit after work_ready would yield :normal.
       assert_receive {:worker_exit, ^worker_id, reason},
                      5_000,
-                     "B4: {:worker_exit, worker_id, :normal} must be sent to report_to " <>
+                     "B4: {:worker_exit, worker_id, _} must be sent to report_to " <>
                        "after the Port exits with status 0"
 
-      assert reason == :normal or match?({:exit_status, 0}, reason) or
+      assert reason in [:normal, :no_work_product] or match?({:exit_status, 0}, reason) or
                match?({:normal, _}, reason),
-             "B4: worker_exit reason for exit-0 must be :normal (or {:exit_status, 0}); " <>
+             "B4: worker_exit reason for exit-0 must be :normal or :no_work_product (D-326); " <>
                "got #{inspect(reason)}"
 
       # Death-cert has arrived; allow cleanup a moment.

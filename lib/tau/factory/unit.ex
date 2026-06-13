@@ -83,9 +83,14 @@ defmodule Tau.Factory.Unit do
     - `:hash`           — `String.t()`; content hash for the PR.
     - `:scheduler`      — atom or pid of a running `Tau.Factory.Scheduler`.
     - `:report_to`      — pid receiving `{:unit_terminal, unit_id, outcome, provenance}`.
-    - `:worker_fun`     — `(role :: atom() -> {:ok, worker_pid :: pid()} | {:error, reason})`.
+    - `:worker_fun`     — `(role :: atom() -> {:ok, worker_pid :: pid()} | {:ok, worker_pid :: pid(), worker_id :: String.t()} | {:error, reason})`.
                          Returns a real process pid; the Unit monitors it via
                          `Process.monitor/1` for liveness (B8).
+                         When the 3-tuple form is returned, the Unit stores `worker_id`
+                         under `data.worker_id` and gates `implementing → gating` ONLY
+                         on `{:work_ready, ^worker_id, _, _}` (D-326/SPEC-FACTORY-CORE §4 B8).
+                         When the 2-tuple form is returned (legacy), the Unit matches
+                         `{:worker_done, ^worker_pid}` for normal completion.
     - `:gate_fun`       — `(-> :pass | {:fail, findings :: [term()]})`.
     - `:merge_fun`      — `(unit_id, hash -> :queued | {:error, reason})`.
 
@@ -147,6 +152,10 @@ defmodule Tau.Factory.Unit do
       state_timeout_ms: state_timeout_ms,
       # Current worker pid (B8 — real process, monitorable).
       worker_pid: nil,
+      # D-326: logical worker_id keying work_ready events (nil when worker_fun
+      # returns 2-tuple legacy form). Stored under :worker_id so tests can
+      # observe it via :sys.get_state/1.
+      worker_id: nil,
       # Monitor ref for the current worker.
       worker_mref: nil,
       # Retry counters.
@@ -199,9 +208,15 @@ defmodule Tau.Factory.Unit do
     data = snapshot_state(:oracle, data)
 
     case data.worker_fun.(:test_author) do
+      {:ok, worker_pid, worker_id} ->
+        mref = Process.monitor(worker_pid)
+        new_data = %{data | worker_pid: worker_pid, worker_id: worker_id, worker_mref: mref}
+        timeout_ms = data.state_timeout_ms
+        {:keep_state, new_data, [{:state_timeout, timeout_ms, :worker_stalled}]}
+
       {:ok, worker_pid} ->
         mref = Process.monitor(worker_pid)
-        new_data = %{data | worker_pid: worker_pid, worker_mref: mref}
+        new_data = %{data | worker_pid: worker_pid, worker_id: nil, worker_mref: mref}
         timeout_ms = data.state_timeout_ms
         {:keep_state, new_data, [{:state_timeout, timeout_ms, :worker_stalled}]}
 
@@ -209,6 +224,19 @@ defmodule Tau.Factory.Unit do
         Logger.warning("[Unit #{data.unit_id}] worker_fun(:test_author) error: #{inspect(reason)}")
         escalate(data, :E_WORKER_ERROR)
     end
+  end
+
+  # D-326: gate on work_ready keyed by the CURRENT worker_id (3-tuple seam).
+  def oracle(:info, {:work_ready, worker_id, _branch, _head_sha}, %{worker_id: worker_id} = data)
+      when not is_nil(worker_id) do
+    Process.demonitor(data.worker_mref, [:flush])
+    new_data = %{data | worker_pid: nil, worker_id: nil, worker_mref: nil}
+    {:next_state, :implementing, new_data, [{:next_event, :internal, :on_enter}]}
+  end
+
+  # Discard work_ready from a superseded worker_id (stale-worker discard, B8).
+  def oracle(:info, {:work_ready, _other_id, _branch, _head_sha}, data) do
+    {:keep_state, data}
   end
 
   def oracle(:info, {:worker_done, worker_pid}, %{worker_pid: worker_pid} = data)
@@ -253,9 +281,15 @@ defmodule Tau.Factory.Unit do
     new_data = snapshot_state(:implementing, new_data)
 
     case new_data.worker_fun.(:implementer) do
+      {:ok, worker_pid, worker_id} ->
+        mref = Process.monitor(worker_pid)
+        updated_data = %{new_data | worker_pid: worker_pid, worker_id: worker_id, worker_mref: mref}
+        timeout_ms = updated_data.state_timeout_ms
+        {:keep_state, updated_data, [{:state_timeout, timeout_ms, :worker_stalled}]}
+
       {:ok, worker_pid} ->
         mref = Process.monitor(worker_pid)
-        updated_data = %{new_data | worker_pid: worker_pid, worker_mref: mref}
+        updated_data = %{new_data | worker_pid: worker_pid, worker_id: nil, worker_mref: mref}
         timeout_ms = updated_data.state_timeout_ms
         {:keep_state, updated_data, [{:state_timeout, timeout_ms, :worker_stalled}]}
 
@@ -268,6 +302,25 @@ defmodule Tau.Factory.Unit do
     end
   end
 
+  # D-326 §4 B8: gate implementing → gating ONLY on work_ready keyed by the
+  # CURRENT worker_id (the sole completion trigger — never bare exit / :worker_done).
+  def implementing(
+        :info,
+        {:work_ready, worker_id, _branch, _head_sha},
+        %{worker_id: worker_id} = data
+      )
+      when not is_nil(worker_id) do
+    Process.demonitor(data.worker_mref, [:flush])
+    new_data = %{data | worker_pid: nil, worker_id: nil, worker_mref: nil}
+    {:next_state, :gating, new_data, [{:next_event, :internal, :on_enter}]}
+  end
+
+  # Stale-worker discard (B8): work_ready from a superseded worker_id is ignored.
+  def implementing(:info, {:work_ready, _other_id, _branch, _head_sha}, data) do
+    {:keep_state, data}
+  end
+
+  # Legacy 2-tuple worker_fun seam: {:worker_done, worker_pid} (back-compat).
   def implementing(:info, {:worker_done, worker_pid}, %{worker_pid: worker_pid} = data)
       when not is_nil(worker_pid) do
     Process.demonitor(data.worker_mref, [:flush])

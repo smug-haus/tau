@@ -389,6 +389,15 @@ callers that pass no `:ledger` opt are unaffected (back-compat).
   `worker_exit(w, :no_work_product)` (**D-326, cited owner: SPEC-FACTORY-FLEET**).
   W owns isolation/capture D-309..D-311, D-313, D-314, D-316 and the completion
   contract D-326.
+- **Pinned Unit seam (D-326 / PR #468 amendment).** The `worker_fun` injectable
+  returns `{:ok, worker_pid :: pid(), worker_id :: String.t()}` (3-tuple) for
+  D-326-aware workers; the Unit stores `data.worker_id` (test-observable via
+  `:sys.get_state/1`) and gates `implementing → gating` ONLY on
+  `{:work_ready, ^worker_id, _, _}` — discarding `{:work_ready, other_id, _, _}`
+  (stale-worker events, B8 invariant). The legacy 2-tuple `{:ok, worker_pid}`
+  form is preserved for back-compat but does NOT carry a `worker_id` — the
+  `data.worker_id` field is `nil` in that path and the Unit falls back to the
+  `{:worker_done, ^worker_pid}` trigger.
 
 ### B9: KillSwitch (C9) ↔ Coordinator (C3)
 
