@@ -666,6 +666,7 @@ Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 - `lib/tau/factory/scheduler.ex` (C4; D-312, D-320, D-343) — PR-CORE-2
 - `lib/tau/factory/conflict_check.ex` (C5; D-312, D-343) — PR-CORE-2
 - `lib/tau/factory/unit.ex` (C6; D-318, D-340, plus B6/B7/B8 cited edges) — PR-CORE-3
+- `lib/tau/factory/unit_driver.ex` (D-340; the real `drive_fun` wiring Unit→fleet→gate→merge seams) — PR #477
 - `lib/tau/factory/retry.ex` (C8; D-318) — PR-CORE-3
 - `lib/tau/factory/kill_switch.ex` (C9; D-321) — PR-CORE-4
 - `lib/tau/factory/supervisor.ex` + `lib/tau/application.ex` (tree; rest_for_one spine) — PR-CORE-1
@@ -680,6 +681,7 @@ Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 - `test/tau/factory/cost_attribution_test.exs` (D-333) — PR-CORE-5
 - `test/tau/factory/reconcile_test.exs` (D-330, D-331, D-336; audits D-334 disposition) — PR-CORE-5
 - `test/tau/factory/unit_termination_test.exs` (D-340) + `scope_amendment_test.exs` (D-343) — PR-CORE-3/2
+- `test/tau/factory/unit_driver_test.exs` (D-340; real drive_fun gating tests) — PR #477
 
 **Cross-SPEC boundaries (cited, not owned here):** B6 → `SPEC-FACTORY-MERGE`
 (D-300–D-303, D-341); B7 → `SPEC-FACTORY-GATE` (D-304–D-308, D-322, D-323);
