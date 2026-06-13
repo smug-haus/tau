@@ -20,6 +20,13 @@ D-315/D-330/D-336 (SPEC-FACTORY-CORE — the durable Ledger that records each
 capture disposition and the `worker_stalled` consumer). Resource-namespace
 declaration is supplied by the **Toolchain adapter** (SPEC-FACTORY-GATE / D-S2),
 making isolation total and polyglot.
+A1 (#487) amendment — adds **D-364..D-367**: the **Worker↔CodingAgent bridge**
+contract that wires the *real* `Tau.CodingAgent` substrate (SPEC-CODING-AGENT) as
+the worker's agent in place of the canned dogfood script, via an
+`agent_bin`-shaped **CodingAgent shim** that preserves the existing §4 B4 Port
+contract unchanged (§4 B4-A1, §6 D-364..D-367). Couples to #486 (the real
+`head_sha` thread) which *consumes* the coordinate this bridge produces — cited,
+not owned here.
 
 ## 0. Why this spec exists
 
@@ -348,6 +355,133 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
   NOT a cross-process ordering claim (no wall-clock, no cross-worker order — the
   ordering invariant is per-`worker_id`, V9-clean).
 
+### B4-A1: Worker (C2) ↔ the **CodingAgent shim** (`agent_bin`) — the real-agent bridge (#487)
+
+> **The gap this closes.** Today the Worker's `agent_bin` is the canned
+> `Tau.Factory.Dogfood.Agent` script: a fixed `/bin/sh` that emits a hardcoded
+> `lib/sandbox.ex` and a fixed `work_ready` frame (`lib/tau/factory/dogfood/agent.ex`).
+> Real dogfooding needs a *real* coding agent that reads an issue, reasons, edits
+> files, and commits a non-deterministic diff. The substrate already exists —
+> `Tau.CodingAgent` (behaviour) + `Tau.CodingAgents.ClaudeCode` (subprocess
+> adapter, SPEC-CODING-AGENT). The two speak **different execution models**: the
+> Worker speaks a raw `{:packet,4}` `Port` emitting a `work_ready` frame (B4); the
+> adapter speaks an Elixir `Enumerable.t()` of `%Tau.CodingAgent.Event{}`. This
+> contract specifies the bridge.
+
+**The discriminating question (Port-shim vs in-process Enumerable drive).** Two
+shapes can meet the seam:
+
+- **(i) `agent_bin`-shaped CodingAgent shim (recommended).** A small executable
+  (a release task / escript, e.g. `Tau.Factory.CodingAgentShim`) the Worker
+  `Port.open`s as `agent_bin` *exactly as today* (B4 unchanged). Inside its own
+  BEAM the shim drives `Tau.CodingAgent.run/4` (or the dispatcher stream) against
+  `Tau.CodingAgents.ClaudeCode`, **commits** the agent's edits to the worktree,
+  and emits the D-326 `{:packet,4}` `work_ready` frame on the adapter's terminal
+  `%Event.Done{}` before exiting.
+- **(ii) In-process drive.** The Worker GenServer calls `Tau.CodingAgent.run/4`
+  directly (no `agent_bin` Port for the agent), mapping `%Event.Done{}` →
+  `work_ready` in-process.
+
+**Cost asymmetry — why (i).** The Worker's *entire* B2/B3/B4/§6 contract is built
+around the agent being a **linked `Port` in the worker's crash domain**
+(D-316, §4 B4, §6) launched with the per-worker `env: ns` namespace (D-309, §2b)
+and `{:cd, ws}` (D-311). Option (ii) dissolves that boundary: the `ClaudeCode`
+adapter opens its own `Port` (with `:line`, not `:packet,4`), spawns its own
+dispatcher GenServer + drainer + tempfile janitor (SPEC-CODING-AGENT §5, the
+`Tau.CodingAgent.Supervisor` subtree), and inherits the **host `$HOME`**
+unless `ns` is re-threaded into *that* `Port.open` — re-homing the agent crash
+domain and re-routing F-5 isolation through a second, differently-shaped boundary.
+Reversing a wrong (ii) guess is a Worker rewrite touching six locked invariants;
+reversing a wrong (i) guess deletes one executable, Worker untouched. **(i) is the
+cheap-to-reverse, contract-preserving shape, and is selected.** It also keeps the
+story polyglot — a Rust/Python worker's `agent_bin` is the same `{:packet,4}`
+shape — and keeps the F-5 namespace injection at exactly one site (the Worker's
+`Port.open`). The shim's *own* sub-subprocess (`claude`) inherits `env: ns`
+transitively, because the Worker launched the shim with `env: ns` and the shim
+passes its environment through (D-365).
+
+**The shim contract (option (i), pinned):**
+
+- **Transport unchanged.** The Worker opens `agent_bin` with the existing B4
+  options — `[:binary, {:packet,4}, :exit_status, {:env, ns}, {:cd, ws}]`. The
+  shim's stdout carries **only** `{:packet,4}` frames (its own diagnostics and the
+  `claude` subprocess's stdout/stderr go to *its* stderr / a log, never the
+  Worker's `{:packet,4}` stdout — mirroring the dogfood script's stderr discipline
+  and `ClaudeCode`'s "stderr NOT redirected to stdout").
+- **Drive.** The shim builds a `Tau.CodingAgent.task` (`%{prompt, workspace: ws,
+  …}`) — the issue→prompt assembly is **A2 (#488), cited not owned here** — and
+  drives `ClaudeCode` via the dispatcher. It consumes the **dispatcher-guaranteed
+  single `%Event.Done{}`** terminal event (SPEC-CODING-AGENT §4 B4: "every run
+  terminates with exactly one `%Done{}`"). V1-clean: the shim relies on the
+  dispatcher *manufacturing* a terminal `%Done{}` (including the synthetic
+  `exit_status ∈ {-1,-2}` sentinels for death/timeout/cancel), **not** on the
+  agent always emitting a parseable completion of its own.
+- **Commit ownership (the load-bearing new logic — D-364).** `Tau.CodingAgents.ClaudeCode`
+  edits files in `task.workspace` but **does not** `git commit`, **does not**
+  create a branch, and **does not** produce a `head_sha`. The `%Event.Done{}`
+  carries `{exit_status, final_message}` only. So the **shim owns the
+  branch+commit step**: on a successful `%Done{}` (real `exit_status == 0`) over a
+  **non-empty** working tree, the shim creates/uses the unit branch, `git add -A`,
+  commits the agent's diff, resolves `head_sha = git rev-parse HEAD`, and emits
+  `work_ready{branch, head_sha}`. This step has **no analogue in the CodingAgent
+  substrate** and is the core of the bridge.
+- **Mapping to D-326 completion.**
+  - `%Done{exit_status: 0}` **with a non-empty post-commit diff** → emit
+    `{"type":"work_ready","branch":<branch>,"head_sha":<real sha>}`, then exit 0.
+    The `head_sha` is the **agent's actual HEAD**, the evidence #486 consumes.
+  - `%Done{exit_status: 0}` **with an empty diff** (agent ran, changed nothing) →
+    emit **no** `work_ready`; exit 0. The Worker's existing D-326 fail-closed maps
+    this to `worker_exit(worker_id, :no_work_product)` — the false-green an empty
+    diff would otherwise produce is structurally excluded (mirrors why D-326
+    exists).
+  - `%Done{exit_status: -1}` (death / inactivity timeout / unrecoverable
+    `%Event.Error{}`) or `-2` (cancel), **or** a non-recoverable `%Event.Error{}` →
+    emit **no** `work_ready`; exit **non-zero**. The Worker maps the non-zero exit
+    to `{:exit_status, n}` → `worker_exit(worker_id, {:exit_status, n})`, routed to
+    U's retry ladder, never gated. Auth failures (SPEC-CODING-AGENT C8/AC-6) reach
+    the Ledger via this path with their user-actionable reason in diagnostics.
+- **Isolation (D-365).** The shim and its `claude` sub-subprocess run **entirely
+  inside the worker's private worktree** (`{:cd, ws}`) under the worker's resource
+  namespace (`env: ns`). The shim MUST pass its environment through to `ClaudeCode`
+  so the `claude` `Port` inherits the same `XDG_*`/`MIX_HOME`/`HEX_HOME` namespace
+  (closing the GAP-4 un-namespaced-`$HOME` race the arch flags at worker-fleet §4).
+  The shim MUST set `task.workspace = ws` and rely on no `~/.tau/worktrees/...`
+  CodingAgent.Workspace backend — workspace isolation is the *Worker's* (D-309),
+  not the adapter's; the shim selects `Tau.CodingAgent.Workspace.Cwd` (passthrough)
+  so the adapter does **not** create a second nested worktree.
+- **Liveness / heartbeat source (D-366).** The CodingAgent stream emits
+  fine-grained progress events (`AssistantText`, `ToolUse`, `ToolResult`,
+  `FileEdit`) throughout a run. The shim MUST treat *each consumed stream event* as
+  a liveness pulse and emit a `{:packet,4}` **heartbeat frame** (a new typed event
+  under the `Tau.Provider.Event` taxonomy — never an ad-hoc format) at most once
+  per `heartbeat_interval`, so the Worker's heartbeat — and therefore the
+  `Watchdog`'s `worker_stalled` inference (B7, C206) — is **derived from real agent
+  progress**, not a self-clock timer that keeps beating while the agent is wedged.
+  A wedged agent (no stream events past the dispatcher inactivity timeout) stops
+  pulsing; the dispatcher's own inactivity timeout additionally manufactures a
+  `%Done{exit_status: -1}`, so a wedge resolves as a death-cert even if the
+  watchdog has not yet fired. This makes C206's "wedged-but-not-crashed" detection
+  *real*, where today's self-clock timer (`worker.ex` `handle_info(:heartbeat, …)`)
+  cannot distinguish a live agent from a wedged one.
+- **Crash containment (D-367).** The shim is a `Port` linked into the Worker
+  (D-316), so a shim crash propagates to the Worker exactly as the canned script's
+  would; the Worker's death-cert + janitor capture (B5) are unchanged. The shim
+  links/monitors its *own* `ClaudeCode` dispatcher so a `claude` crash surfaces
+  in-stream as a non-recoverable `%Event.Error{}`/`%Done{-1}` (SPEC-CODING-AGENT
+  D-035) rather than as a silent shim hang. No `try/rescue` crosses the
+  Worker↔shim Port boundary (OTP non-negotiable 7).
+
+**Scope note — this is a multi-PR bridge, and A1 alone is not self-sufficient.**
+A1 (this contract + the shim) produces a *real commit with a real `head_sha`*, but
+that coordinate is **discarded by the Unit FSM today** (`unit.ex` matches
+`{:work_ready, _, _branch, _head_sha}` and keys gate/merge on the *pre-declared*
+`data.hash`). Threading the real `head_sha` through gate+merge is **#486 (C1)** —
+a separate ARCH GAP with its own D-NNN. Without #486 the shim's real `head_sha`
+lands but is ignored, so a useful real-dogfood smoke needs **A1 ∧ #486** (and a
+real prompt from **A2/#488**). This contract therefore *produces* the coordinate
+and *names its consumer*; it does not implement the consumption. (V2-clean: the
+shape solves exactly A1 — replace the canned agent — and explicitly defers C1/A2.)
+
 ### B5: WorkspaceJanitor (C4) ↔ Worker (C2) — the `:DOWN` capture
 
 - `handle_info({:DOWN, ref, :process, pid, reason}, st)` fires for **every** exit
@@ -525,6 +659,76 @@ exits 0 surfaces `work_ready(id, branch, head_sha)` to its Unit and drives
 `gating`; (c) a `work_ready` from a superseded `worker_id` is discarded. The
 boundary is the **typed event**, never the exit code.
 
+**D-364 — The CodingAgent shim owns the branch+commit step and maps `%Done{}` →
+`work_ready` (#487, A1):**
+The worker's `agent_bin` for a real coding agent is the **CodingAgent shim**: an
+`agent_bin`-shaped executable that drives `Tau.CodingAgent` (e.g.
+`Tau.CodingAgents.ClaudeCode`) and bridges its `Enumerable.t()` of
+`%Tau.CodingAgent.Event{}` to the §4 B4 `{:packet,4}` Port contract **unchanged**.
+Because `Tau.CodingAgent` adapters edit `task.workspace` files but produce **no**
+commit, **no** branch, and **no** `head_sha`, the shim — not the Worker, not the
+adapter — owns the branch+commit step. On the dispatcher-guaranteed single
+terminal `%Event.Done{}`:
+`□( Done(exit_status=0) ∧ ¬empty(diff(ws)) ⇒ shim commits & emits work_ready{branch, head_sha=git rev-parse HEAD} )`
+∧ `□( Done(exit_status=0) ∧ empty(diff(ws)) ⇒ shim emits NO work_ready ∧ exits 0 )`
+[Worker maps → `worker_exit(:no_work_product)`, D-326]
+∧ `□( Done(exit_status∈{-1,-2}) ∨ Error(recoverable=false) ⇒ shim emits NO work_ready ∧ exits non-zero )`
+[Worker maps → `worker_exit({:exit_status,n})`, retry ladder].
+The emitted `head_sha` is the agent's **actual** HEAD (the evidence #486 keys on;
+this SPEC produces it, SPEC-FACTORY-CORE/#486 consumes it). V1-clean: the shim
+depends on the dispatcher *manufacturing* exactly one `%Done{}` (SPEC-CODING-AGENT
+§4 B4), never on the agent self-emitting a parseable completion. Detection:
+`coding_agent_shim_bridge_test.exs` — a `ClaudeCode` Replay fixture ending in
+`%Done{0}` over a non-empty tree yields a `work_ready{branch, real-sha}` frame the
+Worker forwards as `{:work_ready, id, branch, sha}` (sha = the shim's commit);
+an empty-tree `%Done{0}` yields **no** `work_ready` (→ `:no_work_product`); a
+`%Done{-1}` / non-recoverable `%Error{}` yields a non-zero exit (→ retry ladder).
+
+**D-365 — The shim and its sub-agent run inside the worker's isolation boundary
+(#487, A1):**
+The Worker launches the shim with the existing B4 options `{:env, ns}` (D-309) and
+`{:cd, ws}` (D-311); the shim MUST set `task.workspace = ws`, select the
+passthrough `Tau.CodingAgent.Workspace.Cwd` backend (so the adapter creates **no**
+second nested worktree), and **pass its environment through** to the `claude`
+subprocess so that sub-subprocess inherits the per-worker `XDG_*`/`MIX_HOME`/
+`HEX_HOME` namespace transitively. This closes the GAP-4 un-namespaced-`$HOME`
+race today's free-running `coding_agent/` shell-out exhibits (worker-fleet §4).
+`□( resources(shim) ∪ resources(claude) ⊆ namespace(worker) )` — no host-`$HOME`
+cache is touched. Detection: `coding_agent_shim_isolation_test.exs` — assert the
+shim's effective `workspace`, cwd, and the propagated `XDG_DATA_HOME`/`MIX_HOME`
+all resolve **inside** `ws`, and that no `~/.tau/worktrees/...` nested worktree is
+created.
+
+**D-366 — Worker heartbeats are derived from agent-stream progress, not a
+self-clock (#487, A1):**
+The shim emits a `{:packet,4}` heartbeat frame (a typed `Tau.Provider.Event`
+struct — never an ad-hoc format) derived from **consumed CodingAgent stream
+events** (`AssistantText`/`ToolUse`/`ToolResult`/`FileEdit`), rate-limited to at
+most one per `heartbeat_interval`. The Worker's liveness — and therefore the
+`Watchdog`'s `worker_stalled` inference (B7, C206) — is thus a function of *real
+agent progress*: a wedged agent emitting no stream events stops pulsing and the
+watchdog can infer the stall, where a self-clock timer (today's
+`worker.ex handle_info(:heartbeat,…)`) keeps beating regardless and cannot detect
+a wedge (a V12 finding against the current heartbeat — the timer enforces nothing
+about liveness). The dispatcher's inactivity timeout independently manufactures a
+`%Done{-1}` on a wedge, so a stall resolves as a death-cert even before the
+watchdog window elapses. `□( emits_heartbeat(t) ⇒ ∃ stream_event consumed in (t−interval, t] )`.
+Detection: `coding_agent_shim_heartbeat_test.exs` — a Replay stream with a gap
+longer than `heartbeat_interval` produces **no** heartbeat across the gap (the
+self-clock counter-example fails), and resumes pulsing when events resume.
+
+**D-367 — Shim crash containment preserves the Worker's crash domain (#487, A1):**
+The shim Port is linked into the Worker (D-316), so a shim crash propagates to the
+Worker exactly as the canned script's would and the janitor capture (B5) is
+unchanged; the shim links/monitors its own `ClaudeCode` dispatcher so a `claude`
+crash surfaces in-stream as `%Error{recoverable:false}`/`%Done{-1}`
+(SPEC-CODING-AGENT D-035), never a silent shim hang. No `try/rescue` crosses the
+Worker↔shim Port boundary. `□( crashes(claude) ⇒ surfaces in-stream Done/Error,
+not silent-hang ) ∧ □( crashes(shim) ⇒ blast_radius ⊆ {worker} )`. Detection:
+`coding_agent_shim_containment_test.exs` — inject a dispatcher/`claude` crash ⇒ the
+shim emits a non-recoverable terminal event and exits non-zero (Worker observes a
+death-cert), and a sibling worker is unaffected.
+
 ## 7. Acceptance criteria
 
 Each is expressed against the user-facing path with an observable signal. PR
@@ -586,6 +790,16 @@ groupings are indicative.
   `worker_exit(worker_id, :no_work_product)` and does **not** reach `gating`; a
   `work_ready` from a superseded `worker_id` is discarded. Signal: the Unit's
   observable state after each case matches the disjoint-outcome table.
+- **AC-14 (PR-A1, D-364..D-367 — the real-agent bridge):** the **CodingAgent
+  shim** drives `Tau.CodingAgents.ClaudeCode` (via a Replay fixture, no real
+  `claude` needed in CI) as the worker's `agent_bin` and produces a real
+  `work_ready{branch, head_sha}` on a non-empty `%Done{0}`. Signal:
+  `mix test test/tau/factory/coding_agent_shim_bridge_test.exs` passes — the
+  Worker forwards `{:work_ready, id, branch, sha}` where `sha` is the shim's
+  actual commit; the empty-diff and `%Done{-1}` cases surface the correct
+  no-completion/retry outcomes (D-364); the shim+sub-agent stay inside `ws` and
+  the namespace (D-365); heartbeats track stream progress not a clock (D-366);
+  a `claude`/dispatcher crash surfaces as a terminal event, not a hang (D-367).
 
 ## Appendix B — Source map
 
@@ -609,6 +823,12 @@ Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 - `test/tau/factory/worker_stalled_test.exs` (watchdog; feeds CORE D-317) — PR-FLEET-4
 - `test/tau/factory/worker_completion_event_test.exs` (D-326 — `work_ready` vs exit-0 no-op vs stale `worker_id`) — P5c-3
 - `test/tau/factory/oracle_spawn_order_test.exs` (D-304 mechanism, cited) — PR-FLEET-4
+- `lib/tau/factory/coding_agent_shim.ex` (B4-A1; D-364..D-367 — drives `Tau.CodingAgent`, owns branch+commit, emits `work_ready`/heartbeat frames) — PR-A1 (#487)
+- `lib/tau/factory/dogfood/agent.ex` (the canned script the shim replaces as the real-dogfood `agent_bin`; D-358 retained for the orchestration smoke) — PR-A1 (#487)
+- `test/tau/factory/coding_agent_shim_bridge_test.exs` (D-364 — `%Done{}`→`work_ready` mapping over Replay) — PR-A1
+- `test/tau/factory/coding_agent_shim_isolation_test.exs` (D-365 — shim+sub-agent inside `ws`/namespace) — PR-A1
+- `test/tau/factory/coding_agent_shim_heartbeat_test.exs` (D-366 — heartbeat tracks stream progress) — PR-A1
+- `test/tau/factory/coding_agent_shim_containment_test.exs` (D-367 — `claude`/dispatcher crash surfaces, not hang) — PR-A1
 
 **Cross-SPEC boundaries (cited, not owned here):** B1/B6/B7 → `SPEC-FACTORY-CORE`
 (D-315 durable capture record, D-317 `worker_stalled` consumer, D-318 retry
@@ -616,9 +836,15 @@ ladder, D-330/D-336 conservation lineage); B8 → `SPEC-FACTORY-GATE` (D-304 ora
 separation invariant, D-305 masking, D-306 mutation — the fleet supplies only the
 spawn-order + author-identity *mechanism*); the `origin/main` sole-writer half of
 INV-11 → `SPEC-FACTORY-MERGE` (D-300–D-303). Resource-namespace declaration is
-the Toolchain adapter's contract (D-S2 → `SPEC-FACTORY-GATE`).
+the Toolchain adapter's contract (D-S2 → `SPEC-FACTORY-GATE`). The **CodingAgent
+substrate** the shim drives (B4-A1, D-364..D-367) is owned by `SPEC-CODING-AGENT`
+(D-031..D-039 — the behaviour, the dispatcher's single-`%Done{}` guarantee, the
+`%Event{}` taxonomy, workspace backends); this SPEC only wires it as the worker's
+`agent_bin`. The **consumption of the shim's real `head_sha`** (threading it
+through gate/merge in place of the pre-declared `data.hash`) is **#486 (C1)** →
+`SPEC-FACTORY-CORE` §4 amendment — a separate ARCH GAP cited, not owned here.
 
 **Catalog registration required before first implementation PR:** add
 `SPEC-FACTORY-FLEET` to `.claude/rules/spec-before-code.md` (catalog) and the
 `D-NNN` block table in `docs/MISSION.md` (D-309, D-310, D-311, D-313, D-314,
-D-316, D-334 → this SPEC).
+D-316, D-334, **D-364–D-367** → this SPEC).

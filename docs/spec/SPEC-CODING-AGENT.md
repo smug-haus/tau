@@ -8,6 +8,15 @@
 | **Disposition** | **Additional, optional** feature. Does NOT replace `Tau.Provider`. Users who run tau with an API key are unaffected. |
 | **Tracking issue** | #191 |
 
+> **Downstream consumer (A1, #487).** The `:tau_factory` worker fleet drives this
+> substrate as a worker's `agent_bin` to perform real dogfooding. The bridge — an
+> `agent_bin`-shaped **CodingAgent shim** that adapts this SPEC's
+> `Enumerable.t()`/`%Event{}` model (the dispatcher's single-`%Done{}` guarantee,
+> §4 B1) to the worker's `{:packet,4}` `work_ready` Port contract, and owns the
+> branch+commit step this substrate does **not** perform — is specified in
+> `SPEC-FACTORY-FLEET §4 B4-A1` + D-364..D-367. No change to this SPEC's D-031..D-039
+> is required; the factory consumes the contract as-is.
+
 ## 0. Why this spec exists
 
 Sonnet/Opus via Anthropic API costs per-turn. A Claude Max plan sits idle
