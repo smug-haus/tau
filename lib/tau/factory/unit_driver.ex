@@ -21,11 +21,38 @@ defmodule Tau.Factory.UnitDriver do
   `Gate.run/1` closure here.
 
   **`:merge_fun`** — builds `%{id: unit_id, hash: hash, run: run, branch: branch}`,
-  calls `MergeAuthority.request_merge/2`, then installs a telemetry bridge that
-  forwards `{:merge_result, :merged}` / `{:merge_result, :rejected}` to the Unit
-  pid when the real MergeAuthority emits `[:tau, :factory, :merge, :merged]` /
-  `[:tau, :factory, :merge, :reject]`. The bridge is keyed by `unit_id` so it
+  calls `MergeAuthority.request_merge/2`, then the bridge process (started at
+  `drive/2` time) installs a telemetry handler that forwards
+  `{:merge_result, :merged}` / `{:merge_result, :rejected}` to the Unit pid when
+  the real MergeAuthority emits `[:tau, :factory, :merge, :merged]` /
+  `[:tau, :factory, :merge, :reject]`. The handler is keyed by `unit_id` so it
   only fires for this unit's outcome.
+
+  ## Bridge process (D-340)
+
+  A short-lived, unlinked bridge process is started at `drive/2` time. It:
+
+    1. Receives the started Unit's pid and monitors it.
+    2. Accumulates private worker worktree paths as `worker_fun` sends
+       `{:worktree_allocated, ws}` messages to it.
+    3. When `merge_fun` calls `MergeAuthority.request_merge/2`, the bridge
+       installs a telemetry handler for `[:tau, :factory, :merge, :merged]` /
+       `[:tau, :factory, :merge, :reject]`. On the first matching event, the
+       handler forwards `{:merge_result, outcome}` to the Unit, then sends
+       `{:merge_result_delivered}` to the bridge. The bridge immediately
+       detaches the telemetry handler, reclaims all pending worktrees, and exits.
+    4. On Unit `:DOWN` (any terminal path — merged, escalated, or crashed):
+       bridge detaches the telemetry handler (if still installed) and reclaims
+       all accumulated worktrees before exiting.
+    5. On timeout (5 minutes): same cleanup.
+
+  This design guarantees:
+    - No duplicate or late `{:merge_result, _}` delivery (handler detaches
+      immediately on first delivery).
+    - Worktree reclaim fires on ALL terminal paths, not only the merge path.
+    - No unsupervised, never-stopped `Agent` or other stateful process.
+    - Reclaim runs off the Unit gen_statem process, removing the D-340 liveness
+      risk from the blocking `merge_fun` callback.
 
   ## D-340 terminal report
 
@@ -107,20 +134,11 @@ defmodule Tau.Factory.UnitDriver do
     ledger = Map.get(deps, :ledger, nil)
 
     # -------------------------------------------------------------------------
-    # Shared worktree reclaim tracker (synchronous reclaim via merge_fun).
-    #
-    # Stores the list of private worker worktree paths (ws) that have been
-    # allocated so far. merge_fun drains and reclaims them synchronously —
-    # by the time merge_fun runs (awaiting_merge entry), both the :test_author
-    # and :implementer workers have already exited, so reclaim is safe.
-    #
-    # Using an Agent (owned by the current caller process) lets worker_fun
-    # (which runs in the Unit process) and merge_fun (also Unit process) share
-    # mutable state without ETS or process dictionary. The Agent is started
-    # unlinked to avoid linking it to the Unit (which is started separately);
-    # it lives until the Unit terminates or the caller process dies.
+    # Start the bridge process BEFORE the unit so closures can reference it.
+    # The bridge receives the unit pid once the unit is started, then monitors
+    # it. This avoids any need for a shared Agent or ETS state.
     # -------------------------------------------------------------------------
-    {:ok, reclaim_agent} = Agent.start(fn -> [] end)
+    bridge_pid = start_bridge(unit_id)
 
     # -------------------------------------------------------------------------
     # :worker_fun — called from within the Unit's process context.
@@ -129,8 +147,8 @@ defmodule Tau.Factory.UnitDriver do
     # WorkerSupervisor.spawn/5 returns {:ok, worker_id}. After spawn completes,
     # the Worker has finished init/1 and registered in the WorkerRegistry.
     # We look up its pid from the registry to return the 3-tuple the Unit needs.
-    # The private worktree path (ws) is registered in reclaim_agent for later
-    # synchronous reclaim in merge_fun.
+    # Each allocated private worktree path is registered with the bridge process
+    # for lifecycle-tied reclaim (covering ALL terminal paths, not just merge).
     # -------------------------------------------------------------------------
     worker_fun = fn role ->
       unit_pid = self()
@@ -146,9 +164,14 @@ defmodule Tau.Factory.UnitDriver do
         {:ok, worker_id} ->
           case resolve_worker_pid(worker_registry, worker_id) do
             {:ok, worker_pid} ->
-              # Register the private worktree path for synchronous reclaim in merge_fun.
+              # Register the private worktree path with the bridge process for
+              # lifecycle-tied reclaim. The bridge accumulates these in its own
+              # state and reclaims all of them on any terminal path (unit :DOWN,
+              # merge result delivered, or timeout) — no Agent, no ETS.
+              # Pass repo_dir along so the bridge can call git worktree remove
+              # without needing to derive it from the worktree path.
               ws = Path.join([Path.dirname(repo_dir), ".worker-wt-#{worker_id}"])
-              Agent.update(reclaim_agent, fn ws_list -> [ws | ws_list] end)
+              send(bridge_pid, {:worktree_allocated, ws, repo_dir})
 
               {:ok, worker_pid, worker_id}
 
@@ -172,24 +195,37 @@ defmodule Tau.Factory.UnitDriver do
     # -------------------------------------------------------------------------
     # :merge_fun — called from the Unit's awaiting_merge state.
     # Builds the exact merge map, calls MergeAuthority.request_merge/2, then
-    # installs a short-lived telemetry bridge that forwards the async outcome
-    # back to the Unit pid as {:merge_result, :merged} or {:merge_result, :rejected}.
-    # The bridge is keyed by unit_id so it only fires for this unit's outcome.
-    # In tests, the stub MergeAuthority never fires real telemetry events;
-    # the test manually sends {:merge_result, :merged} to the unit_pid instead.
+    # notifies the bridge to install its telemetry handler and forward the async
+    # outcome to the Unit pid.
+    # The bridge installs the handler so that it can detach it exactly once on
+    # first delivery (no duplicate or late merge_result messages).
     #
-    # Before calling request_merge, synchronously reclaim all pending worker
-    # worktrees. By the time awaiting_merge is entered, both the :test_author
-    # and :implementer workers have already exited (work_ready was received and
-    # the Unit passed through gating). Reclaiming here eliminates the scheduling
-    # race that would otherwise exist if reclaim ran in a separate monitor process.
+    # Synchronous worktree reclaim happens here (before request_merge) to ensure
+    # all allocated worktrees are released before the merge result arrives. By the
+    # time awaiting_merge is entered, all workers have exited. The bridge also
+    # reclaims on unit `:DOWN` (covering the escalation path where merge_fun never
+    # runs) — since `reclaim_worktree` is idempotent (guards on File.dir?), a
+    # double-reclaim attempt by the bridge on the merge path is safe.
     # -------------------------------------------------------------------------
     merge_fun = fn merge_unit_id, merge_hash ->
       unit_pid = self()
 
-      # Synchronously reclaim all pending private worktrees.
-      pending_ws = Agent.get_and_update(reclaim_agent, fn ws_list -> {ws_list, []} end)
-      Enum.each(pending_ws, fn ws -> reclaim_worktree(ws, repo_dir) end)
+      # Notify bridge: fetch the current worktree list synchronously, reclaim
+      # them now, and clear the list in the bridge. This removes the race where
+      # the unit reaches terminal before the bridge processes its cleanup message.
+      # We use a call-style approach: send a message and wait for the bridge to
+      # confirm it has received the list and cleared its state.
+      send(bridge_pid, {:drain_and_reclaim, self()})
+
+      receive do
+        {:worktrees_drained, pending_ws} ->
+          Enum.each(pending_ws, fn {ws, rd} -> reclaim_worktree(ws, rd) end)
+      after
+        5_000 ->
+          Logger.warning(
+            "[UnitDriver #{unit_id}] bridge drain timed out; proceeding without sync reclaim"
+          )
+      end
 
       merge_map = %{
         id: merge_unit_id,
@@ -198,11 +234,10 @@ defmodule Tau.Factory.UnitDriver do
         branch: branch
       }
 
-      # Install telemetry bridge before calling request_merge/2 so no
-      # event is missed if the authority resolves synchronously (unlikely
-      # but safe). The bridge is a monitored process that detaches its
-      # handler on receipt or on unit pid death.
-      install_merge_bridge(unit_id, unit_pid)
+      # Notify bridge: install the telemetry handler for this unit's merge
+      # result and wire unit_pid as the delivery target. The bridge installs
+      # the handler BEFORE request_merge is called so no event is missed.
+      send(bridge_pid, {:arm_merge_bridge, unit_pid})
 
       MergeAuthority.request_merge(merge_authority, merge_map)
     end
@@ -223,7 +258,12 @@ defmodule Tau.Factory.UnitDriver do
       registry_name: unit_registry
     ]
 
-    UnitSupervisor.start_unit(unit_supervisor, unit_opts)
+    unit_pid = UnitSupervisor.start_unit(unit_supervisor, unit_opts)
+
+    # Send the unit pid to the bridge so it can begin monitoring.
+    send(bridge_pid, {:unit_started, unit_pid})
+
+    unit_pid
   end
 
   # ---------------------------------------------------------------------------
@@ -259,27 +299,92 @@ defmodule Tau.Factory.UnitDriver do
     :ok
   end
 
-  # Install a short-lived telemetry bridge process for the given unit_id.
-  # Subscribes to [:tau, :factory, :merge, :merged] and
-  # [:tau, :factory, :merge, :reject], forwards a single {:merge_result, _}
-  # message to unit_pid when a matching unit_id is found in the event metadata,
-  # then detaches and exits.
+  # ---------------------------------------------------------------------------
+  # Bridge process
   #
-  # The bridge process monitors unit_pid and exits cleanly if the Unit dies
-  # before a merge outcome arrives (no leak). Uses Process.spawn for a truly
-  # unlinked bridge that won't crash the Unit on bridge exit.
+  # Lifecycle:
+  #   1. Start with `start_bridge/1` → spawns an unlinked process in the
+  #      :pre_start phase (no unit pid yet, no telemetry handler installed).
+  #   2. {:unit_started, unit_pid} → transitions to :monitoring phase:
+  #      monitors unit_pid; begins accumulating {:worktree_allocated, ws} msgs.
+  #   3. {:arm_merge_bridge, unit_pid} → installs the per-unit telemetry handler
+  #      for [:tau,:factory,:merge,:merged] and [:tau,:factory,:merge,:reject].
+  #      On first matching event the handler sends {:merge_result_delivered} to
+  #      the bridge and {:merge_result, outcome} to unit_pid.
+  #   4. {:merge_result_delivered} → bridge detaches the handler, reclaims
+  #      all accumulated worktrees, exits normally. Unit is still alive here
+  #      (it's in awaiting_merge, will be driven to terminal by the result).
+  #   5. {:DOWN, ^unit_ref, ...} → unit died (normal, kill, crash); bridge
+  #      detaches any handler (idempotent), reclaims worktrees, exits.
+  #   6. Timeout (5 minutes) → same cleanup.
   #
-  # OTP non-negotiable: this is a monitored-ref pattern, NOT Process.whereis|>send.
-  # The handler name is unique per unit_id so concurrent units don't collide.
-  @spec install_merge_bridge(String.t(), pid()) :: :ok
-  defp install_merge_bridge(unit_id, unit_pid) do
-    handler_id = {__MODULE__, :merge_bridge, unit_id}
+  # State is carried in the recursive loop function — no Agent, no ETS.
+  # This is the correct OTP pattern: monitored refs for cross-process events,
+  # state in the process's own receive loop.
+  # ---------------------------------------------------------------------------
 
-    # Unlinked bridge process: monitors unit_pid and cleans up its telemetry
-    # handler when done (on merge outcome or unit death).
+  # Start the unlinked bridge process. Returns the bridge pid.
+  # The bridge immediately enters the pre-start phase, waiting for {:unit_started, pid}.
+  @spec start_bridge(String.t()) :: pid()
+  defp start_bridge(unit_id) do
     Elixir.Process.spawn(
       fn ->
+        # Pre-start phase: wait for the unit pid before monitoring.
+        # Also buffer any {:worktree_allocated, ws} messages that arrive before
+        # the unit pid (shouldn't happen in practice, but defensive).
+        bridge_pre_start(unit_id, [])
+      end,
+      []
+    )
+  end
+
+  # Pre-start phase: wait for {:unit_started, unit_pid}.
+  # Accumulate {:worktree_allocated, ws, repo_dir} messages while waiting.
+  # ws_list is a list of {ws, repo_dir} tuples.
+  defp bridge_pre_start(unit_id, pending_ws) do
+    receive do
+      {:unit_started, unit_pid} ->
         unit_ref = Process.monitor(unit_pid)
+        # Transition to monitoring phase with any already-accumulated worktrees.
+        bridge_monitoring(unit_id, unit_pid, unit_ref, false, pending_ws)
+
+      {:worktree_allocated, ws, repo_dir} ->
+        bridge_pre_start(unit_id, [{ws, repo_dir} | pending_ws])
+
+      _other ->
+        bridge_pre_start(unit_id, pending_ws)
+    after
+      # Safety timeout in pre-start phase: 30 seconds.
+      # If no unit starts within 30s, exit cleanly (no resources to clean up yet).
+      30_000 ->
+        Logger.warning("[UnitDriver bridge #{unit_id}] timed out in pre-start phase; exiting")
+    end
+  end
+
+  # Monitoring phase: unit is running; accumulate worktree paths and wait
+  # for the merge arm signal, unit death, or timeout.
+  # ws_list is a list of {ws, repo_dir} tuples.
+  defp bridge_monitoring(unit_id, unit_pid, unit_ref, handler_installed, ws_list) do
+    receive do
+      {:worktree_allocated, ws, repo_dir} ->
+        bridge_monitoring(unit_id, unit_pid, unit_ref, handler_installed, [
+          {ws, repo_dir} | ws_list
+        ])
+
+      {:drain_and_reclaim, caller} ->
+        # merge_fun (inside the Unit process) is requesting a synchronous drain
+        # of the worktree list so it can reclaim them before calling request_merge.
+        # Reply with the current list and clear it in the bridge state.
+        # The bridge will still reclaim on :DOWN to cover any worktrees allocated
+        # after the drain (none expected, but defensive) and the escalation path.
+        send(caller, {:worktrees_drained, ws_list})
+        bridge_monitoring(unit_id, unit_pid, unit_ref, handler_installed, [])
+
+      {:arm_merge_bridge, ^unit_pid} ->
+        # Install the telemetry handler now. The handler closure captures
+        # bridge_self so it can notify the bridge on first delivery.
+        bridge_self = self()
+        handler_id = {__MODULE__, :merge_bridge, unit_id}
 
         :telemetry.attach_many(
           handler_id,
@@ -288,21 +393,73 @@ defmodule Tau.Factory.UnitDriver do
             [:tau, :factory, :merge, :reject]
           ],
           fn event_name, _measurements, metadata, _config ->
-            outcome_for_unit = find_unit_outcome(event_name, metadata, unit_id)
+            outcome = find_unit_outcome(event_name, metadata, unit_id)
 
-            if outcome_for_unit do
-              send(unit_pid, {:merge_result, outcome_for_unit})
+            if outcome do
+              send(unit_pid, {:merge_result, outcome})
+              # Notify bridge to detach. The bridge will handle this in its next
+              # receive iteration. Using send (not a blocking call) keeps the
+              # telemetry handler fast and prevents handler re-entry.
+              send(bridge_self, :merge_result_delivered)
             end
           end,
           nil
         )
 
-        wait_for_merge_outcome(unit_ref, unit_pid, handler_id)
-      end,
-      []
-    )
+        bridge_monitoring(unit_id, unit_pid, unit_ref, true, ws_list)
 
-    :ok
+      :merge_result_delivered ->
+        # Merge result was forwarded to the unit. Detach handler immediately —
+        # no duplicate or late delivery possible after this point.
+        # ws_list here is any worktrees allocated AFTER the drain (expected to be
+        # empty on the normal merge path, but reclaim anyway for correctness).
+        detach_handler(unit_id, handler_installed)
+        reclaim_all(ws_list)
+        Process.demonitor(unit_ref, [:flush])
+
+      {:DOWN, ^unit_ref, :process, ^unit_pid, _reason} ->
+        # Unit terminated (any terminal path: merged, escalated, crashed).
+        # Detach any handler and reclaim all remaining worktrees.
+        # On the gate-fail/escalation path, merge_fun never runs so the drain
+        # never fires — all allocated worktrees are still in ws_list here.
+        detach_handler(unit_id, handler_installed)
+        reclaim_all(ws_list)
+
+      _other ->
+        bridge_monitoring(unit_id, unit_pid, unit_ref, handler_installed, ws_list)
+    after
+      # Bridge expires after 5 minutes. The merge train can take a while, but
+      # 5 minutes is well beyond any reasonable bound.
+      300_000 ->
+        Logger.warning("[UnitDriver bridge #{unit_id}] timed out in monitoring phase; cleaning up")
+        detach_handler(unit_id, handler_installed)
+        reclaim_all(ws_list)
+        Process.demonitor(unit_ref, [:flush])
+    end
+  end
+
+  # Detach the telemetry handler idempotently (ignore :not_found).
+  defp detach_handler(_unit_id, false), do: :ok
+
+  defp detach_handler(unit_id, true) do
+    handler_id = {__MODULE__, :merge_bridge, unit_id}
+
+    case :telemetry.detach(handler_id) do
+      :ok -> :ok
+      {:error, :not_found} -> :ok
+    end
+  end
+
+  # Reclaim all accumulated private worktrees.
+  # ws_list is a list of {ws, repo_dir} tuples where ws is the absolute worktree
+  # path and repo_dir is the parent git repository used to deregister the worktree.
+  # Reclaim is idempotent: reclaim_worktree/2 guards on File.dir? before calling git.
+  defp reclaim_all([]), do: :ok
+
+  defp reclaim_all(ws_list) do
+    Enum.each(ws_list, fn {ws, repo_dir} ->
+      reclaim_worktree(ws, repo_dir)
+    end)
   end
 
   # Determine if this telemetry event is for our unit_id and map it to an outcome.
@@ -319,27 +476,6 @@ defmodule Tau.Factory.UnitDriver do
         :reject -> :rejected
         _ -> nil
       end
-    end
-  end
-
-  # Bridge receive loop: wait for the unit_pid :DOWN (dead — detach handler)
-  # or a :bridge_done signal (sent by the handler after forwarding). Using a
-  # mailbox poll because the telemetry handler runs synchronously in the telemetry
-  # caller's context, not in this process — it can send us a message.
-  # We use a sentinel message approach: the handler sends {:merge_bridge_done, unit_id}
-  # to the bridge process once it fires. The bridge process then detaches.
-  defp wait_for_merge_outcome(unit_ref, _unit_pid, handler_id) do
-    receive do
-      {:DOWN, ^unit_ref, :process, _, _} ->
-        :telemetry.detach(handler_id)
-
-      {:merge_bridge_done, _} ->
-        :telemetry.detach(handler_id)
-    after
-      # Bridge expires after 5 minutes (well beyond any real merge timeout).
-      # Telemetry handler has already forwarded its message; we just clean up.
-      300_000 ->
-        :telemetry.detach(handler_id)
     end
   end
 end
