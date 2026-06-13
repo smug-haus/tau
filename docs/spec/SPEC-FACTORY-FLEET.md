@@ -327,6 +327,18 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
   certificate (single-writer discipline: the worker is the sole forwarder of
   `work_ready`, just as the independent monitor is the sole writer of
   `worker_exit`).
+- **Pinned wire encoding (D-326 / PR #468 amendment).** The `{:packet,4}` frame
+  payload is a JSON object (stream-json-consistent; `Jason.decode/1`):
+  ```
+  {"type":"work_ready","branch":"<branch>","head_sha":"<sha>"}
+  ```
+  The BEAM strips the 4-byte big-endian length prefix; the Worker's
+  `handle_info({port, {:data, frame}}, …)` receives the raw JSON bytes.
+  Decoded into `%Tau.Provider.Event.WorkReady{branch: branch, head_sha: head_sha}`
+  (the typed struct — never a raw map).
+- **Pinned Worker→Unit message shapes (D-326 / PR #468 amendment).**
+  - Success: `{:work_ready, worker_id :: String.t(), branch :: String.t(), head_sha :: String.t()}` — the sole `implementing → gating` trigger (B1/B8).
+  - Fail-closed: `{:worker_exit, worker_id :: String.t(), :no_work_product}` — reuses the death-cert channel; exit-0 with no prior `work_ready` surfaces here, routed to the retry ladder, never gated.
 - **Ordering (the V1-load-bearing fact).** A single `Port`'s `{:data, _}` frames
   and its `{:exit_status, n}` are delivered to the owning process **in order** —
   the BEAM flushes all buffered Port output to the worker mailbox *before* the

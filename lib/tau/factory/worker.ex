@@ -42,6 +42,7 @@ defmodule Tau.Factory.Worker do
   alias Tau.Factory.Worker.Isolation
   alias Tau.Factory.Toolchain
   alias Tau.Factory.WorkspaceJanitor
+  alias Tau.Provider.Event.WorkReady
 
   # ---------------------------------------------------------------------------
   # Public API
@@ -142,6 +143,11 @@ defmodule Tau.Factory.Worker do
 
   # Port exited: stop the worker. The death-certificate is delivered by the
   # unlinked monitor, NOT by the worker itself (C202 single-writer discipline).
+  #
+  # D-326 fail-closed: exit-0 WITHOUT a prior work_ready is a semantic
+  # non-completion. We stop with {:shutdown, :no_work_product} so the
+  # independent monitor maps that to {:worker_exit, worker_id, :no_work_product}.
+  # A normal exit AFTER work_ready is unchanged (just :normal).
   @impl GenServer
   def handle_info({port, {:exit_status, n}}, %{port: port} = state) do
     :telemetry.execute(
@@ -150,13 +156,23 @@ defmodule Tau.Factory.Worker do
       %{worker_id: state.worker_id, role: state.role}
     )
 
-    reason = if n == 0, do: :normal, else: {:exit_status, n}
+    reason =
+      cond do
+        n == 0 and not state.work_ready_seen? -> {:shutdown, :no_work_product}
+        n == 0 -> :normal
+        true -> {:exit_status, n}
+      end
+
     {:stop, reason, state}
   end
 
-  # Data from agent — ignore for now (future: forward to Unit FSM).
-  def handle_info({port, {:data, _data}}, %{port: port} = state) do
-    {:noreply, state}
+  # Data from the agent: decode the {packet,4}-framed JSON into a typed event
+  # and dispatch. D-326: a work_ready frame is forwarded to report_to exactly
+  # ONCE and sets work_ready_seen? true (single-writer discipline, mirrors
+  # independent monitor's sole ownership of worker_exit).
+  def handle_info({port, {:data, frame}}, %{port: port} = state) do
+    new_state = dispatch(decode_event(frame), state)
+    {:noreply, new_state}
   end
 
   # Heartbeat tick: emit telemetry + optional report_to message, re-arm timer.
@@ -306,7 +322,10 @@ defmodule Tau.Factory.Worker do
        report_to: report_to,
        registry: registry,
        heartbeat_interval: heartbeat_interval,
-       heartbeat_timer: timer
+       heartbeat_timer: timer,
+       # D-326: set to true when the agent emits work_ready before exiting.
+       # Exit-0 without work_ready is fail-closed → :no_work_product.
+       work_ready_seen?: false
      }}
   end
 
@@ -316,10 +335,11 @@ defmodule Tau.Factory.Worker do
   # This is the SOLE writer of `{:worker_exit, worker_id, reason}` (C202).
   # The worker itself does NOT send the certificate — it just stops.
   #
-  # Reason mapping:
-  #   :normal  → {:worker_exit, id, :normal}
-  #   :killed  → {:worker_exit, id, :kill}
-  #   other    → {:worker_exit, id, other}
+  # Reason mapping (D-326 — :no_work_product is a semantic non-completion):
+  #   :normal                       → {:worker_exit, id, :normal}
+  #   {:shutdown, :no_work_product} → {:worker_exit, id, :no_work_product}
+  #   :killed                       → {:worker_exit, id, :kill}
+  #   other                         → {:worker_exit, id, other}
   defp spawn_death_monitor(_worker_id, nil), do: :ok
 
   defp spawn_death_monitor(worker_id, report_to) do
@@ -334,6 +354,7 @@ defmodule Tau.Factory.Worker do
             cert_reason =
               case reason do
                 :normal -> :normal
+                {:shutdown, :no_work_product} -> :no_work_product
                 :killed -> :kill
                 other -> other
               end
@@ -343,6 +364,41 @@ defmodule Tau.Factory.Worker do
       end,
       []
     )
+  end
+
+  # ---------------------------------------------------------------------------
+  # D-326 — decode and dispatch typed agent events from Port data frames
+  # ---------------------------------------------------------------------------
+
+  # Decode a {packet,4}-framed JSON payload into a typed event struct.
+  # The BEAM strips the 4-byte BE length prefix, so `frame` is raw JSON bytes.
+  # Extend Tau.Provider.Event; never use ad-hoc formats (OTP non-negotiable).
+  @spec decode_event(binary()) :: WorkReady.t() | {:unknown, binary()}
+  defp decode_event(frame) do
+    case Jason.decode(frame) do
+      {:ok, %{"type" => "work_ready", "branch" => branch, "head_sha" => head_sha}} ->
+        %WorkReady{branch: branch, head_sha: head_sha}
+
+      _ ->
+        {:unknown, frame}
+    end
+  end
+
+  # Dispatch a decoded typed event, updating state accordingly.
+  # D-326: the Worker is the SOLE forwarder of work_ready to report_to
+  # (single-writer discipline — mirrors the independent monitor's sole
+  # ownership of worker_exit). Forward ONCE and set work_ready_seen? true.
+  @spec dispatch(WorkReady.t() | {:unknown, binary()}, map()) :: map()
+  defp dispatch(%WorkReady{branch: branch, head_sha: head_sha}, state) do
+    if not is_nil(state.report_to) and not state.work_ready_seen? do
+      send(state.report_to, {:work_ready, state.worker_id, branch, head_sha})
+    end
+
+    %{state | work_ready_seen?: true}
+  end
+
+  defp dispatch({:unknown, _frame}, state) do
+    state
   end
 
   # ---------------------------------------------------------------------------

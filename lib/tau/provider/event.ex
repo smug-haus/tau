@@ -105,6 +105,22 @@ defmodule Tau.Provider.Event do
     @type t :: %__MODULE__{reason: term(), retryable?: boolean()}
   end
 
+  defmodule WorkReady do
+    @moduledoc """
+    A factory Worker agent declared a stable work product (D-326).
+
+    Emitted in-band over the agent's `{:packet, 4}` Port as a JSON frame
+    `{"type":"work_ready","branch":"<branch>","head_sha":"<sha>"}` BEFORE
+    the agent exits. The Worker decodes the frame, constructs this struct,
+    and forwards `{:work_ready, worker_id, branch, head_sha}` to its owning
+    Unit as the sole `implementing → gating` trigger (SPEC-FACTORY-FLEET §4
+    B4, SPEC-FACTORY-CORE §4 B8).
+    """
+    @enforce_keys [:branch, :head_sha]
+    defstruct [:branch, :head_sha]
+    @type t :: %__MODULE__{branch: String.t(), head_sha: String.t()}
+  end
+
   @type t ::
           Start.t()
           | TextStart.t()
@@ -118,4 +134,5 @@ defmodule Tau.Provider.Event do
           | ToolCallEnd.t()
           | Done.t()
           | Error.t()
+          | WorkReady.t()
 end
