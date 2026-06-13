@@ -73,6 +73,21 @@ Appendix B adds `tau.factory.dogfood.ex`, the dogfood agent/seed helpers,
 `dogfood_e2e_test.exs`, `dogfood_guard_test.exs`. Conforms to (does not redesign)
 arch `control-plane.md`, `gate-and-toolchain.md`, `merge-and-integration.md`.
 
+**Amendment (2026-06-13, PR #503 — C1 / `[C121-B11]` resolution: unit-coordinate
+identity).** Closes the head-SHA coordinate gap recorded as `[C121-B11]`. The
+Unit now **captures** `work_ready`'s asserted `branch`/`head_sha` into its data
+at the `implementing → gating` (and `oracle → implementing`) transition, and the
+gate/merge seams key on that **actual** coordinate, not the pre-declared
+`work_item.hash`. §4 B6/B8 pin the capture and the coordinate-substitution; §6
+adds **D-361** (the coordinate-identity invariant — gate/merge key on the
+agent-asserted `head_sha`), **D-362** (capture-on-`work_ready`), and **D-363**
+(back-compat: a deterministic agent whose declared hash == produced HEAD, and the
+legacy `head_sha = nil` 2-tuple seam, both fall through unchanged). §3 Q3
+promotes `[C121-B11]` from a recorded deferral to a **resolved** constraint.
+Conforms to arch `control-plane.md` §3.2.1 (which already showed the capturing
+clause) and `merge-and-integration.md`; resolves the `control-plane.md`
+§3.2.1↔§7.2 contradiction in favour of capture.
+
 ## 0. Why this spec exists
 
 The factory's control core is the brain of an autonomous loop that takes a
@@ -232,14 +247,20 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
   mode" true by construction, not by trust). This is **D-359**. It complements
   [C120-B11] (off-by-default): even when the operator opts the factory *on* for a
   dogfood, the blast radius is confined to a throwaway local repo.
-- **[C121-B11]** **The agent-asserted `head_sha` is not threaded into the
-  gate/merge coordinate (recorded constraint, dogfood relies on determinism).**
-  The Unit discards `work_ready`'s `branch`/`head_sha`; `gate_fun` and
-  `merge_fun(unit_id, data.hash)` key on the *pre-declared* `work_item.hash`. The
-  dogfood's **deterministic scripted agent** produces a commit whose HEAD == the
-  declared `hash`, so the coordinate is correct. A non-deterministic agent would
-  require wiring the asserted `head_sha` through `unit.ex`/`unit_driver.ex` —
-  explicitly out of P5c-7 scope (§4 B11).
+- **[C121-B11]** **The gate/merge coordinate is the agent-asserted `head_sha`,
+  not the pre-declared `work_item.hash` (RESOLVED 2026-06-13, PR #503, D-361).**
+  *Originally recorded (P5c-7) as a deliberate deferral; now resolved.* The Unit
+  **captures** `work_ready`'s asserted `branch`/`head_sha` into `data` at the
+  `oracle → implementing` and `implementing → gating` transitions, and substitutes
+  that captured `head_sha` for `work_item.hash` as the **gate-Request `hash`** and
+  the **merge-map `hash`/`branch`**. The agent is the sole authority for what it
+  produced; pre-declaring the SHA of an unauthored commit is impossible for a
+  non-deterministic agent (V1). Back-compat is total (D-363): the dogfood's
+  deterministic scripted agent asserts `head_sha == declared hash`, so the captured
+  and declared coordinates coincide and nothing observable changes; the legacy
+  2-tuple `worker_fun` seam (no `worker_id`, `head_sha = nil`) retains the
+  declared `work_item.hash` unchanged. Enforced by D-361/D-362; wiring spans
+  `unit.ex`, `unit_driver.ex`, `gate/request.ex`, and the merge map (§4 B6/B8).
 - **[C123-B8]** **`origin/<branch>` MUST exist at oracle-spawn time when
   `oracle_base_ref` is an `origin/`-qualified ref.** The oracle (test-author)
   Worker is spawned with a detached-HEAD checkout at `oracle_base_ref`; when the
@@ -462,6 +483,21 @@ callers that pass no `:ledger` opt are unaffected (back-compat).
 - `request_merge/2 :: (unit_id, hash) -> :queued` (non-blocking; the result
   `:merged`/`:rejected` arrives asynchronously via `"factory:pr:#{id}"`). A
   blocking `call` across a minutes-long merge build is forbidden (arch H-1b).
+- **The merge coordinate is the captured `head_sha`, not the declared
+  `work_item.hash` (D-361 / `[C121-B11]` resolution, PR #503).** When the Unit has
+  a captured `data.head_sha` (the agent-asserted coordinate from `work_ready`, B8),
+  `merge_fun` is invoked with that value as the `hash` argument, and `UnitDriver`
+  builds the merge map `%{id: unit_id, hash: <captured head_sha>, run, branch:
+  <captured branch>}`. The `hash` field is the **Ledger/CAS verdict coordinate**
+  `(hash, run, half)` re-read by `assert_all_verdicts_live` at commit (SPEC-FACTORY-MERGE
+  B9, `cas.ex`), NOT a content selector — the merge build already checks out
+  `unit.branch` (`merge_authority.ex` `default_build`) and lands the branch tip.
+  Coupling the verdict coordinate to the **same** `head_sha` the gate wrote its
+  verdict under (B7 / Gate.Request) is what makes the live-verdict CAS a genuine
+  guarantee about the commit actually pushed, rather than a check against a
+  fiction. **Fallback (D-363):** when `data.head_sha` is `nil` (legacy 2-tuple
+  seam or a back-compat caller), `merge_fun` receives the declared
+  `work_item.hash` unchanged — the existing behaviour.
 - M owns INV-1..4 / D-300..D-303 and the *emission* half of the result delivery
   (MERGE D-356 — broadcast to `"factory:pr:#{id}"`); U owns the *consume* half
   (**D-356**, this SPEC). U only submits and consumes the result; it never
@@ -500,6 +536,18 @@ callers that pass no `:ledger` opt are unaffected (back-compat).
 - `request_gate/4` / `gate_outcome` (`:pass` | `{:fail, findings}`). The gate is
   the only legal producer of a verdict (G appends to L per B3 / D-335). G owns
   D-304..D-308, D-322, D-323.
+- **The gate keys on the captured `head_sha` (D-361 / `[C121-B11]`, PR #503).**
+  The Unit's `:gate_fun` seam is arity-0 (§4 B11 / arch §7.3); the closure that
+  builds `%Gate.Request{}` MUST set `Request.hash` to the Unit's captured
+  `data.head_sha` (the agent-asserted coordinate, B8/D-362), NOT the declared
+  `work_item.hash`. `Request.hash` is the `(hash, run, half)` verdict coordinate
+  the gate appends to L (Gate.Request docstring; SPEC-FACTORY-GATE B1); keying it
+  on the actual commit is what makes the verdict refer to the agent's real work.
+  The gate **content** is already the branch tip (the harness builds the gate
+  workspace via `git worktree add --detach <branch>`, `dogfood/gate_fun.ex`), so
+  this change aligns the verdict *label* with the content the gate already ran on.
+  **Fallback (D-363):** when `data.head_sha` is `nil`, the closure uses the
+  declared `work_item.hash` unchanged.
 
 ### B8: Unit (C6) ↔ Worker fleet (W) — *cited, SPEC-FACTORY-FLEET*
 
@@ -524,6 +572,20 @@ callers that pass no `:ledger` opt are unaffected (back-compat).
   form is preserved for back-compat but does NOT carry a `worker_id` — the
   `data.worker_id` field is `nil` in that path and the Unit falls back to the
   `{:worker_done, ^worker_pid}` trigger.
+- **Capture the asserted coordinate on `work_ready` (D-362 / `[C121-B11]`, PR #503).**
+  On the matching `{:work_ready, ^worker_id, branch, head_sha}` transition (from
+  BOTH `oracle → implementing` and `implementing → gating`), the Unit MUST write
+  the asserted pair into its data: `%{data | branch: branch, head_sha: head_sha}`
+  (the exact clause shown in arch `control-plane.md` §3.2.1). These fields are
+  test-observable via `:sys.get_state/1`. The capture is on the **current**-worker
+  clause only; the stale-worker discard clause (`{:work_ready, _other_id, _, _}`)
+  captures nothing. `head_sha`/`branch` initialise to `nil` and are non-`nil` only
+  after a `work_ready` from the current worker. The captured `head_sha` is the
+  coordinate the gate (B7 / Gate.Request `hash`) and the merge (B6 / merge-map
+  `hash`) key on — see D-361. **Back-compat (D-363):** the legacy 2-tuple
+  `{:worker_done, ^worker_pid}` completion carries no `branch`/`head_sha`, so
+  `data.head_sha` stays `nil` and both the gate and merge seams fall back to the
+  declared `work_item.hash` exactly as before.
 - **`:janitor` threading — reclaim is the Janitor's, not the driver's
   (PR #477 amendment; PR #479 cleanup; cross-refs SPEC-FACTORY-FLEET D-313/D-314).**
   The `UnitDriver.drive/2` seam threads `:janitor` into the `worker_fun`'s opts
@@ -698,19 +760,21 @@ closes it.
   the worker. `:policy_pin` and `:ledger` are admission-/supervisor-level values.
   `:diff` is the unified diff between `:merge_base` and `:hash` in the workspace.
 
-  **Constraint surfaced — head-SHA threading (recorded, not redesigned;
-  [C121-B11]).** The Unit consumes `work_ready(worker_id, branch, head_sha)` but
-  **discards** `branch`/`head_sha` (`unit.ex` `implementing/3` pattern
-  `{:work_ready, id, _branch, _head_sha}`), and both `gate_fun` (the arity-0
-  closure above) and `merge_fun(unit_id, data.hash)` key on the unit's
-  *pre-declared* `work_item.hash`, never on the agent-asserted `head_sha`. For
-  the dogfood this is satisfied by **determinism**: the scripted agent produces a
-  commit whose branch and HEAD are exactly the work_item's declared
-  `branch`/`hash`, so the declared hash the gate and merge key on **is** the
-  agent's real HEAD. Wiring the asserted `head_sha` through into the gate/merge
-  coordinate (so a non-deterministic agent's real HEAD is gated and merged) is a
-  separate `unit.ex` / `unit_driver.ex` change, **out of P5c-7 scope**; the
-  dogfood does not require it.
+  **Constraint RESOLVED — head-SHA threading ([C121-B11], C1, PR #503; D-361,
+  D-362, D-363).** *Originally recorded (P5c-7) as out-of-scope; now resolved.*
+  The Unit consumes `work_ready(worker_id, branch, head_sha)` and now **captures**
+  `branch`/`head_sha` into its data (D-362; `unit.ex` `implementing/3` and
+  `oracle/3` current-worker clauses write `%{data | branch: branch, head_sha:
+  head_sha}`). Both `gate_fun` (the arity-0 closure above, via `Request.hash`) and
+  `merge_fun` (via the merge-map `hash`/`branch`) key on that captured
+  agent-asserted `head_sha`, not the unit's pre-declared `work_item.hash` (D-361).
+  For the dogfood the change is observably a no-op (D-363): the scripted agent's
+  asserted HEAD == the declared `hash` by construction, so the captured and
+  declared coordinates coincide. The fix is the strict refinement a
+  non-deterministic agent requires — its real HEAD (unknowable before authorship,
+  V1) is the coordinate the gate verifies and the merge CAS lands. The
+  `head_sha = nil` fallback (legacy 2-tuple seam) retains the declared
+  `work_item.hash` unchanged (D-363).
 
 **Unit timeout widening (`:unit_timeouts`, OQ-2 → D-358).** The Unit arms a
 single `:state_timeout_ms` (default `30_000`) on every external-actor-awaiting
@@ -1010,6 +1074,54 @@ force-pushing loop at a real GitHub remote. Enforced by the safety-guard unit
 test (a non-local origin → hard refusal, factory not booted) and by
 `dogfood_e2e_test.exs` driving against a local bare-repo sandbox.
 
+**D-361 — Unit-coordinate identity: the gate/merge coordinate is the
+agent-asserted `head_sha`, not the pre-declared `work_item.hash` ([C121-B11], C1,
+PR #503):** The pre-declared `work_item.hash`
+(`IssueSelector.content_hash/2 = sha256("N:title")`) is fixed **before** the agent
+runs and is therefore unrelated to the commit the agent actually authors — for a
+non-deterministic agent, no value computable before authorship can equal the
+HEAD SHA of an unauthored commit (V1: assumes an impossibility). The agent is the
+sole authority for its output, asserted in-band as `work_ready(w, branch,
+head_sha)` (B8, D-326). Therefore, when the Unit holds a captured non-`nil`
+`data.head_sha` (D-362), the **gate-Request `hash`** (B7) and the **merge-map
+`hash`** (B6) MUST both be that captured `head_sha`, and the merge-map `branch`
+MUST be the captured `branch`. The `(hash, run, half)` Ledger/CAS verdict
+coordinate (B3; `assert_all_verdicts_live`, SPEC-FACTORY-MERGE B9) is thereby
+keyed on the **same** commit the gate ran its verdict against — closing the
+two-writers/one-truth gap (V4) in which the verdict label (declared hash) and the
+landed content (branch tip) were decoupled, making the live-verdict CAS a check
+against a fiction. Production **content** was already the branch tip on both the
+gate (`git worktree add --detach <branch>`) and the merge build (`git checkout
+unit.branch`) paths; D-361 aligns the *coordinate* with that content. Enforced by
+an oracle-separated gating test asserting the gate-Request `hash` and the merge
+map `hash`/`branch` equal the asserted `work_ready` `head_sha`/`branch`, not the
+declared `work_item.hash`.
+
+**D-362 — Capture the asserted coordinate on `work_ready` (the FSM-data
+contract, PR #503):** On the matching `{:work_ready, ^worker_id, branch,
+head_sha}` transition — from BOTH `oracle → implementing` and
+`implementing → gating` — the Unit writes `%{data | branch: branch, head_sha:
+head_sha}` into its data (the exact clause arch `control-plane.md` §3.2.1 shows).
+`head_sha`/`branch` start `nil`, become non-`nil` only after a current-worker
+`work_ready`, and are test-observable via `:sys.get_state/1`. The stale-worker
+discard clause (`{:work_ready, _other_id, _, _}` → `keep_state`) captures nothing
+(B8 invariant). This is the single producer of the coordinate D-361 consumes.
+Enforced by an FSM-data assertion (`:sys.get_state` shows the captured pair after
+a current-worker `work_ready`, and `nil`/unchanged after a stale-worker one).
+
+**D-363 — Total back-compat for the declared-hash and legacy seams (PR #503):**
+When `data.head_sha` is `nil` — the legacy 2-tuple `worker_fun` seam (no
+`worker_id`, completion via `{:worker_done, ^worker_pid}`), or any caller that
+never emits `work_ready` — the gate (B7) and merge (B6) seams fall back to the
+declared `work_item.hash` and `work_item.branch` exactly as before D-361. For the
+dogfood's **deterministic scripted agent**, the asserted `head_sha` equals the
+declared `hash` by construction (arch §7.2), so the captured and declared
+coordinates coincide and the AC-12 end-to-end flow is observably unchanged. D-361
+is therefore a strict refinement: it changes the coordinate only when the agent
+asserts one that differs, which is exactly the non-deterministic-agent case.
+Enforced by the existing `dogfood_e2e_test.exs` continuing to reach `:merged`
+green, and a unit test that the `head_sha = nil` path uses the declared hash.
+
 ## 7. Acceptance criteria
 
 Each is expressed against the user-facing path with an observable signal.
@@ -1097,8 +1209,10 @@ Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 - `lib/tau/factory/escalation.ex` (C7; D-317) — PR-CORE-3
 - `lib/tau/factory/scheduler.ex` (C4; D-312, D-320, D-343) — PR-CORE-2
 - `lib/tau/factory/conflict_check.ex` (C5; D-312, D-343) — PR-CORE-2
-- `lib/tau/factory/unit.ex` (C6; D-318, D-340, **D-356** awaiting_merge subscribe-before-request consume + unsubscribe-on-exit, plus B6/B7/B8 cited edges) — PR-CORE-3/PR #477
-- `lib/tau/factory/unit_driver.ex` (D-340, **D-356** `:janitor` threading + no driver-side merge bridge / no driver reclaim; the real `drive_fun` wiring Unit→fleet→gate→merge seams) — PR #477
+- `lib/tau/factory/unit.ex` (C6; D-318, D-340, **D-356** awaiting_merge subscribe-before-request consume + unsubscribe-on-exit, **D-362** capture `work_ready` `branch`/`head_sha` into data, **D-361** key `merge_fun` on captured `head_sha`/`branch`, plus B6/B7/B8 cited edges) — PR-CORE-3/PR #477/PR #503
+- `lib/tau/factory/unit_driver.ex` (D-340, **D-356** `:janitor` threading + no driver-side merge bridge / no driver reclaim; **D-361** build the merge map `hash`/`branch` from the captured `head_sha`; the real `drive_fun` wiring Unit→fleet→gate→merge seams) — PR #477/PR #503
+- `lib/tau/factory/gate/request.ex` (**D-361** `Request.hash` is the captured `head_sha`, not the declared `work_item.hash`; the gate-closure construction site) — PR #503
+- `lib/tau/factory/dogfood/gate_fun.ex` (**D-361/D-363** the arity-0 gate closure sets `Request.hash` from the captured `head_sha`, falling back to declared hash when `nil`) — PR #503
 - `lib/tau/factory/retry.ex` (C8; D-318) — PR-CORE-3
 - `lib/tau/factory/kill_switch.ex` (C9; D-321) — PR-CORE-4
 - `lib/tau/factory/supervisor.ex` + `lib/tau/application.ex` (tree; rest_for_one spine; **D-357** config-gated `start_link/1` assembly + seam-threading, B11; **D-358** `:unit_timeouts` thread; **gate_fun/agent_bin** thread completing the P5c-6 deferral, §4 B11) — PR-CORE-1 / PR #480 / PR #481
@@ -1130,4 +1244,5 @@ B8 → `SPEC-FACTORY-FLEET` (D-309–D-311, D-313, D-314, D-316); `E-DESTRUCTIVE
 **Catalog registration required before first implementation PR:** add
 `SPEC-FACTORY-CORE` to `.claude/rules/spec-before-code.md` (catalog) and the
 `D-NNN` block table in `docs/MISSION.md` (D-312, D-315, D-317, D-318, D-320,
-D-321, D-330–D-333, D-335, D-336, D-340, D-342–D-344, D-355–D-359 → this SPEC).
+D-321, D-330–D-333, D-335, D-336, D-340, D-342–D-344, D-355–D-359,
+D-361–D-363 → this SPEC).
