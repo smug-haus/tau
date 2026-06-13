@@ -411,6 +411,28 @@ callers that pass no `:ledger` opt are unaffected (back-compat).
   `reconcile` is a read-only projection used to discharge CON-2 (D-331). The
   tracker is never a second writer of L.
 
+**Amendment (PR #470 / B10):** pins the `IssueSelector` contract that
+implements `select_next`:
+
+- **Entry point:** `Tau.Factory.IssueSelector.select(opts :: keyword()) ::
+  work_item | nil`.
+- **opts:** `:ledger` (`GenServer.server()` — running `Ledger.Writer`, read-only
+  projection source); `:milestone` (`String.t()`); `:gh_fun`
+  (`(String.t() -> {:ok, [issue_map]})` — stubbable read-only `gh` adapter;
+  `issue_map` carries at minimum `"number"` and `"title"` keys; NO network in
+  tests). Follows the codebase's canonical `*_fun` injection pattern.
+- **`unit_id` derivation:** `"unit-<number>"` — a stable, issue-number-derived
+  id ensuring the L-projection aligns with the ids the rest of the factory
+  snapshots under (D-331 [C112-B10]).
+- **`work_item` shape:** `{issue, scope, hash, branch}` — a 4-tuple where
+  `scope` is a non-nil frozen declared scope string, `hash` is a non-empty
+  content-hash string, and `branch` is a non-empty feature-branch name string.
+  `issue` carries the issue number (at minimum as `"number"` key).
+- **Return:** `work_item` when an open, non-terminal-in-L issue exists; `nil`
+  when the milestone is drained or every open issue is terminal in L (D-342).
+- **L is read-only:** the selector NEVER writes L; the tracker is not a second
+  writer of L (D-331 [C112-B10]).
+
 ## 5. State enumeration
 
 ### Coordinator (K) — `gen_statem`, `state_functions`
