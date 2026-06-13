@@ -122,9 +122,17 @@ defmodule Tau.Factory.KillSwitchTest do
   # A controllable "unit" that blocks until the test sends it :finish.
   # On :finish, sends {:unit_terminal, unit_id, :merged} to the coordinator.
   # Returns {unit_pid, unit_id}.
-  defp spawn_blocking_unit(coordinator_pid, unit_id) do
-    test_pid = self()
-
+  #
+  # `test_pid` is passed in explicitly (bound in the TEST body) so the
+  # {:unit_finished, unit_id} probe reaches the real test process directly.
+  # Previously `test_pid = self()` was bound INSIDE this function, but the
+  # function is called from within the `drive_fun`, which runs in the
+  # Coordinator process — so the probe was mis-targeted at the Coordinator and
+  # only reached the test via the Coordinator's `halted/3 {:unit_finished}`
+  # forwarding clause. Re-targeting the probe to the real test process (#452)
+  # makes that forwarding clause genuinely dead. AC-7/D-321 assertions are
+  # unchanged.
+  defp spawn_blocking_unit(coordinator_pid, unit_id, test_pid) do
     unit_pid =
       spawn(fn ->
         receive do
@@ -161,7 +169,12 @@ defmodule Tau.Factory.KillSwitchTest do
     coord_name = unique_name(:coord_ac7)
     ks_name = unique_name(:ks_ac7)
     pubsub_name = Tau.PubSub
-    on_halted = self()
+    # Bind the real test process here, in the TEST body, so the unit's
+    # {:unit_finished} probe targets it directly (NOT the Coordinator, which is
+    # where the drive_fun closure runs). This re-target (#452) makes the
+    # Coordinator's halted/3 {:unit_finished} forwarding clause dead.
+    test_pid = self()
+    on_halted = test_pid
 
     # Counter for select_fun: returns one work item then nil.
     {:ok, counter} = Agent.start_link(fn -> 0 end)
@@ -175,7 +188,9 @@ defmodule Tau.Factory.KillSwitchTest do
     drive_fun = fn _work ->
       # Coordinator pid is looked up by registered name at drive time.
       coord_pid = Process.whereis(coord_name)
-      {unit_pid, _} = spawn_blocking_unit(coord_pid, unit_id)
+      # test_pid is closed over from the test body (the real test process), so
+      # the probe reaches the test directly rather than via the Coordinator.
+      {unit_pid, _} = spawn_blocking_unit(coord_pid, unit_id, test_pid)
       :ets.insert(unit_pids, {unit_id, unit_pid})
       :ok
     end

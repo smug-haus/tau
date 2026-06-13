@@ -223,10 +223,14 @@ defmodule Tau.Factory.Coordinator do
     end
   end
 
-  # Global escalation → halting.
+  # Global escalation → halting (D-320).
+  # If a unit is in flight, route through :halting and AWAIT {:unit_terminal}
+  # so the in-flight unit is drained before reaching :halted (drain-first).
+  # If no unit is in flight, the existing halting(:internal, :drain) nil-branch
+  # transitions immediately to :halted.
   def running(:info, {:escalate, {_e, :global}}, data) do
     telemetry(:escalate, %{}, %{scope: :global})
-    {:next_state, :halting, %{data | in_flight: nil}, [{:next_event, :internal, :drain}]}
+    {:next_state, :halting, data, [{:next_event, :internal, :drain}]}
   end
 
   # Per-unit escalation → stay running; treat as a terminal for loop progress.
@@ -277,15 +281,6 @@ defmodule Tau.Factory.Coordinator do
   # ---------------------------------------------------------------------------
   # State: :halted
   # ---------------------------------------------------------------------------
-
-  # Forward unit_finished notifications to on_halted when the drive_fun was
-  # invoked from this process's context (self() = coordinator in the closure),
-  # so the test/caller receives the notification rather than losing it.
-  def halted(:info, {:unit_finished, _unit_id} = msg, %{on_halted: on_halted} = data)
-      when is_pid(on_halted) do
-    send(on_halted, msg)
-    {:keep_state, data}
-  end
 
   def halted(_event_type, _event, data) do
     {:keep_state, data}
