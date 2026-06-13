@@ -700,12 +700,16 @@ sandbox. The harness is a thin operator entry point above §1–§5.
 
 ### 7.1 What the harness is and is not
 
-The harness is a `Mix.Task` (`mix tau.factory.dogfood`) that (a) validates the
-sandbox, (b) seeds one trivial issue, (c) enables and boots the §3-order factory
-subtree (`supervision-tree.md`; the config-gated `Tau.Factory.Supervisor`,
-SPEC-FACTORY-CORE §4 B11) against the sandbox, (d) lets the **Coordinator** drive
-exactly one unit to its terminal `unit_terminal(:merged)` (§1.2 loop), and (e)
-reports the merged SHA + green health, then halts. It introduces **no new control
+The harness is a `Mix.Task` (`mix tau.factory.dogfood --repo <work-repo> --issue <n>
+[--db <ledger-path>]`) that (a) validates the sandbox, (b) seeds one trivial
+issue, (c) enables and boots the §3-order factory subtree (`supervision-tree.md`;
+the config-gated `Tau.Factory.Supervisor`, SPEC-FACTORY-CORE §4 B11) against the
+sandbox, (d) lets the **Coordinator** drive exactly one unit to its terminal
+`unit_terminal(:merged)` (§1.2 loop), and (e) reports the merged SHA + green
+health, then halts. The optional `--db <path>` flag threads an isolated Ledger DB
+path into `Supervisor.start_link/1` `:db_path` (default:
+`Tau.Settings.data_dir()/factory_ledger.db`); the e2e test uses it to supply a
+per-test DB and verify durable rows post-run. It introduces **no new control
 process and no new transition** — it is the operator's `select_fun`/`drive_fun`
 wiring plus a safety precondition.
 

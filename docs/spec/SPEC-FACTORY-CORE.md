@@ -597,7 +597,8 @@ Tau.Factory.Supervisor.start_link(opts) :: Supervisor.on_start()
   opts (full-subtree, enabled path):
     :enabled    — boolean();    request the gated full-subtree assembly
                                 (defaults to the config gate when absent)
-    :db_path    — String.t();   Ledger DB file (test: tmp-dir DB)
+    :db_path    — String.t();   Ledger DB file (test: tmp-dir DB). Exposed
+                                as `--db <path>` CLI flag in the dogfood task.
     :name       — atom();       this supervisor's registered name (test isolation;
                                 per-supervisor child names are derived from it)
     :repo_dir   — String.t();   the real (or throwaway, in tests) git repo —
@@ -1023,13 +1024,15 @@ PR groupings are indicative.
 - **AC-12 (PR-CORE-6 / P5c-7, end-to-end / substance):** the control core drives
   one real PR on the self-hosting Elixir toolchain from an open issue to a
   gate-passed, merged result with `main` health-checked, **no human in the loop**.
-  `mix tau.factory.dogfood --repo <local-bare-sandbox> --issue <n>` (the
-  **deterministic** path; live LLM authorship is the only simulated part — the
+  `mix tau.factory.dogfood --repo <local-bare-sandbox> --issue <n> [--db <ledger-path>]`
+  (the **deterministic** path; live LLM authorship is the only simulated part — the
   scripted `agent_bin` emits the D-326 `work_ready` frame and produces a **real**
   branch/commit solving the trivial seeded issue, whose **real gating test**
   genuinely exercises Gate 5.3 mutation) runs the **real** control plane
   (Coordinator → UnitDriver → fleet → `Gate.run` → MergeAuthority CAS → health) —
   the agent's authorship is the only thing simulated; the machinery is real.
+  The optional `--db <path>` flag lets tests supply an isolated Ledger DB path
+  (defaults to `Tau.Settings.data_dir()/factory_ledger.db` when absent).
   **Observable assertions (`dogfood_e2e_test.exs`, `@tag :integration`, not in
   normal CI):**
   1. a **merged commit on the sandbox `main`** — a real SHA reachable from

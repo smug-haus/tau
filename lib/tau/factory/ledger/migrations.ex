@@ -126,6 +126,28 @@ defmodule Tau.Factory.Ledger.Migrations do
        run         TEXT    NOT NULL,
        inserted_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
      )
+     """},
+    # P5c-7 (dogfood e2e observable-3, two-step):
+    # Replace the original `verdicts` TABLE (migration 002 — no longer written
+    # to; all gate writes go to `verdicts_v2` since migration 007) with a VIEW
+    # over `verdicts_v2` that exposes the `status` column as `verdict` so the
+    # frozen gating test's query `SELECT hash, run, half, verdict FROM verdicts`
+    # resolves correctly.
+    # Step 1: drop the TABLE (always empty post-007 since the writer exclusively
+    # uses `verdicts_v2`). SQLite does not allow CREATE VIEW with the same name
+    # as an existing TABLE, so the drop must precede the view creation.
+    {"20260613_011_verdicts_drop_table",
+     """
+     DROP TABLE IF EXISTS verdicts
+     """},
+    # Step 2: create the VIEW. Separate migration so the `exec` function handles
+    # each statement atomically (SQLite's execute/2 processes one statement).
+    {"20260613_012_verdicts_view",
+     """
+     CREATE VIEW IF NOT EXISTS verdicts AS
+       SELECT hash, run, half, status AS verdict,
+              idempotency_key, supersedes_id, inserted_at
+       FROM verdicts_v2
      """}
   ]
 

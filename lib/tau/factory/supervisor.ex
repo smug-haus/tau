@@ -166,6 +166,9 @@ defmodule Tau.Factory.Supervisor do
     gh_fun = Keyword.fetch!(opts, :gh_fun)
     select_fun = Keyword.fetch!(opts, :select_fun)
     drive_fun = Keyword.fetch!(opts, :drive_fun)
+    agent_bin = Keyword.get(opts, :agent_bin)
+    gate_fun = Keyword.get(opts, :gate_fun)
+    unit_timeouts = Keyword.get(opts, :unit_timeouts, [])
 
     # Derive per-supervisor child names for isolation (tests / multiple instances).
     writer_name = derive_name(sup_name, __MODULE__, LedgerWriter)
@@ -221,13 +224,25 @@ defmodule Tau.Factory.Supervisor do
       # :agent_bin and :gate_fun are nil for P5c-6 (idle path — no unit
       # driven on boot). These will be threaded from operator opts in a
       # subsequent PR when units are actually driven.
-      agent_bin: nil,
-      gate_fun: nil,
+      # Thread agent_bin and gate_fun from supervisor opts (completing the P5c-6
+      # deferral; SPEC-FACTORY-CORE §4 B11, P5c-7 #475). nil ⇒ no unit driven
+      # (the P5c-6 idle path).
+      agent_bin: agent_bin,
+      gate_fun: gate_fun,
+      unit_timeouts: unit_timeouts,
       report_to: coord_name
     }
 
+    # wrapped_drive_fun converts the IssueSelector 4-tuple work_item (or a
+    # rehydrate unit_id string) into the map shape UnitDriver.drive/2 expects
+    # (§4 B10 / B6), threads unit_timeouts into the deps map (D-358), and
+    # returns :ok as the Coordinator's drive_fun contract requires (the Unit
+    # sends {:unit_terminal, unit_id, outcome} asynchronously — D-340).
     wrapped_drive_fun = fn work_item ->
-      drive_fun.(work_item, %{deps | report_to: self()})
+      unit_work_item = to_unit_work_item(work_item)
+      unit_deps = %{deps | report_to: self(), unit_timeouts: unit_timeouts}
+      _unit_pid = drive_fun.(unit_work_item, unit_deps)
+      :ok
     end
 
     children = [
@@ -272,6 +287,65 @@ defmodule Tau.Factory.Supervisor do
   # ---------------------------------------------------------------------------
   # Private helpers
   # ---------------------------------------------------------------------------
+
+  # Convert an IssueSelector 4-tuple work_item into the map shape that
+  # UnitDriver.drive/2 expects (§4 B6 / B10). The Coordinator passes the
+  # select_fun's return value directly to drive_fun; IssueSelector.select/1
+  # returns {issue, scope, hash, branch} (B10). UnitDriver.drive/2 pattern-
+  # matches on a map with atom keys (B6). This conversion closes the gap.
+  #
+  # Derived fields:
+  #   unit_id   — "unit-<number>" (B10 / D-331 / [C112-B10])
+  #   run       — "run-1" (initial run identifier)
+  #   base_ref  — branch (the feature branch the worker checks out)
+  #   brief     — issue title (or empty string)
+  #   declared_scope — empty scope (dogfood uses a single-unit run)
+  @empty_scope %{
+    deps: [],
+    files: MapSet.new(),
+    codepoints: MapSet.new(),
+    specs: MapSet.new(),
+    resources: MapSet.new()
+  }
+
+  defp to_unit_work_item({issue, _scope, hash, branch}) do
+    number = Map.get(issue, "number", 0)
+    title = Map.get(issue, "title", "")
+
+    %{
+      unit_id: "unit-#{number}",
+      declared_scope: @empty_scope,
+      hash: hash,
+      branch: branch,
+      run: "run-1",
+      base_ref: branch,
+      # oracle_base_ref: the oracle (test_author) Worker uses `origin/<branch>`
+      # (detached HEAD) so it does NOT lock the named branch while checking out.
+      # This lets the implementing Worker checkout the named branch immediately
+      # after the oracle emits work_ready, without waiting for the oracle's
+      # worktree to be reclaimed (D-358 / SPEC-FACTORY-CORE §4 B11).
+      oracle_base_ref: "origin/#{branch}",
+      brief: title
+    }
+  end
+
+  # Rehydrate path: Coordinator passes unit_id (string) when resuming a
+  # non-terminal unit from Ledger snapshots (D-344). Reconstruct the work_item
+  # using the unit_id as both branch and base_ref; hash is unknown on rehydrate
+  # (the pre-computed hash was not persisted as a first-class Ledger field in
+  # this phase). The empty hash causes the Unit to re-open with a fresh run
+  # coordinate, which is acceptable for crash-recovery on a one-shot dogfood run.
+  defp to_unit_work_item(unit_id) when is_binary(unit_id) do
+    %{
+      unit_id: unit_id,
+      declared_scope: @empty_scope,
+      hash: "",
+      branch: unit_id,
+      run: "run-1",
+      base_ref: unit_id,
+      brief: ""
+    }
+  end
 
   # Derive a per-supervisor child name. When the supervisor IS the module
   # default, use the child module itself (canonical singleton names). Otherwise
