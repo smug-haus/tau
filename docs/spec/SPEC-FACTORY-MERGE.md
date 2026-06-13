@@ -22,6 +22,19 @@ telemetry projection). Updates §5 `:committing` exit description and §6 D-NNN
 block. Cited by SPEC-FACTORY-CORE §4 B3 (Unit `:awaiting_merge` reconcile-on-entry,
 D-344 amendment).
 
+**Amendment (2026-06-13, PR #477):** Introduces **D-356** (merge-result PubSub
+delivery, M's emission half). M, on every terminal outcome of a train member,
+**broadcasts `{:merge_result, :merged | :rejected}` to PubSub topic
+`"factory:pr:#{id}"`** on the shared `Tau.PubSub` (one instance, D-184 analog) —
+the result-emission act the arch named (`control-plane.md` §5; merge-and-
+integration.md). This was already a §4 B1/B8 boundary and a §3 `[C206-B1]`
+constraint; the **code emitted only telemetry** (a driver-side bridge re-derived
+`{:merge_result, _}` from `[:tau, :factory, :merge, :merged|:reject]`), so this is
+a **non-conformance closure plus a newly-owned D-NNN**, not a contract change.
+Updates §5 `:committing` exit line, adds D-356 to §6, and cross-references
+SPEC-FACTORY-CORE D-356 (the U subscribe-before-request consume half). Resolves
+#478 (telemetry-vs-PubSub mismatch).
+
 ## 0. Why this spec exists
 
 M is the **crux** of the autonomous factory: it is the one component where the
@@ -361,10 +374,21 @@ submitted(green) ─enqueue→ wait-queue (FIFO + aging by restale_count)
        assert_all_verdicts_live(train):
          {:revoked,u} → eject u, retry rest         (FC-4 — value-staleness)
          :all_pass    → cas_push(tip, base):
-            :ok        → COMMIT: record_merge_outcome(L) WAL-before-ack (D-355); broadcast :merged ∀ member; advance origin/main
+            :ok        → COMMIT: record_merge_outcome(L) WAL-before-ack (D-355);
+                         PubSub.broadcast("factory:pr:#{id}", {:merge_result, :merged}) ∀ member (D-356); advance origin/main
             :stale_ref → requeue all, rebase onto new head, re-gate  (FC-3 — TOCTOU)
   post-merge main re-check RED → E-RED-MAIN (global halt; main left red, named)
 ```
+
+On every **terminal rejection** of a train member (verdict-revoked, build-failed
+health-RED eject, task-down/wedged requeue exhausted to an eject, stale-ref) M
+likewise broadcasts `{:merge_result, :rejected}` to `"factory:pr:#{id}"` for the
+affected member(s) (D-356). A `:rejected` re-gates at U (INV-2); a member only
+*requeued* (e.g. `:stale_ref` for a later rebase attempt) is **not** a terminal
+rejection and is not yet published — U keeps awaiting. The broadcast is the
+authoritative async result the arch's `control-plane.md` §5 names; the
+`[:tau, :factory, :merge, …]` telemetry remains a *derived observer projection*
+(§4 B8), never the control-path delivery.
 
 The tip is gated as **one diff**, so INV-1..3 hold over the *combination*: a
 batch of individually-green units whose **combination** breaks a test is caught
@@ -442,6 +466,30 @@ SPEC-FACTORY-CORE (Unit `:awaiting_merge` reconcile, D-344 amendment).
 Enforced by `merge_outcome_durability_test.exs` (oracle-separated; the
 MergeAuthority/Unit gating test for PR #465).
 
+**D-356 — Merge-result PubSub delivery, M's emission half (the async result
+plane):**
+On every **terminal** outcome of a train member, M broadcasts
+`{:merge_result, :merged}` (on `cas_push` `:ok`, ∀ member) or
+`{:merge_result, :rejected}` (on any terminal rejection of a member: verdict-
+revoked eject, health-RED eject, exhausted requeue, or other non-requeue reject)
+to PubSub topic `"factory:pr:#{id}"` on the shared `Tau.PubSub` instance. This is
+the **authoritative async result-delivery** the arch names
+(`control-plane.md` §5 *U → M `request_merge` ; M → U `merge_result`* edge; merge-
+and-integration.md *“learns the outcome via a `pr:#{id}` PubSub event”*) and the
+§4 B1/B8, §3 `[C206-B1]` contract. The `[:tau, :factory, :merge, …]` telemetry is
+a **derived observer projection** (§4 B8), never the control-path delivery; a
+driver-side telemetry→Unit bridge that re-derives the result is **forbidden** (it
+re-creates an at-most-once-without-replay hazard between M's emit and U's
+subscription, closed only by the subscribe-before-request ordering owned by
+SPEC-FACTORY-CORE **D-356**, U's consume half). A `:merged` lands at the U
+`merged` terminal; a `:rejected` re-gates at U (INV-2). On `:merged` M MUST
+record the durable outcome (D-355) **before** the broadcast (the broadcast is the
+ephemeral projection of the durable row, WAL-before-ack). Enforced by
+`merge_result_pubsub_test.exs` (oracle-separated; asserts a real `request_merge`
+on M produces a `{:merge_result, _}` on `"factory:pr:#{id}"` and **no** driver
+bridge mediates it). *Counterpart to SPEC-FACTORY-CORE D-356 (U subscribe-before-
+request); the two halves share the identifier — one invariant, two enforcers.*
+
 **D-341 — Fair merge progress, no starvation (LIV-2):**
 M serves merge-ready units from a **FIFO + aging** wait-queue;
 `effective_priority(seq, restale_count) = seq − aging_weight · restale_count` is
@@ -502,7 +550,10 @@ Each is expressed against an observable signal. PR groupings are indicative.
 Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 
 - `lib/tau/factory/merge_authority.ex` (C1; D-300, D-301, D-302, D-303, D-341,
-  D-355 — the `gen_statem`, `:idle`/`:integrating`/`:committing`) — PR-MERGE-1..5/PR#465
+  D-355, D-356 — the `gen_statem`, `:idle`/`:integrating`/`:committing`; D-356
+  PubSub broadcast of `{:merge_result, _}` to `"factory:pr:#{id}"` on every
+  terminal member outcome) — PR-MERGE-1..5/PR#465/PR#477
+- `test/tau/factory/merge_result_pubsub_test.exs` (D-356 emission gating test) — PR#477
 - `lib/tau/factory/ledger/migrations.ex` (D-355 migration `20260612_010_merge_outcomes`) — PR#465
 - `lib/tau/factory/ledger/writer.ex` (D-355 `record_merge_outcome/2`,
   `merge_outcome_for/2`) — PR#465

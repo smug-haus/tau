@@ -471,6 +471,67 @@ in-band `{:coding_agent_event, pid, %Event.Done{}}` contract in `Tau.Session`:
 completion is a typed event the agent *asserts*, never an exit code the harness
 *infers* (D-326; OTP non-negotiable — extend `Tau.Provider.Event`, never scrape).
 
+### 3.2.2 The `awaiting_merge` result lifecycle — subscribe-before-request (D-356)
+
+The `awaiting_merge` state consumes M's async result over PubSub
+`"factory:pr:#{id}"` (the §5 *U → M `merge_result`* edge). Because
+`Phoenix.PubSub` is **at-most-once with no replay**, the order of *subscribe*
+and *request* is load-bearing: if U requested the merge before subscribing, M's
+result broadcast — fired minutes later in `:committing` — could still land in the
+gap before U's subscription exists and be **lost**, leaving U to sit until its
+`state_timeout` and escalate spuriously. U therefore **subscribes first, then
+requests**:
+
+```elixir
+# awaiting_merge: subscribe to the per-PR result topic BEFORE submitting the
+# merge, so the at-most-once broadcast can never precede the subscription.
+def awaiting_merge(:internal, :on_enter, data) do
+  case reconcile_merge_outcome(data) do          # D-355: durable outcome first
+    {:merged, _sha}   -> terminal(data, :merged)  # already landed — no submit
+    {:rejected, _r}   -> {:next_state, :gating, data, [request_gate(data)]}  # INV-2
+    :none ->
+      :ok = Phoenix.PubSub.subscribe(Tau.PubSub, "factory:pr:#{data.unit_id}")
+      :queued = data.merge_fun.(data.unit_id, data.hash)   # → request_merge
+      {:keep_state, data, [{:state_timeout, data.t_merge, :stall}]}
+  end
+end
+
+# the result arrives async on the topic; U consumes it directly off its mailbox.
+def awaiting_merge(:info, {:merge_result, :merged},   data), do: terminal(data, :merged)
+def awaiting_merge(:info, {:merge_result, :rejected}, data),
+  do: {:next_state, :gating, data, [request_gate(data)]}    # re-gate (INV-2)
+```
+
+`subscribe/2` is a synchronous local-registry write; it *happens-before* the
+`request_merge` it precedes, and M's broadcast *happens-after* the build, so the
+subscription provably exists at every possible publish instant — the race is
+closed by construction (the single shared `Tau.PubSub` instance, never a second,
+makes publisher and subscriber share one registry). U **unsubscribes on every
+exit** from `awaiting_merge` (to `merged`, to `gating` on `:rejected`, or to
+`escalated` on timeout); a late or duplicate broadcast after unsubscribe is
+dropped harmlessly, so the re-gate → re-enter → re-subscribe cycle (INV-2) carries
+no stale cross-excursion delivery. There is **no driver-side telemetry→Unit
+bridge**: the `[:tau, :factory, :merge, …]` telemetry is an observer projection
+(§5), and a bridge that re-derived `{:merge_result, _}` from it would re-introduce
+the very lost-event hazard this ordering closes (D-356, SPEC-FACTORY-CORE /
+SPEC-FACTORY-MERGE).
+
+**U callbacks run off the mailbox — no blocking subprocess in a state callback.**
+A `gen_statem` state callback that blocks (a synchronous `git`/build subprocess, a
+multi-second `receive`, a `call` held across a long activity) freezes U's mailbox
+for the whole duration: the mandatory `state_timeout` cannot fire, `worker_exit`
+and `worker_stalled` triggers queue unprocessed, and the liveness guarantee of
+§3.2 is silently defeated. This mirrors M's own deterministic-FSM /
+nondeterministic-activity split (`merge-and-integration.md` — the minutes-long
+build runs in a monitored `Task`, never in M's `handle_call`). For U the same
+doctrine holds: every long or blocking effect is pushed into a **monitored peer**
+(the worker, M, the gate `Task`) whose result returns as a *message* or `:DOWN`;
+the state callback only decides and arms a timeout. In particular `merge_fun`
+MUST return promptly (`request_merge` is non-blocking, returns `:queued`); it MUST
+NOT perform worktree reclaim or any other blocking work inline — reclaim is the
+`WorkspaceJanitor`'s, fired on the worker's `:DOWN` (`worker-fleet.md`, D-313/
+D-314), never the driver's or the callback's.
+
 ### 3.3 Bounded retry ladder (INV-19, HR-8 clamp)
 
 The ladder is a **pure decision function**, `Tau.Factory.Retry.next/3`; `N` is
