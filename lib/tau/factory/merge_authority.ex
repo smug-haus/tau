@@ -194,12 +194,27 @@ defmodule Tau.Factory.MergeAuthority do
     Logger.warning("[MergeAuthority] build failed: #{inspect(reason)}")
 
     train = data.train
-    telemetry(:reject, %{hash: hd_hash(train)}, %{reason: :build_failed, units: train})
 
     next_data =
       case reason do
         {:health_red, _report} ->
           # Eject the train; do NOT requeue — health failure is terminal for this tip.
+          # D-355 (symmetric) / WAL-before-ack: write the durable :rejected outcome
+          # row for each ejected member BEFORE the ephemeral telemetry projection
+          # fires. Mirrors the :merged WAL-before-ack path in :committing (D-315,
+          # RPO=0). Only TERMINAL rejections are durable; requeues write nothing.
+          Enum.each(train, fn unit ->
+            LedgerWriter.record_merge_outcome(data.ledger, %{
+              unit_id: unit.id,
+              outcome: :rejected,
+              commit_sha: nil,
+              reason: :build_failed,
+              run: unit.run
+            })
+          end)
+
+          telemetry(:reject, %{hash: hd_hash(train)}, %{reason: :build_failed, units: train})
+
           # D-356: broadcast :rejected to each ejected member (terminal rejection).
           Enum.each(train, fn unit ->
             Phoenix.PubSub.broadcast(
@@ -212,6 +227,9 @@ defmodule Tau.Factory.MergeAuthority do
           eject_train(data)
 
         _other ->
+          # Non-terminal: requeue for the next train attempt; do NOT write a durable
+          # outcome row (only terminal outcomes are durable — D-355 symmetric).
+          telemetry(:reject, %{hash: hd_hash(train)}, %{reason: :build_failed, units: train})
           requeue_train(data)
       end
 
@@ -266,6 +284,17 @@ defmodule Tau.Factory.MergeAuthority do
         Logger.info(
           "[MergeAuthority] verdict revoked for unit #{inspect(revoked_unit.id)}; no push"
         )
+
+        # D-355 (symmetric) / WAL-before-ack: write the durable :rejected outcome
+        # row for the revoked member BEFORE the ephemeral telemetry projection fires.
+        # Mirrors the :merged WAL-before-ack path (D-315, RPO=0). Terminal rejection.
+        LedgerWriter.record_merge_outcome(ledger, %{
+          unit_id: revoked_unit.id,
+          outcome: :rejected,
+          commit_sha: nil,
+          reason: :verdict_revoked,
+          run: revoked_unit.run
+        })
 
         telemetry(:reject, %{hash: revoked_unit.hash}, %{
           reason: :verdict_revoked,
