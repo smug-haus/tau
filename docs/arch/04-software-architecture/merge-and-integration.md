@@ -374,6 +374,17 @@ landing* (bisect, §4); E-RED-MAIN is reserved for the case where `main` itself 
 found red on a post-merge re-check (e.g. an accumulation a stateless per-PR gate
 cannot catch — the standing backstop, `factory-loop.md` cycle step 8d).
 
+**Dogfood note (P5c-7, M10 — recording, not redesigning).** The
+`mix tau.factory.dogfood` capstone (`control-plane.md` §7; SPEC-FACTORY-CORE
+§4 B11 / AC-12) drives this **real** health path: `Merge.Health.check` runs the
+Elixir toolchain (`mix compile --warnings-as-errors` + `mix test`) on the
+integrated tip in the **local bare-repo sandbox**, and its `:green` result is an
+AC-12 observable. The CAS push (§2b, `--force-with-lease`) advances the sandbox's
+**local** `origin/main` only — the dogfood harness hard-refuses a non-local
+origin before booting (D-359), so M's sole-writer force-push (§3) is
+blast-radius-confined to a throwaway local repo. No change to M's contract: the
+dogfood is the production merge path pointed at a sandbox remote.
+
 ---
 
 ## 6. Fair queue (LIV-2, Q-L1) — FIFO + aging

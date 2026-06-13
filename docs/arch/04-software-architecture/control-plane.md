@@ -686,3 +686,111 @@ is monitored refs (`:DOWN`). Reads of hot shared state (budget/policy snapshots)
 
 No row is orphaned; each maps to a named process boundary or pure predicate, per
 the traceability obligation (R-list.md).
+
+---
+
+## 7. The M10 dogfood harness (P5c-7) — recording on top of the control plane
+
+This section **records** the dogfood capstone (`mix tau.factory.dogfood`,
+SPEC-FACTORY-CORE §4 B11 / AC-12); it does **not** redesign the control plane.
+The dogfood drives the **real** K → S → U → W → G (`gate-and-toolchain.md`) → M
+(`merge-and-integration.md`) → health path; nothing is reimplemented. Only the
+**agent's authorship** is simulated, and the **origin** is confined to a local
+sandbox. The harness is a thin operator entry point above §1–§5.
+
+### 7.1 What the harness is and is not
+
+The harness is a `Mix.Task` (`mix tau.factory.dogfood`) that (a) validates the
+sandbox, (b) seeds one trivial issue, (c) enables and boots the §3-order factory
+subtree (`supervision-tree.md`; the config-gated `Tau.Factory.Supervisor`,
+SPEC-FACTORY-CORE §4 B11) against the sandbox, (d) lets the **Coordinator** drive
+exactly one unit to its terminal `unit_terminal(:merged)` (§1.2 loop), and (e)
+reports the merged SHA + green health, then halts. It introduces **no new control
+process and no new transition** — it is the operator's `select_fun`/`drive_fun`
+wiring plus a safety precondition.
+
+### 7.2 The deterministic `agent_bin` (the only simulated part)
+
+A live-LLM `agent_bin` is non-deterministic and slow, which would make the
+end-to-end test flaky and would prove agent *intelligence*, not the *control
+plane*. The dogfood instead uses a **deterministic scripted `agent_bin`**: a
+small executable that, in the worker's private worktree (`worker-fleet.md`),
+produces a **real** git branch + commit solving the seeded issue, then emits the
+D-326 `work_ready` `{:packet,4}` frame (`{"type":"work_ready","branch":…,
+"head_sha":…}`) over its `Port` — exactly the in-band success contract §3.2.1
+requires. This keeps every machinery edge real: a **real** worker worktree, a
+**real** `Gate.run` (including the engine-executed mutation half over the seeded
+issue's **real gating test**, `gate-and-toolchain.md` §3), a **real**
+MergeAuthority CAS push to the sandbox `main`, and a **real** post-integration
+health check (`merge-and-integration.md` §5). The agent's *authorship* is the
+sole simulated element; "one REAL PR end-to-end" holds because every other edge
+is the production path.
+
+**The seeded issue.** A trivial change with a real gating test so Gate 5.3
+mutation genuinely fires — e.g. *add `Sandbox.answer/0` returning `42`* with a
+gating test asserting `Sandbox.answer() == 42`. The scripted agent writes the
+production function and commits; the test-author's gating test (frozen path)
+fails on the reverted tree (no `answer/0`) and passes on the real tree, so the
+mutation cross-check (`gate-and-toolchain.md` §3 step 7) is satisfied by a real
+diff, not a vacuous one.
+
+**Determinism and the head-SHA coordinate.** U discards `work_ready`'s
+`head_sha` and keys `gate_fun`/`merge_fun` on the *declared* `work_item.hash`
+(SPEC-FACTORY-CORE §4 B11 [C121-B11]). The scripted agent makes the declared
+`branch`/`hash` exactly the commit it produces, so the gate and merge coordinate
+**is** the agent's real HEAD — no head-SHA threading change is needed for the
+dogfood.
+
+### 7.3 `gate_fun` construction (completing the §4 B11 deferral)
+
+The Unit's `:gate_fun` seam is **arity-0** (`-> :pass | {:fail, findings}`); the
+real gate is `Gate.run/1` over a `%Gate.Request{}`. The harness/supervisor builds
+the arity-0 closure that constructs the Request at drive time and folds the
+`%Verdict{}`: `workspace` = a host-isolated checkout for the engine's revert
+(distinct from the worker's writable worktree), `merge_base` = `git merge-base
+origin/main HEAD` in that workspace, `frozen_paths` = the declared gating-test
+path set (D-304), `unit`/`hash`/`run`/`diff`/`policy_pin`/`ledger` from the
+work-item and supervisor context. Detail and field provenance: SPEC-FACTORY-CORE
+§4 B11.
+
+### 7.4 Sandbox + the local-origin safety guard (D-359, V1)
+
+The dogfood `origin` is a **local bare repo** — a real git remote on the
+filesystem (`file://` / path), never a network remote. MergeAuthority is the
+sole writer of `origin/main` and advances it with `--force-with-lease` (§3,
+`merge-and-integration.md` §2b); a force-push to a real GitHub remote is an
+irreversible, gate-unassessable destructive action (INV-20 / E-DESTRUCTIVE
+territory). The harness therefore **hard-refuses a non-local origin before
+booting the factory**: it resolves the sandbox's `remote.origin.url` and rejects
+any `https://` / `git@` / `ssh://` URL (non-zero exit, no subtree assembled),
+proceeding only for a local bare-repo path/URL. This is a **precondition guard**,
+not a runtime classification — the named mechanism (V1) that makes "the
+autonomous force-pushing loop never targets a real remote in dogfood mode" true
+by construction. It complements the off-by-default gate (D-357): even an
+operator-enabled dogfood is blast-radius-confined to a throwaway local repo.
+
+### 7.5 Widened Unit timeouts (D-358, OQ-2)
+
+Real agent runs (`T_unit`) exceed the Unit's default 30 s per-state
+`:state_timeout` (§3.2), so an unwidened dogfood would trip the stall path and
+escalate `E-RETRY-EXHAUSTED` spuriously (a §1.4 non-progress *false positive*).
+The harness threads a widened `:unit_timeouts` (`[state_timeout_ms: …]`, set well
+above the scripted agent's worst-case run) through the supervisor onto every
+driven Unit. This widens the liveness *bound*, not the *guarantee*: the timeout
+still fires on a genuinely-wedged worker — just above `T_unit` (OQ-2 is the
+binding `W_cap`/`B` sizing input; here it sets a single dogfood timeout, not the
+fleet cap).
+
+### 7.6 The one-unit-to-terminal autonomous flow (AC-12, no human)
+
+The Coordinator's `running` loop (§1.2) is unchanged: `select_fun → drive_fun →
+unit_terminal`. With a single seeded issue the first `select_fun` yields the
+work-item and the second yields `nil` (milestone termination, D-342), so the loop
+drives exactly one unit to `unit_terminal(:merged)` and then idles/reports — **no
+per-step human checkpoint** (D-S1). The harness enables the factory, awaits the
+single unit's terminal, and reports the merged SHA + green health. The AC-12
+observables (merged commit on the sandbox `main`, green `Merge.Health.check`,
+verdict + Unit snapshots durable in L, zero human input, no spurious escalation)
+are the substance the §1 control plane already produces — the harness only points
+it at a sandbox and reads the result. Full assertion list: SPEC-FACTORY-CORE §7
+AC-12 / AC-13.
