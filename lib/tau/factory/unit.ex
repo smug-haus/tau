@@ -103,6 +103,12 @@ defmodule Tau.Factory.Unit do
                           `latest_unit_snapshots/1` returns the current state.
                           When `nil` or absent, snapshotting is a no-op — existing
                           callers unaffected.
+    - `:pubsub`         — `atom()`; the `Phoenix.PubSub` instance to subscribe to
+                          for D-356 merge-result delivery (default `Tau.PubSub`).
+                          In `awaiting_merge`, the Unit subscribes to
+                          `"factory:pr:\#{unit_id}"` BEFORE calling `merge_fun`
+                          (subscribe-before-request ordering — race-freedom guarantee)
+                          and unsubscribes on every exit from `awaiting_merge`.
     - `:registry_name`  — atom; if given, the Unit registers itself under its
                           `unit_id` in that Registry on start (f-6).
     - `:timeouts`       — keyword with `:state_timeout_ms` (default 30_000).
@@ -130,6 +136,7 @@ defmodule Tau.Factory.Unit do
     gate_fun = Keyword.fetch!(opts, :gate_fun)
     merge_fun = Keyword.fetch!(opts, :merge_fun)
     ledger = Keyword.get(opts, :ledger, nil)
+    pubsub = Keyword.get(opts, :pubsub, Tau.PubSub)
     registry_name = Keyword.get(opts, :registry_name, nil)
     timeouts = Keyword.get(opts, :timeouts, [])
     state_timeout_ms = Keyword.get(timeouts, :state_timeout_ms, @default_state_timeout_ms)
@@ -146,6 +153,7 @@ defmodule Tau.Factory.Unit do
       scheduler: scheduler,
       report_to: report_to,
       ledger: ledger,
+      pubsub: pubsub,
       worker_fun: worker_fun,
       gate_fun: gate_fun,
       merge_fun: merge_fun,
@@ -428,13 +436,24 @@ defmodule Tau.Factory.Unit do
     #   :none     → no prior outcome; proceed with the normal merge_fun call.
     case reconcile_merge_outcome(data) do
       {:merged, _commit_sha} ->
+        # Reconcile found a prior merge — no PubSub subscription needed since
+        # we are not calling merge_fun (no broadcast will arrive).
         terminal(data, :merged, nil, nil)
 
       {:rejected, _reason} ->
         # INV-2: re-gate on rejection (same as receiving {:merge_result, :rejected}).
+        # No PubSub subscription needed — not calling merge_fun.
         {:next_state, :gating, data, [{:next_event, :internal, :on_enter}]}
 
       :none ->
+        # D-356 subscribe-before-request: subscribe to the per-PR PubSub topic
+        # BEFORE calling merge_fun. The subscription MUST be in place before the
+        # request is issued so that a broadcast that fires at any point during or
+        # after request_merge — even concurrently within merge_fun itself — is
+        # guaranteed to reach this process. Phoenix.PubSub is at-most-once with
+        # no replay; ordering here is the race-freedom guarantee.
+        :ok = Phoenix.PubSub.subscribe(data.pubsub, "factory:pr:#{data.unit_id}")
+
         _result = data.merge_fun.(data.unit_id, data.hash)
         timeout_ms = data.state_timeout_ms
         {:keep_state, data, [{:state_timeout, timeout_ms, :merge_stalled}]}
@@ -442,16 +461,22 @@ defmodule Tau.Factory.Unit do
   end
 
   def awaiting_merge(:info, {:merge_result, :merged}, data) do
+    # D-356: unsubscribe on exit from awaiting_merge (terminal :merged path).
+    Phoenix.PubSub.unsubscribe(data.pubsub, "factory:pr:#{data.unit_id}")
     terminal(data, :merged, nil, nil)
   end
 
   def awaiting_merge(:info, {:merge_result, :rejected}, data) do
+    # D-356: unsubscribe on exit from awaiting_merge (re-gate path, INV-2).
+    Phoenix.PubSub.unsubscribe(data.pubsub, "factory:pr:#{data.unit_id}")
     # INV-2: merge reject → re-gate.
     {:next_state, :gating, data, [{:next_event, :internal, :on_enter}]}
   end
 
   def awaiting_merge(:state_timeout, :merge_stalled, data) do
     Logger.warning("[Unit #{data.unit_id}] awaiting_merge :state_timeout — merge stalled")
+    # D-356: unsubscribe on exit from awaiting_merge (escalation path).
+    Phoenix.PubSub.unsubscribe(data.pubsub, "factory:pr:#{data.unit_id}")
     escalate(data, :E_MERGE_STALLED)
   end
 
