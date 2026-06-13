@@ -77,11 +77,13 @@ defmodule Tau.Application do
         # :rest_for_one a crash cascades forward — intentional; a broken
         # memory store should not allow new sessions to start.
         Tau.Memory.Supervisor,
-        # Factory ledger. Must follow Memory.Supervisor (data_dir/0 depends on
-        # Settings.Watcher, same requirement). Under :rest_for_one a crash
+        # Factory ledger / control subtree. Must follow Memory.Supervisor
+        # (data_dir/0 depends on Settings.Watcher, same requirement). Gated on
+        # config :tau, :factory, enabled (default false — D-357, [C120-B11]).
+        # Mirrors the OtelReporter :enabled precedent. Under :rest_for_one a crash
         # cascades forward — intentional; a broken ledger should not allow the
         # factory to continue operating. D-315 / SPEC-FACTORY-CORE.
-        Tau.Factory.Supervisor,
+        factory_supervisor_spec(),
         Tau.Permissions.RuleSet,
         {Finch, name: Tau.Providers.Finch},
         Tau.Providers.RateLimiter.Supervisor,
@@ -124,6 +126,17 @@ defmodule Tau.Application do
     else
       []
     end
+  end
+
+  # Returns a child spec for the Factory supervisor.
+  # When the factory is enabled (config :tau, :factory, enabled: true), the
+  # full Coordinator-bearing subtree is assembled. When disabled (the default),
+  # the supervisor starts without a Coordinator — no uncontrolled work is driven
+  # on a normal boot (D-357, [C120-B11]).
+  # Mirrors the otel_reporter_spec/0 pattern.
+  defp factory_supervisor_spec do
+    enabled = Application.get_env(:tau, :factory, []) |> Keyword.get(:enabled, false)
+    [Tau.Factory.Supervisor.child_spec(enabled: enabled)]
   end
 
   # Suppress noisy `[error]`/`[warning]` messages from the `:file_system`

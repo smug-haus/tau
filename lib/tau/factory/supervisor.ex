@@ -2,29 +2,72 @@ defmodule Tau.Factory.Supervisor do
   @moduledoc """
   Supervision subtree for the factory control components.
 
-  Hosts `Tau.Factory.Ledger.Writer` under a `one_for_one` strategy. Sits in
-  `Tau.Application`'s `:rest_for_one` child list after `Tau.Memory.Supervisor`
-  (which resolves `data_dir/0` — required before the ledger can open its DB).
+  ## Config-gated assembly (P5c-6, #474; D-357, [C120-B11])
 
-  Supports `start_link/1` with `db_path:` and `name:` options for test
-  isolation — each test can spin up an isolated supervisor against a tmp-dir DB
-  without touching the application-started instance.
+  When `enabled: false` (the default, read from `config :tau, :factory,
+  enabled: false`), the supervisor starts only the `Tau.Factory.Ledger.Writer`
+  — no Coordinator-bearing subtree is assembled. `Process.whereis(Tau.Factory.Coordinator)`
+  is `nil`; no uncontrolled work is driven on a normal boot (D-357).
 
-  See `docs/spec/SPEC-FACTORY-CORE.md`.
+  When `enabled: true`, the supervisor assembles the full control subtree in
+  the `docs/arch/04-software-architecture/supervision-tree.md` §3 order, with
+  the Coordinator started LAST (it depends on every sibling — D-344 resume
+  reads the started Ledger; its seams reference the started fleet/merge/registry
+  processes). The `:rest_for_one` strategy is used for the full spine: if
+  `Ledger.Writer` crashes, everything downstream restarts.
+
+  ## Option surface (`start_link/1`, B11)
+
+  High-level seams only. The supervisor **derives** every per-child opt; the
+  caller does NOT hand-thread per-child opts:
+
+    - `:enabled`   — boolean; request the gated full-subtree assembly (defaults
+                     to `Application.get_env(:tau, :factory, [])[:enabled]`).
+    - `:db_path`   — path to the SQLite ledger DB (test: tmp-dir DB).
+    - `:name`      — atom; this supervisor's registered name (test isolation;
+                     per-supervisor child names are derived from it).
+    - `:repo_dir`  — the real (or throwaway) git repo; threaded to
+                     MergeAuthority and the worker fleet.
+    - `:milestone` — the assigned milestone string (→ IssueSelector).
+    - `:gh_fun`    — `(String.t() -> {:ok, [issue_map()]})`; stubbable issue
+                     source (NO network in tests).
+    - `:select_fun` — `&IssueSelector.select/1`; arity-1 opts-taking seam.
+    - `:drive_fun`  — `&UnitDriver.drive/2`; arity-2 seam.
+
+  See `docs/spec/SPEC-FACTORY-CORE.md` §4 B11, D-357; and
+  `docs/arch/04-software-architecture/supervision-tree.md` §3.
   """
 
   use Supervisor
+
+  alias Tau.Factory.Budget.Owner, as: BudgetOwner
+  alias Tau.Factory.Fleet.Watchdog
+  alias Tau.Factory.KillSwitch
+  alias Tau.Factory.Ledger.Writer, as: LedgerWriter
+  alias Tau.Factory.MergeAuthority
+  alias Tau.Factory.Scheduler
+  alias Tau.Factory.UnitRegistry
+  alias Tau.Factory.UnitSupervisor
+  alias Tau.Factory.WorkerRegistry
+  alias Tau.Factory.WorkerSupervisor
+  alias Tau.Factory.WorkspaceJanitor
 
   @doc """
   Start the factory supervisor (called by `Tau.Application` or tests).
 
   Options:
-    - `:db_path` — path to the SQLite ledger DB file (required when not using
-      the application default).
-    - `:name` — registered name for this supervisor process (defaults to
-      `__MODULE__`). The `Ledger.Writer` child is registered under a derived
-      name (`{:via, name}` convention: `:"<name>_writer"`) so multiple isolated
-      supervisor instances can coexist (e.g. in tests).
+    - `:enabled`   — boolean; request the full-subtree assembly. Defaults to
+                     `Application.get_env(:tau, :factory, [])[:enabled]`.
+    - `:db_path`   — path to the SQLite ledger DB file (required when not using
+                     the application default).
+    - `:name`      — registered name for this supervisor (defaults to
+                     `__MODULE__`). Child names are derived from it.
+    - `:repo_dir`  — git repo path (full subtree only; threaded to
+                     MergeAuthority and WorkerSupervisor).
+    - `:milestone` — the assigned milestone (full subtree only).
+    - `:gh_fun`    — issue-source adapter (full subtree only; stubbable).
+    - `:select_fun` — `&IssueSelector.select/1` (full subtree only).
+    - `:drive_fun`  — `&UnitDriver.drive/2` (full subtree only).
   """
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts \\ []) do
@@ -34,6 +77,28 @@ defmodule Tau.Factory.Supervisor do
 
   @impl true
   def init(opts) do
+    # Resolve :enabled from opts, falling back to the application config gate.
+    enabled =
+      Keyword.get_lazy(opts, :enabled, fn ->
+        Application.get_env(:tau, :factory, []) |> Keyword.get(:enabled, false)
+      end)
+
+    if enabled do
+      init_full_subtree(opts)
+    else
+      init_ledger_only(opts)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Private — ledger-only path (default / disabled factory)
+  # ---------------------------------------------------------------------------
+
+  # Assembles only the Ledger.Writer (and optional existing per-test children
+  # that the legacy non-enabled tests wire via coordinator_opts / budget_opts
+  # / etc.). This preserves backward compat with existing tests that do NOT
+  # pass `enabled: true` but still hand-thread coordinator_opts etc.
+  defp init_ledger_only(opts) do
     db_path = Keyword.get(opts, :db_path, default_db_path())
     sup_name = Keyword.get(opts, :name, __MODULE__)
     repo_dir = Keyword.get(opts, :repo_dir)
@@ -44,63 +109,26 @@ defmodule Tau.Factory.Supervisor do
     kill_switch_opts = Keyword.get(opts, :kill_switch_opts)
     coordinator_opts = Keyword.get(opts, :coordinator_opts)
 
-    # Derive a per-supervisor writer name so concurrent supervisor instances
-    # (e.g. isolated test instances) do not conflict on the writer's name.
-    writer_name =
-      if sup_name == __MODULE__ do
-        Tau.Factory.Ledger.Writer
-      else
-        :"#{sup_name}_writer"
-      end
+    writer_name = derive_name(sup_name, __MODULE__, LedgerWriter)
 
-    tasks_name =
-      if sup_name == __MODULE__ do
-        Tau.Factory.MergeTasks
-      else
-        :"#{sup_name}_tasks"
-      end
+    tasks_name = derive_name(sup_name, __MODULE__, Tau.Factory.MergeTasks)
 
-    ma_name =
-      if sup_name == __MODULE__ do
-        Tau.Factory.MergeAuthority
-      else
-        :"#{sup_name}_merge_authority"
-      end
+    ma_name = derive_name(sup_name, __MODULE__, MergeAuthority)
+
+    unit_registry_name = derive_name(sup_name, __MODULE__, UnitRegistry)
+
+    unit_supervisor_name = derive_name(sup_name, __MODULE__, UnitSupervisor)
+
+    ks_name = derive_name(sup_name, __MODULE__, KillSwitch)
+
+    coord_name = derive_name(sup_name, __MODULE__, Tau.Factory.Coordinator)
 
     base_children = [
-      {Tau.Factory.Ledger.Writer, db_path: db_path, name: writer_name},
+      {LedgerWriter, db_path: db_path, name: writer_name},
       {Task.Supervisor, name: tasks_name}
     ]
 
     unit_opts = Keyword.get(opts, :unit_opts)
-
-    unit_registry_name =
-      if sup_name == __MODULE__ do
-        Tau.Factory.UnitRegistry
-      else
-        :"#{sup_name}_unit_registry"
-      end
-
-    unit_supervisor_name =
-      if sup_name == __MODULE__ do
-        Tau.Factory.UnitSupervisor
-      else
-        :"#{sup_name}_unit_supervisor"
-      end
-
-    ks_name =
-      if sup_name == __MODULE__ do
-        Tau.Factory.KillSwitch
-      else
-        :"#{sup_name}_kill_switch"
-      end
-
-    coord_name =
-      if sup_name == __MODULE__ do
-        Tau.Factory.Coordinator
-      else
-        :"#{sup_name}_coordinator"
-      end
 
     children =
       base_children
@@ -122,8 +150,139 @@ defmodule Tau.Factory.Supervisor do
   end
 
   # ---------------------------------------------------------------------------
+  # Private — full subtree assembly (enabled path, B11, D-357)
+  # ---------------------------------------------------------------------------
+
+  # Assembles the full control subtree in supervision-tree.md §3 order with
+  # :rest_for_one strategy. The Coordinator is started LAST (D-344, B11).
+  # select_fun (arity-1) and drive_fun (arity-2) are wrapped into the
+  # Coordinator's arity-0/arity-1 forms; the Ledger.Writer name is threaded as
+  # the Coordinator's :ledger (D-344).
+  defp init_full_subtree(opts) do
+    db_path = Keyword.get(opts, :db_path, default_db_path())
+    sup_name = Keyword.get(opts, :name, __MODULE__)
+    repo_dir = Keyword.fetch!(opts, :repo_dir)
+    milestone = Keyword.fetch!(opts, :milestone)
+    gh_fun = Keyword.fetch!(opts, :gh_fun)
+    select_fun = Keyword.fetch!(opts, :select_fun)
+    drive_fun = Keyword.fetch!(opts, :drive_fun)
+
+    # Derive per-supervisor child names for isolation (tests / multiple instances).
+    writer_name = derive_name(sup_name, __MODULE__, LedgerWriter)
+    budget_owner_name = derive_name(sup_name, __MODULE__, BudgetOwner)
+    scheduler_name = derive_name(sup_name, __MODULE__, Scheduler)
+    tasks_name = derive_name(sup_name, __MODULE__, Tau.Factory.MergeTasks)
+    ma_name = derive_name(sup_name, __MODULE__, MergeAuthority)
+    unit_registry_name = derive_name(sup_name, __MODULE__, UnitRegistry)
+    unit_supervisor_name = derive_name(sup_name, __MODULE__, UnitSupervisor)
+    worker_supervisor_name = derive_name(sup_name, __MODULE__, WorkerSupervisor)
+    worker_registry_name = derive_name(sup_name, __MODULE__, WorkerRegistry)
+    janitor_name = derive_name(sup_name, __MODULE__, WorkspaceJanitor)
+    watchdog_name = derive_name(sup_name, __MODULE__, Watchdog)
+    ks_name = derive_name(sup_name, __MODULE__, KillSwitch)
+    coord_name = derive_name(sup_name, __MODULE__, Tau.Factory.Coordinator)
+
+    # -------------------------------------------------------------------------
+    # Seam wrapping (B11 / supervision-tree.md §Config-gating):
+    #
+    # select_fun: &IssueSelector.select/1  (arity-1, keyword opts)
+    #   → wrapped into arity-0 (Coordinator's :select_fun contract)
+    #   binding ledger: writer_name, milestone:, gh_fun:  (B10 opts)
+    #
+    # drive_fun: &UnitDriver.drive/2  (arity-2: work_item, deps)
+    #   → wrapped into arity-1 (Coordinator's :drive_fun contract)
+    #   binding the assembled deps map (all started substrate processes).
+    #   :agent_bin and :gate_fun are nil for P5c-6 (no unit driven on idle path).
+    #
+    # Coordinator :ledger: writer_name (D-344 resume reads the started Ledger).
+    # -------------------------------------------------------------------------
+
+    wrapped_select_fun = fn ->
+      select_fun.(
+        ledger: writer_name,
+        milestone: milestone,
+        gh_fun: gh_fun
+      )
+    end
+
+    # deps is assembled from the derived child names — the names are atoms that
+    # are registered by the time the Coordinator's drive_fun is called.
+    deps = %{
+      unit_supervisor: unit_supervisor_name,
+      unit_registry: unit_registry_name,
+      scheduler: scheduler_name,
+      worker_supervisor: worker_supervisor_name,
+      worker_registry: worker_registry_name,
+      janitor: WorkspaceJanitor,
+      pubsub: Tau.PubSub,
+      repo_dir: repo_dir,
+      merge_authority: ma_name,
+      ledger: writer_name,
+      # :agent_bin and :gate_fun are nil for P5c-6 (idle path — no unit
+      # driven on boot). These will be threaded from operator opts in a
+      # subsequent PR when units are actually driven.
+      agent_bin: nil,
+      gate_fun: nil,
+      report_to: coord_name
+    }
+
+    wrapped_drive_fun = fn work_item ->
+      drive_fun.(work_item, %{deps | report_to: self()})
+    end
+
+    children = [
+      # 1. Ledger.Writer — durable-decision writer; root of all dependence.
+      {LedgerWriter, db_path: db_path, name: writer_name},
+      # 2. Budget.Owner — ETS snapshot of per-dimension budget limits.
+      {BudgetOwner, ledger: writer_name, totals: %{}, name: budget_owner_name},
+      # 3. Scheduler — admission authority.
+      {Scheduler, name: scheduler_name, w_cap: 5},
+      # 4. Task.Supervisor for MergeAuthority's async integration tasks.
+      {Task.Supervisor, name: tasks_name},
+      # 5. MergeAuthority — sole writer of origin/main; gen_statem.
+      {MergeAuthority,
+       name: ma_name,
+       ledger: writer_name,
+       repo_dir: repo_dir,
+       tasks_name: tasks_name,
+       pubsub: Tau.PubSub},
+      # 6. UnitRegistry + UnitSupervisor — per-PR FSM registry and dynamic supervisor.
+      {UnitRegistry, name: unit_registry_name},
+      {UnitSupervisor, name: unit_supervisor_name},
+      # 7. Worker fleet: WorkerSupervisor, WorkerRegistry, WorkspaceJanitor, Watchdog.
+      {WorkerSupervisor, name: worker_supervisor_name},
+      {WorkerRegistry, name: worker_registry_name},
+      {WorkspaceJanitor, ledger: writer_name, name: janitor_name},
+      {Watchdog, name: watchdog_name, check_interval: 30_000},
+      # 8. KillSwitch — sentinel-file poller; broadcasts :halt_requested.
+      {KillSwitch, name: ks_name, pubsub: Tau.PubSub},
+      # 9. Coordinator — the loop; started LAST (D-344, B11).
+      {Tau.Factory.Coordinator,
+       name: coord_name,
+       pubsub: Tau.PubSub,
+       ledger: writer_name,
+       scheduler: scheduler_name,
+       select_fun: wrapped_select_fun,
+       drive_fun: wrapped_drive_fun}
+    ]
+
+    Supervisor.init(children, strategy: :rest_for_one)
+  end
+
+  # ---------------------------------------------------------------------------
   # Private helpers
   # ---------------------------------------------------------------------------
+
+  # Derive a per-supervisor child name. When the supervisor IS the module
+  # default, use the child module itself (canonical singleton names). Otherwise
+  # prefix with the supervisor name for isolation (concurrent test instances).
+  defp derive_name(sup_name, mod_default, child_mod) do
+    if sup_name == mod_default do
+      child_mod
+    else
+      :"#{sup_name}_#{inspect(child_mod) |> String.split(".") |> List.last() |> Macro.underscore()}"
+    end
+  end
 
   # Add Budget.Owner as a child only when budget_opts are provided.
   # Requires :totals and :name in budget_opts; threads :ledger from writer_name.
@@ -134,7 +293,7 @@ defmodule Tau.Factory.Supervisor do
       budget_opts
       |> Keyword.put(:ledger, writer_name)
 
-    children ++ [{Tau.Factory.Budget.Owner, owner_opts}]
+    children ++ [{BudgetOwner, owner_opts}]
   end
 
   # Add Scheduler as a child only when scheduler_opts are provided.
@@ -159,7 +318,7 @@ defmodule Tau.Factory.Supervisor do
           end
       end
 
-    children ++ [{Tau.Factory.Scheduler, scheduler_opts}]
+    children ++ [{Scheduler, scheduler_opts}]
   end
 
   # Add MergeAuthority as a child only when repo_dir is provided.
@@ -192,7 +351,7 @@ defmodule Tau.Factory.Supervisor do
         required_halves: required_halves
       ] ++ merge_authority_opts
 
-    children ++ [{Tau.Factory.MergeAuthority, ma_opts}]
+    children ++ [{MergeAuthority, ma_opts}]
   end
 
   # Add UnitRegistry + UnitSupervisor only when unit_opts are provided.
@@ -202,8 +361,8 @@ defmodule Tau.Factory.Supervisor do
   defp maybe_add_unit_subsystem(children, _unit_opts, registry_name, sup_name) do
     children ++
       [
-        {Tau.Factory.UnitRegistry, name: registry_name},
-        {Tau.Factory.UnitSupervisor, name: sup_name}
+        {UnitRegistry, name: registry_name},
+        {UnitSupervisor, name: sup_name}
       ]
   end
 
@@ -212,7 +371,7 @@ defmodule Tau.Factory.Supervisor do
 
   defp maybe_add_kill_switch(children, kill_switch_opts, ks_name, _sup_name) do
     opts = Keyword.put_new(kill_switch_opts, :name, ks_name)
-    children ++ [{Tau.Factory.KillSwitch, opts}]
+    children ++ [{KillSwitch, opts}]
   end
 
   # Add Coordinator as a child only when coordinator_opts are provided.

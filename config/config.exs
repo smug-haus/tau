@@ -23,6 +23,8 @@ config :tau,
     Tau.Tools.Builtin.Delegate
   ]
 
+config :tau, :factory, enabled: false
+
 config :logger, :console,
   format: "$time $metadata[$level] $message\n",
   metadata: [:session_id, :tool_call_id, :provider]

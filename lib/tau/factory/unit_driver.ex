@@ -120,7 +120,6 @@ defmodule Tau.Factory.UnitDriver do
       scheduler: scheduler,
       worker_supervisor: worker_supervisor,
       worker_registry: worker_registry,
-      janitor: janitor,
       pubsub: pubsub,
       repo_dir: repo_dir,
       agent_bin: agent_bin,
@@ -148,7 +147,11 @@ defmodule Tau.Factory.UnitDriver do
     # Resolve the pid now so the Worker's GenServer.call targets a live pid
     # rather than the supervision-id atom which may differ.
     # -------------------------------------------------------------------------
-    janitor_pid = GenServer.whereis(WorkspaceJanitor) || janitor
+    # Resolve the janitor: prefer the explicit deps[:janitor] injection (the
+    # test-injection seam per B8/#479); fall back to the singleton
+    # WorkspaceJanitor (always registered under __MODULE__). Driver-side reclaim
+    # is ZERO — the janitor exclusively owns capture-before-destroy (D-313/D-314).
+    janitor_pid = deps[:janitor] || WorkspaceJanitor
 
     worker_fun = fn role ->
       unit_pid = self()
