@@ -473,12 +473,15 @@ callers that pass no `:ledger` opt are unaffected (back-compat).
   `data.worker_id` field is `nil` in that path and the Unit falls back to the
   `{:worker_done, ^worker_pid}` trigger.
 - **`:janitor` threading — reclaim is the Janitor's, not the driver's
-  (PR #477 amendment; cross-refs SPEC-FACTORY-FLEET D-313/D-314).** The
-  `UnitDriver.drive/2` seam threads `:janitor` (a running
-  `Tau.Factory.WorkspaceJanitor`) into the `worker_fun`'s opts so it reaches
-  `WorkerSupervisor.spawn/5` (the `:janitor` opt seam) and the spawned
-  `Tau.Factory.Worker`, which **registers itself** with the janitor in `init/1`
-  (passing its own `ws`, `ns_dirs`, `report_to`) before opening its Port. The
+  (PR #477 amendment; PR #479 cleanup; cross-refs SPEC-FACTORY-FLEET D-313/D-314).**
+  The `UnitDriver.drive/2` seam threads `:janitor` into the `worker_fun`'s opts
+  so it reaches `WorkerSupervisor.spawn/5` (the `:janitor` opt seam) and the
+  spawned `Tau.Factory.Worker`, which **registers itself** with the janitor in
+  `init/1` (passing its own `ws`, `ns_dirs`, `report_to`) before opening its
+  Port. The janitor is resolved as `deps[:janitor] || Tau.Factory.WorkspaceJanitor`:
+  the singleton `WorkspaceJanitor` (always registered under its module name) is
+  the production default; the `:janitor` dep key is a **test-injection seam**
+  (pass the running singleton module atom to name it explicitly in tests). The
   janitor `Process.monitor/1`s the worker (never links) and on the worker's
   `:DOWN` — for ANY exit reason — executes capture-before-destroy and reclaims
   the worktree (D-313/D-314). Consequently the UnitDriver performs **zero
