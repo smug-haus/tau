@@ -136,19 +136,13 @@ them concurrently. Never merge an ungated or stale diff.
    c. **Sync local `main`.** In the same turn: `git fetch origin && git checkout
       main && git pull --ff-only origin main`; remove finished worktrees per
       `worktree-discipline.md`.
-   d. **Post-merge `main` health check — via CI, not locally.** The authoritative
-      signal is the CI run triggered by the merge commit's `push` to `main`
-      (`gh run list --branch main` → the merge commit's `conclusion`). CI is a
-      strict superset of a local check — both OTP matrices, `compile
-      --warnings-as-errors`, `test`, `credo`, `dialyzer`, `format`,
-      `mutation-check`, `binary-qa` — so a local `mix compile`/`mix test` can
-      neither certify `main` green (it skips dialyzer/binary-qa/the second OTP
-      version) nor add coverage CI lacks; do NOT run it. The per-PR gate is
-      stateless and cannot catch a subtly-wrong-but-gate-passing change
-      accumulating across cycles; the post-merge CI run is that standing
-      backstop. Confirm the merge commit's CI `conclusion` is `success` before
-      the next merge; a failed post-merge CI HALTS the loop — see "Stop /
-      escalate conditions".
+   d. **Post-merge `main` health check.** Runs via the merge commit's CI, a
+      strict superset of a local `mix compile --warnings-as-errors` / `mix test`;
+      confirm its conclusion rather than running them locally. The per-PR gate is
+      stateless and
+      cannot catch a subtly-wrong-but-gate-passing change accumulating across
+      cycles; this is the standing backstop. A red `main` HALTS the loop — see
+      "Stop / escalate conditions".
 9. **Next PR.** Return to step 1. Do not pause for human input between steps.
 
 ### The draft-PR body
@@ -242,8 +236,8 @@ Concurrency applies to **implementation only**. The gate and merge stay strict:
 - **Merges are serialized** — one PR at a time. After each merge, every other
   in-flight branch is behind `origin/main`, so the freshness re-check (cycle
   step 8a) fires for it. Parallelism makes 8a fire more often; that is expected.
-- The post-merge `main` health check (cycle step 8d) is the CI run on each merge
-  commit; confirm its `conclusion` before the next merge.
+- The post-merge `main` health check (cycle step 8d) runs serially after every
+  merge.
 - The N = 3 refine bound and the safety circuit remain per PR.
 
 ### When to serialize
@@ -454,10 +448,9 @@ forever — on any of:
    judgement, not an engineering one. Do not guess; surface it.
 5. **Budget exhaustion** — the loop's configured time, token, or iteration
    budget is spent.
-6. **A red `main` after merge** — the post-merge CI run on the merge commit
-   (cycle step 8d) concludes failure (any CI job: compile, either OTP test
-   matrix, credo, dialyzer, format, mutation-check, or binary-qa). The loop
-   halts with `main` left red and the failing CI job named, so the user can
+6. **A red `main` after merge** — the post-merge CI run (cycle step 8d)
+   concludes failure. The loop
+   halts with `main` left red and the failing check named, so the user can
    decide whether to revert the offending merge or fix forward.
 7. **More than 2 upheld implementer challenges on one PR** — indicates a weak
    test-author output or an underspecified SPEC. Escalate rather than continuing
