@@ -129,6 +129,11 @@ defmodule Tau.Factory.UnitDriver do
     } = deps
 
     ledger = Map.get(deps, :ledger, nil)
+    # unit_timeouts: optional keyword list of per-state Unit timeout overrides
+    # (D-358 / SPEC-FACTORY-CORE §4 B11). Threaded into Unit's :timeouts opt
+    # so the dogfood can widen state_timeout_ms above the scripted agent's
+    # worst-case run time without modifying unit.ex.
+    unit_timeouts = Map.get(deps, :unit_timeouts, [])
 
     # -------------------------------------------------------------------------
     # :worker_fun — called from within the Unit's process context.
@@ -153,8 +158,19 @@ defmodule Tau.Factory.UnitDriver do
     # is ZERO — the janitor exclusively owns capture-before-destroy (D-313/D-314).
     janitor_pid = deps[:janitor] || WorkspaceJanitor
 
+    # oracle_base_ref: optional per-work_item override for the oracle
+    # (test_author) worker's checkout ref. When provided, the oracle Worker
+    # checks out `oracle_base_ref` instead of `base_ref`. This lets harnesses
+    # (e.g. the dogfood) put the oracle Worker in detached HEAD mode (via
+    # `origin/<branch>`) so it does not lock the named branch, allowing the
+    # implementing Worker to checkout the named branch without conflict.
+    # Defaults to `base_ref` (existing single-ref behaviour).
+    oracle_base_ref = Map.get(work_item, :oracle_base_ref, base_ref)
+
     worker_fun = fn role ->
       unit_pid = self()
+
+      wr_base_ref = if role == :test_author, do: oracle_base_ref, else: base_ref
 
       opts = [
         registry: worker_registry,
@@ -164,7 +180,7 @@ defmodule Tau.Factory.UnitDriver do
         janitor: janitor_pid
       ]
 
-      case WorkerSupervisor.spawn(worker_supervisor, role, brief, base_ref, opts) do
+      case WorkerSupervisor.spawn(worker_supervisor, role, brief, wr_base_ref, opts) do
         {:ok, worker_id} ->
           case resolve_worker_pid(worker_registry, worker_id) do
             {:ok, worker_pid} ->
@@ -224,7 +240,8 @@ defmodule Tau.Factory.UnitDriver do
       gate_fun: gate_fun,
       merge_fun: merge_fun,
       ledger: ledger,
-      registry_name: unit_registry
+      registry_name: unit_registry,
+      timeouts: unit_timeouts
     ]
 
     UnitSupervisor.start_unit(unit_supervisor, unit_opts)

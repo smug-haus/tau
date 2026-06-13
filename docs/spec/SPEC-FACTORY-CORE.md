@@ -55,6 +55,24 @@ hand-thread per-child opts). §6: D-357. Appendix B lists
 `factory_supervision_test.exs`. Closes the §4 gap the test-author surfaced for
 #474.
 
+**Amendment (2026-06-13, PR #481 — P5c-7 dogfood capstone, AC-12):** Completes
+the P5c-6 §4 B11 `:gate_fun` / `:agent_bin` deferral (the #480 critic's note):
+`:agent_bin` is the D-326 `{:packet,4}` agent path; `:gate_fun` is the **arity-0**
+Unit seam wrapping `Tau.Factory.Gate.run/1` over a `%Gate.Request{}` built at
+drive time (records exactly where each Request field comes from). Adds the
+`:unit_timeouts` opt (**D-358** — widen the per-state Unit `:state_timeout_ms`
+past `T_unit` so a real agent run does not spuriously escalate; OQ-2). Records the
+**dogfood harness** contract: a **deterministic scripted `agent_bin`** (the
+control plane is proven end-to-end, not agent intelligence — the agent's
+authorship is the only simulated part), a **local-bare-origin sandbox** with a
+**hard-refuse-non-local guard** before boot (**D-359**, [C122-B11], V1), and the
+one-unit-to-`:merged` autonomous flow. §3 Q3: adds [C122-B11] (D-359 safety) and
+[C121-B11] (head-SHA-not-threaded recorded constraint). §6: D-358, D-359. §7:
+sharpens **AC-12** observable assertions and adds **AC-13** (safety guard).
+Appendix B adds `tau.factory.dogfood.ex`, the dogfood agent/seed helpers,
+`dogfood_e2e_test.exs`, `dogfood_guard_test.exs`. Conforms to (does not redesign)
+arch `control-plane.md`, `gate-and-toolchain.md`, `merge-and-integration.md`.
+
 ## 0. Why this spec exists
 
 The factory's control core is the brain of an autonomous loop that takes a
@@ -198,6 +216,40 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
   `Tau.Factory.Supervisor` assembles only the durable-ledger-and-below children
   it needs for non-factory subsystems, never the Coordinator-bearing subtree
   (D-357).
+- **★ [C122-B11]** **The dogfood harness MUST NOT push to a non-local origin.**
+  The M10 dogfood (`mix tau.factory.dogfood`, P5c-7) drives the **real** control
+  plane — Coordinator → UnitDriver → fleet → Gate → MergeAuthority → health — and
+  MergeAuthority is the **sole writer of `origin/main`** (cited B6, MERGE §3),
+  which it advances with a real `git push --force-with-lease`. In dogfood mode the
+  sandbox `origin` MUST be a **local bare repo** (a `file://` / filesystem-path
+  bare repository on the same host), **never** a network remote
+  (`https://` / `git@` / `ssh://`). The mix task **hard-refuses** a non-local
+  origin **before** booting the factory subtree — the guard is a precondition,
+  not a runtime classification — so an autonomous force-pushing loop can never be
+  pointed at a real GitHub remote by misconfiguration (V1: a network-remote push
+  is an irreversible, gate-unassessable destructive action; the guard is the named
+  mechanism that makes "the loop never force-pushes a real remote in dogfood
+  mode" true by construction, not by trust). This is **D-359**. It complements
+  [C120-B11] (off-by-default): even when the operator opts the factory *on* for a
+  dogfood, the blast radius is confined to a throwaway local repo.
+- **[C121-B11]** **The agent-asserted `head_sha` is not threaded into the
+  gate/merge coordinate (recorded constraint, dogfood relies on determinism).**
+  The Unit discards `work_ready`'s `branch`/`head_sha`; `gate_fun` and
+  `merge_fun(unit_id, data.hash)` key on the *pre-declared* `work_item.hash`. The
+  dogfood's **deterministic scripted agent** produces a commit whose HEAD == the
+  declared `hash`, so the coordinate is correct. A non-deterministic agent would
+  require wiring the asserted `head_sha` through `unit.ex`/`unit_driver.ex` —
+  explicitly out of P5c-7 scope (§4 B11).
+- **[C123-B8]** **`origin/<branch>` MUST exist at oracle-spawn time when
+  `oracle_base_ref` is an `origin/`-qualified ref.** The oracle (test-author)
+  Worker is spawned with a detached-HEAD checkout at `oracle_base_ref`; when the
+  UnitDriver sets `oracle_base_ref` to `origin/<branch>`, the remote ref MUST
+  already be pushed before `worker_fun` is called. In the real driver this is
+  satisfied by the draft-PR seed push (factory cycle step 4); in the dogfood the
+  Coordinator pushes the seeded branch to the local bare-repo origin before
+  admitting the unit. Failure to satisfy this precondition causes the Worker's
+  `git worktree add --detach origin/<branch>` to fail, which surfaces as
+  `worker_exit(w, :error)` and enters the retry ladder.
 
 ### Q4: What information crosses a boundary, and what is lost?
 
@@ -489,6 +541,17 @@ callers that pass no `:ledger` opt are unaffected (back-compat).
   synchronous reclaim in `merge_fun`, no reclaim-on-`:DOWN` bridge. Driver-side
   reclaim is **forbidden** — it duplicates the janitor's sole ownership of the
   capture-before-destroy sequence and races it on the `:DOWN`.
+- **Oracle detached-checkout — no branch lock (P5c-7 amendment; relates D-313/D-314).**
+  The oracle (test-author) Worker is spawned at a **detached HEAD** checkout of
+  `oracle_base_ref` (the `UnitDriver` opt; default: `work_item.base_ref`; the
+  dogfood/real driver sets it to `"origin/<branch>"`). A detached checkout holds
+  **no named-branch lock**, which allows the later implementing Worker to call
+  `git worktree add … <branch>` without conflict (a named branch may be checked
+  out in only one worktree at a time). The `oracle_base_ref` is threaded from
+  `UnitDriver.drive/2` → `to_unit_work_item/3` → the worker spawn opts, making
+  the checkout strategy a driver-injectable seam rather than a hard-coded
+  worktree policy. The precondition on `origin/<branch>` existing is recorded in
+  §3 [C123-B8].
 
 ### B9: KillSwitch (C9) ↔ Coordinator (C3)
 
@@ -555,7 +618,8 @@ Tau.Factory.Supervisor.start_link(opts) :: Supervisor.on_start()
   opts (full-subtree, enabled path):
     :enabled    — boolean();    request the gated full-subtree assembly
                                 (defaults to the config gate when absent)
-    :db_path    — String.t();   Ledger DB file (test: tmp-dir DB)
+    :db_path    — String.t();   Ledger DB file (test: tmp-dir DB). Exposed
+                                as `--db <path>` CLI flag in the dogfood task.
     :name       — atom();       this supervisor's registered name (test isolation;
                                 per-supervisor child names are derived from it)
     :repo_dir   — String.t();   the real (or throwaway, in tests) git repo —
@@ -565,7 +629,102 @@ Tau.Factory.Supervisor.start_link(opts) :: Supervisor.on_start()
                                 NO network in tests (B10 IssueSelector contract)
     :select_fun — &IssueSelector.select/1  (arity-1, opts-taking — see wrapping)
     :drive_fun  — &UnitDriver.drive/2      (arity-2 — see wrapping)
+    :agent_bin  — String.t();   path to the worker agent executable each Worker
+                                runs (the {:packet,4} D-326 agent). Threaded into
+                                the assembled drive_fun deps. (P5c-7, #475.)
+    :gate_fun   — (-> :pass | {:fail, [finding]}) | nil; the per-unit gate seam
+                                (arity-0, the Unit's contract — see "gate_fun
+                                completion" below). nil ⇒ no real gate wired (the
+                                P5c-6 idle path drove no unit). Threaded into the
+                                assembled drive_fun deps. (P5c-7, #475.)
+    :unit_timeouts — keyword();  per-state Unit timeout overrides threaded into
+                                every driven Unit's :timeouts opt (default
+                                [state_timeout_ms: 30_000]). Real agent runs need
+                                T_unit ≫ 30 s (OQ-2) → the dogfood widens this so
+                                a live agent run does not spuriously escalate
+                                (D-358; see "Unit timeout widening" below).
+                                (P5c-7, #475.)
 ```
+
+**Completing the P5c-6 `:gate_fun` / `:agent_bin` deferral (P5c-7, #475).** P5c-6
+left `deps.agent_bin` and `deps.gate_fun` as `nil` on the idle path (no unit was
+driven on boot — D-357), with the #480 critic noting the deferral. This contract
+closes it.
+
+- **`:agent_bin`.** Threaded verbatim into the assembled `drive_fun` deps map's
+  `:agent_bin`, which `UnitDriver.drive/2` puts into the worker spawn opts. The
+  agent is the D-326 `{:packet,4}` executable that emits a `work_ready` JSON
+  frame (`%{"type" => "work_ready", "branch" => …, "head_sha" => …}`) over its
+  `Port` (cited B8 / SPEC-FACTORY-FLEET; `lib/tau/factory/worker.ex`
+  `decode_event/1`).
+
+- **`:gate_fun` — the arity contract and how it wraps `Gate.run/1`.** The
+  **Unit's** `:gate_fun` seam is **arity-0** returning `:pass | {:fail,
+  findings}` (`unit.ex`; called as `data.gate_fun.()` in `gating/3`). The
+  **real** gate is `Tau.Factory.Gate.run/1`, which takes a fully-built
+  `%Tau.Factory.Gate.Request{}` and returns a `%Tau.Factory.Gate.Verdict{}`
+  (cited B7 / SPEC-FACTORY-GATE §4 B1; `lib/tau/factory/gate.ex`). The
+  supervisor/dogfood therefore builds a **request-bearing arity-0 closure** that
+  adapts `Gate.run/1`-over-`Request` to the Unit's arity-0 seam:
+
+  ```
+  gate_fun = fn ->
+    req = %Gate.Request{
+      unit:         unit_id,        # work_item.unit_id
+      diff:         diff,            # merge_base..HEAD unified diff in the gate workspace
+      frozen_paths: frozen_paths,    # the declared gating-test path set (D-304)
+      policy_pin:   policy_pin,       # admission-pinned policy (HR-8); in the dogfood a hermetic oracle pin
+      workspace:    gate_workspace,   # a host-isolated checkout the engine reverts in (D-309)
+      merge_base:   merge_base,       # `git merge-base origin/main HEAD` in the workspace
+      hash:         hash,              # the unit's content/HEAD hash (work_item.hash)
+      run:          run,               # the run identifier (work_item.run)
+      ledger:       ledger              # the started Ledger.Writer (WAL-before-ack, D-335)
+    }
+    case Gate.run(req) do
+      %Gate.Verdict{status: :pass}                  -> :pass
+      %Gate.Verdict{status: :fail, halves: halves}  -> {:fail, failing_halves(halves)}
+    end
+  end
+  ```
+
+  **Where each `Gate.Request` field comes from at drive time.** `:unit`, `:hash`,
+  `:run`, `:branch` are `work_item` fields (B10 IssueSelector / B6 merge-map).
+  `:frozen_paths` is the declared gating-test path set frozen at scope-freeze
+  (cited B7 / SPEC-FACTORY-GATE D-304). `:merge_base` is computed in the gate
+  `:workspace` (`git merge-base origin/main HEAD`). `:workspace` is a
+  host-isolated checkout the engine reverts `tracked ∖ frozen_paths` in for the
+  mutation half (SPEC-FACTORY-GATE §3 HR-3, D-306); it is **not** the worker's
+  own writable worktree — a separate clean checkout, so the revert never disturbs
+  the worker. `:policy_pin` and `:ledger` are admission-/supervisor-level values.
+  `:diff` is the unified diff between `:merge_base` and `:hash` in the workspace.
+
+  **Constraint surfaced — head-SHA threading (recorded, not redesigned;
+  [C121-B11]).** The Unit consumes `work_ready(worker_id, branch, head_sha)` but
+  **discards** `branch`/`head_sha` (`unit.ex` `implementing/3` pattern
+  `{:work_ready, id, _branch, _head_sha}`), and both `gate_fun` (the arity-0
+  closure above) and `merge_fun(unit_id, data.hash)` key on the unit's
+  *pre-declared* `work_item.hash`, never on the agent-asserted `head_sha`. For
+  the dogfood this is satisfied by **determinism**: the scripted agent produces a
+  commit whose branch and HEAD are exactly the work_item's declared
+  `branch`/`hash`, so the declared hash the gate and merge key on **is** the
+  agent's real HEAD. Wiring the asserted `head_sha` through into the gate/merge
+  coordinate (so a non-deterministic agent's real HEAD is gated and merged) is a
+  separate `unit.ex` / `unit_driver.ex` change, **out of P5c-7 scope**; the
+  dogfood does not require it.
+
+**Unit timeout widening (`:unit_timeouts`, OQ-2 → D-358).** The Unit arms a
+single `:state_timeout_ms` (default `30_000`) on every external-actor-awaiting
+state — `oracle`, `implementing`, `awaiting_merge` (`unit.ex`; arch
+`control-plane.md` §3.2). A **real** agent run (`T_unit`) routinely exceeds 30 s
+(OQ-2: `T_unit ≫ T_merge`, the binding `W_cap`/`B` input), so the default makes a
+genuinely-working live agent trip `:state_timeout → :stall → retry ladder →
+E-RETRY-EXHAUSTED` — a **spurious** escalation that misclassifies "still working"
+as "wedged". The supervisor's `:unit_timeouts` opt is threaded into the assembled
+`drive_fun` deps and onto every driven Unit's `:timeouts` (`[state_timeout_ms:
+…]`); the dogfood widens it well past the scripted agent's worst-case run so the
+single unit reaches `:merged` without a spurious escalation (D-358). This widens a
+liveness *bound*, not the liveness *guarantee*: the timeout still fires —
+eventually — on a genuinely-wedged worker; it is set above `T_unit`, not removed.
 
 **Gated assembly (enabled path).** When the gate is on, the supervisor assembles
 the full control subtree in the `supervision-tree.md` §3 order — PubSub up first
@@ -821,6 +980,36 @@ seams (B11); a no-issues `gh_fun` keeps the Coordinator **idle** in `:running`
 with no in-flight unit. Enforced by `factory_supervision_test.exs` — Test A
 (enabled assembly + idle property) and Test B (default-OFF regression guard).
 
+**D-358 — Unit timeout widening for real agent runs (OQ-2):** The Unit's single
+per-state `:state_timeout_ms` (default `30_000`, armed on `oracle` /
+`implementing` / `awaiting_merge` — arch `control-plane.md` §3.2) is **operator-
+overridable** via `Tau.Factory.Supervisor.start_link/1`'s `:unit_timeouts` opt
+(`[state_timeout_ms: …]`), threaded into the assembled `drive_fun` deps and onto
+every driven Unit's `:timeouts`. Because a real agent run `T_unit` routinely
+exceeds 30 s (OQ-2 — the binding `W_cap`/`B` input), the default would make a
+genuinely-working live agent trip the stall path and escalate
+`E-RETRY-EXHAUSTED` spuriously; the dogfood widens the bound well past the
+scripted agent's worst-case run. This widens a liveness *bound* (the timeout
+still fires on a genuinely-wedged worker, just above `T_unit`), never removes the
+liveness *guarantee*. Enforced by `dogfood_e2e_test.exs` (a widened-timeout drive
+reaches `:merged` with no `:state_timeout` escalation) — `@tag :integration`.
+
+**D-359 — Dogfood sandbox origin MUST be local; the harness hard-refuses a
+non-local origin (safety, [C122-B11], V1):** `mix tau.factory.dogfood` drives the
+**real** control plane against a **THROWAWAY local sandbox**. Its `origin` MUST
+be a **local bare repo** (a `file://` URL or a filesystem path to a bare git
+repository on the same host). The task **hard-refuses** a non-local origin
+(`https://` / `git@` / `ssh://` — any scheme implying a network remote) **before**
+booting the factory subtree: it resolves the sandbox repo's `remote.origin.url`,
+rejects (non-zero exit, no boot) any URL that is not a local bare-repo path/URL,
+and only then assembles the (enabled) subtree against the local `:repo_dir`.
+MergeAuthority — the **sole writer of `origin/main`** (cited B6, MERGE §3) — then
+force-pushes only into that local bare repo. The guard is a **precondition**, not
+a runtime classification, so a misconfiguration can never point the autonomous
+force-pushing loop at a real GitHub remote. Enforced by the safety-guard unit
+test (a non-local origin → hard refusal, factory not booted) and by
+`dogfood_e2e_test.exs` driving against a local bare-repo sandbox.
+
 ## 7. Acceptance criteria
 
 Each is expressed against the user-facing path with an observable signal.
@@ -853,13 +1042,43 @@ PR groupings are indicative.
   in zero or two terminal sets; tree ≡ tracker; every escalation recorded+delivered.
 - **AC-11 (meta):** the gating tests above run in CI as a blocking job.
   *(meta — verified by CI wiring; exempt from the unit-test-linkage check.)*
-- **AC-12 (PR-CORE-6, end-to-end / substance):** the control core drives one real
-  PR on the self-hosting Elixir toolchain from an open issue to a gate-passed,
-  merged result with `main` health-checked, **no human in the loop**. Signal: the
-  exact command + the observable merged commit + the green health check (the
-  dogfood proof; arch `06-roadmap/spec-factory.md` AC-10). *This AC depends on
-  SPEC-FACTORY-{GATE,FLEET,MERGE} landing; it is the integration gate, not a
-  CORE-only unit.*
+- **AC-12 (PR-CORE-6 / P5c-7, end-to-end / substance):** the control core drives
+  one real PR on the self-hosting Elixir toolchain from an open issue to a
+  gate-passed, merged result with `main` health-checked, **no human in the loop**.
+  `mix tau.factory.dogfood --repo <local-bare-sandbox> --issue <n> [--db <ledger-path>]`
+  (the **deterministic** path; live LLM authorship is the only simulated part — the
+  scripted `agent_bin` emits the D-326 `work_ready` frame and produces a **real**
+  branch/commit solving the trivial seeded issue, whose **real gating test**
+  genuinely exercises Gate 5.3 mutation) runs the **real** control plane
+  (Coordinator → UnitDriver → fleet → `Gate.run` → MergeAuthority CAS → health) —
+  the agent's authorship is the only thing simulated; the machinery is real.
+  The optional `--db <path>` flag lets tests supply an isolated Ledger DB path
+  (defaults to `Tau.Settings.data_dir()/factory_ledger.db` when absent).
+  **Observable assertions (`dogfood_e2e_test.exs`, `@tag :integration`, not in
+  normal CI):**
+  1. a **merged commit on the sandbox `main`** — a real SHA reachable from
+     `<local-bare-sandbox>/main` containing the seeded change;
+  2. a **green `Merge.Health.check`** on the integrated tip (`:green`, not
+     `{:red, _}`);
+  3. the **verdict + per-state Unit snapshots durable in L** (the gate verdict
+     row(s) and the Unit's terminal `:merged` snapshot);
+  4. **zero human input** — the task enables the factory, the Coordinator drives
+     the single unit to its terminal `unit_terminal(:merged)` autonomously, a
+     second `select_fun → nil` terminates the milestone, and the task reports;
+     no prompt, no checkpoint;
+  5. **no spurious escalation** — with widened timeouts (D-358) the unit reaches
+     `:merged` and the run records no `E-RETRY-EXHAUSTED` / `:state_timeout`.
+
+  Signal: the exact command above + the observable merged SHA + the green health
+  check (the dogfood proof; arch `06-roadmap/spec-factory.md` AC-10).
+  *This AC depends on SPEC-FACTORY-{GATE,FLEET,MERGE} landing; it is the
+  integration gate, not a CORE-only unit.*
+- **AC-13 (P5c-7, safety, D-359):** `mix tau.factory.dogfood` with a sandbox whose
+  `origin` is a **non-local** remote (`https://` / `git@` / `ssh://`)
+  **hard-refuses** before booting the factory (non-zero exit, no Coordinator
+  started); with a **local bare-repo** origin it proceeds. Signal: the safety-guard
+  unit test asserts the refusal (and that no `Tau.Factory.Coordinator` is started)
+  on a non-local origin, and acceptance on a local bare repo.
 - **AC-P5c6 (PR #480, D-357):** `mix test test/tau/factory/factory_supervision_test.exs`
   passes — with the factory enabled, `Tau.Factory.Supervisor` assembles the full
   subtree and the Coordinator (started LAST) reaches `:running` and idles
@@ -882,8 +1101,10 @@ Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 - `lib/tau/factory/unit_driver.ex` (D-340, **D-356** `:janitor` threading + no driver-side merge bridge / no driver reclaim; the real `drive_fun` wiring Unit→fleet→gate→merge seams) — PR #477
 - `lib/tau/factory/retry.ex` (C8; D-318) — PR-CORE-3
 - `lib/tau/factory/kill_switch.ex` (C9; D-321) — PR-CORE-4
-- `lib/tau/factory/supervisor.ex` + `lib/tau/application.ex` (tree; rest_for_one spine; **D-357** config-gated `start_link/1` assembly + seam-threading, B11) — PR-CORE-1 / PR #480
+- `lib/tau/factory/supervisor.ex` + `lib/tau/application.ex` (tree; rest_for_one spine; **D-357** config-gated `start_link/1` assembly + seam-threading, B11; **D-358** `:unit_timeouts` thread; **gate_fun/agent_bin** thread completing the P5c-6 deferral, §4 B11) — PR-CORE-1 / PR #480 / PR #481
 - `config/config.exs` + `config/runtime.exs` (`config :tau, :factory, enabled:` gate, default `false`; **D-357**) — PR #480
+- `lib/mix/tasks/tau.factory.dogfood.ex` (P5c-7 dogfood harness; **D-359** local-bare-origin hard-refuse guard; builds the deterministic `agent_bin`, the gate_fun closure, widened `:unit_timeouts` (D-358); drives one unit to `:merged`; AC-12/AC-13) — PR #481
+- `lib/tau/factory/dogfood/` (the scripted deterministic `agent_bin` and sandbox-seeding helpers — the seeded issue + its real gating test; emits the D-326 `work_ready` frame) — PR #481
 - `test/tau/factory/ledger_durability_test.exs` (D-315) — PR-CORE-1
 - `test/tau/factory/conflict_check_property_test.exs` (D-312, D-343) — PR-CORE-2
 - `test/tau/factory/budget_admission_test.exs` (D-320, D-332) — PR-CORE-2
@@ -898,6 +1119,8 @@ Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 - `test/tau/factory/unit_driver_test.exs` (D-340; real drive_fun gating tests) — PR #477
 - `test/tau/factory/unit_merge_result_test.exs` (**D-356** U subscribe-before-request consume + unsubscribe-on-exit) — PR #477
 - `test/tau/factory/factory_supervision_test.exs` (**D-357** config-gated subtree assembly + default-OFF; AC-P5c6) — PR #480
+- `test/tau/factory/dogfood_e2e_test.exs` (**AC-12** e2e: one real PR open-issue→merged→green-health, no human; **D-358** widened timeouts, no spurious escalation; `@tag :integration`) — PR #481
+- `test/tau/factory/dogfood_guard_test.exs` (**AC-13 / D-359** non-local origin hard-refuse; local bare-repo acceptance) — PR #481
 
 **Cross-SPEC boundaries (cited, not owned here):** B6 → `SPEC-FACTORY-MERGE`
 (D-300–D-303, D-341); B7 → `SPEC-FACTORY-GATE` (D-304–D-308, D-322, D-323);
@@ -907,4 +1130,4 @@ B8 → `SPEC-FACTORY-FLEET` (D-309–D-311, D-313, D-314, D-316); `E-DESTRUCTIVE
 **Catalog registration required before first implementation PR:** add
 `SPEC-FACTORY-CORE` to `.claude/rules/spec-before-code.md` (catalog) and the
 `D-NNN` block table in `docs/MISSION.md` (D-312, D-315, D-317, D-318, D-320,
-D-321, D-330–D-333, D-335, D-336, D-340, D-342–D-344 → this SPEC).
+D-321, D-330–D-333, D-335, D-336, D-340, D-342–D-344, D-355–D-359 → this SPEC).
