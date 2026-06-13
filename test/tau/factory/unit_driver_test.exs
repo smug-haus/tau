@@ -214,7 +214,15 @@ defmodule Tau.Factory.UnitDriverTest do
       worker_supervisor: sub.worker_supervisor,
       worker_registry: sub.worker_registry,
       ledger: sub.ledger,
-      janitor: sub.janitor,
+      # #479 task 3: the WorkspaceJanitor is a singleton per node — it always
+      # registers under `Tau.Factory.WorkspaceJanitor` (`__MODULE__`) and IGNORES
+      # the `:name` opt (SPEC-FACTORY-FLEET §4 C4; worker-fleet.md). Threading the
+      # bespoke per-test name (`sub.janitor`) here was a NO-OP masked by the
+      # driver's `whereis(WorkspaceJanitor) || deps.janitor` resolution. Pass the
+      # singleton MODULE so the `:janitor` test-injection seam names the real
+      # running janitor — correct under both the current driver (`whereis || dep`)
+      # and the #479 driver change (`deps[:janitor] || WorkspaceJanitor`).
+      janitor: @janitor,
       pubsub: Tau.PubSub,
       repo_dir: sub.repo_dir,
       agent_bin: sub.agent_bin,

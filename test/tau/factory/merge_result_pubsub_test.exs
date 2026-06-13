@@ -68,6 +68,17 @@ defmodule Tau.Factory.MergeResultPubSubTest do
     def cas_push(_repo_dir, _tip, _base), do: :ok
   end
 
+  defmodule StaleRefCas do
+    @moduledoc false
+    # Verdicts live, but the CAS push reports a stale ref → :committing takes the
+    # `{:error, :stale_ref}` branch, which REQUEUES the train for a rebase + re-gate.
+    # A requeue is NOT a terminal outcome: D-356 explicitly does NOT publish a
+    # {:merge_result, _} broadcast on a mere requeue (the emission half fires only
+    # on a terminal :merged or terminal :rejected).
+    def assert_all_verdicts_live(_ledger, _units, _required_halves), do: :all_pass
+    def cas_push(_repo_dir, _tip, _base), do: {:error, :stale_ref}
+  end
+
   # ---------------------------------------------------------------------------
   # Helpers (mirror merge_outcome_durability_test.exs / merge_verdict_revoke_test.exs)
   # ---------------------------------------------------------------------------
@@ -220,6 +231,48 @@ defmodule Tau.Factory.MergeResultPubSubTest do
 
       # A terminal reject must NOT also publish :merged on the same topic.
       refute_received {:merge_result, :merged}
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # D-356 emission, REQUEUE — a mere requeue (stale-ref CAS / non-health build
+  # failure) is NOT terminal and broadcasts NOTHING on the per-PR topic. This is
+  # the negative half of the D-356 emission contract: the broadcast fires ONLY on
+  # a terminal :merged / :rejected, never on a re-gate requeue.
+  # ---------------------------------------------------------------------------
+
+  describe "D-356 — a requeued train member broadcasts NO merge-result on the per-PR topic" do
+    @tag :d_356
+    test "D-356: a stale-ref CAS requeue (re-gate, not terminal) publishes NO {:merge_result, _} on the per-PR topic" do
+      ledger = start_ledger()
+
+      unit = %{
+        id: "u-requeue-#{System.unique_integer([:positive])}",
+        hash: "hash-#{System.unique_integer([:positive])}",
+        run: "run-#{System.unique_integer([:positive])}",
+        branch: "feat/merge-result-requeue-#{System.unique_integer([:positive])}"
+      }
+
+      {work_path, tip} = setup_git_repo(unit)
+      # StaleRefCas → assert_all_verdicts_live :all_pass, then cas_push returns
+      # {:error, :stale_ref} → the train is REQUEUED for rebase + re-gate. A
+      # requeue is NOT terminal: D-356 must NOT broadcast on the per-PR topic.
+      ma = start_merge_authority(ledger, work_path, built_build_fun(tip), StaleRefCas)
+
+      :ok = Phoenix.PubSub.subscribe(Tau.PubSub, pr_topic(unit.id))
+
+      assert :queued = MergeAuthority.request_merge(ma, unit)
+
+      # The stale-ref path requeues (does not push, does not terminally reject).
+      # Across the requeue window NO merge-result broadcast may land on the topic —
+      # neither :merged nor :rejected. A spurious broadcast here would falsely
+      # signal a terminal outcome to a subscribed Unit on a mere re-gate.
+      refute_receive {:merge_result, _any},
+                     1_500,
+                     "D-356: a mere requeue (stale-ref CAS → rebase + re-gate) must broadcast " <>
+                       "NOTHING on #{pr_topic(unit.id)}. The emission half fires ONLY on a " <>
+                       "terminal :merged / :rejected; a broadcast on requeue would falsely " <>
+                       "terminate a subscribed Unit mid-re-gate."
     end
   end
 end
