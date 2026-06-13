@@ -43,6 +43,8 @@ defmodule Tau.Factory.MergeAuthority do
     - `:build_fun` — `(units, base) -> {:built, units, base, tip} | {:build_failed, reason}`
       (default: the real rebase+push implementation; injectable for tests).
     - `:cas` — the CAS module to use (default `Tau.Factory.Merge.Cas`; injectable for tests).
+    - `:pubsub` — the `Phoenix.PubSub` instance to broadcast D-356 merge results on
+      (default `Tau.PubSub`; injectable for tests).
   """
   @spec child_spec(keyword()) :: Supervisor.child_spec()
   def child_spec(opts) do
@@ -88,6 +90,7 @@ defmodule Tau.Factory.MergeAuthority do
     tasks_name = Keyword.fetch!(opts, :tasks_name)
     required_halves = Keyword.get(opts, :required_halves, [:critic, :reviewer])
     cas = Keyword.get(opts, :cas, Cas)
+    pubsub = Keyword.get(opts, :pubsub, Tau.PubSub)
 
     # Start the Task.Supervisor for builds if it is not already running.
     # Linking it to this process ensures it is cleaned up when MA stops.
@@ -110,6 +113,7 @@ defmodule Tau.Factory.MergeAuthority do
       tasks_name: tasks_name,
       required_halves: required_halves,
       cas: cas,
+      pubsub: pubsub,
       build_fun: build_fun,
       # wait queue: list of units waiting to be built
       queue: [],
@@ -196,6 +200,15 @@ defmodule Tau.Factory.MergeAuthority do
       case reason do
         {:health_red, _report} ->
           # Eject the train; do NOT requeue — health failure is terminal for this tip.
+          # D-356: broadcast :rejected to each ejected member (terminal rejection).
+          Enum.each(train, fn unit ->
+            Phoenix.PubSub.broadcast(
+              data.pubsub,
+              "factory:pr:#{unit.id}",
+              {:merge_result, :rejected}
+            )
+          end)
+
           eject_train(data)
 
         _other ->
@@ -240,7 +253,13 @@ defmodule Tau.Factory.MergeAuthority do
   # ---------------------------------------------------------------------------
 
   def committing(:internal, {:commit, units, base, tip}, data) do
-    %{ledger: ledger, required_halves: required_halves, cas: cas, repo_dir: repo_dir} = data
+    %{
+      ledger: ledger,
+      required_halves: required_halves,
+      cas: cas,
+      repo_dir: repo_dir,
+      pubsub: pubsub
+    } = data
 
     case cas.assert_all_verdicts_live(ledger, units, required_halves) do
       {:revoked, revoked_unit} ->
@@ -252,6 +271,16 @@ defmodule Tau.Factory.MergeAuthority do
           reason: :verdict_revoked,
           unit: revoked_unit
         })
+
+        # D-356 TERMINAL REJECT: verdict-revoked eject is a terminal rejection for
+        # this member. Broadcast :rejected AFTER telemetry (derived projection first,
+        # then control-path delivery). A single-member train with a revoked verdict
+        # gets no push and no requeue — this is the terminal signal the Unit awaits.
+        Phoenix.PubSub.broadcast(
+          pubsub,
+          "factory:pr:#{revoked_unit.id}",
+          {:merge_result, :rejected}
+        )
 
         # Eject the revoked unit; requeue the rest (no push).
         rest = Enum.reject(units, &(&1.id == revoked_unit.id))
@@ -278,17 +307,32 @@ defmodule Tau.Factory.MergeAuthority do
             end)
 
             telemetry(:merged, %{hash: hd_hash(units)}, %{tip: tip, units: units})
+
+            # D-356: broadcast :merged to each train member's per-PR topic AFTER the
+            # D-355 durable record and AFTER telemetry (WAL-before-ack ordering).
+            Enum.each(units, fn unit ->
+              Phoenix.PubSub.broadcast(
+                pubsub,
+                "factory:pr:#{unit.id}",
+                {:merge_result, :merged}
+              )
+            end)
+
             transition_from_idle(data)
 
           {:error, :stale_ref} ->
             Logger.info("[MergeAuthority] stale ref; requeuing train for rebase + re-gate")
             telemetry(:reject, %{hash: hd_hash(units)}, %{reason: :stale_ref, units: units})
+            # :stale_ref is NOT a terminal reject — the train is requeued for retry.
+            # D-356: do NOT broadcast :rejected here.
             next_data = requeue_units(data, units)
             transition_from_idle(next_data)
 
           {:error, reason} ->
             Logger.warning("[MergeAuthority] cas_push failed: #{inspect(reason)}")
             telemetry(:reject, %{hash: hd_hash(units)}, %{reason: reason, units: units})
+            # Other cas_push errors are also requeued for retry.
+            # D-356: do NOT broadcast :rejected here.
             next_data = requeue_units(data, units)
             transition_from_idle(next_data)
         end

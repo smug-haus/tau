@@ -25,6 +25,22 @@ consumes the `worker_event` set at U's `implementing → gating` edge — §4 B8
 [C111b-B8]), D-319 (SPEC-FACTORY-GOV). Durable store decided:
 **SQLite/Exqlite** (arch OQ-1).
 
+**Amendment (2026-06-13, PR #477):** Introduces **D-356** (U's consume half of
+the merge-result PubSub delivery; the emission half is owned by
+SPEC-FACTORY-MERGE D-356 — one invariant, two enforcers). §4 B6: pins the
+`:awaiting_merge` **subscribe-before-request** ordering (U subscribes to
+`"factory:pr:#{unit_id}"` on entry **before** invoking `merge_fun` →
+`request_merge`, closing the at-most-once-without-replay lost-event race), the
+direct consume of `{:merge_result, :merged | :rejected}` from that topic, and the
+**unsubscribe on leaving** `:awaiting_merge`. Adds the `:janitor` threading note
+to the UnitDriver seam (§4 B6 / B8): the driver threads `:janitor` through
+`worker_fun` → `WorkerSupervisor.spawn/5` and performs **zero** worktree reclaim
+itself — reclaim is owned by `Tau.Factory.WorkspaceJanitor` (SPEC-FACTORY-FLEET
+D-313/D-314, on every `:DOWN`, capture-before-destroy). Removes the driver-side
+telemetry→Unit merge bridge (forbidden by MERGE D-356). Appendix B adds the
+gating-test paths. Resolves the merge-bridge lifecycle arch gap and the
+U-callback no-block gap; folds in #478.
+
 ## 0. Why this spec exists
 
 The factory's control core is the brain of an autonomous loop that takes a
@@ -362,12 +378,43 @@ callers that pass no `:ledger` opt are unaffected (back-compat).
 - Invariant (**D-340**): every admitted unit ◇ reaches a terminal outcome
   (exhausting the retry ladder *is* a terminal `escalated`).
 
-### B6: Unit (C6) ↔ Merge Authority (M) — *cited, SPEC-FACTORY-MERGE*
+### B6: Unit (C6) ↔ Merge Authority (M) — *cited, SPEC-FACTORY-MERGE; consume half owned here (D-356)*
 
 - `request_merge/2 :: (unit_id, hash) -> :queued` (non-blocking; the result
   `:merged`/`:rejected` arrives asynchronously via `"factory:pr:#{id}"`). A
   blocking `call` across a minutes-long merge build is forbidden (arch H-1b).
-- M owns INV-1..4 / D-300..D-303; U only submits and consumes the result.
+- M owns INV-1..4 / D-300..D-303 and the *emission* half of the result delivery
+  (MERGE D-356 — broadcast to `"factory:pr:#{id}"`); U owns the *consume* half
+  (**D-356**, this SPEC). U only submits and consumes the result; it never
+  mutates the train.
+- **Subscribe-before-request ordering (D-356, the load-bearing contract).**
+  Phoenix.PubSub is **at-most-once with no replay**: a `{:merge_result, _}`
+  broadcast that fires before U's subscription exists is **lost**, and U then
+  hangs in `awaiting_merge` until `state_timeout` → spurious escalation. To
+  eliminate the race, on entering `awaiting_merge` U MUST, **in this order**:
+    1. `Phoenix.PubSub.subscribe(Tau.PubSub, "factory:pr:#{unit_id}")` — and only
+       after this returns `:ok`;
+    2. invoke `merge_fun` (→ `MergeAuthority.request_merge/2`).
+  Because `subscribe/2` is a synchronous local-registry write that *completes
+  before* `request_merge` is issued, and M's broadcast happens strictly later
+  (after the minutes-long build, in `:committing`), the subscription provably
+  exists at every possible publish instant. The single shared `Tau.PubSub`
+  instance (no second pubsub — D-184 analog) guarantees publisher and subscriber
+  share one registry. **Requesting the merge before subscribing is forbidden.**
+  This ordering sits on the `:none` branch of the D-355 reconcile-on-entry (B3):
+  reconcile reads the durable Ledger first; only when it returns `:none` (no
+  prior outcome) does U subscribe-then-request. The `:merged`/`:rejected`
+  reconcile branches never reach `merge_fun`, so they never subscribe.
+- **Consume + unsubscribe-on-exit (D-356).** U consumes
+  `{:merge_result, :merged}` (→ terminal `merged`) and `{:merge_result,
+  :rejected}` (→ re-gate, INV-2) directly off its mailbox from the topic — **no
+  driver-side telemetry→Unit bridge** (forbidden by MERGE D-356; it re-creates
+  the very lost-event hazard the ordering above closes). U **unsubscribes** from
+  `"factory:pr:#{unit_id}"` on **every** exit from `awaiting_merge` (to `merged`,
+  to `gating` on `:rejected`, or to `escalated` on `state_timeout`). A late or
+  duplicate broadcast arriving after unsubscribe is harmless — no subscriber, so
+  PubSub drops it; this is what makes the re-gate → re-enter → re-subscribe cycle
+  (INV-2) free of stale cross-excursion deliveries.
 
 ### B7: Unit (C6) ↔ Gate (G) — *cited, SPEC-FACTORY-GATE*
 
@@ -398,6 +445,20 @@ callers that pass no `:ledger` opt are unaffected (back-compat).
   form is preserved for back-compat but does NOT carry a `worker_id` — the
   `data.worker_id` field is `nil` in that path and the Unit falls back to the
   `{:worker_done, ^worker_pid}` trigger.
+- **`:janitor` threading — reclaim is the Janitor's, not the driver's
+  (PR #477 amendment; cross-refs SPEC-FACTORY-FLEET D-313/D-314).** The
+  `UnitDriver.drive/2` seam threads `:janitor` (a running
+  `Tau.Factory.WorkspaceJanitor`) into the `worker_fun`'s opts so it reaches
+  `WorkerSupervisor.spawn/5` (the `:janitor` opt seam) and the spawned
+  `Tau.Factory.Worker`, which **registers itself** with the janitor in `init/1`
+  (passing its own `ws`, `ns_dirs`, `report_to`) before opening its Port. The
+  janitor `Process.monitor/1`s the worker (never links) and on the worker's
+  `:DOWN` — for ANY exit reason — executes capture-before-destroy and reclaims
+  the worktree (D-313/D-314). Consequently the UnitDriver performs **zero
+  worktree reclaim of its own**: no driver-side worktree-path computation, no
+  synchronous reclaim in `merge_fun`, no reclaim-on-`:DOWN` bridge. Driver-side
+  reclaim is **forbidden** — it duplicates the janitor's sole ownership of the
+  capture-before-destroy sequence and races it on the `:DOWN`.
 
 ### B9: KillSwitch (C9) ↔ Coordinator (C3)
 
@@ -614,6 +675,20 @@ by PR #465 (the ephemeral-telemetry-only outcome path). D-355 (owned by
 SPEC-FACTORY-MERGE §6) is the invariant enforcing the write ordering; D-344
 consumes it to guarantee no double-submit on resume.
 
+**D-356 — Merge-result delivery, U's consume half (subscribe-before-request, no
+lost event):** When U enters `awaiting_merge` and the D-355 reconcile returns
+`:none`, U subscribes to `"factory:pr:#{unit_id}"` on the shared `Tau.PubSub`
+**before** invoking `merge_fun` (→ `request_merge`), so the at-most-once,
+no-replay broadcast M emits later (MERGE D-356) can never be lost to a
+subscribe-after-publish gap; U consumes `{:merge_result, :merged | :rejected}`
+directly off its mailbox (no driver telemetry bridge), and **unsubscribes on
+every exit** from `awaiting_merge`. The emission half is MERGE D-356 (one
+invariant, two enforcers; §4 B6). Enforced by `unit_merge_result_test.exs`
+(oracle-separated): a `{:merge_result, _}` broadcast on `"factory:pr:#{id}"`
+published immediately after — and even concurrently with — `request_merge`
+reaches U and drives it to terminal, with no `state_timeout` escalation; and U
+holds **no** subscription to the topic after leaving `awaiting_merge`.
+
 ## 7. Acceptance criteria
 
 Each is expressed against the user-facing path with an observable signal.
@@ -665,7 +740,8 @@ Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 - `lib/tau/factory/escalation.ex` (C7; D-317) — PR-CORE-3
 - `lib/tau/factory/scheduler.ex` (C4; D-312, D-320, D-343) — PR-CORE-2
 - `lib/tau/factory/conflict_check.ex` (C5; D-312, D-343) — PR-CORE-2
-- `lib/tau/factory/unit.ex` (C6; D-318, D-340, plus B6/B7/B8 cited edges) — PR-CORE-3
+- `lib/tau/factory/unit.ex` (C6; D-318, D-340, **D-356** awaiting_merge subscribe-before-request consume + unsubscribe-on-exit, plus B6/B7/B8 cited edges) — PR-CORE-3/PR #477
+- `lib/tau/factory/unit_driver.ex` (D-340, **D-356** `:janitor` threading + no driver-side merge bridge / no driver reclaim; the real `drive_fun` wiring Unit→fleet→gate→merge seams) — PR #477
 - `lib/tau/factory/retry.ex` (C8; D-318) — PR-CORE-3
 - `lib/tau/factory/kill_switch.ex` (C9; D-321) — PR-CORE-4
 - `lib/tau/factory/supervisor.ex` + `lib/tau/application.ex` (tree; rest_for_one spine) — PR-CORE-1
@@ -680,6 +756,8 @@ Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 - `test/tau/factory/cost_attribution_test.exs` (D-333) — PR-CORE-5
 - `test/tau/factory/reconcile_test.exs` (D-330, D-331, D-336; audits D-334 disposition) — PR-CORE-5
 - `test/tau/factory/unit_termination_test.exs` (D-340) + `scope_amendment_test.exs` (D-343) — PR-CORE-3/2
+- `test/tau/factory/unit_driver_test.exs` (D-340; real drive_fun gating tests) — PR #477
+- `test/tau/factory/unit_merge_result_test.exs` (**D-356** U subscribe-before-request consume + unsubscribe-on-exit) — PR #477
 
 **Cross-SPEC boundaries (cited, not owned here):** B6 → `SPEC-FACTORY-MERGE`
 (D-300–D-303, D-341); B7 → `SPEC-FACTORY-GATE` (D-304–D-308, D-322, D-323);
