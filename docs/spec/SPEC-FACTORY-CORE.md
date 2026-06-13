@@ -41,6 +41,20 @@ telemetry→Unit merge bridge (forbidden by MERGE D-356). Appendix B adds the
 gating-test paths. Resolves the merge-bridge lifecycle arch gap and the
 U-callback no-block gap; folds in #478.
 
+**Amendment (2026-06-13, PR #480 — P5c-6 production supervision):** Records
+(does not redesign) the **config-gating + seam-threading contract** for
+`Tau.Factory.Supervisor`, conforming to the assembly in
+`docs/arch/04-software-architecture/supervision-tree.md`. Introduces **D-357**
+(factory OFF by default — a normal boot starts no factory subtree and drives no
+uncontrolled work). §3 Q3: adds the `[C120-B11]` default-OFF safety constraint.
+§4: adds boundary **B11** — the `Tau.Factory.Supervisor.start_link/1` option
+surface, the `enabled`-gated full-subtree assembly (Coordinator-LAST), and the
+seam-derivation rules (the supervisor derives per-child opts and wraps the
+`select_fun`/`drive_fun` seams from its high-level opts; the caller does NOT
+hand-thread per-child opts). §6: D-357. Appendix B lists
+`factory_supervision_test.exs`. Closes the §4 gap the test-author surfaced for
+#474.
+
 ## 0. Why this spec exists
 
 The factory's control core is the brain of an autonomous loop that takes a
@@ -109,6 +123,7 @@ Boundaries (B-N attach contracts in §4):
 | B8 | C6 Unit ↔ **W** (SPEC-FACTORY-FLEET) | `spawn(role, brief, ref)` / `{:DOWN,…}` / `worker_stalled`. **Cited boundary.** |
 | B9 | C9 KillSwitch ↔ C3 Coordinator | `:halt_requested` over PubSub `"factory:control"`. |
 | B10 | C3 Coordinator ↔ external tracker | `select_next` / `reconcile` (issue source; reconciliation, CON-2). |
+| B11 | `Tau.Factory.Supervisor` ↔ {`Tau.Application`, tests} | `start_link/1` — config-gated subtree assembly + seam-threading (P5c-6, #474). |
 
 ## 3. L0 constraints
 
@@ -171,6 +186,18 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
 - **[C109-B5]** A non-progress state with no foreseen cause MUST escalate
   `E-UNCLASSIFIED` (the catch-all), never spin. Its firing is logged as a defect
   signal.
+- **★ [C120-B11]** **The factory is OFF by default.** The control subtree
+  (Coordinator and everything that drives uncontrolled autonomous work) is gated
+  on `config :tau, :factory` `:enabled`, whose **default is `false`**. A normal
+  application boot — with no operator opt-in — MUST start **no** factory subtree:
+  no `Coordinator`, no admitted units, no driven work. This is the
+  "no-uncontrolled-work-on-normal-boot" safety property: an autonomous loop that
+  merges to `main` must never start itself merely because the binary launched.
+  The gate is read once at boot (mirroring the established
+  `Tau.OtelReporter` `:enabled` precedent in `Tau.Application`); when disabled,
+  `Tau.Factory.Supervisor` assembles only the durable-ledger-and-below children
+  it needs for non-factory subsystems, never the Coordinator-bearing subtree
+  (D-357).
 
 ### Q4: What information crosses a boundary, and what is lost?
 
@@ -494,6 +521,95 @@ implements `select_next`:
 - **L is read-only:** the selector NEVER writes L; the tracker is not a second
   writer of L (D-331 [C112-B10]).
 
+### B11: `Tau.Factory.Supervisor` ↔ {`Tau.Application`, tests} — config-gated assembly + seam-threading (P5c-6, #474; D-357)
+
+This boundary records (does **not** redesign) the assembly that
+`docs/arch/04-software-architecture/supervision-tree.md` §3 specifies; the arch
+file is authoritative on the **composition and internal start-order**, this
+contract on the **gating layer and the option surface** on top of it. The
+implementer conforms to both.
+
+**Config key + default.**
+
+```
+config :tau, :factory, enabled: false   # default; opt-in is operator action
+```
+
+The flag is read **once at boot** by `Tau.Application` (mirroring the
+established `Tau.OtelReporter` `:enabled` precedent — `otel_reporter_spec/0`),
+not per-message. Reading it from `config` (compile/runtime config, not
+`Application.put_env/3` runtime mutation) keeps it out of the
+"runtime mutable state" anti-pattern (OTP non-negotiable #1). Default `false` ⇒
+no Coordinator-bearing subtree on a normal boot (D-357, [C120-B11]).
+
+**`start_link/1` option surface.** The supervisor accepts a *high-level seam*
+option set and **derives** every per-child option from it; the caller does NOT
+hand-thread per-child opts (no `coordinator_opts:` / `budget_opts:` /
+`scheduler_opts:` from the caller for the gated full-subtree path):
+
+```
+Tau.Factory.Supervisor.start_link(opts) :: Supervisor.on_start()
+  opts (full-subtree, enabled path):
+    :enabled    — boolean();    request the gated full-subtree assembly
+                                (defaults to the config gate when absent)
+    :db_path    — String.t();   Ledger DB file (test: tmp-dir DB)
+    :name       — atom();       this supervisor's registered name (test isolation;
+                                per-supervisor child names are derived from it)
+    :repo_dir   — String.t();   the real (or throwaway, in tests) git repo —
+                                threaded to MergeAuthority and the worker fleet
+    :milestone  — String.t();   the assigned milestone (→ IssueSelector)
+    :gh_fun     — (String.t() -> {:ok, [issue_map]});  issue source, stubbable;
+                                NO network in tests (B10 IssueSelector contract)
+    :select_fun — &IssueSelector.select/1  (arity-1, opts-taking — see wrapping)
+    :drive_fun  — &UnitDriver.drive/2      (arity-2 — see wrapping)
+```
+
+**Gated assembly (enabled path).** When the gate is on, the supervisor assembles
+the full control subtree in the `supervision-tree.md` §3 order — PubSub up first
+(the shared `Tau.PubSub`, never a second instance), then
+`Ledger.Writer → Budget.Owner → Scheduler → MergeAuthority → UnitRegistry /
+UnitSupervisor → worker fleet (`WorkerSupervisor` / `WorkerRegistry` /
+`WorkspaceJanitor` / fleet `Watchdog`) → KillSwitch → **Coordinator (LAST)**`.
+The internal relative order of the spine children is the arch file's to fix; the
+**Coordinator-LAST** placement is invariant in both this contract and the arch
+(it depends on every sibling — D-344 resume reads the started Ledger; its
+seams reference the started fleet/merge/registry processes). When the gate is
+**off** (default), the supervisor assembles **no** Coordinator-bearing subtree
+(today's ledger-and-below behaviour); `Process.whereis(Tau.Factory.Coordinator)`
+is `nil` (D-357).
+
+**Seam-derivation rules (the supervisor derives; the caller does not).**
+
+- **Ledger threading (D-344).** The started `Ledger.Writer`'s (per-supervisor
+  derived) name is threaded as the Coordinator's `:ledger` so `init/1` resumes
+  from L, and into the assembled `drive_fun` deps (`:ledger`) so Units snapshot
+  durable state (D-318/D-355).
+- **`select_fun` wrapping.** The injected `&IssueSelector.select/1` is arity-1
+  over `opts`, but the Coordinator's `:select_fun` is arity-0
+  (`(-> work_item | nil)`). The supervisor wraps it into the arity-0 form,
+  binding `IssueSelector.select(ledger: <writer>, milestone: <milestone>,
+  gh_fun: <gh_fun>)` (B10 IssueSelector opts). In tests `gh_fun` returns
+  `{:ok, []}`, so the wrapped selector yields `nil` and the Coordinator **idles**
+  in `:running` — driving no uncontrolled work (D-357 idle property).
+- **`drive_fun` wrapping.** The injected `&UnitDriver.drive/2` is arity-2
+  (`work_item, deps`), but the Coordinator's `:drive_fun` is arity-1. The
+  supervisor wraps it into the arity-1 form, binding the assembled `deps` map
+  (the started `:unit_supervisor`, `:unit_registry`, `:scheduler`,
+  `:worker_supervisor`, `:worker_registry`, `:janitor`, the shared `:pubsub`,
+  `:repo_dir`, `:agent_bin`, `:gate_fun`, `:merge_authority`, `:ledger`, and
+  `:report_to` = the Coordinator) — see the UnitDriver `deps` contract (§4 B6/B8).
+- **MergeAuthority threading.** `MergeAuthority` is started against the real
+  `:repo_dir` and the shared `:pubsub` (D-356 result delivery on
+  `"factory:pr:#{id}"`).
+
+- Pre: `Tau.Settings` `data_dir/0` resolvable (the ledger DB path); the shared
+  `Tau.PubSub` running (started above this subtree in `Tau.Application`).
+- Post (enabled): the subtree is assembled in arch order; the Coordinator is a
+  child started LAST and reaches `:running`; with a no-issues `gh_fun` it idles
+  (`select_fun → nil`), holding no in-flight unit and spawning no `Unit`.
+- Post (disabled / default): no Coordinator child exists; no work is driven.
+- Invariant (**D-357**): a default boot starts no factory subtree.
+
 ## 5. State enumeration
 
 ### Coordinator (K) — `gen_statem`, `state_functions`
@@ -689,6 +805,19 @@ published immediately after — and even concurrently with — `request_merge`
 reaches U and drives it to terminal, with no `state_timeout` escalation; and U
 holds **no** subscription to the topic after leaving `awaiting_merge`.
 
+**D-357 — Factory OFF by default (no uncontrolled work on normal boot):**
+The factory control subtree is gated on `config :tau, :factory` `:enabled`
+(default `false`, read once at boot — [C120-B11]). (a) On a default boot
+`Tau.Application` starts **no** Coordinator-bearing subtree:
+`Process.whereis(Tau.Factory.Coordinator)` is `nil` and no `Unit` is admitted.
+(b) When `Tau.Factory.Supervisor.start_link/1` is invoked with the gated
+full-subtree assembly (enabled), it assembles the subtree in the
+`supervision-tree.md` §3 order with the Coordinator started LAST, threading the
+started Ledger as `:ledger` (D-344) and wrapping the `select_fun`/`drive_fun`
+seams (B11); a no-issues `gh_fun` keeps the Coordinator **idle** in `:running`
+with no in-flight unit. Enforced by `factory_supervision_test.exs` — Test A
+(enabled assembly + idle property) and Test B (default-OFF regression guard).
+
 ## 7. Acceptance criteria
 
 Each is expressed against the user-facing path with an observable signal.
@@ -728,6 +857,12 @@ PR groupings are indicative.
   dogfood proof; arch `06-roadmap/spec-factory.md` AC-10). *This AC depends on
   SPEC-FACTORY-{GATE,FLEET,MERGE} landing; it is the integration gate, not a
   CORE-only unit.*
+- **AC-P5c6 (PR #480, D-357):** `mix test test/tau/factory/factory_supervision_test.exs`
+  passes — with the factory enabled, `Tau.Factory.Supervisor` assembles the full
+  subtree and the Coordinator (started LAST) reaches `:running` and idles
+  (`select_fun → nil`, no in-flight unit, no `Unit` spawned); and on a default
+  boot (factory disabled) no `Tau.Factory.Coordinator` exists. Signal: both Test A
+  (enabled assembly + idle) and Test B (default-OFF) assert it.
 
 ## Appendix B — Source map
 
@@ -744,7 +879,8 @@ Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 - `lib/tau/factory/unit_driver.ex` (D-340, **D-356** `:janitor` threading + no driver-side merge bridge / no driver reclaim; the real `drive_fun` wiring Unit→fleet→gate→merge seams) — PR #477
 - `lib/tau/factory/retry.ex` (C8; D-318) — PR-CORE-3
 - `lib/tau/factory/kill_switch.ex` (C9; D-321) — PR-CORE-4
-- `lib/tau/factory/supervisor.ex` + `lib/tau/application.ex` (tree; rest_for_one spine) — PR-CORE-1
+- `lib/tau/factory/supervisor.ex` + `lib/tau/application.ex` (tree; rest_for_one spine; **D-357** config-gated `start_link/1` assembly + seam-threading, B11) — PR-CORE-1 / PR #480
+- `config/config.exs` + `config/runtime.exs` (`config :tau, :factory, enabled:` gate, default `false`; **D-357**) — PR #480
 - `test/tau/factory/ledger_durability_test.exs` (D-315) — PR-CORE-1
 - `test/tau/factory/conflict_check_property_test.exs` (D-312, D-343) — PR-CORE-2
 - `test/tau/factory/budget_admission_test.exs` (D-320, D-332) — PR-CORE-2
@@ -758,6 +894,7 @@ Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 - `test/tau/factory/unit_termination_test.exs` (D-340) + `scope_amendment_test.exs` (D-343) — PR-CORE-3/2
 - `test/tau/factory/unit_driver_test.exs` (D-340; real drive_fun gating tests) — PR #477
 - `test/tau/factory/unit_merge_result_test.exs` (**D-356** U subscribe-before-request consume + unsubscribe-on-exit) — PR #477
+- `test/tau/factory/factory_supervision_test.exs` (**D-357** config-gated subtree assembly + default-OFF; AC-P5c6) — PR #480
 
 **Cross-SPEC boundaries (cited, not owned here):** B6 → `SPEC-FACTORY-MERGE`
 (D-300–D-303, D-341); B7 → `SPEC-FACTORY-GATE` (D-304–D-308, D-322, D-323);

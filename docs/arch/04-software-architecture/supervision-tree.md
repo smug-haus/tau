@@ -108,6 +108,39 @@ retry, and cron-driver — it is the durable spine for *what work exists and wha
 is owed* (research OTP durability ruling: Oban-as-system-of-record, `gen_statem`
 for live reactivity). Detail in `durable-spine.md`.
 
+### Config-gating layer — the factory is OFF by default (P5c-6, #474; D-357)
+
+The composition above is the subtree that exists **only when the factory is
+enabled**. The control loop drives autonomous work that merges to `main`, so it
+must never start merely because the binary launched. A boolean config gate sits
+in front of the assembly:
+
+```
+config :tau, :factory, enabled: false   # default — opt-in is an operator action
+```
+
+`Tau.Factory.Supervisor.start_link/1` (and `Tau.Application`, which reads the
+gate at boot — mirroring the established `Tau.OtelReporter` `:enabled`
+precedent) consults this flag:
+
+- **disabled (default)** → assemble **no** Coordinator-bearing subtree (the
+  ledger-and-below children may still start for non-factory subsystems, but the
+  Coordinator, Scheduler, Merge Authority, fleet, and Unit supervisors do not).
+  `Process.whereis(Tau.Factory.Coordinator)` is `nil`; no work is driven. This is
+  the "no-uncontrolled-work-on-normal-boot" safety property (**D-357**).
+- **enabled** → assemble the full subtree in the order above, **Coordinator
+  started LAST** (it depends on every sibling — D-344 resume reads the started
+  Ledger; its seams reference the started fleet/merge/registry processes).
+
+The gate is read **once at boot** from `config` (not `Application.put_env/3`
+runtime mutation — OTP non-negotiable #1). The contract for the option surface
+and seam-threading (the supervisor *derives* every per-child opt and wraps the
+arity-1 `IssueSelector.select/1` and arity-2 `UnitDriver.drive/2` seams into the
+arity-0/arity-1 forms the Coordinator expects; the caller hand-threads none of
+the per-child opts) is recorded in `docs/spec/SPEC-FACTORY-CORE.md` §4 B11 /
+D-357. This layer **records** the gate on top of the composition above; it does
+not alter the composition or the start-order.
+
 ## Step 4 — Identity & read/write split
 
 - **Logical identity, never pid.** Units and workers are addressed by key via
