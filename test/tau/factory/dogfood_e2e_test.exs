@@ -220,11 +220,11 @@ defmodule Tau.Factory.DogfoodE2ETest do
                "fold did not snapshot to the Ledger (D-315 / RPO=0)."
 
       verdict_rows =
-        ledger_rows(sandbox.db, "SELECT hash, run, half, verdict FROM verdicts")
+        ledger_rows(sandbox.db, "SELECT half, status FROM verdicts_v2 WHERE status IS NOT NULL")
 
       assert verdict_rows != [],
-             "AC-12 (observable 3): the gate verdict row(s) MUST be durable in L (rows in " <>
-               "`verdicts`). None found — Gate.run's verdict was not appended to the Ledger."
+             "AC-12 (observable 3): the gate verdict row(s) MUST be durable in L (status-bearing " <>
+               "rows in `verdicts_v2`). None found — Gate.run's verdict was not appended to the Ledger."
 
       # Observable 5 — no spurious escalation: NO :escalated snapshot, and no
       # E-RETRY-EXHAUSTED / :state_timeout signal in the run output (D-358).
