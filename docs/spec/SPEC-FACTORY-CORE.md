@@ -240,6 +240,16 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
   declared `hash`, so the coordinate is correct. A non-deterministic agent would
   require wiring the asserted `head_sha` through `unit.ex`/`unit_driver.ex` —
   explicitly out of P5c-7 scope (§4 B11).
+- **[C123-B8]** **`origin/<branch>` MUST exist at oracle-spawn time when
+  `oracle_base_ref` is an `origin/`-qualified ref.** The oracle (test-author)
+  Worker is spawned with a detached-HEAD checkout at `oracle_base_ref`; when the
+  UnitDriver sets `oracle_base_ref` to `origin/<branch>`, the remote ref MUST
+  already be pushed before `worker_fun` is called. In the real driver this is
+  satisfied by the draft-PR seed push (factory cycle step 4); in the dogfood the
+  Coordinator pushes the seeded branch to the local bare-repo origin before
+  admitting the unit. Failure to satisfy this precondition causes the Worker's
+  `git worktree add --detach origin/<branch>` to fail, which surfaces as
+  `worker_exit(w, :error)` and enters the retry ladder.
 
 ### Q4: What information crosses a boundary, and what is lost?
 
@@ -531,6 +541,17 @@ callers that pass no `:ledger` opt are unaffected (back-compat).
   synchronous reclaim in `merge_fun`, no reclaim-on-`:DOWN` bridge. Driver-side
   reclaim is **forbidden** — it duplicates the janitor's sole ownership of the
   capture-before-destroy sequence and races it on the `:DOWN`.
+- **Oracle detached-checkout — no branch lock (P5c-7 amendment; relates D-313/D-314).**
+  The oracle (test-author) Worker is spawned at a **detached HEAD** checkout of
+  `oracle_base_ref` (the `UnitDriver` opt; default: `work_item.base_ref`; the
+  dogfood/real driver sets it to `"origin/<branch>"`). A detached checkout holds
+  **no named-branch lock**, which allows the later implementing Worker to call
+  `git worktree add … <branch>` without conflict (a named branch may be checked
+  out in only one worktree at a time). The `oracle_base_ref` is threaded from
+  `UnitDriver.drive/2` → `to_unit_work_item/3` → the worker spawn opts, making
+  the checkout strategy a driver-injectable seam rather than a hard-coded
+  worktree policy. The precondition on `origin/<branch>` existing is recorded in
+  §3 [C123-B8].
 
 ### B9: KillSwitch (C9) ↔ Coordinator (C3)
 
