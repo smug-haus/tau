@@ -320,6 +320,70 @@ Admission is **monotone** (LIV-4): a `{:defer, _}` never demotes a unit's
 queue position; S serves deferred units in arrival order with aging once their
 blocker clears (the fairness analogue of M's merge queue, Q-L1).
 
+### 2.6 Where the declared scope comes from — issue → `ConflictCheck.scope()` (I2; D-369/D-370/D-371)
+
+§2.3's five-clause check operates over a `declared_scope :: ConflictCheck.scope()`
+(`%{deps, files, codepoints, specs, resources}`). §2.4 assumes that scope already
+exists, *frozen, at admission time* (FR-1.3). **It does not say how a real issue's
+text becomes that map.** `IssueSelector` (B10) is the intake that closes this gap:
+it elaborates an open milestone issue into the structured scope the Scheduler
+admits on. This subsection records the elaboration contract and its soundness
+posture; the boundary detail is SPEC-FACTORY-CORE §4 B10 (PR #505 amendment).
+
+**The soundness dependency (the load-bearing fact, V3).** `ConflictCheck` is the
+*sole enforcer* of conflict-gated concurrency (INV-13), but it is a pure function
+of *what it is told*. A scope that **under-declares** — omits a file two units
+actually share — clears them as disjoint, and S admits both in parallel; they
+then corrupt the omitted shared file. So the safety of the *check* is conditional
+on the soundness of the *elaboration*, and free issue text cannot be turned into a
+provably-complete impact set (V1 — the static-impact-analysis impossibility). The
+design does not pretend otherwise. Instead it makes incompleteness *safe* by
+construction through **directional soundness**:
+
+- **Over-declare, never under-declare.** Uncertain membership → *include*. A false
+  inclusion costs only a needless `{:defer, …}` (a unit serialises that could have
+  parallelised — cheap, reversible). A false exclusion costs *correctness* (a
+  missed conflict — a corrupting defect). The asymmetry dictates the bias:
+  *serialize when unsure*.
+- **Coarsen codepoints to whole files absent a `file:line` citation.** The
+  parallel-on-disjoint-regions optimisation (§2.3 `disjoint_codepoints?`) is taken
+  **only** where the issue cites `file:line`/`file#function` (the human author
+  discharges the burden of proof). Otherwise the unit serialises against anything
+  touching the file.
+- **Serialize-on-unscopable fallback.** An issue too vague to yield any file or
+  SPEC elaborates to a *universal-conflict sentinel scope* that fails
+  `pairwise_clear?` against any non-empty in-flight member — admitted only into an
+  empty `F`, never silently disjoint-from-everything.
+
+This preserves §2.4's monotonicity (D-343): the elaborated scope is still a *fixed
+declaration*, frozen before any worker runs — no post-hoc actual-path check is
+introduced.
+
+**The discriminating question — heuristic vs LLM vs required-template — and why a
+heuristic is the default.** The fact that decides the mechanism is *who can be
+held to soundness*: an LLM elaboration is unsound by nature (it omits or
+hallucinates and cannot be audited on the synchronous admission path); a
+required issue-template scope field shifts the burden to the human author but is
+still unverifiable; a citation-driven heuristic over signals already in the
+`issue_map` (`title`/`body`/`labels`) and the in-repo SPEC source-maps is the
+**cheapest-to-reverse** shape that makes incompleteness *safe* rather than
+*trusted*. The heuristic is therefore the default elaborator (D-369). It is
+reached through an **injected pure seam** `:elaborate_fun :: (issue_map ->
+ConflictCheck.scope())` (D-370), so a stronger LLM-assisted elaborator — gated
+behind an out-of-band verification step, never trusted blindly — remains a
+*substitution*, not a rewrite of `Scheduler`/`ConflictCheck`, if scope precision
+ever justifies its cost. **Coupling to #492** (real `gh issue list`) is by
+reference only: elaboration consumes the `issue_map` regardless of source; #492
+populates real fields the `--json number,title,body,labels` projection already
+names.
+
+**Closing a latent type error.** Before this contract, `IssueSelector` emitted
+`scope` as the string `"#{number}: #{title}"`, which `ConflictCheck.clear?/2`
+would crash on (`Map.fetch!(string, :files)`). The seam was sound only because no
+test wired a real string-scope work-item into a real Scheduler. The elaboration
+makes `IssueSelector → Scheduler → ConflictCheck` type-correct on a real issue
+(SPEC-FACTORY-CORE [C124-B10]).
+
 ---
 
 ## 3. U — Unit/PR FSM (`gen_statem` per entity)

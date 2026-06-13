@@ -272,6 +272,35 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
   admitting the unit. Failure to satisfy this precondition causes the Worker's
   `git worktree add --detach origin/<branch>` to fail, which surfaces as
   `worker_exit(w, :error)` and enters the retry ladder.
+- **★ [C130-B10]** **The conflict check is only as sound as the declared scope it
+  is handed; an under-declared scope silently defeats it (I2; D-369/D-370/D-371).**
+  `ConflictCheck.clear?/2` (the sole enforcer of conflict-gated admission) is a
+  *pure function of declarations*. If `IssueSelector`'s elaboration of an issue
+  *omits* a file/codepoint two units actually share, the predicate clears them as
+  "disjoint" and the Scheduler admits both in parallel — they then collide on the
+  omitted file (a corrupting defect, NOT a deferred-throughput cost). The
+  soundness of the *check* is therefore conditional on the soundness of the
+  *elaboration*, and free issue text cannot be turned into a provably-complete
+  scope (the static-impact-analysis impossibility — V1). The constraint this SPEC
+  pins is **directional soundness**: the elaborator MUST be **conservative** —
+  over-declare under uncertainty, coarsen codepoints to whole files absent an
+  explicit `file:line` citation, and **fall back to a serialize-against-everything
+  sentinel scope** when it can extract no files/specs at all (admit only into an
+  empty `F`). A false *over*-declaration costs only a needless `{:defer, …}`
+  (reversible, cheap); a false *under*-declaration costs correctness (a missed
+  conflict). The asymmetry is the load-bearing fact: bias every uncertain call
+  toward *serialize*. The mechanism is the default `elaborate_fun` heuristic (§4
+  B10 amendment, D-369); its conservative posture is D-369, the seam that lets a
+  stronger elaborator be substituted without weakening the posture is D-370, and
+  the serialize-on-empty fallback is D-371. The **discriminating question** —
+  heuristic vs LLM vs required-template — is resolved by *who can be held to
+  soundness*: an LLM elaboration is unsound by nature (it omits/hallucinates and
+  cannot be audited on the admission path), a required-template field shifts the
+  burden to the human author but is still unverifiable, and the citation-driven
+  heuristic is the **cheapest-to-reverse** shape that makes incompleteness *safe*
+  rather than *trusted*. The heuristic is therefore the default; the injected seam
+  (D-370) keeps an LLM-assisted elaborator a *swap*, not a *rewrite*, if scope
+  precision ever justifies its cost and an out-of-band verification step is added.
 
 ### Q4: What information crosses a boundary, and what is lost?
 
@@ -651,6 +680,96 @@ implements `select_next`:
   when the milestone is drained or every open issue is terminal in L (D-342).
 - **L is read-only:** the selector NEVER writes L; the tracker is not a second
   writer of L (D-331 [C112-B10]).
+
+**Amendment (PR #505 / B10, I2 — issue → declared-scope elaboration; D-369, D-370, D-371).**
+The PR #470 amendment above pins `work_item.scope` as a *non-nil frozen declared
+scope string* — adequate for the stubbed-`gh_fun` idle path (P5c-6, D-357), but
+**not** a `ConflictCheck.scope()` (`%{deps, files, codepoints, specs, resources}`
+— §4 B2, `conflict_check.ex`). A real milestone issue must be *elaborated* into a
+structured declared scope before `Scheduler.admit/3` can run the five-clause
+check on it. This sub-section pins that elaboration contract; it is disjoint from
+the B11 supervisor/seam contract that follows.
+
+- **The shape gap being closed (a latent type error).** Today `IssueSelector`
+  emits `scope` as the string `"#{number}: #{title}"`. `Scheduler.admit/3` passes
+  it verbatim to `ConflictCheck.clear?/2`, whose clauses call
+  `Map.fetch!(declared_scope, :files)` etc. A string therefore **crashes** the
+  predicate — the seam is sound today only because no test wires a real
+  string-`scope` work-item into a real Scheduler. The elaboration is what makes
+  `IssueSelector → Scheduler → ConflictCheck` type-correct and admission-correct
+  on a real issue. **[C124-B10]**
+
+- **The elaboration function (the seam).** `IssueSelector` derives the structured
+  scope through an injected, **pure** seam — the established `*_fun` pattern,
+  mirroring `:gh_fun`:
+
+  ```
+  :elaborate_fun — (issue_map -> ConflictCheck.scope())   # default: the conservative heuristic below
+  ```
+
+  `select/1` builds `work_item = {issue, declared_scope, hash, branch}` where
+  `declared_scope = elaborate_fun.(issue)` is a `ConflictCheck.scope()` map (no
+  longer a string). The seam is injected so the soundness posture is testable
+  with deterministic fixtures and so a future, stronger elaborator (LLM-assisted —
+  see the discriminating question, §3 / D-370) can be swapped without touching the
+  Scheduler or the conflict-check. **[C125-B10]**
+
+- **The default elaborator is a CONSERVATIVE, citation-driven heuristic.** It
+  reads only **machine-checkable** signals already present in the `issue_map`
+  (`"title"`, `"body"`, `"labels"`) and the in-repo SPEC source-maps; it does NOT
+  call an LLM on the admission path. Concretely it harvests:
+  - **`files`** — file paths the issue body cites verbatim (paths matching a
+    repo-relative `lib/…`, `test/…`, `web/…`, `docs/…` shape) **plus** every file
+    named by the Appendix-B source-map of each SPEC the issue cites.
+  - **`specs`** — `SPEC-*.md` ids cited in body/labels; the `no-shared-SPEC`
+    clause already folds the shared-D-NNN-block check (§4 B2), so a cited SPEC
+    covers both.
+  - **`codepoints`** — `{path, region}` pairs only where the issue cites
+    `file:line` / `file#function`; absent citations contribute **no** codepoint
+    narrowing (see soundness, below).
+  - **`resources`** — declared from labels / known-resource keywords (e.g. a
+    `burrito` / `smoke` label ⇒ the shared-`$HOME` cache resource of
+    `worktree-discipline.md`).
+  - **`deps`** — in-flight unit-ids named by `blocked-by:` / `depends-on:`
+    references in the body. **[C126-B10]**
+
+- **Soundness posture — conservative over-declaration with serialize-on-uncertainty
+  (the load-bearing decision, V1/V3).** The conflict-check's safety (D-312) holds
+  **iff declared scopes are sound** — a scope that *omits* a file two units truly
+  share lets the Scheduler admit them in parallel and corrupt each other (the V3
+  orphan-invariant failure: `ConflictCheck` is the sole enforcer of conflict-gated
+  admission, but it can only enforce over what it is *told*). No mechanism can
+  derive a *provably complete* file/codepoint set from free issue text (V1 — that
+  is the static-impact-analysis impossibility in disguise). The contract therefore
+  does **not** assume completeness; it makes the *consequence of incompleteness*
+  safe:
+  - **Over-declare, never under-declare.** When the heuristic is uncertain whether
+    a file/codepoint belongs in scope, it **includes** it. A false *inclusion*
+    only costs throughput (an unnecessary `{:defer, …}` — two units serialize that
+    could have run in parallel); a false *exclusion* costs *correctness* (two
+    conflicting units run concurrently and corrupt shared files). The cost
+    asymmetry is the whole argument: **throughput is cheap and reversible; a
+    missed conflict is a corrupting, expensive defect.** **[C127-B10]**
+  - **Coarsen codepoints to whole files when uncertain.** An issue that cites a
+    file but no `file:line` yields a *whole-file* `files` entry, **not** a narrow
+    `codepoints` entry. Codepoint-level narrowing (the parallel-on-disjoint-regions
+    optimisation) is admitted **only** on explicit `file:line` citation, where the
+    burden of proof is discharged by the human author. Absent that, the unit
+    serialises against any other unit touching the file. **[C128-B10]**
+  - **Fallback-to-serialize on an empty elaboration.** If the heuristic extracts
+    **no** files and **no** specs (an issue too vague to scope), `elaborate_fun`
+    returns the **universal-conflict sentinel scope** — a scope that
+    `pairwise_clear?` rejects against *any* non-empty in-flight member — so the
+    unit is admitted **only when `F` is empty** (it runs alone). It is never
+    silently treated as disjoint-from-everything. This makes "we could not scope
+    it" resolve to *serialize*, never to *risk a collision*. **[C129-B10]**
+
+- **Coupling to #492 (real `gh issue list`).** This contract is **independent of**
+  the `gh_fun` real-network adapter (#492): elaboration consumes the `issue_map`
+  whatever its source (stub or real `gh --json number,title,body,labels`). #492
+  only populates the `issue_map`'s real fields; the `body` / `labels` keys the
+  heuristic reads are already in the §4 B10 `--json` projection. No ordering
+  dependency in either direction — referenced, not implemented here.
 
 ### B11: `Tau.Factory.Supervisor` ↔ {`Tau.Application`, tests} — config-gated assembly + seam-threading (P5c-6, #474; D-357)
 
@@ -1132,6 +1251,43 @@ is therefore a strict refinement: it changes the coordinate only when the agent
 asserts one that differs, which is exactly the non-deterministic-agent case.
 Enforced by the existing `dogfood_e2e_test.exs` continuing to reach `:merged`
 green, and a unit test that the `head_sha = nil` path uses the declared hash.
+
+**D-369 — Issue → declared-scope elaboration is conservative (I2, [C124-B10],
+[C126-B10], [C127-B10], [C130-B10], V1/V3):** `IssueSelector.select/1` produces
+`work_item.scope` as a `ConflictCheck.scope()` map (`%{deps, files, codepoints,
+specs, resources}`), **never** a string, via the `:elaborate_fun` seam (D-370).
+The default elaborator harvests scope only from machine-checkable issue signals
+(cited `lib/…`/`test/…`/`web/…`/`docs/…` paths, cited `SPEC-*.md` Appendix-B
+source-maps, `file:line`-cited codepoints, label-derived resources, `blocked-by:`
+deps) and is **directionally sound**: it over-declares under uncertainty and
+**coarsens a file-cited-but-not-line-cited reference to a whole-`files` entry**,
+never a narrow `codepoints` entry. Enforced by `issue_elaboration_test.exs`: (a)
+the returned `scope` is a map accepted by `ConflictCheck.clear?/2` without a
+crash (closes the [C124-B10] latent type error); (b) a fixture issue citing a
+file but no line yields that file in `files` and **no** narrowing
+`codepoints` entry (over-declaration); (c) two fixture issues citing a shared
+file elaborate to scopes that `ConflictCheck.pairwise_clear?/2` rejects (the V3
+soundness witness — a real shared file is never elaborated apart).
+
+**D-370 — Elaboration is an injected pure seam (I2, [C125-B10]):** the
+issue→scope mapping is the injected `:elaborate_fun :: (issue_map ->
+ConflictCheck.scope())` (defaulting to the D-369 heuristic), following the
+codebase's `*_fun` injection pattern, so (a) the soundness posture is tested with
+deterministic fixtures with no network/LLM call on the admission path, and (b) a
+stronger (LLM-assisted, separately verified) elaborator is a *substitution*, not
+a rewrite of `Scheduler`/`ConflictCheck`. Enforced by `issue_elaboration_test.exs`
+(a stub `elaborate_fun` is honoured; the default is pure and network-free).
+
+**D-371 — Serialize-on-unscopable fallback (I2, [C129-B10], [C130-B10]):** when
+the default elaborator extracts **no** files and **no** specs from an issue, it
+returns a **universal-conflict sentinel scope** that `ConflictCheck.pairwise_clear?/2`
+rejects against every non-empty in-flight member, so an unscopable unit is
+admitted **only into an empty `F`** (it runs alone) and is **never** treated as
+disjoint-from-everything. This makes "could not scope it" resolve to *serialize*,
+preserving D-312/D-343 monotonicity (the sentinel is still a fixed declaration —
+no post-hoc actual-path check). Enforced by `issue_elaboration_test.exs` (an
+empty-signal issue's scope clears against an empty `F` but defers against any
+non-empty `F`).
 
 ## 7. Acceptance criteria
 
