@@ -776,8 +776,19 @@ opts[:agent_mode] == :claude_code )`.
 The resolver is a **pure function** (write of the shim file is a required
 side-effect for producing the executable, not hidden process state). It holds no
 ETS, no GenServer, no `Application.put_env/3`. Detection:
-`test/tau/factory/agent_bin_test.exs` — 6 gating tests covering all three mode
-branches plus the D-357 default-off invariant.
+`test/tau/factory/agent_bin_test.exs` — 7 gating tests covering all three mode
+branches, the D-357 default-off invariant, and the end-to-end thread (#511 refine).
+
+**D-376 thread contract (§4 B4-A1 seam, #511 refine):** The `spawn_opts`
+returned by `resolve/1` (`[agent_mode: :claude_code]` for `:claude_code` mode)
+MUST be threaded end-to-end to `WorkerSupervisor.spawn/5` opts so the Worker's
+D-374 preflight fires. The mandated thread is:
+`dogfood supervisor_opts` → `Supervisor.init_full_subtree deps` →
+`UnitDriver.drive/2 deps` → `worker_fun opts` → `WorkerSupervisor.spawn/5`.
+When `agent_mode` is absent or non-`:claude_code`, the key MUST NOT be added
+to the spawn opts (unchanged behaviour). `creds_check_fun` follows the same
+thread and defaults to the real `~/.claude/.credentials.json` check in the Worker
+when not injected.
 
 **D-367 — Shim crash containment preserves the Worker's crash domain (#487, A1):**
 The shim Port is linked into the Worker (D-316), so a shim crash propagates to the

@@ -136,6 +136,12 @@ defmodule Tau.Factory.UnitDriver do
     # so the dogfood can widen state_timeout_ms above the scripted agent's
     # worst-case run time without modifying unit.ex.
     unit_timeouts = Map.get(deps, :unit_timeouts, [])
+    # agent_mode / creds_check_fun: threaded from AgentBin.resolve/1 spawn_opts
+    # (via supervisor_opts / UnitDriver deps) into the worker_fun closure so the
+    # Worker's D-374 preflight fires for :claude_code mode (D-376 refine fix).
+    # Non-:claude_code paths: agent_mode is nil/absent → preflight skipped (unchanged).
+    agent_mode = Map.get(deps, :agent_mode)
+    creds_check_fun = Map.get(deps, :creds_check_fun)
 
     # -------------------------------------------------------------------------
     # :worker_fun — called from within the Unit's process context.
@@ -174,13 +180,23 @@ defmodule Tau.Factory.UnitDriver do
 
       wr_base_ref = if role == :test_author, do: oracle_base_ref, else: base_ref
 
-      opts = [
+      base_opts = [
         registry: worker_registry,
         repo_dir: repo_dir,
         agent_bin: agent_bin,
         report_to: unit_pid,
         janitor: janitor_pid
       ]
+
+      # Thread agent_mode and creds_check_fun (D-376 refine: closes the
+      # orphaned-fence gap so :claude_code fires D-374 preflight in Worker).
+      # agent_mode nil/absent → no key added → Worker preflight skipped (unchanged).
+      opts =
+        base_opts
+        |> then(fn o -> if agent_mode, do: Keyword.put(o, :agent_mode, agent_mode), else: o end)
+        |> then(fn o ->
+          if creds_check_fun, do: Keyword.put(o, :creds_check_fun, creds_check_fun), else: o
+        end)
 
       case WorkerSupervisor.spawn(worker_supervisor, role, brief, wr_base_ref, opts) do
         {:ok, worker_id} ->

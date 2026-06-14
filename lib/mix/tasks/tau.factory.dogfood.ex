@@ -113,7 +113,7 @@ defmodule Mix.Tasks.Tau.Factory.Dogfood do
     # default), so existing dogfood behaviour is preserved unless the operator
     # explicitly sets agent_mode: :claude_code in the factory config.
     factory_opts = Application.get_env(:tau, :factory, [])
-    {agent_bin, _spawn_opts} = AgentBin.resolve(factory_opts)
+    {agent_bin, spawn_opts} = AgentBin.resolve(factory_opts)
     Mix.shell().info("[dogfood] agent_bin: #{agent_bin}")
 
     # Step 6 — Derive the deterministic work_item coordinate (mirrors IssueSelector).
@@ -157,19 +157,20 @@ defmodule Mix.Tasks.Tau.Factory.Dogfood do
 
     unit_timeouts = [state_timeout_ms: @unit_state_timeout_ms]
 
-    supervisor_opts = [
-      enabled: true,
-      name: sup_name,
-      repo_dir: repo,
-      db_path: db_path,
-      milestone: "dogfood-milestone",
-      gh_fun: gh_fun,
-      select_fun: &IssueSelector.select/1,
-      drive_fun: &UnitDriver.drive/2,
-      agent_bin: agent_bin,
-      gate_fun: gate_fun,
-      unit_timeouts: unit_timeouts
-    ]
+    supervisor_opts =
+      [
+        enabled: true,
+        name: sup_name,
+        repo_dir: repo,
+        db_path: db_path,
+        milestone: "dogfood-milestone",
+        gh_fun: gh_fun,
+        select_fun: &IssueSelector.select/1,
+        drive_fun: &UnitDriver.drive/2,
+        agent_bin: agent_bin,
+        gate_fun: gate_fun,
+        unit_timeouts: unit_timeouts
+      ] ++ spawn_opts
 
     Mix.shell().info("[dogfood] booting factory supervisor (enabled, one-shot)")
 
