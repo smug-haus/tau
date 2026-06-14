@@ -92,7 +92,53 @@ Boundaries (B-N attach contracts in §4):
 | B9 | all governed components ↔ C9 OtelReporter | paired `[:tau,:factory,…]` spans over `:telemetry`; handler is an observer, never control. |
 | B10 | C10 Lineage ↔ L (Ledger.Writer) | the lineage row is written in the **same transaction as the merge record** (WAL-before-ack); audit is a join over its FK edges. *L is writer-of-record (cited, SPEC-FACTORY-CORE).* |
 
-## 3. L0 constraints
+## 3. L0 constraints (includes D-374 amendment — PR #510)
+
+### Amendment: metered-API spend is a fail-closed admission boundary (D-374)
+
+Metered Anthropic-API spend (a charge against a raw `ANTHROPIC_API_KEY`) is
+an **irreversible resource action** with no in-band undo — it is structurally
+the same class of destructive action that `ActionClassifier` (C7) guards at
+the effecting path. Absent a structural guard, any `Port.open` of a
+`:claude_code` worker could silently consume metered quota even when the
+factory is intended to operate exclusively on the user's Claude
+Pro/Max subscription.
+
+The governance plane therefore adds a fail-closed preflight at the single
+`Worker.open_port_and_finish/1` funnel (the only `Port.open` site in the
+factory worker path):
+
+- **Worker spawn boundary contract** (added at PR #510):
+  - `agent_mode` opt on `WorkerSupervisor.spawn/5` → threaded to
+    `Worker`. `:claude_code` = metered-capable (D-374 preflight fires).
+    Absence or any other value → no preflight (test/legacy paths
+    unchanged).
+  - `creds_check_fun` opt on `WorkerSupervisor.spawn/5` → `Worker`.
+    Type `(-> :ok | {:error, :subscription_creds_absent})`. Default
+    wraps `Tau.Providers.Anthropic.Auth.resolve/1` against
+    `~/.claude/.credentials.json`. Tests inject a stub.
+  - Preflight fires **after** the death-monitor is spawned (so a
+    `:metered_path_refused` stop is observable via the death-cert) and
+    **before** `Port.open` (so no metered call can escape).
+  - On `{:error, _}` from `creds_check_fun.()`: do NOT open the Port;
+    stop with reason `:metered_path_refused` (fail-closed; NO fallback).
+    The death-cert monitor maps this to
+    `{:worker_exit, worker_id, :metered_path_refused}`.
+  - Env scrub: append `{~c"ANTHROPIC_API_KEY", false}` to the Port's
+    `{:env, list}` when `agent_mode == :claude_code`. Erlang Port treats
+    `{key, false}` as "remove from child env" (POSIX unsetenv). This
+    ensures the child never inherits a metered key even if one is set in
+    the calling process env.
+
+**[C223-B1 addition]** A metered-capable worker spawn MUST pass the D-374
+preflight at the `Worker.open_port_and_finish/1` funnel before `Port.open`.
+Fail-closed: a false negative (creds absent, Port opens anyway) is a
+metered-spend violation; a false positive (creds present, Port refused)
+surfaces as `:metered_path_refused` and the unit retries. The preflight
+is structurally identical to the `ActionClassifier` deny: it runs at the
+admission boundary, not after execution.
+
+
 
 Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
 
@@ -475,6 +521,20 @@ chain end-to-end; a lineage row with any null edge fails a CON-6/NFR-AUDIT
 assertion in the per-cycle reconciliation) and the same-transaction durability
 test (kill between merge-record and lineage-write ⇒ neither lands; never a merge
 without lineage).
+
+**D-374 — No metered-API spend (factory plane, fail-closed):**
+When `agent_mode == :claude_code`, `Worker.open_port_and_finish/1` MUST
+call `creds_check_fun.()` BEFORE `Port.open`. If it returns
+`{:error, _}`, the Port is NEVER opened; the worker stops with
+`:metered_path_refused` (the death-cert monitor maps this to
+`{:worker_exit, worker_id, :metered_path_refused}`). The Port env MUST
+include `{~c"ANTHROPIC_API_KEY", false}` to prevent the child from
+inheriting a metered key. NO fallback to the metered path is permitted.
+Non-`:claude_code` modes are unchanged.
+Enforced by `test/tau/factory/cost_safety_fence_test.exs`
+(tags `:d_374` — 3 tests): (a) fail-closed: absent creds → refusal, no
+Port open; (b) env scrub: canary `ANTHROPIC_API_KEY` absent from child;
+(c) creds-present: preflight passes, worker proceeds normally.
 
 ## 7. Acceptance criteria
 

@@ -66,7 +66,7 @@ Block-to-SPEC allocation:
 |---|---|
 | D-001 – D-028 | SPEC-USER-TURN — core session FSM invariants |
 | D-029, D-030, D-043, D-044 | SPEC-CIRCUIT-BREAKER |
-| D-031 – D-039 | SPEC-CODING-AGENT |
+| D-031 – D-039, D-375 | SPEC-CODING-AGENT |
 | D-040 – D-042, D-048, D-049, D-056, D-058 – D-062, D-076 – D-089 | SPEC-USER-TURN — amendments |
 | D-045 – D-047 | SPEC-MEMORY-STORE |
 | D-050 – D-055, D-057 | SPEC-OTEL-REPORTER |
@@ -82,7 +82,7 @@ Block-to-SPEC allocation:
 | D-304 – D-308, D-322, D-323, D-354 | SPEC-FACTORY-GATE |
 | D-309 – D-311, D-313, D-314, D-316, D-334, D-364 – D-367 | SPEC-FACTORY-FLEET |
 | D-312, D-315, D-317, D-318, D-320, D-321, D-330 – D-333, D-335, D-336, D-340, D-342 – D-344, D-355 – D-359, D-369 – D-371 | SPEC-FACTORY-CORE |
-| D-319, D-351 – D-353 | SPEC-FACTORY-GOV |
+| D-319, D-351 – D-353, D-374 | SPEC-FACTORY-GOV |
 | D-361 – D-363 | SPEC-FACTORY-CORE (C1 unit-coordinate identity; PR #503) |
 | D-300 – D-380 | reserved — SPEC-FACTORY-\* family (autonomous factory; `docs/arch/`) |
 

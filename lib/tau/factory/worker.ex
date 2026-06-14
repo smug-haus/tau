@@ -44,6 +44,7 @@ defmodule Tau.Factory.Worker do
   alias Tau.Factory.WorkspaceJanitor
   alias Tau.Provider.Event.Heartbeat
   alias Tau.Provider.Event.WorkReady
+  alias Tau.Providers.Anthropic.Auth
 
   # ---------------------------------------------------------------------------
   # Public API
@@ -73,6 +74,18 @@ defmodule Tau.Factory.Worker do
                                instead of the built-in death-monitor process.
     - `:extra_env`           — list of `{key, value}` string pairs merged into
                                the Port's env AFTER the namespace map (D-365).
+    - `:agent_mode`          — atom (default: `nil`); when `:claude_code`, the
+                               D-374 preflight fires before `Port.open`: runs
+                               `creds_check_fun.()` and appends
+                               `{~c"ANTHROPIC_API_KEY", false}` to the Port env
+                               so the child never inherits a metered API key.
+                               Any other value (including absent) disables the
+                               preflight (non-`:claude_code` modes unchanged).
+    - `:creds_check_fun`     — zero-arity function
+                               `(-> :ok | {:error, :subscription_creds_absent})`.
+                               Default checks `~/.claude/.credentials.json` via
+                               `Tau.Providers.Anthropic.Auth`. Tests inject a
+                               stub. (D-374)
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -105,6 +118,8 @@ defmodule Tau.Factory.Worker do
     expected_head_override = Keyword.get(opts, :expected_head)
     janitor = Keyword.get(opts, :janitor)
     extra_env = Keyword.get(opts, :extra_env, [])
+    agent_mode = Keyword.get(opts, :agent_mode)
+    creds_check_fun = Keyword.get(opts, :creds_check_fun, &default_creds_check/0)
 
     # Unique private worktree path under the parent repo's parent dir.
     ws = Path.join([Path.dirname(repo_dir), ".worker-wt-#{worker_id}"])
@@ -129,6 +144,8 @@ defmodule Tau.Factory.Worker do
           expected_head_override: expected_head_override,
           janitor: janitor,
           extra_env: extra_env,
+          agent_mode: agent_mode,
+          creds_check_fun: creds_check_fun,
           ws: ws
         }
 
@@ -269,6 +286,48 @@ defmodule Tau.Factory.Worker do
   defp open_port_and_finish(ctx) do
     %{
       worker_id: worker_id,
+      repo_dir: repo_dir,
+      report_to: report_to,
+      janitor: janitor,
+      ws: ws,
+      ns: ns
+    } = ctx
+
+    extra_env = Map.get(ctx, :extra_env, [])
+    agent_mode = Map.get(ctx, :agent_mode)
+    creds_check_fun = Map.get(ctx, :creds_check_fun, &default_creds_check/0)
+
+    # Step 4: register with the janitor (or arm the death-monitor) BEFORE
+    # opening the Port, so that any raise during Port.open is caught by the
+    # janitor's :DOWN handler — no unmonitored worktree leak (D-314, SPEC B5).
+    # The monitor is also spawned before the D-374 preflight so that a
+    # :metered_path_refused stop delivers a death-cert to report_to (D-374).
+    ns_dirs = Map.values(ns)
+
+    if janitor do
+      WorkspaceJanitor.register(janitor, worker_id, self(), ws, ns_dirs, report_to)
+    else
+      spawn_death_monitor(worker_id, report_to)
+    end
+
+    # D-374: metered-API spend preflight — runs only for agent_mode: :claude_code.
+    # If creds_check_fun returns {:error, _} the worker refuses to open the Port
+    # and stops with :metered_path_refused (fail-closed; NO fallback).
+    # The death-cert monitor (spawned above) delivers
+    # {:worker_exit, worker_id, :metered_path_refused} to report_to.
+    case preflight_metered(agent_mode, creds_check_fun) do
+      :ok ->
+        open_port_final(ctx, ns, extra_env, agent_mode, ws, repo_dir)
+
+      {:stop, :metered_path_refused} ->
+        cleanup_worktree(ws, repo_dir)
+        {:stop, :metered_path_refused}
+    end
+  end
+
+  defp open_port_final(ctx, ns, extra_env, agent_mode, _ws, _repo_dir) do
+    %{
+      worker_id: worker_id,
       role: role,
       brief: brief,
       base_ref: base_ref,
@@ -277,23 +336,8 @@ defmodule Tau.Factory.Worker do
       registry: registry,
       report_to: report_to,
       heartbeat_interval: heartbeat_interval,
-      janitor: janitor,
-      ws: ws,
-      ns: ns
+      ws: ws
     } = ctx
-
-    extra_env = Map.get(ctx, :extra_env, [])
-
-    # Step 4: register with the janitor (or arm the death-monitor) BEFORE
-    # opening the Port, so that any raise during Port.open is caught by the
-    # janitor's :DOWN handler — no unmonitored worktree leak (D-314, SPEC B5).
-    ns_dirs = Map.values(ns)
-
-    if janitor do
-      WorkspaceJanitor.register(janitor, worker_id, self(), ws, ns_dirs, report_to)
-    else
-      spawn_death_monitor(worker_id, report_to)
-    end
 
     # Step 5: open Port (linked by default — agent crash propagates to worker).
     # Build env_list from namespace map, then merge any extra_env overrides
@@ -309,7 +353,19 @@ defmodule Tau.Factory.Worker do
         {String.to_charlist(k), String.to_charlist(v)}
       end)
 
-    env_list = ns_env ++ extra_env_charlist
+    # D-374 env scrub: when agent_mode is :claude_code, append
+    # {~c"ANTHROPIC_API_KEY", false} so the child process never inherits
+    # a metered API key even if it is set in the calling env.
+    # Erlang Port {:env, list} is additive; appending {key, false} removes
+    # an inherited var (POSIX: unsetenv semantics via Erlang's child_setup).
+    metered_scrub =
+      if agent_mode == :claude_code do
+        [{~c"ANTHROPIC_API_KEY", false}]
+      else
+        []
+      end
+
+    env_list = ns_env ++ extra_env_charlist ++ metered_scrub
 
     port =
       Port.open({:spawn_executable, agent_bin}, [
@@ -499,6 +555,37 @@ defmodule Tau.Factory.Worker do
         {out, 0} -> String.trim(out)
         {_out, _} -> "HEAD"
       end
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # D-374 — metered-API spend preflight helpers
+  # ---------------------------------------------------------------------------
+
+  # Run the metered-path preflight. Only active when agent_mode == :claude_code.
+  # Returns :ok to proceed or {:stop, :metered_path_refused} to block Port.open.
+  # Non-:claude_code modes pass through unconditionally (unchanged behaviour).
+  @spec preflight_metered(atom() | nil, (-> :ok | {:error, term()})) ::
+          :ok | {:stop, :metered_path_refused}
+  defp preflight_metered(:claude_code, creds_check_fun) do
+    case creds_check_fun.() do
+      :ok -> :ok
+      {:error, _reason} -> {:stop, :metered_path_refused}
+    end
+  end
+
+  defp preflight_metered(_other_mode, _creds_check_fun), do: :ok
+
+  # Default subscription-creds check (D-374): reads ~/.claude/.credentials.json
+  # via Tau.Providers.Anthropic.Auth. Returns :ok if the file is present and
+  # parseable (OAuth creds exist); {:error, :subscription_creds_absent}
+  # otherwise (covers :no_auth, :oauth_expired, :oauth_malformed,
+  # :oauth_missing_scope — all indicate absent/unusable subscription creds).
+  @spec default_creds_check() :: :ok | {:error, :subscription_creds_absent}
+  defp default_creds_check do
+    case Auth.resolve(%{}) do
+      {:ok, {:oauth, _}} -> :ok
+      _other -> {:error, :subscription_creds_absent}
     end
   end
 
