@@ -52,6 +52,7 @@ defmodule Tau.Factory.CodingAgentShimContainmentTest do
   @moduletag :d_367
 
   alias Tau.CodingAgent.Event
+  alias Tau.Factory.CodingAgentShim
 
   @worker_registry Tau.Factory.WorkerRegistry
   @worker_supervisor Tau.Factory.WorkerSupervisor
@@ -149,7 +150,7 @@ defmodule Tau.Factory.CodingAgentShimContainmentTest do
 
       # D-367: UndefinedFunctionError on current branch — correct fail-before state.
       shim_bin =
-        Tau.Factory.CodingAgentShim.write(shim_bin,
+        CodingAgentShim.write(shim_bin,
           adapter: Tau.CodingAgents.Replay,
           replay_fixture: crash_fixture(),
           branch: "feat/crash-#{n}",
@@ -202,7 +203,7 @@ defmodule Tau.Factory.CodingAgentShimContainmentTest do
 
       # D-367: UndefinedFunctionError on current branch — correct fail-before state.
       crash_bin =
-        Tau.Factory.CodingAgentShim.write(crash_bin,
+        CodingAgentShim.write(crash_bin,
           adapter: Tau.CodingAgents.Replay,
           replay_fixture: crash_fixture(),
           branch: "feat/crash-blast-#{n}",
@@ -210,7 +211,7 @@ defmodule Tau.Factory.CodingAgentShimContainmentTest do
         )
 
       clean_bin =
-        Tau.Factory.CodingAgentShim.write(clean_bin,
+        CodingAgentShim.write(clean_bin,
           adapter: Tau.CodingAgents.Replay,
           replay_fixture: success_fixture(),
           branch: "feat/clean-blast-#{n}",

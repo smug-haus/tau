@@ -57,6 +57,7 @@ defmodule Tau.Factory.CodingAgentShimBridgeTest do
   @moduletag :d_364
 
   alias Tau.CodingAgent.Event
+  alias Tau.Factory.CodingAgentShim
 
   @worker_registry Tau.Factory.WorkerRegistry
   @worker_supervisor Tau.Factory.WorkerSupervisor
@@ -171,7 +172,7 @@ defmodule Tau.Factory.CodingAgentShimBridgeTest do
       # so the diff is non-empty. The worktree path is resolved by the Worker at
       # runtime; we let the shim use whatever `ws` the Worker allocates.
       shim_bin =
-        Tau.Factory.CodingAgentShim.write(shim_bin,
+        CodingAgentShim.write(shim_bin,
           adapter: Tau.CodingAgents.Replay,
           replay_fixture: non_empty_fixture(_ws_placeholder = ""),
           branch: branch
@@ -230,7 +231,7 @@ defmodule Tau.Factory.CodingAgentShimBridgeTest do
 
       # D-364: Again UndefinedFunctionError on current branch — correct fail-before.
       shim_bin =
-        Tau.Factory.CodingAgentShim.write(shim_bin,
+        CodingAgentShim.write(shim_bin,
           adapter: Tau.CodingAgents.Replay,
           replay_fixture: empty_diff_fixture(),
           branch: branch
@@ -274,7 +275,7 @@ defmodule Tau.Factory.CodingAgentShimBridgeTest do
 
       # D-364: UndefinedFunctionError on current branch — correct fail-before.
       shim_bin =
-        Tau.Factory.CodingAgentShim.write(shim_bin,
+        CodingAgentShim.write(shim_bin,
           adapter: Tau.CodingAgents.Replay,
           replay_fixture: failed_fixture(),
           branch: branch

@@ -61,6 +61,7 @@ defmodule Tau.Factory.CodingAgentShimHeartbeatTest do
   @moduletag :d_366
 
   alias Tau.CodingAgent.Event
+  alias Tau.Factory.CodingAgentShim
 
   @worker_registry Tau.Factory.WorkerRegistry
   @worker_supervisor Tau.Factory.WorkerSupervisor
@@ -153,7 +154,7 @@ defmodule Tau.Factory.CodingAgentShimHeartbeatTest do
       # The shim must accept :heartbeat_interval_ms and :replay_delay_ms so tests
       # can control the timing relationship between events and heartbeat emission.
       shim_bin =
-        Tau.Factory.CodingAgentShim.write(shim_bin,
+        CodingAgentShim.write(shim_bin,
           adapter: Tau.CodingAgents.Replay,
           replay_fixture: active_stream_fixture(),
           branch: "feat/hb-active-#{n}",
@@ -230,7 +231,7 @@ defmodule Tau.Factory.CodingAgentShimHeartbeatTest do
 
       # D-366: UndefinedFunctionError on current branch — correct fail-before state.
       shim_bin =
-        Tau.Factory.CodingAgentShim.write(shim_bin,
+        CodingAgentShim.write(shim_bin,
           adapter: Tau.CodingAgents.Replay,
           replay_fixture_phases: [
             {early_events, div(@hb_interval_ms, 4)},

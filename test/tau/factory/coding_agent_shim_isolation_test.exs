@@ -39,6 +39,13 @@ defmodule Tau.Factory.CodingAgentShimIsolationTest do
   The shim can report these values by emitting a typed diagnostic heartbeat or
   by writing an inspection file; the test observes the net effect.
 
+  ## Registry discipline
+
+  Workers register in the **per-test** dynamic registry created by `start_fleet/1`
+  (e.g. `:iso_reg_shim_iso_N`), NOT in the global `Tau.Factory.WorkerRegistry`.
+  All `Registry.lookup/2` calls in this module MUST use the per-test
+  `registry_name` returned by `start_fleet/1` — never the module-named global.
+
   ## AC linkage
     - AC-14 / D-365 — all tests below.
   """
@@ -50,9 +57,10 @@ defmodule Tau.Factory.CodingAgentShimIsolationTest do
   @moduletag :d_365
 
   alias Tau.CodingAgent.Event
+  alias Tau.Factory.CodingAgentShim
 
-  @worker_registry Tau.Factory.WorkerRegistry
   @worker_supervisor Tau.Factory.WorkerSupervisor
+  @worker_registry Tau.Factory.WorkerRegistry
 
   defp setup_git_repo(tmp_dir) do
     repo_dir = Path.join(tmp_dir, "repo_#{System.unique_integer([:positive])}")
@@ -114,6 +122,22 @@ defmodule Tau.Factory.CodingAgentShimIsolationTest do
     ]
   end
 
+  # Look up the worker pid in the per-test registry and retrieve its ws.
+  # Returns the ws string. Raises if the worker is not found (which would
+  # indicate a registry bug, not a test bug).
+  defp get_worker_ws(registry_name, worker_id) do
+    case Registry.lookup(registry_name, worker_id) do
+      [{pid, _meta}] ->
+        {:ok, ws} = GenServer.call(pid, :get_ws)
+        ws
+
+      [] ->
+        raise "D-365: worker #{inspect(worker_id)} not found in per-test registry " <>
+                "#{inspect(registry_name)}. Registry.lookup must use the per-test " <>
+                "registry_name, NOT the global Tau.Factory.WorkerRegistry."
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # D-365 test 1: workspace uses worker's ws (Cwd backend), no nested worktree
   #
@@ -142,7 +166,7 @@ defmodule Tau.Factory.CodingAgentShimIsolationTest do
       # The shim MUST be written with workspace_backend: :cwd to suppress nested
       # worktree creation.
       shim_bin =
-        Tau.Factory.CodingAgentShim.write(shim_bin,
+        CodingAgentShim.write(shim_bin,
           adapter: Tau.CodingAgents.Replay,
           replay_fixture: inspection_fixture(),
           branch: "feat/iso-probe-#{n}",
@@ -167,7 +191,12 @@ defmodule Tau.Factory.CodingAgentShimIsolationTest do
           extra_env: [{"XDG_DATA_HOME", xdg_probe}]
         )
 
-      # Wait for the run to complete (work_ready OR no_work_product both acceptable;
+      # Capture the worker's ws from the per-test registry BEFORE the run
+      # completes. The worker is still alive at this point (it opened the Port
+      # but hasn't received the Done event yet).
+      ws = get_worker_ws(registry_name, worker_id)
+
+      # Wait for the run to complete (work_ready OR worker_exit both acceptable;
       # we care about isolation, not the work outcome).
       assert_receive msg
                      when elem(msg, 0) in [:work_ready, :worker_exit] and
@@ -187,6 +216,7 @@ defmodule Tau.Factory.CodingAgentShimIsolationTest do
       assert MapSet.size(new_nested) == 0,
              "D-365: the shim MUST NOT create a nested ~/.tau/worktrees/... entry. " <>
                "New entries found: #{inspect(MapSet.to_list(new_nested))}. " <>
+               "ws=#{inspect(ws)}. Cwd backend must be selected (no nested worktree). " <>
                "Fails on current branch: Tau.Factory.CodingAgentShim is undefined."
     end
 
@@ -195,6 +225,11 @@ defmodule Tau.Factory.CodingAgentShimIsolationTest do
     # Full contract: the shim MUST pass its environment through to the adapter/
     # sub-subprocess so XDG_DATA_HOME/MIX_HOME/HEX_HOME namespace keys inherited
     # from the Worker resolve inside ws, NOT the host $HOME.
+    #
+    # The env-confinement assertion ALWAYS executes — no `if ws do` skip guard.
+    # If ws is nil (registry lookup failure), the test fails explicitly rather
+    # than silently skipping the assertion. A shim that lets env paths resolve
+    # to host $HOME violates D-365 (GAP-4 / F-5).
     @tag :ac_14
     @tag :d_365
     test "D-365: the shim's effective XDG_DATA_HOME (and MIX_HOME/HEX_HOME when set) resolve inside the worker's ws, not the host $HOME" do
@@ -211,7 +246,7 @@ defmodule Tau.Factory.CodingAgentShimIsolationTest do
       inspect_file = Path.join(tmp_dir, "env_inspection_#{n}.txt")
 
       shim_bin =
-        Tau.Factory.CodingAgentShim.write(shim_bin,
+        CodingAgentShim.write(shim_bin,
           adapter: Tau.CodingAgents.Replay,
           replay_fixture: inspection_fixture(),
           branch: "feat/env-probe-#{n}",
@@ -230,6 +265,12 @@ defmodule Tau.Factory.CodingAgentShimIsolationTest do
           registry: registry_name
         )
 
+      # Capture ws from the per-test registry before the run completes.
+      # Uses registry_name (the per-test dynamic registry), NOT the global
+      # Tau.Factory.WorkerRegistry — that global registry does NOT contain
+      # workers spawned with a per-test registry_name option.
+      ws = get_worker_ws(registry_name, worker_id)
+
       # Wait for the shim to complete.
       assert_receive msg
                      when elem(msg, 0) in [:work_ready, :worker_exit] and
@@ -241,31 +282,32 @@ defmodule Tau.Factory.CodingAgentShimIsolationTest do
       # sub-paths of the worker's ws (not the host $HOME).
       assert File.exists?(inspect_file),
              "D-365: shim must write its effective env to the inspect_env_file; file not found. " <>
+               "ws=#{inspect(ws)}. " <>
                "Fails on current branch: Tau.Factory.CodingAgentShim is undefined."
-
-      # Retrieve the worker's ws to validate paths are inside it.
-      {:ok, ws} =
-        case Registry.lookup(@worker_registry, worker_id) do
-          [{pid, _meta}] -> GenServer.call(pid, :get_ws)
-          [] -> {:ok, nil}
-        end
 
       env_text = File.read!(inspect_file)
 
       # D-365: every env path the shim reports must be a sub-path of ws.
+      # This assertion ALWAYS executes — there is no `if ws do` skip guard.
+      # A nil ws here indicates a registry-lookup failure (bug in the test
+      # setup), not a valid skip condition.
       env_lines =
         env_text
         |> String.split("\n", trim: true)
         |> Enum.filter(&String.contains?(&1, "="))
 
+      assert is_binary(ws) and String.length(ws) > 0,
+             "D-365: ws must be a non-empty string resolved from the per-test registry. " <>
+               "Got ws=#{inspect(ws)}. Check that get_worker_ws/2 uses registry_name, " <>
+               "not the global Tau.Factory.WorkerRegistry."
+
       for line <- env_lines do
         [_key, value] = String.split(line, "=", parts: 2)
 
-        if ws do
-          assert String.starts_with?(value, ws),
-                 "D-365: env var #{inspect(line)} must point inside ws=#{inspect(ws)}; " <>
-                   "got #{inspect(value)}. This would be a host-$HOME leak (GAP-4 / F-5)."
-        end
+        assert String.starts_with?(value, ws),
+               "D-365: env var #{inspect(line)} must point inside ws=#{inspect(ws)}; " <>
+                 "got #{inspect(value)}. This is a host-$HOME leak (GAP-4 / F-5). " <>
+                 "The shim MUST confine all XDG_*/MIX_HOME/HEX_HOME paths inside ws."
       end
     end
   end
