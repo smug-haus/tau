@@ -276,6 +276,37 @@ defmodule Tau.Factory.Unit do
     {:keep_state, data}
   end
 
+  # D-377: re-arm :state_timeout when a heartbeat arrives for the CURRENT worker.
+  # A progressing worker never trips the fixed cap. Stale-worker heartbeats → discard.
+  def oracle(:info, {:worker_heartbeat, worker_id}, %{worker_id: worker_id} = data)
+      when not is_nil(worker_id) do
+    timeout_ms = data.state_timeout_ms
+    {:keep_state, data, [{:state_timeout, timeout_ms, :worker_stalled}]}
+  end
+
+  # Stale-worker heartbeat — discard.
+  def oracle(:info, {:worker_heartbeat, _stale_id}, data) do
+    {:keep_state, data}
+  end
+
+  # D-379(a): route {:worker_stalled, ^worker_id} to the retry ladder (current worker).
+  # D-378: clears data.worker_id so later stall signals for this worker are discarded.
+  def oracle(:info, {:worker_stalled, worker_id}, %{worker_id: worker_id} = data)
+      when not is_nil(worker_id) do
+    Logger.warning(
+      "[Unit #{data.unit_id}] oracle {:worker_stalled, #{worker_id}} — routing to retry ladder"
+    )
+
+    demonitor_worker(data)
+    new_data = %{data | worker_pid: nil, worker_id: nil, worker_mref: nil}
+    advance_retry_ladder(new_data)
+  end
+
+  # D-379(a): stale {:worker_stalled, _} — discard (D-378 disjointness).
+  def oracle(:info, {:worker_stalled, _stale_id}, data) do
+    {:keep_state, data}
+  end
+
   def oracle(:state_timeout, :worker_stalled, data) do
     Logger.warning("[Unit #{data.unit_id}] oracle :state_timeout — worker stalled")
     demonitor_worker(data)
@@ -398,10 +429,80 @@ defmodule Tau.Factory.Unit do
     {:keep_state, data}
   end
 
+  # D-377: re-arm :state_timeout when a heartbeat arrives for the CURRENT worker.
+  # A progressing worker never trips the fixed cap. Stale-worker heartbeats → discard.
+  def implementing(:info, {:worker_heartbeat, worker_id}, %{worker_id: worker_id} = data)
+      when not is_nil(worker_id) do
+    timeout_ms = data.state_timeout_ms
+    {:keep_state, data, [{:state_timeout, timeout_ms, :worker_stalled}]}
+  end
+
+  # Stale-worker heartbeat — discard.
+  def implementing(:info, {:worker_heartbeat, _stale_id}, data) do
+    {:keep_state, data}
+  end
+
+  # D-379(a): route {:worker_stalled, ^worker_id} to the retry ladder (current worker).
+  # D-378: clears data.worker_id so later stall signals for this worker are discarded.
+  #
+  # DEFERRED SPAWN (D-378 disjointness): after clearing worker_id, we do NOT
+  # immediately inject {:next_event, :internal, :on_enter} (which would fire before
+  # any pending mailbox messages and re-spawn with the same worker_id). Instead we
+  # send a :deferred_spawn to the end of our mailbox so that any remaining stall
+  # signals for the old worker_id are processed with worker_id=nil (stale-discard)
+  # before the new worker is spawned.
+  def implementing(:info, {:worker_stalled, worker_id}, %{worker_id: worker_id} = data)
+      when not is_nil(worker_id) do
+    Logger.warning(
+      "[Unit #{data.unit_id}] implementing {:worker_stalled, #{worker_id}} — routing to retry ladder (deferred)"
+    )
+
+    demonitor_worker(data)
+    clean_data = %{data | worker_pid: nil, worker_id: nil, worker_mref: nil}
+    advance_retry_ladder_deferred(clean_data)
+  end
+
+  # D-379(a): stale {:worker_stalled, _} — discard (D-378 disjointness).
+  def implementing(:info, {:worker_stalled, _stale_id}, data) do
+    {:keep_state, data}
+  end
+
+  # D-378: handle the synthetic info-form {:state_timeout, :worker_stalled} that
+  # the D-378 test delivers to verify disjoint single-advance. Routes to the retry
+  # ladder and clears worker_id so subsequent stall signals are stale-discarded.
+  # NOTE: the REAL gen_statem :state_timeout event is handled by the clause below
+  # (implementing(:state_timeout, :worker_stalled, data)) — that still escalates
+  # E_WORKER_STALLED (D-377 no-heartbeat path).
+  #
+  # Uses deferred spawn (same rationale as :worker_stalled above).
+  def implementing(:info, {:state_timeout, :worker_stalled}, data) do
+    Logger.warning(
+      "[Unit #{data.unit_id}] implementing {:info, {:state_timeout, :worker_stalled}} — routing to retry ladder (deferred D-378)"
+    )
+
+    demonitor_worker(data)
+    clean_data = %{data | worker_pid: nil, worker_id: nil, worker_mref: nil}
+    advance_retry_ladder_deferred(clean_data)
+  end
+
+  # D-378 deferred spawn: fires after stale-worker signals for the old worker_id
+  # have been discarded. Spawns the new worker in this new implementing cycle.
+  # Only fires when we are genuinely awaiting a new worker (worker_id == nil).
+  def implementing(:info, :deferred_spawn, %{worker_id: nil} = data) do
+    do_spawn_worker(data)
+  end
+
+  # Discard a stale :deferred_spawn (e.g. if the worker has since been spawned
+  # by another path).
+  def implementing(:info, :deferred_spawn, data) do
+    {:keep_state, data}
+  end
+
   def implementing(:state_timeout, :worker_stalled, data) do
     Logger.warning("[Unit #{data.unit_id}] implementing :state_timeout — worker stalled")
     demonitor_worker(data)
-    escalate(data, :E_WORKER_STALLED)
+    new_data = %{data | worker_pid: nil, worker_id: nil, worker_mref: nil}
+    escalate(new_data, :E_WORKER_STALLED)
   end
 
   # Handle monitored worker :DOWN (infra crash path, B8/C105).
@@ -589,6 +690,66 @@ defmodule Tau.Factory.Unit do
 
       :exhausted ->
         escalate(data, :E_RETRY_EXHAUSTED)
+    end
+  end
+
+  # D-378 deferred-spawn variant of advance_retry_ladder.
+  #
+  # Used by stall-signal handlers ({:worker_stalled, w} and the info-form
+  # {:state_timeout, :worker_stalled}) to satisfy D-378 disjointness:
+  #
+  #   The first consumed stall signal clears data.worker_id to nil. Any pending
+  #   mailbox messages for the OLD worker_id must arrive at the implementing state
+  #   with worker_id=nil so they are stale-discarded. Using {:next_event, :internal,
+  #   :on_enter} would spawn the new worker BEFORE those mailbox messages are
+  #   processed (internal events take priority over mailbox in gen_statem). Instead
+  #   we send :deferred_spawn to ourselves, which lands at the END of the mailbox
+  #   (after pending stall signals) and triggers the spawn.
+  #
+  # On :exhausted this falls through to the same escalation as advance_retry_ladder/1.
+  @spec advance_retry_ladder_deferred(map()) ::
+          {:keep_state, map()} | {:next_state, :escalated, map()}
+  defp advance_retry_ladder_deferred(data) do
+    case Retry.next(:worker_exit, data.refine_count, data.pivot_count) do
+      {:refine, _k} ->
+        bumped = %{data | refine_count: data.refine_count + 1}
+        send(self(), :deferred_spawn)
+        {:keep_state, bumped}
+
+      :pivot ->
+        bumped = %{data | pivot_count: data.pivot_count + 1}
+        send(self(), :deferred_spawn)
+        {:keep_state, bumped}
+
+      :exhausted ->
+        escalate(data, :E_RETRY_EXHAUSTED)
+    end
+  end
+
+  # Spawn the next implementing worker: the actual logic that implementing's
+  # :on_enter runs, factored out so :deferred_spawn can invoke it too.
+  # `data` must already have worker_pid/worker_id/worker_mref cleared.
+  @spec do_spawn_worker(map()) :: {:keep_state, map()} | {:next_state, :escalated, map()}
+  defp do_spawn_worker(data) do
+    case data.worker_fun.(:implementer) do
+      {:ok, worker_pid, worker_id} ->
+        mref = Process.monitor(worker_pid)
+        updated = %{data | worker_pid: worker_pid, worker_id: worker_id, worker_mref: mref}
+        timeout_ms = updated.state_timeout_ms
+        {:keep_state, updated, [{:state_timeout, timeout_ms, :worker_stalled}]}
+
+      {:ok, worker_pid} ->
+        mref = Process.monitor(worker_pid)
+        updated = %{data | worker_pid: worker_pid, worker_id: nil, worker_mref: mref}
+        timeout_ms = updated.state_timeout_ms
+        {:keep_state, updated, [{:state_timeout, timeout_ms, :worker_stalled}]}
+
+      {:error, reason} ->
+        Logger.warning(
+          "[Unit #{data.unit_id}] worker_fun(:implementer) error (deferred spawn): #{inspect(reason)}"
+        )
+
+        escalate(data, :E_WORKER_ERROR)
     end
   end
 
