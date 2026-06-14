@@ -198,7 +198,7 @@ defmodule Tau.Factory.BriefAssembler do
     end
   end
 
-  # String members (e.g. :files, :specs, :resources) pass through unchanged.
+  # String members (e.g. :files) pass through unchanged.
   defp render_set_member(member) when is_binary(member), do: member
 
   # Codepoint tuples {path, :"line_NN"} — produced by IssueSelector for any
@@ -217,6 +217,15 @@ defmodule Tau.Factory.BriefAssembler do
 
     "#{path}:#{line_number}"
   end
+
+  # Atom members (e.g. :spec_FACTORY_CORE from extract_specs/1, :resource_gh_api
+  # from label-derived resources) — render as their string name so spec identifiers
+  # remain legible in the assembled brief (D-373 totality over real scope types).
+  defp render_set_member(member) when is_atom(member), do: Atom.to_string(member)
+
+  # Catch-all: any unforeseen member shape falls back to inspect/1 so the renderer
+  # can never raise on an unexpected type (D-373 "never raises" is absolute).
+  defp render_set_member(other), do: inspect(other)
 
   defp render_list_or_none([]), do: "(none declared)"
 
