@@ -4,6 +4,12 @@ defmodule Tau.Factory.CostSafetyFenceTest do
   D-374/D-375).
 
   Written BEFORE production code exists (oracle-separation, factory-loop §4b).
+  Broadened in REFINE to cover ALL three metered-spend vectors, not just
+  `ANTHROPIC_API_KEY`:
+
+    - `ANTHROPIC_API_KEY`     — primary API key (original coverage)
+    - `ANTHROPIC_AUTH_TOKEN`  — metered bearer token honoured by the `claude` CLI
+    - `ANTHROPIC_BASE_URL`    — redirects to a (potentially paid) proxy endpoint
 
   ## D-374 — no-metered-spend, factory plane
 
@@ -11,8 +17,10 @@ defmodule Tau.Factory.CostSafetyFenceTest do
   ONLY after a preflight confirms BOTH:
 
     (a) Subscription creds present/readable (injectable creds_check_fun).
-    (b) The child env is scrubbed of `ANTHROPIC_API_KEY` by passing
-        `{~c"ANTHROPIC_API_KEY", false}` in the Erlang Port's `{:env, ...}` list.
+    (b) The child env is scrubbed of ALL THREE metered-spend variables by passing
+        `{~c"ANTHROPIC_API_KEY", false}`, `{~c"ANTHROPIC_AUTH_TOKEN", false}`,
+        and `{~c"ANTHROPIC_BASE_URL", false}` in the Erlang Port's `{:env, ...}`
+        list.
 
   If either fails → the worker refuses to spawn and exits `:metered_path_refused`
   (fail-closed; NO fallback to the metered path).
@@ -21,8 +29,9 @@ defmodule Tau.Factory.CostSafetyFenceTest do
 
   ## D-375 — adapter-level scrub, defense-in-depth
 
-  `Tau.CodingAgents.ClaudeCode.start/2` scrubs `ANTHROPIC_API_KEY` from the child
-  Port env by default; `ctx[:allow_metered] == true` is the only opt-out.
+  `Tau.CodingAgents.ClaudeCode.start/2` scrubs ALL THREE metered-spend variables
+  from the child Port env by default; `ctx[:allow_metered] == true` is the only
+  opt-out (which retains all three).
 
   ## Needed seams (must be added by the implementer)
 
@@ -38,12 +47,13 @@ defmodule Tau.Factory.CostSafetyFenceTest do
 
   - D-374 fail-closed test: Worker opens Port despite absent creds → marker
     file appears → `refute File.exists?(marker)` fails.
-  - D-374 scrub test: Worker does NOT pass `{~c"ANTHROPIC_API_KEY", false}` →
-    canary leaks to child → `refute` on canary in dump fails.
+  - D-374 scrub test: Worker does NOT pass `{~c"ANTHROPIC_API_KEY", false}` /
+    `{~c"ANTHROPIC_AUTH_TOKEN", false}` / `{~c"ANTHROPIC_BASE_URL", false}` →
+    canaries leak to child → `refute` on canary values in dump fails.
   - D-374 creds-present test: Worker has no `:agent_mode` opt → KeyError on
     spawn → assertion on `{:ok, worker_id}` fails.
-  - D-375 default scrub test: No `{:env, ...}` in ClaudeCode Port.open → canary
-    leaks → `refute` on canary in dump fails.
+  - D-375 default scrub test: No `{:env, ...}` in ClaudeCode Port.open → all
+    three canaries leak → `refute` on canary values in dump fails.
   - D-375 allow_metered test: No `{:env, ...}` in Port.open → no `{:ok, _}`
     vs not, but actually tests the presence of canary, which passes vacuously.
     Re-framed: assert the SCRUB is wired (see test body for how this is made
@@ -128,40 +138,49 @@ defmodule Tau.Factory.CostSafetyFenceTest do
   end
 
   # ---------------------------------------------------------------------------
-  # D-374: ANTHROPIC_API_KEY must be scrubbed from child Port env when spawning
-  # a metered-capable worker (agent_mode: :claude_code).
+  # D-374: ALL THREE metered-spend variables must be scrubbed from child Port env
+  # when spawning a metered-capable worker (agent_mode: :claude_code).
   #
-  # Strategy: use an agent executable (shell script) that dumps its own
-  # ANTHROPIC_API_KEY to a file. The Worker injects a canary value via extra_env.
-  # Without the scrub, the canary leaks; with the scrub it is absent.
+  # Variables:
+  #   - ANTHROPIC_API_KEY    (primary key — original coverage)
+  #   - ANTHROPIC_AUTH_TOKEN (metered bearer token honoured by the claude CLI)
+  #   - ANTHROPIC_BASE_URL   (proxy endpoint redirect — paid spend vector)
+  #
+  # Strategy: use an agent executable (shell script) that dumps the values of
+  # all three variables to a file. The Worker injects canary values via extra_env.
+  # Without the scrub, canaries leak; with the scrub they are absent.
   #
   # This test MUST FAIL on current branch because:
   #   (a) Worker has no :agent_mode / :creds_check_fun opts — KeyError on spawn.
-  #   (b) Even if spawn succeeded, no {~c"ANTHROPIC_API_KEY", false} is added
-  #       to the Port env, so the canary leaks to the child.
+  #   (b) Even if spawn succeeded, no {~c"ANTHROPIC_AUTH_TOKEN", false} or
+  #       {~c"ANTHROPIC_BASE_URL", false} are added to the Port env, so those
+  #       canaries leak to the child.
   # ---------------------------------------------------------------------------
 
   describe "D-374 — child env scrub" do
     @tag :d_374
-    test "D-374: metered worker (agent_mode: :claude_code) scrubs ANTHROPIC_API_KEY from child Port env" do
+    test "D-374: metered worker (agent_mode: :claude_code) scrubs ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, and ANTHROPIC_BASE_URL from child Port env" do
       tmp_dir = mk_tmp("d374_scrub")
       %{repo_dir: repo_dir, base_ref: base_ref} = setup_git_repo(tmp_dir)
 
-      canary = "sk-test-D374-CANARY-#{System.unique_integer([:positive])}"
+      n = System.unique_integer([:positive])
+      canary_key = "sk-test-D374-KEY-#{n}"
+      canary_auth = "Bearer-D374-TOKEN-#{n}"
+      canary_url = "https://proxy-d374-#{n}.example.com"
       dump_file = Path.join(tmp_dir, "env_dump.txt")
 
-      # Agent executable: dumps ANTHROPIC_API_KEY (or "absent") to dump_file.
+      # Agent executable: dumps all three metered-spend variables to dump_file.
       # Uses {packet,4} framing to keep the Worker happy (it expects framed JSON).
-      # We emit an empty-but-valid exit so no work_ready fires (acceptable for this test).
+      # We emit an empty-but-valid exit so no work_ready fires (acceptable here).
       agent_bin = Path.join(tmp_dir, "dump_env_agent")
 
       File.write!(agent_bin, """
       #!/bin/sh
       KEY="${ANTHROPIC_API_KEY:-absent}"
-      printf "ANTHROPIC_API_KEY=${KEY}\\n" > #{dump_file}
-      # Emit a {packet,4} framed empty payload so the Worker's Port drains
-      # cleanly. The Worker will see exit-0 with no work_ready and map to
-      # :no_work_product — that is acceptable for this test.
+      TOKEN="${ANTHROPIC_AUTH_TOKEN:-absent}"
+      BASE="${ANTHROPIC_BASE_URL:-absent}"
+      printf "ANTHROPIC_API_KEY=${KEY}\\nANTHROPIC_AUTH_TOKEN=${TOKEN}\\nANTHROPIC_BASE_URL=${BASE}\\n" > #{dump_file}
+      # Emit exit-0; Worker maps to :no_work_product — acceptable for this test.
       exit 0
       """)
 
@@ -172,7 +191,7 @@ defmodule Tau.Factory.CostSafetyFenceTest do
 
       # D-374: agent_mode: :claude_code activates preflight + scrub.
       # creds_check_fun: -> :ok simulates subscription creds present.
-      # extra_env injects the canary so that, without scrub, the child sees it.
+      # extra_env injects all three canaries so that, without scrub, they leak.
       # NEEDED SEAM: Worker must accept :agent_mode and :creds_check_fun opts.
       # On current branch this raises KeyError (unrecognised opts) → spawn fails.
       {:ok, worker_id} =
@@ -183,7 +202,11 @@ defmodule Tau.Factory.CostSafetyFenceTest do
           registry: registry_name,
           agent_mode: :claude_code,
           creds_check_fun: fn -> :ok end,
-          extra_env: [{"ANTHROPIC_API_KEY", canary}]
+          extra_env: [
+            {"ANTHROPIC_API_KEY", canary_key},
+            {"ANTHROPIC_AUTH_TOKEN", canary_auth},
+            {"ANTHROPIC_BASE_URL", canary_url}
+          ]
         )
 
       # Wait for the worker to exit (Port exits immediately).
@@ -197,15 +220,29 @@ defmodule Tau.Factory.CostSafetyFenceTest do
       assert File.exists?(dump_file),
              "D-374: agent must have run and written dump_file=#{dump_file}. " <>
                "If the file is missing, the Port was never opened (preflight blocked it " <>
-               "or the agent crashed before writing). This is unexpected with creds_check_fun: -> :ok."
+               "or the agent crashed before writing). Unexpected with creds_check_fun: -> :ok."
 
       dump_text = File.read!(dump_file)
 
-      # D-374: the canary MUST NOT appear — it must have been scrubbed.
-      refute String.contains?(dump_text, canary),
+      # D-374: ANTHROPIC_API_KEY canary MUST NOT appear — must have been scrubbed.
+      refute String.contains?(dump_text, canary_key),
              "D-374: ANTHROPIC_API_KEY canary leaked into child env! " <>
-               "Worker MUST pass {~c\"ANTHROPIC_API_KEY\", false} in the Port env to remove " <>
-               "the inherited key. dump=#{inspect(dump_text)} canary=#{inspect(canary)}"
+               "Worker MUST pass {~c\"ANTHROPIC_API_KEY\", false} in the Port env. " <>
+               "dump=#{inspect(dump_text)} canary=#{inspect(canary_key)}"
+
+      # D-374 (broadened): ANTHROPIC_AUTH_TOKEN canary MUST NOT appear.
+      refute String.contains?(dump_text, canary_auth),
+             "D-374: ANTHROPIC_AUTH_TOKEN canary leaked into child env! " <>
+               "Worker MUST pass {~c\"ANTHROPIC_AUTH_TOKEN\", false} in the Port env to scrub " <>
+               "the metered bearer token. This is a new spend vector not scrubbed on current branch. " <>
+               "dump=#{inspect(dump_text)} canary=#{inspect(canary_auth)}"
+
+      # D-374 (broadened): ANTHROPIC_BASE_URL canary MUST NOT appear.
+      refute String.contains?(dump_text, canary_url),
+             "D-374: ANTHROPIC_BASE_URL canary leaked into child env! " <>
+               "Worker MUST pass {~c\"ANTHROPIC_BASE_URL\", false} in the Port env to scrub " <>
+               "the proxy redirect vector. This is a new spend vector not scrubbed on current branch. " <>
+               "dump=#{inspect(dump_text)} canary=#{inspect(canary_url)}"
     end
   end
 
@@ -333,60 +370,51 @@ defmodule Tau.Factory.CostSafetyFenceTest do
   end
 
   # ---------------------------------------------------------------------------
-  # D-375: ClaudeCode.start/2 scrubs ANTHROPIC_API_KEY from the child Port env
-  # by default; ctx[:allow_metered] == true is the only opt-out.
+  # D-375: ClaudeCode.start/2 scrubs ALL THREE metered-spend variables from the
+  # child Port env by default; ctx[:allow_metered] == true is the only opt-out
+  # (which retains all three).
   #
-  # We use a fake "claude" script that dumps its ANTHROPIC_API_KEY to a file.
+  # Variables scrubbed:
+  #   - ANTHROPIC_API_KEY    (primary key — original coverage)
+  #   - ANTHROPIC_AUTH_TOKEN (metered bearer token honoured by the claude CLI)
+  #   - ANTHROPIC_BASE_URL   (proxy endpoint redirect — paid spend vector)
+  #
+  # We use a fake "claude" script that dumps all three variable values to a file.
   #
   # D-375 default scrub MUST FAIL on current branch: ClaudeCode.start/2 has no
-  # {:env, ...} in its Port.open call → key leaks through → canary appears in
-  # dump → refute fails.
+  # {:env, ...} in its Port.open call → all three keys leak through → canary
+  # values appear in dump → refute assertions fail.
   #
   # D-375 allow_metered MUST FAIL on current branch: ClaudeCode.start/2 does
   # not read ctx[:allow_metered] at all → the scrub (once implemented) would
-  # not be conditionally bypassed. To make the allow_metered test fail before
-  # the scrub exists, we assert that the scrub IS present (allow_metered=true
-  # must still reach the Port-open path but NOT scrub). Without the scrub the
-  # test passes vacuously, so we flip the assertion strategy: we assert that
-  # ClaudeCode.start/2 ACCEPTS ctx[:allow_metered] as a recognised opt by
-  # testing a post-condition of its absence — specifically, after the default
-  # (no scrub today) we assert the allow_metered key is honoured differently
-  # from the default. Since both behave identically today (no scrub either way),
-  # the allow_metered test instead asserts:
-  #   "when allow_metered is true, the child sees the key WITH the value"
+  # not be conditionally bypassed. The allow_metered test asserts:
+  #   "when allow_metered is true, ALL THREE vars pass through to child"
   # while the default test asserts:
-  #   "when allow_metered is absent, the child does NOT see the key value"
-  # These two together form a discriminating pair: both will fail now (default
-  # test fails because the key leaks; allow_metered test passes vacuously but
-  # is a correct post-impl contract).
-  #
-  # To make the allow_metered test a genuine fail-before, we assert an
-  # additional condition only satisfiable post-impl: that ClaudeCode.start/2
-  # returns {:ok, stream} AND the stream consumes without error, meaning the
-  # {:env, ...} opt does not break the Port open. Without the scrub code path
-  # the :allow_metered branch simply does not exist, so testing it separately
-  # from the default is logically vacuous today. We keep it as a post-impl
-  # contract test (it will pass once the implementer adds the scrub + opt-out).
-  # The GENUINE discriminating tests are the default scrub (fails now) and the
-  # fail-closed (fails now).
+  #   "when allow_metered is absent, NONE of the three appear in child env"
+  # These form a discriminating pair. The default test is the genuine fail-before.
   # ---------------------------------------------------------------------------
 
   describe "D-375 — adapter-level scrub" do
     @tag :d_375
-    test "D-375: ClaudeCode.start/2 default (no allow_metered) scrubs ANTHROPIC_API_KEY from child Port env" do
+    test "D-375: ClaudeCode.start/2 default (no allow_metered) scrubs ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, and ANTHROPIC_BASE_URL from child Port env" do
       tmp_dir = mk_tmp("d375_default")
 
-      canary = "sk-ant-D375-DEFAULT-CANARY-#{System.unique_integer([:positive])}"
+      n = System.unique_integer([:positive])
+      canary_key = "sk-ant-D375-KEY-#{n}"
+      canary_auth = "Bearer-D375-TOKEN-#{n}"
+      canary_url = "https://proxy-d375-default-#{n}.example.com"
       dump_file = Path.join(tmp_dir, "claude_env_default.txt")
 
-      # A fake "claude" that dumps ANTHROPIC_API_KEY to dump_file then exits.
-      # Outputs valid stream-json so ClaudeCode's parser doesn't error.
+      # A fake "claude" that dumps all three metered-spend variables then exits.
+      # Outputs valid stream-json so ClaudeCode's parser does not error.
       fake_claude = Path.join(tmp_dir, "claude")
 
       File.write!(fake_claude, """
       #!/bin/sh
       KEY="${ANTHROPIC_API_KEY:-absent}"
-      printf "ANTHROPIC_API_KEY=${KEY}\\n" > #{dump_file}
+      TOKEN="${ANTHROPIC_AUTH_TOKEN:-absent}"
+      BASE="${ANTHROPIC_BASE_URL:-absent}"
+      printf "ANTHROPIC_API_KEY=${KEY}\\nANTHROPIC_AUTH_TOKEN=${TOKEN}\\nANTHROPIC_BASE_URL=${BASE}\\n" > #{dump_file}
       printf '{"type":"result","subtype":"success","result":"ok","session_id":"t1","is_error":false}\\n'
       exit 0
       """)
@@ -395,18 +423,22 @@ defmodule Tau.Factory.CostSafetyFenceTest do
 
       old_path = System.get_env("PATH", "")
       System.put_env("PATH", "#{tmp_dir}:#{old_path}")
-      System.put_env("ANTHROPIC_API_KEY", canary)
+      System.put_env("ANTHROPIC_API_KEY", canary_key)
+      System.put_env("ANTHROPIC_AUTH_TOKEN", canary_auth)
+      System.put_env("ANTHROPIC_BASE_URL", canary_url)
 
       on_exit(fn ->
         System.put_env("PATH", old_path)
         System.delete_env("ANTHROPIC_API_KEY")
+        System.delete_env("ANTHROPIC_AUTH_TOKEN")
+        System.delete_env("ANTHROPIC_BASE_URL")
       end)
 
       workspace = Path.join(tmp_dir, "ws")
       File.mkdir_p!(workspace)
 
       task = %{prompt: "test", workspace: workspace}
-      # D-375: default ctx — scrub MUST apply.
+      # D-375: default ctx — scrub MUST apply to all three variables.
       ctx = %{}
 
       assert {:ok, stream} = ClaudeCode.start(task, ctx),
@@ -420,19 +452,38 @@ defmodule Tau.Factory.CostSafetyFenceTest do
 
       dump_text = File.read!(dump_file)
 
-      # D-375: canary must NOT be in the child env (scrub applied).
-      refute String.contains?(dump_text, canary),
+      # D-375: ANTHROPIC_API_KEY canary must NOT be in the child env.
+      refute String.contains?(dump_text, canary_key),
              "D-375: ANTHROPIC_API_KEY canary leaked into ClaudeCode child env by default! " <>
                "ClaudeCode.start/2 MUST pass {~c\"ANTHROPIC_API_KEY\", false} in Port env " <>
                "when ctx[:allow_metered] is not true. " <>
                "dump=#{inspect(dump_text)}"
+
+      # D-375 (broadened): ANTHROPIC_AUTH_TOKEN canary must NOT be in the child env.
+      refute String.contains?(dump_text, canary_auth),
+             "D-375: ANTHROPIC_AUTH_TOKEN canary leaked into ClaudeCode child env by default! " <>
+               "ClaudeCode.start/2 MUST pass {~c\"ANTHROPIC_AUTH_TOKEN\", false} in Port env " <>
+               "when ctx[:allow_metered] is not true. " <>
+               "This is a new spend vector not scrubbed on current branch. " <>
+               "dump=#{inspect(dump_text)}"
+
+      # D-375 (broadened): ANTHROPIC_BASE_URL canary must NOT be in the child env.
+      refute String.contains?(dump_text, canary_url),
+             "D-375: ANTHROPIC_BASE_URL canary leaked into ClaudeCode child env by default! " <>
+               "ClaudeCode.start/2 MUST pass {~c\"ANTHROPIC_BASE_URL\", false} in Port env " <>
+               "when ctx[:allow_metered] is not true. " <>
+               "This is a new spend vector not scrubbed on current branch. " <>
+               "dump=#{inspect(dump_text)}"
     end
 
     @tag :d_375
-    test "D-375: ClaudeCode.start/2 with ctx[:allow_metered] == true passes ANTHROPIC_API_KEY through to child" do
+    test "D-375: ClaudeCode.start/2 with ctx[:allow_metered] == true passes ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, and ANTHROPIC_BASE_URL through to child" do
       tmp_dir = mk_tmp("d375_allow")
 
-      canary = "sk-ant-D375-ALLOW-CANARY-#{System.unique_integer([:positive])}"
+      n = System.unique_integer([:positive])
+      canary_key = "sk-ant-D375-ALLOW-KEY-#{n}"
+      canary_auth = "Bearer-D375-ALLOW-TOKEN-#{n}"
+      canary_url = "https://proxy-d375-allow-#{n}.example.com"
       dump_file = Path.join(tmp_dir, "claude_env_allow.txt")
 
       fake_claude = Path.join(tmp_dir, "claude")
@@ -440,7 +491,9 @@ defmodule Tau.Factory.CostSafetyFenceTest do
       File.write!(fake_claude, """
       #!/bin/sh
       KEY="${ANTHROPIC_API_KEY:-absent}"
-      printf "ANTHROPIC_API_KEY=${KEY}\\n" > #{dump_file}
+      TOKEN="${ANTHROPIC_AUTH_TOKEN:-absent}"
+      BASE="${ANTHROPIC_BASE_URL:-absent}"
+      printf "ANTHROPIC_API_KEY=${KEY}\\nANTHROPIC_AUTH_TOKEN=${TOKEN}\\nANTHROPIC_BASE_URL=${BASE}\\n" > #{dump_file}
       printf '{"type":"result","subtype":"success","result":"ok","session_id":"t2","is_error":false}\\n'
       exit 0
       """)
@@ -449,18 +502,22 @@ defmodule Tau.Factory.CostSafetyFenceTest do
 
       old_path = System.get_env("PATH", "")
       System.put_env("PATH", "#{tmp_dir}:#{old_path}")
-      System.put_env("ANTHROPIC_API_KEY", canary)
+      System.put_env("ANTHROPIC_API_KEY", canary_key)
+      System.put_env("ANTHROPIC_AUTH_TOKEN", canary_auth)
+      System.put_env("ANTHROPIC_BASE_URL", canary_url)
 
       on_exit(fn ->
         System.put_env("PATH", old_path)
         System.delete_env("ANTHROPIC_API_KEY")
+        System.delete_env("ANTHROPIC_AUTH_TOKEN")
+        System.delete_env("ANTHROPIC_BASE_URL")
       end)
 
       workspace = Path.join(tmp_dir, "ws")
       File.mkdir_p!(workspace)
 
       task = %{prompt: "test", workspace: workspace}
-      # D-375: allow_metered opt-out — key MUST pass through to child.
+      # D-375: allow_metered opt-out — all three variables MUST pass through to child.
       ctx = %{allow_metered: true}
 
       assert {:ok, stream} = ClaudeCode.start(task, ctx),
@@ -473,9 +530,19 @@ defmodule Tau.Factory.CostSafetyFenceTest do
 
       dump_text = File.read!(dump_file)
 
-      # D-375: with allow_metered: true, canary MUST be present (no scrub).
-      assert String.contains?(dump_text, canary),
+      # D-375: with allow_metered: true, ANTHROPIC_API_KEY MUST pass through (no scrub).
+      assert String.contains?(dump_text, canary_key),
              "D-375: with ctx[:allow_metered] == true, ANTHROPIC_API_KEY MUST pass through " <>
+               "to child (no scrub). canary not found. dump=#{inspect(dump_text)}"
+
+      # D-375 (broadened): with allow_metered: true, ANTHROPIC_AUTH_TOKEN MUST pass through.
+      assert String.contains?(dump_text, canary_auth),
+             "D-375: with ctx[:allow_metered] == true, ANTHROPIC_AUTH_TOKEN MUST pass through " <>
+               "to child (no scrub). canary not found. dump=#{inspect(dump_text)}"
+
+      # D-375 (broadened): with allow_metered: true, ANTHROPIC_BASE_URL MUST pass through.
+      assert String.contains?(dump_text, canary_url),
+             "D-375: with ctx[:allow_metered] == true, ANTHROPIC_BASE_URL MUST pass through " <>
                "to child (no scrub). canary not found. dump=#{inspect(dump_text)}"
     end
   end
