@@ -32,7 +32,13 @@ defmodule Tau.Factory.UnitHeartbeatLivenessTest do
   Every test name and @tag carries D-377, D-378, or D-379.
   """
 
-  use ExUnit.Case, async: true
+  # async: false — this module exercises timing-sensitive OTP state_timeout
+  # behaviour. Under full-suite concurrency (100+ test processes) the BEAM
+  # scheduler starves a spawned heartbeat sender, causing false state_timeout
+  # trips in D-377. Serialising the module eliminates scheduler starvation as
+  # a confound; the individual tests still start uniquely-named supervisors so
+  # there is no inter-test resource collision.
+  use ExUnit.Case, async: false
 
   @moduletag :capture_log
 
@@ -156,10 +162,12 @@ defmodule Tau.Factory.UnitHeartbeatLivenessTest do
       start_scheduler(scheduler_name)
       start_supervised!({@unit_supervisor, name: sup_name}, id: sup_name)
 
-      # Very short timeout so the test is fast.  Without heartbeat-reset the Unit
-      # would trip at state_timeout_ms.  With D-377 each heartbeat re-arms the
-      # timer, so the Unit stays in :implementing as long as pulses arrive.
-      state_timeout_ms = 80
+      # Generous timeout — 1000ms gives the BEAM scheduler ample room under full
+      # suite load (100+ concurrent tests) without being so tight that jitter
+      # causes a false trip.  Without D-377 heartbeat-reset the Unit would still
+      # escalate E_WORKER_STALLED at state_timeout_ms; with D-377 each pulse
+      # re-arms the timer so the Unit stays in :implementing indefinitely.
+      state_timeout_ms = 1_000
 
       oracle_worker_id = "w-hb-oracle-#{System.unique_integer([:positive])}"
       impl_worker_id = "w-hb-impl-#{System.unique_integer([:positive])}"
@@ -187,24 +195,30 @@ defmodule Tau.Factory.UnitHeartbeatLivenessTest do
       assert match?({:implementing, _}, result),
              "D-377: Unit must reach :implementing; got #{inspect(result)}"
 
-      # Drive heartbeats every 40ms (< timeout 80ms) for 3× the old fixed cap.
-      # Without D-377 the Unit would escalate E_WORKER_STALLED at 80ms.
-      # With D-377 each pulse re-arms the timer so the Unit stays in :implementing.
-      driver =
-        spawn(fn ->
-          hb_loop(unit_pid, impl_worker_id, 35, 3 * state_timeout_ms)
-        end)
+      # Drive heartbeats from the TEST PROCESS at 200ms intervals (well below the
+      # 1000ms state_timeout_ms) for 3× the deadline (3000ms total).  Driving
+      # from the test process — rather than a spawned ticker — ensures the sends
+      # are not subject to a separate process being starved by the scheduler under
+      # full-suite load.  The test process itself is always the scheduling victim
+      # here, and it uses Process.sleep between sends, which is deterministic.
+      #
+      # Without D-377: the state_timeout fires at 1000ms on the first iteration
+      # (no reset clause) and the Unit escalates → test fails.
+      # With D-377: each {:worker_heartbeat, impl_worker_id} re-arms the 1000ms
+      # timer, so the Unit is still :implementing at 3000ms.
+      hb_interval_ms = 200
+      total_hb_duration_ms = 3 * state_timeout_ms
 
-      # Wait 3× the old cap — the Unit must NOT have escalated.
-      Process.sleep(3 * state_timeout_ms + 50)
+      hb_loop_from_test(unit_pid, impl_worker_id, hb_interval_ms, total_hb_duration_ms)
 
+      # Immediately after the heartbeat loop finishes, the Unit must still be in
+      # :implementing (the last heartbeat re-armed the timer; no escalation).
       {state_after, _data} = :sys.get_state(unit_pid)
 
-      send(driver, :stop)
-
       assert state_after == :implementing,
-             "D-377: Unit fed {:worker_heartbeat, current_id} at sub-timeout intervals " <>
-               "MUST stay in :implementing past the old fixed cap (#{3 * state_timeout_ms}ms). " <>
+             "D-377: Unit fed {:worker_heartbeat, current_id} at #{hb_interval_ms}ms " <>
+               "intervals (well below #{state_timeout_ms}ms state_timeout) MUST stay " <>
+               "in :implementing past the old fixed cap (#{total_hb_duration_ms}ms total). " <>
                "Got state=#{inspect(state_after)}. " <>
                "FAIL-BEFORE: no {:worker_heartbeat, _} clause exists — the Unit trips " <>
                ":state_timeout at #{state_timeout_ms}ms and escalates E_WORKER_STALLED."
@@ -603,17 +617,17 @@ defmodule Tau.Factory.UnitHeartbeatLivenessTest do
   # Private helpers
   # ---------------------------------------------------------------------------
 
-  # Drive {:worker_heartbeat, worker_id} pulses at interval_ms for up_to_ms.
-  defp hb_loop(unit_pid, worker_id, interval_ms, up_to_ms) when up_to_ms > 0 do
+  # Drive {:worker_heartbeat, worker_id} pulses from the TEST PROCESS at
+  # interval_ms for up_to_ms total wall time.  Driving from the test process
+  # (rather than a spawned ticker) ensures the sends are not subject to
+  # scheduler starvation of a separate process under full-suite load.
+  defp hb_loop_from_test(_unit_pid, _worker_id, _interval_ms, remaining_ms)
+       when remaining_ms <= 0,
+       do: :ok
+
+  defp hb_loop_from_test(unit_pid, worker_id, interval_ms, remaining_ms) do
     send(unit_pid, {:worker_heartbeat, worker_id})
-
-    receive do
-      :stop -> :ok
-    after
-      interval_ms ->
-        hb_loop(unit_pid, worker_id, interval_ms, up_to_ms - interval_ms)
-    end
+    Process.sleep(interval_ms)
+    hb_loop_from_test(unit_pid, worker_id, interval_ms, remaining_ms - interval_ms)
   end
-
-  defp hb_loop(_unit_pid, _worker_id, _interval_ms, _up_to_ms), do: :ok
 end
