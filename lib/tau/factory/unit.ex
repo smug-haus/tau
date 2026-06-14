@@ -177,7 +177,11 @@ defmodule Tau.Factory.Unit do
       # Incremented on every snapshot_state call so backward-edge re-entries each
       # produce a distinct key, making MAX(id) in latest_unit_snapshots/1 track
       # the genuinely-latest FSM state rather than the forward-stale state.
-      entry_seq: 0
+      entry_seq: 0,
+      # D-362: captured from {:work_ready, worker_id, branch, head_sha} (3-tuple seam).
+      # Initialised to nil; stays nil when the legacy 2-tuple seam is used (D-363).
+      head_sha: nil,
+      branch: nil
     }
 
     # Transition immediately to planned state, which triggers admission.
@@ -235,10 +239,20 @@ defmodule Tau.Factory.Unit do
   end
 
   # D-326: gate on work_ready keyed by the CURRENT worker_id (3-tuple seam).
-  def oracle(:info, {:work_ready, worker_id, _branch, _head_sha}, %{worker_id: worker_id} = data)
+  # D-362: capture branch and head_sha into data on transition.
+  def oracle(:info, {:work_ready, worker_id, branch, head_sha}, %{worker_id: worker_id} = data)
       when not is_nil(worker_id) do
     Process.demonitor(data.worker_mref, [:flush])
-    new_data = %{data | worker_pid: nil, worker_id: nil, worker_mref: nil}
+
+    new_data = %{
+      data
+      | worker_pid: nil,
+        worker_id: nil,
+        worker_mref: nil,
+        branch: branch,
+        head_sha: head_sha
+    }
+
     {:next_state, :implementing, new_data, [{:next_event, :internal, :on_enter}]}
   end
 
@@ -312,14 +326,24 @@ defmodule Tau.Factory.Unit do
 
   # D-326 §4 B8: gate implementing → gating ONLY on work_ready keyed by the
   # CURRENT worker_id (the sole completion trigger — never bare exit / :worker_done).
+  # D-362: capture branch and head_sha into data on transition.
   def implementing(
         :info,
-        {:work_ready, worker_id, _branch, _head_sha},
+        {:work_ready, worker_id, branch, head_sha},
         %{worker_id: worker_id} = data
       )
       when not is_nil(worker_id) do
     Process.demonitor(data.worker_mref, [:flush])
-    new_data = %{data | worker_pid: nil, worker_id: nil, worker_mref: nil}
+
+    new_data = %{
+      data
+      | worker_pid: nil,
+        worker_id: nil,
+        worker_mref: nil,
+        branch: branch,
+        head_sha: head_sha
+    }
+
     {:next_state, :gating, new_data, [{:next_event, :internal, :on_enter}]}
   end
 
@@ -454,7 +478,11 @@ defmodule Tau.Factory.Unit do
         # no replay; ordering here is the race-freedom guarantee.
         :ok = Phoenix.PubSub.subscribe(data.pubsub, "factory:pr:#{data.unit_id}")
 
-        _result = data.merge_fun.(data.unit_id, data.hash)
+        # D-361: use the captured head_sha as the merge coordinate when present;
+        # fall back to the declared work_item.hash for the legacy 2-tuple seam
+        # (D-363 back-compat — head_sha is nil when no work_ready was received).
+        coordinate = data.head_sha || data.hash
+        _result = data.merge_fun.(data.unit_id, coordinate)
         timeout_ms = data.state_timeout_ms
         {:keep_state, data, [{:state_timeout, timeout_ms, :merge_stalled}]}
     end
