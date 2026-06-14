@@ -393,4 +393,83 @@ defmodule Tau.Factory.IssueElaborationTest do
            "D-371: ConflictCheck.clear?/2 must return {:conflict, _} for unscopable " <>
              "scope against non-empty F; got: #{inspect(conflict_result)}"
   end
+
+  # ---------------------------------------------------------------------------
+  # D-371 (reverse direction): sentinel ALREADY IN-FLIGHT blocks later non-sentinel
+  #
+  # SPEC: "an unscopable unit is admitted only into an empty F (it runs alone)"
+  # — equivalently, once a sentinel is in F, NO subsequent unit may join F
+  # alongside it.  The current implementation is ASYMMETRIC:
+  #   clear?(sentinel, %{"u" => other})  → conflict  ✓  (forward, tested above)
+  #   clear?(non_sentinel, %{"u" => sentinel}) → :clear  ✗  (reverse, the hole)
+  #
+  # This test asserts the REVERSE direction: when the sentinel scope is already
+  # an in-flight member, a subsequent NON-sentinel candidate must CONFLICT, not
+  # clear.
+  #
+  # PRE-IMPL FAILURE: ConflictCheck.clear?/2 only checks
+  # `declared_scope.universal_conflict` — it never checks in-flight members'
+  # `:universal_conflict` flag.  So `clear?(normal_scope, %{"unit-N" => sentinel})`
+  # falls through to the MapSet checks (all empty-vs-nonempty intersections are
+  # disjoint) and returns `:clear`, violating D-371.
+  # ---------------------------------------------------------------------------
+  @tag :d_371
+  test "D-371 (reverse): sentinel scope already in-flight causes subsequent non-sentinel candidate to conflict" do
+    ledger_sentinel = start_ledger()
+    ledger_normal = start_ledger()
+
+    # Produce the sentinel scope via the REAL elaborator (vague issue, no
+    # file paths, no SPEC citations — triggers the universal-conflict sentinel).
+    vague_issue = issue(999, "Something vague", body: "No files or specs mentioned here.")
+
+    {_i_s, sentinel_scope, _h_s, _b_s} =
+      IssueSelector.select(
+        ledger: ledger_sentinel,
+        milestone: "M10",
+        gh_fun: gh_stub([vague_issue])
+      )
+
+    assert is_map(sentinel_scope),
+           "D-371(reverse): sentinel scope must be a map; got: #{inspect(sentinel_scope)}"
+
+    assert Map.get(sentinel_scope, :universal_conflict, false),
+           "D-371(reverse): vague issue must yield a sentinel scope with universal_conflict: true; " <>
+             "got: #{inspect(sentinel_scope)}"
+
+    # Produce a normal (scopable) scope via the REAL elaborator: a regular
+    # issue citing a concrete file path — no sentinel flag.
+    normal_issue =
+      issue(488, "Normal scoped work",
+        body: "Modifies lib/tau/factory/conflict_check.ex for some reason."
+      )
+
+    {_i_n, normal_scope, _h_n, _b_n} =
+      IssueSelector.select(
+        ledger: ledger_normal,
+        milestone: "M10",
+        gh_fun: gh_stub([normal_issue])
+      )
+
+    assert is_map(normal_scope),
+           "D-371(reverse): normal scope must be a map; got: #{inspect(normal_scope)}"
+
+    refute Map.get(normal_scope, :universal_conflict, false),
+           "D-371(reverse): file-citing issue must NOT yield a sentinel scope; " <>
+             "got: #{inspect(normal_scope)}"
+
+    # The sentinel is already in-flight.  The non-sentinel candidate comes later.
+    # D-371 requires it to CONFLICT — the sentinel unit must run alone.
+    in_flight_with_sentinel = %{"unit-sentinel" => sentinel_scope}
+    reverse_result = ConflictCheck.clear?(normal_scope, in_flight_with_sentinel)
+
+    assert reverse_result != :clear,
+           "D-371(reverse): a non-sentinel candidate must CONFLICT when the in-flight " <>
+             "set already contains a sentinel (universal_conflict) scope; " <>
+             "ConflictCheck.clear?/2 returned :clear — asymmetric D-371 bug present; " <>
+             "normal_scope=#{inspect(normal_scope)}, sentinel_scope=#{inspect(sentinel_scope)}"
+
+    assert match?({:conflict, _}, reverse_result),
+           "D-371(reverse): ConflictCheck.clear?/2 must return {:conflict, _}; " <>
+             "got: #{inspect(reverse_result)}"
+  end
 end
