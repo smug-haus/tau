@@ -75,6 +75,14 @@ defmodule Tau.Factory.WorkerSupervisor do
                                verify_position; used by tests to inject a mismatch).
     - `:extra_env`           — list of `{key, value}` string pairs merged into
                                the Port's env after the namespace map (D-365).
+    - `:agent_mode`          — atom (default: `nil`); `:claude_code` activates
+                               the D-374 metered-API preflight + env scrub in
+                               the Worker before `Port.open`. Other values or
+                               absence leave behaviour unchanged.
+    - `:creds_check_fun`     — zero-arity function
+                               `(-> :ok | {:error, :subscription_creds_absent})`;
+                               defaults to the real `~/.claude/.credentials.json`
+                               check. Tests inject a stub (D-374).
   """
   @spec spawn(atom() | pid(), atom(), String.t(), String.t(), keyword()) ::
           {:ok, String.t()} | {:error, term()}
@@ -106,6 +114,11 @@ defmodule Tau.Factory.WorkerSupervisor do
 
       {:error, {:already_started, _pid}} ->
         {:ok, worker_id}
+
+      # D-374: metered-path refused during init — surface the reason directly
+      # without wrapping, so the caller can match {:error, :metered_path_refused}.
+      {:error, :metered_path_refused} ->
+        {:error, :metered_path_refused}
 
       {:error, reason} ->
         {:error, reason}

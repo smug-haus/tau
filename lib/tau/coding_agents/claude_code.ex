@@ -37,11 +37,29 @@ defmodule Tau.CodingAgents.ClaudeCode do
 
   ## D-036 — no credential injection
 
-  The Port inherits the host user's full environment. We do NOT
-  read `~/.claude/credentials.json`, do NOT set
-  `ANTHROPIC_API_KEY`, and do NOT pass any auth flags. If the host
-  user is not logged in, `claude` will emit `result/error_*` itself
+  Tau MUST NOT inject or copy credentials into the subprocess. We do NOT
+  read `~/.claude/credentials.json` and do NOT pass any auth flags. If the
+  host user is not logged in, `claude` will emit `result/error_*` itself
   and we turn that into `%Event.Error{reason: {:auth_failed, ...}}`.
+
+  ## D-375 — adapter-level metered-credential scrub (defense-in-depth)
+
+  By default, `start/2` passes `{:env, [{~c"ANTHROPIC_API_KEY", false},
+  {~c"ANTHROPIC_AUTH_TOKEN", false}, {~c"ANTHROPIC_BASE_URL", false}]}`
+  to `Port.open` so the `claude` subprocess never inherits any metered
+  Anthropic credential from the host environment. The Erlang Port driver
+  treats a `false` value as "remove this variable from the child
+  environment" (POSIX unsetenv semantics).
+
+  The three scrubbed variables are all metered-spend vectors:
+    - `ANTHROPIC_API_KEY`    — primary API key
+    - `ANTHROPIC_AUTH_TOKEN` — metered bearer token honoured by the claude CLI
+    - `ANTHROPIC_BASE_URL`   — proxy endpoint redirect (paid spend vector)
+
+  The only opt-out is `ctx[:allow_metered] == true`, which passes all
+  three through to the child unchanged. Use this only in controlled
+  environments where metered access is intentional. Production callers
+  MUST NOT set this flag.
 
   ## Test-friendly source injection
 
@@ -204,12 +222,38 @@ defmodule Tau.CodingAgents.ClaudeCode do
 
   defp stream_from_port(exe, argv, task, tempfile, ctx) do
     workspace = Map.fetch!(task, :workspace)
+    allow_metered = Map.get(ctx, :allow_metered) == true
 
     Stream.resource(
       fn ->
         # Open the Port HERE — in the drainer process — so Port
         # messages route to the receive loop in `pull_port_line/1`.
         # See start_spawn/2 for the rationale.
+        #
+        # D-375 env scrub: remove all three metered Anthropic credential
+        # variables from the child env by default so the claude subprocess
+        # cannot reach any metered API path even if credentials are set in
+        # the host environment. Erlang Port treats {key, false} as "unset
+        # this variable in the child" (POSIX unsetenv semantics).
+        # The only opt-out is ctx[:allow_metered] == true.
+        # {:env, []} inherits all parent env vars unchanged;
+        # {:env, [{key, false}, ...]} unsets the named vars and inherits the rest.
+        #
+        # Scrubbed variables (all three are metered-spend vectors):
+        #   ANTHROPIC_API_KEY    — primary API key
+        #   ANTHROPIC_AUTH_TOKEN — metered bearer token honoured by the claude CLI
+        #   ANTHROPIC_BASE_URL   — proxy endpoint redirect (paid spend vector)
+        port_env =
+          if allow_metered do
+            []
+          else
+            [
+              {~c"ANTHROPIC_API_KEY", false},
+              {~c"ANTHROPIC_AUTH_TOKEN", false},
+              {~c"ANTHROPIC_BASE_URL", false}
+            ]
+          end
+
         port =
           Port.open({:spawn_executable, exe}, [
             :binary,
@@ -218,7 +262,8 @@ defmodule Tau.CodingAgents.ClaudeCode do
             :use_stdio,
             {:line, @line_size},
             {:args, argv},
-            {:cd, workspace}
+            {:cd, workspace},
+            {:env, port_env}
           ])
 
         # Janitor: monitors the drainer (this process) and unlinks
