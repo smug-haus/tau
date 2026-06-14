@@ -191,8 +191,31 @@ defmodule Tau.Factory.BriefAssembler do
     if MapSet.size(set) == 0 do
       "(none declared)"
     else
-      set |> MapSet.to_list() |> Enum.sort() |> Enum.join(", ")
+      set
+      |> MapSet.to_list()
+      |> Enum.sort()
+      |> Enum.map_join(", ", &render_set_member/1)
     end
+  end
+
+  # String members (e.g. :files, :specs, :resources) pass through unchanged.
+  defp render_set_member(member) when is_binary(member), do: member
+
+  # Codepoint tuples {path, :"line_NN"} — produced by IssueSelector for any
+  # "file:line" citation — are rendered as "path:line_number" (e.g. "lib/x.ex:42").
+  # Calling Enum.join on the raw tuples would trigger Protocol.UndefinedError
+  # (String.Chars not implemented for tuples), crashing assemble/2 (D-373).
+  defp render_set_member({path, line_atom})
+       when is_binary(path) and is_atom(line_atom) do
+    line_str = Atom.to_string(line_atom)
+
+    line_number =
+      case String.split(line_str, "line_", parts: 2) do
+        [_, n] -> n
+        _ -> line_str
+      end
+
+    "#{path}:#{line_number}"
   end
 
   defp render_list_or_none([]), do: "(none declared)"

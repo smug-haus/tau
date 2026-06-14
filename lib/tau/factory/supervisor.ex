@@ -299,8 +299,8 @@ defmodule Tau.Factory.Supervisor do
   #   unit_id   — "unit-<number>" (B10 / D-331 / [C112-B10])
   #   run       — "run-1" (initial run identifier)
   #   base_ref  — branch (the feature branch the worker checks out)
-  #   brief     — issue title (or empty string)
-  #   declared_scope — empty scope (dogfood uses a single-unit run)
+  #   brief     — assembled prompt from BriefAssembler.assemble/2 (D-372)
+  #   declared_scope — the real elaborated scope threaded from the 4-tuple
   @empty_scope %{
     deps: [],
     files: MapSet.new(),
