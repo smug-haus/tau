@@ -40,6 +40,7 @@ defmodule Tau.Factory.Supervisor do
 
   use Supervisor
 
+  alias Tau.Factory.BriefAssembler
   alias Tau.Factory.Budget.Owner, as: BudgetOwner
   alias Tau.Factory.Fleet.Watchdog
   alias Tau.Factory.KillSwitch
@@ -310,7 +311,9 @@ defmodule Tau.Factory.Supervisor do
 
   defp to_unit_work_item({issue, _scope, hash, branch}) do
     number = Map.get(issue, "number", 0)
-    title = Map.get(issue, "title", "")
+
+    brief =
+      BriefAssembler.assemble(%{issue: issue, declared_scope: @empty_scope}, [])
 
     %{
       unit_id: "unit-#{number}",
@@ -325,7 +328,7 @@ defmodule Tau.Factory.Supervisor do
       # after the oracle emits work_ready, without waiting for the oracle's
       # worktree to be reclaimed (D-358 / SPEC-FACTORY-CORE §4 B11).
       oracle_base_ref: "origin/#{branch}",
-      brief: title
+      brief: brief
     }
   end
 
