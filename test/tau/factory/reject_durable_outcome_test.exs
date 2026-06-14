@@ -384,7 +384,7 @@ defmodule Tau.Factory.RejectDurableOutcomeTest do
 
       regate_signal = test_pid
 
-      gate_fun = fn ->
+      gate_fun = fn _coord ->
         n = Agent.get_and_update(gate_calls, fn c -> {c, c + 1} end)
         if n >= 1, do: send(regate_signal, :regated)
         :pass

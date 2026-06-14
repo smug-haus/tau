@@ -266,7 +266,7 @@ defmodule Tau.Factory.UnitDriverTest do
         brief: "implement the thing"
       }
 
-      deps = deps_for(sub, fn -> :pass end, merge_authority, test_pid)
+      deps = deps_for(sub, fn _coord -> :pass end, merge_authority, test_pid)
 
       unit_pid = @unit_driver.drive(work_item, deps)
 
@@ -283,8 +283,12 @@ defmodule Tau.Factory.UnitDriverTest do
       assert merge_map.id == unit_id,
              "D-340: merge map :id must be the unit_id; got #{inspect(merge_map)}"
 
-      assert merge_map.hash == "hash-#{unit_id}",
-             "D-340: merge map :hash must be the work_item hash; got #{inspect(merge_map)}"
+      # D-361: merge coordinate is the captured head_sha (from {:work_ready, id, branch, sha}),
+      # NOT the pre-declared work_item.hash. The work_ready_agent_bin emits head_sha as the
+      # coordinate, which the Unit captures and threads to merge_fun (D-362).
+      assert merge_map.hash == head_sha,
+             "D-361: merge map :hash must be the captured head_sha (#{inspect(head_sha)}), " <>
+               "not the pre-declared work_item hash; got #{inspect(merge_map)}"
 
       assert merge_map.branch == branch,
              "D-340: merge map :branch must be the work_item branch; got #{inspect(merge_map)}"
@@ -358,7 +362,7 @@ defmodule Tau.Factory.UnitDriverTest do
         brief: "implement the thing"
       }
 
-      deps = deps_for(sub, fn -> {:fail, [:always_fails]} end, merge_authority, test_pid)
+      deps = deps_for(sub, fn _coord -> {:fail, [:always_fails]} end, merge_authority, test_pid)
 
       unit_pid = @unit_driver.drive(work_item, deps)
       assert is_pid(unit_pid), "D-340: drive/2 must return the Unit pid"
@@ -423,7 +427,7 @@ defmodule Tau.Factory.UnitDriverTest do
         brief: "implement the thing"
       }
 
-      deps = deps_for(sub, fn -> :pass end, merge_authority, test_pid)
+      deps = deps_for(sub, fn _coord -> :pass end, merge_authority, test_pid)
 
       unit_pid = @unit_driver.drive(work_item, deps)
       assert is_pid(unit_pid), "D-340: drive/2 must return the Unit pid"

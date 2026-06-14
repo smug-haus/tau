@@ -172,7 +172,7 @@ defmodule Tau.Factory.UnitTerminationTest do
       # Default seams (overridden per test).
       # worker_fun returns a real monitorable pid (B8 contract).
       worker_fun: fn _role -> {:ok, spawn_worker()} end,
-      gate_fun: fn -> :pass end,
+      gate_fun: fn _coord -> :pass end,
       merge_fun: fn _uid, _hash -> :queued end,
       timeouts: [state_timeout_ms: 5_000]
     ]
@@ -214,7 +214,7 @@ defmodule Tau.Factory.UnitTerminationTest do
       start_scheduler(scheduler_name)
       start_supervised!({@unit_supervisor, name: sup_name}, id: sup_name)
 
-      gate_fun = fn -> :pass end
+      gate_fun = fn _coord -> :pass end
       merge_fun = fn _uid, _hash -> :queued end
 
       opts =
@@ -289,7 +289,7 @@ defmodule Tau.Factory.UnitTerminationTest do
 
       gate_count_ref = :counters.new(1, [:atomics])
 
-      gate_fun = fn ->
+      gate_fun = fn _coord ->
         :counters.add(gate_count_ref, 1, 1)
         {:fail, ["finding-#{:counters.get(gate_count_ref, 1)}"]}
       end
@@ -385,7 +385,7 @@ defmodule Tau.Factory.UnitTerminationTest do
       gate_count_ref = :counters.new(1, [:atomics])
 
       # Script: first (1 + n_refine) calls → {:fail,_}; the pivot call → :pass.
-      gate_fun = fn ->
+      gate_fun = fn _coord ->
         call_n =
           :counters.add(gate_count_ref, 1, 1) |> then(fn _ -> :counters.get(gate_count_ref, 1) end)
 
@@ -466,7 +466,7 @@ defmodule Tau.Factory.UnitTerminationTest do
       # Unit must arm :state_timeout and escalate on expiry.
       worker_fun = fn _role -> {:ok, spawn_worker()} end
 
-      gate_fun = fn ->
+      gate_fun = fn _coord ->
         :counters.add(gate_called_ref, 1, 1)
         :pass
       end
@@ -525,7 +525,7 @@ defmodule Tau.Factory.UnitTerminationTest do
       start_scheduler(scheduler_name)
       start_supervised!({@unit_supervisor, name: sup_name}, id: sup_name)
 
-      gate_fun = fn -> :pass end
+      gate_fun = fn _coord -> :pass end
       merge_fun = fn _uid, _hash -> :queued end
 
       opts =
@@ -586,7 +586,7 @@ defmodule Tau.Factory.UnitTerminationTest do
 
       last_findings = ["finding-alpha", "finding-beta"]
 
-      gate_fun = fn -> {:fail, last_findings} end
+      gate_fun = fn _coord -> {:fail, last_findings} end
 
       n_refine = Retry.n_refine()
       n_pivot = Retry.n_pivot()
@@ -663,7 +663,7 @@ defmodule Tau.Factory.UnitTerminationTest do
       # semantic gate-fail path — a C105 violation.
       gate_called_ref = :counters.new(1, [:atomics])
 
-      gate_fun = fn ->
+      gate_fun = fn _coord ->
         :counters.add(gate_called_ref, 1, 1)
         :pass
       end

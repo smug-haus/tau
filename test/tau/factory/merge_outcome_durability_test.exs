@@ -382,7 +382,7 @@ defmodule Tau.Factory.MergeOutcomeDurabilityTest do
         report_to: test_pid,
         ledger: ledger,
         worker_fun: fn _role -> {:ok, spawn_worker()} end,
-        gate_fun: fn -> :pass end,
+        gate_fun: fn _coord -> :pass end,
         merge_fun: merge_fun,
         timeouts: [state_timeout_ms: 5_000]
       ]
@@ -451,7 +451,7 @@ defmodule Tau.Factory.MergeOutcomeDurabilityTest do
 
       regate_signal = test_pid
 
-      gate_fun = fn ->
+      gate_fun = fn _coord ->
         n = Agent.get_and_update(gate_calls, fn c -> {c, c + 1} end)
         # The second gate call is the re-gate after the :rejected reconcile.
         if n >= 1, do: send(regate_signal, :regated)

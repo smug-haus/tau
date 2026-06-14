@@ -738,24 +738,32 @@ fails on the reverted tree (no `answer/0`) and passes on the real tree, so the
 mutation cross-check (`gate-and-toolchain.md` §3 step 7) is satisfied by a real
 diff, not a vacuous one.
 
-**Determinism and the head-SHA coordinate.** U discards `work_ready`'s
-`head_sha` and keys `gate_fun`/`merge_fun` on the *declared* `work_item.hash`
-(SPEC-FACTORY-CORE §4 B11 [C121-B11]). The scripted agent makes the declared
-`branch`/`hash` exactly the commit it produces, so the gate and merge coordinate
-**is** the agent's real HEAD — no head-SHA threading change is needed for the
-dogfood.
+**Determinism and the head-SHA coordinate (RESOLVED — C1, PR #503).** U
+**captures** `work_ready`'s `branch`/`head_sha` (§3.2.1) and keys
+`gate_fun`/`merge_fun` on the agent-asserted `head_sha`, not the *declared*
+`work_item.hash` (SPEC-FACTORY-CORE §4 B6/B7/B8, D-361/D-362/D-363; `[C121-B11]`
+resolved). *Earlier this section stated U discards `head_sha` and keys on the
+declared hash — that was the P5c-7 deferral, now superseded; §3.2.1 always showed
+the capturing clause, and capture is the canonical contract.* For the **dogfood**
+the change is a no-op: the deterministic scripted agent makes its asserted HEAD
+exactly the declared `branch`/`hash`, so the captured and declared coordinates
+coincide and the gate/merge coordinate **is** the agent's real HEAD either way.
+The capture matters for a **non-deterministic** agent, whose real HEAD cannot be
+pre-declared (V1) — its actual commit is then the coordinate gated and merged.
 
 ### 7.3 `gate_fun` construction (completing the §4 B11 deferral)
 
-The Unit's `:gate_fun` seam is **arity-0** (`-> :pass | {:fail, findings}`); the
-real gate is `Gate.run/1` over a `%Gate.Request{}`. The harness/supervisor builds
-the arity-0 closure that constructs the Request at drive time and folds the
-`%Verdict{}`: `workspace` = a host-isolated checkout for the engine's revert
+The Unit's `:gate_fun` seam is **arity-1** (`(coordinate :: String.t() -> :pass |
+{:fail, findings})`); the real gate is `Gate.run/1` over a `%Gate.Request{}`. The
+Unit supplies the coordinate (`data.head_sha || data.hash`) at the `gating` state
+entry (D-361 symmetric with `awaiting_merge`). The harness/supervisor builds the
+arity-1 closure that receives the coordinate, sets `Request.hash` to it, and folds
+the `%Verdict{}`: `workspace` = a host-isolated checkout for the engine's revert
 (distinct from the worker's writable worktree), `merge_base` = `git merge-base
 origin/main HEAD` in that workspace, `frozen_paths` = the declared gating-test
-path set (D-304), `unit`/`hash`/`run`/`diff`/`policy_pin`/`ledger` from the
-work-item and supervisor context. Detail and field provenance: SPEC-FACTORY-CORE
-§4 B11.
+path set (D-304), `unit`/`run`/`diff`/`policy_pin`/`ledger` from the work-item
+and supervisor context; `hash` comes from the Unit at call time (D-361/D-363).
+Detail and field provenance: SPEC-FACTORY-CORE §4 B11.
 
 ### 7.4 Sandbox + the local-origin safety guard (D-359, V1)
 

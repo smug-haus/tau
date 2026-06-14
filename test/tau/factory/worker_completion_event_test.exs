@@ -255,7 +255,7 @@ defmodule Tau.Factory.WorkerCompletionEventTest do
 
       # gate_fun records that the gate WAS reached — the discriminating signal
       # that the Unit gated on work_ready rather than ignoring it.
-      gate_fun = fn ->
+      gate_fun = fn _coord ->
         send(test_pid, {:gate_called, unit_id})
         {:fail, [:stop_here]}
       end
@@ -366,7 +366,7 @@ defmodule Tau.Factory.WorkerCompletionEventTest do
       worker_id = "w-noprod-#{n}"
       worker_pid = spawn(fn -> receive do: (:stop -> :ok) end)
 
-      gate_fun = fn ->
+      gate_fun = fn _coord ->
         send(test_pid, {:gate_called, unit_id})
         :pass
       end
@@ -441,7 +441,7 @@ defmodule Tau.Factory.WorkerCompletionEventTest do
       current_worker_id = "w-current-#{n}"
       worker_pid = spawn(fn -> receive do: (:stop -> :ok) end)
 
-      gate_fun = fn ->
+      gate_fun = fn _coord ->
         send(test_pid, {:gate_called, unit_id})
         :pass
       end

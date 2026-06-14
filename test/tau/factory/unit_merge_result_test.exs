@@ -146,7 +146,7 @@ defmodule Tau.Factory.UnitMergeResultTest do
       end
 
       opts =
-        base_unit_opts(unit_id, merge_fun, fn -> :pass end)
+        base_unit_opts(unit_id, merge_fun, fn _coord -> :pass end)
         |> Keyword.put(:scheduler, sched)
 
       unit_pid = @unit_supervisor.start_unit(sup, opts)
@@ -200,7 +200,7 @@ defmodule Tau.Factory.UnitMergeResultTest do
       end
 
       opts =
-        base_unit_opts(unit_id, merge_fun, fn -> :pass end)
+        base_unit_opts(unit_id, merge_fun, fn _coord -> :pass end)
         |> Keyword.put(:scheduler, sched)
 
       unit_pid = @unit_supervisor.start_unit(sup, opts)
@@ -243,7 +243,7 @@ defmodule Tau.Factory.UnitMergeResultTest do
       end
 
       opts =
-        base_unit_opts(unit_id, merge_fun, fn -> :pass end)
+        base_unit_opts(unit_id, merge_fun, fn _coord -> :pass end)
         |> Keyword.put(:scheduler, sched)
 
       unit_pid = @unit_supervisor.start_unit(sup, opts)
@@ -300,7 +300,7 @@ defmodule Tau.Factory.UnitMergeResultTest do
       end
 
       opts =
-        base_unit_opts(unit_id, merge_fun, fn -> :pass end)
+        base_unit_opts(unit_id, merge_fun, fn _coord -> :pass end)
         |> Keyword.put(:scheduler, sched)
 
       unit_pid = @unit_supervisor.start_unit(sup, opts)
