@@ -40,6 +40,7 @@ defmodule Tau.Factory.Supervisor do
 
   use Supervisor
 
+  alias Tau.Factory.BriefAssembler
   alias Tau.Factory.Budget.Owner, as: BudgetOwner
   alias Tau.Factory.Fleet.Watchdog
   alias Tau.Factory.KillSwitch
@@ -298,8 +299,8 @@ defmodule Tau.Factory.Supervisor do
   #   unit_id   — "unit-<number>" (B10 / D-331 / [C112-B10])
   #   run       — "run-1" (initial run identifier)
   #   base_ref  — branch (the feature branch the worker checks out)
-  #   brief     — issue title (or empty string)
-  #   declared_scope — empty scope (dogfood uses a single-unit run)
+  #   brief     — assembled prompt from BriefAssembler.assemble/2 (D-372)
+  #   declared_scope — the real elaborated scope threaded from the 4-tuple
   @empty_scope %{
     deps: [],
     files: MapSet.new(),
@@ -308,13 +309,15 @@ defmodule Tau.Factory.Supervisor do
     resources: MapSet.new()
   }
 
-  defp to_unit_work_item({issue, _scope, hash, branch}) do
+  defp to_unit_work_item({issue, scope, hash, branch}) do
     number = Map.get(issue, "number", 0)
-    title = Map.get(issue, "title", "")
+
+    brief =
+      BriefAssembler.assemble(%{issue: issue, declared_scope: scope}, [])
 
     %{
       unit_id: "unit-#{number}",
-      declared_scope: @empty_scope,
+      declared_scope: scope,
       hash: hash,
       branch: branch,
       run: "run-1",
@@ -325,7 +328,7 @@ defmodule Tau.Factory.Supervisor do
       # after the oracle emits work_ready, without waiting for the oracle's
       # worktree to be reclaimed (D-358 / SPEC-FACTORY-CORE §4 B11).
       oracle_base_ref: "origin/#{branch}",
-      brief: title
+      brief: brief
     }
   end
 
