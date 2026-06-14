@@ -456,4 +456,163 @@ defmodule Tau.Factory.BriefAssemblerTest do
                "input=#{inspect(input)}"
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # D-373(e): non-empty codepoints must render readably — no Protocol.UndefinedError
+  #
+  # The bug: render_set_or_none/1 calls Enum.join/2 on the codepoints MapSet.
+  # When codepoints contains {path, :"line_NN"} tuples (the shape produced by
+  # IssueSelector for any "file:line" citation, e.g. "lib/x.ex:42"), Enum.join
+  # invokes String.Chars on each tuple element → Protocol.UndefinedError → crash.
+  # All earlier D-373 tests use empty_scope() (codepoints: MapSet.new()), so
+  # they never exercise this path. D-373 says assemble/2 "never raises"; a crash
+  # on the IssueSelector's native codepoints shape falsifies that invariant.
+  #
+  # Expected human-readable form: "lib/x.ex:42" (path + ":" + line number),
+  # NOT the raw Elixir tuple inspect "{\"lib/x.ex\", :line_42}".
+  #
+  # PRE-IMPL FAILURE: Protocol.UndefinedError (String.Chars not implemented for
+  # tuples) raised inside assemble/2 when codepoints is non-empty.
+  # ---------------------------------------------------------------------------
+  @tag :d_373
+  test "D-373(e): assemble/2 with non-empty codepoints ({path, :line_NN} tuples) must not raise and must render each codepoint readably" do
+    # This is the exact shape IssueSelector.elaborate_scope/1 produces for any
+    # "file:line" citation (line 192 of issue_selector.ex):
+    #   MapSet.new(file_line_pairs, fn {path, line} -> {path, :"line_#{line}"} end)
+    codepoints =
+      MapSet.new([
+        {"lib/x.ex", :line_42},
+        {"lib/y.ex", :line_7}
+      ])
+
+    input = %{
+      issue: issue(489, "D-373(e) non-empty codepoints", body: "Touches lib/x.ex:42."),
+      declared_scope: %{
+        deps: [],
+        files: MapSet.new(),
+        codepoints: codepoints,
+        specs: MapSet.new(),
+        resources: MapSet.new()
+      }
+    }
+
+    # Must not raise — Protocol.UndefinedError is the pre-fix failure mode.
+    result =
+      try do
+        BriefAssembler.assemble(input, [])
+      rescue
+        err ->
+          flunk(
+            "D-373(e): assemble/2 must NOT raise when codepoints is non-empty; " <>
+              "the IssueSelector produces {path, :line_NN} tuples for any file:line " <>
+              "citation, and render_set_or_none/1 called Enum.join on them which " <>
+              "crashes with Protocol.UndefinedError (String.Chars not impl for tuple). " <>
+              "Got exception: #{inspect(err)}"
+          )
+      end
+
+    assert is_binary(result),
+           "D-373(e): assemble/2 must return a String.t() when codepoints is non-empty; " <>
+             "got: #{inspect(result)}"
+
+    assert result != "",
+           "D-373(e): assemble/2 must return a non-empty String.t() when codepoints is non-empty"
+
+    # Each codepoint must appear in a human-readable form containing both the
+    # path and the line number. The canonical human form is "lib/x.ex:42".
+    # Asserting path + ":" + line number as the essential facts; exact separator
+    # style is the implementation's choice as long as both parts are present and
+    # readable (not a raw tuple inspect like "{\"lib/x.ex\", :line_42}").
+    assert result =~ "lib/x.ex",
+           "D-373(e): path 'lib/x.ex' must appear in the assembled prompt; " <>
+             "got: #{inspect(result)}"
+
+    assert result =~ "42",
+           "D-373(e): line number '42' must appear in the assembled prompt for " <>
+             "codepoint {\"lib/x.ex\", :line_42}; got: #{inspect(result)}"
+
+    assert result =~ "lib/y.ex",
+           "D-373(e): path 'lib/y.ex' must appear in the assembled prompt; " <>
+             "got: #{inspect(result)}"
+
+    assert result =~ "7",
+           "D-373(e): line number '7' must appear in the assembled prompt for " <>
+             "codepoint {\"lib/y.ex\", :line_7}; got: #{inspect(result)}"
+
+    # Must NOT contain raw tuple inspect — that would be an unreadable brief.
+    refute result =~ ~s({"lib/x.ex", :line_42}),
+           "D-373(e): assembled prompt must NOT contain raw tuple inspect form " <>
+             ~s({"lib/x.ex", :line_42}; ) <>
+             "render each codepoint as a human-readable string (e.g. 'lib/x.ex:42'); " <>
+             "got: #{inspect(result)}"
+  end
+
+  # ---------------------------------------------------------------------------
+  # D-373(f): D-373 never-raises guarantee is exercised against the crashing input
+  #           (non-empty codepoints in scope — the realistic IssueSelector shape)
+  #
+  # This extends D-373(d)'s "never raises / always non-empty String" invariant to
+  # the realistic codepoints shape. D-373(d) only iterates over scopes where
+  # codepoints is MapSet.new() (empty), so the never-raises claim was never
+  # exercised against the input that actually crashes the production path.
+  #
+  # PRE-IMPL FAILURE: Protocol.UndefinedError raised in assemble/2 for the
+  # non-empty-codepoints input shape.
+  # ---------------------------------------------------------------------------
+  @tag :d_373
+  test "D-373(f): D-373 never-raises guarantee holds for scopes with non-empty codepoints — the realistic IssueSelector output shape" do
+    # Multiple representative inputs: one codepoint, multiple codepoints, large
+    # line numbers — all valid IssueSelector output shapes.
+    realistic_inputs = [
+      %{
+        issue: issue(489, "Single codepoint"),
+        declared_scope: %{
+          deps: [],
+          files: MapSet.new(),
+          codepoints: MapSet.new([{"lib/tau/factory/brief_assembler.ex", :line_59}]),
+          specs: MapSet.new(),
+          resources: MapSet.new()
+        }
+      },
+      %{
+        issue: issue(489, "Multiple codepoints with files"),
+        declared_scope: %{
+          deps: [],
+          files: MapSet.new(["lib/tau/factory/supervisor.ex"]),
+          codepoints:
+            MapSet.new([
+              {"lib/tau/factory/brief_assembler.ex", :line_73},
+              {"lib/tau/factory/issue_selector.ex", :line_192},
+              {"test/tau/factory/brief_assembler_test.exs", :line_1}
+            ]),
+          specs: MapSet.new(["SPEC-FACTORY-CORE"]),
+          resources: MapSet.new()
+        },
+        gating_test_paths: ["test/tau/factory/brief_assembler_test.exs"],
+        spec_refs: ["D-372", "D-373"]
+      }
+    ]
+
+    for input <- realistic_inputs do
+      result =
+        try do
+          BriefAssembler.assemble(input, [])
+        rescue
+          err ->
+            flunk(
+              "D-373(f): assemble/2 must not raise for realistic codepoints input " <>
+                "#{inspect(input)}; Protocol.UndefinedError on tuple codepoints is the " <>
+                "known crash. Got: #{inspect(err)}"
+            )
+        end
+
+      assert is_binary(result),
+             "D-373(f): assemble/2 must return a String.t() for realistic codepoints " <>
+               "input #{inspect(input)}; got: #{inspect(result)}"
+
+      assert result != "",
+             "D-373(f): assemble/2 must never return an empty string for realistic " <>
+               "codepoints input #{inspect(input)}"
+    end
+  end
 end
