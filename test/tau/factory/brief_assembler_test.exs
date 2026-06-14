@@ -615,4 +615,188 @@ defmodule Tau.Factory.BriefAssemblerTest do
                "codepoints input #{inspect(input)}"
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # D-373(g): non-empty :specs (atoms) must render readably — no FunctionClauseError
+  #
+  # The bug: render_set_member/1 has a clause for binary strings and a clause for
+  # {path, :line_NN} codepoint tuples, but NO clause for bare atoms.
+  # IssueSelector.extract_specs/1 always produces atoms — e.g.
+  # "SPEC-FACTORY-CORE.md" → :"spec_FACTORY_CORE" (line 242-248 of issue_selector.ex,
+  # using String.replace("-","_") |> String.upcase() |> then(&:"spec_#{&1}")).
+  # When render_set_or_none/1 calls render_set_member/1 on a bare atom, no clause
+  # matches → FunctionClauseError → assemble/2 crashes (falsifies D-373).
+  # All earlier tests use MapSet.new([]) or MapSet.new(["SPEC-FACTORY-CORE"])
+  # (string) for :specs, so the atom path was never gated.
+  #
+  # Expected behaviour: each atom spec rendered as a human-readable string
+  # (e.g. "spec_FACTORY_CORE" or "SPEC-FACTORY-CORE" or the atom-name verbatim),
+  # present in the assembled prompt, NOT a crash.
+  #
+  # PRE-IMPL FAILURE: FunctionClauseError — no clause in render_set_member/1
+  # matches a bare atom like :spec_FACTORY_CORE.
+  # ---------------------------------------------------------------------------
+  @tag :d_373
+  test "D-373(g): assemble/2 with non-empty :specs (atoms — the real IssueSelector output) must not raise and must render each spec readably" do
+    # These are the EXACT atoms IssueSelector.extract_specs/1 emits:
+    #   "SPEC-FACTORY-CORE.md"  → :"spec_FACTORY_CORE"
+    #   "SPEC-FACTORY-GATE.md"  → :"spec_FACTORY_GATE"
+    # Derivation (issue_selector.ex lines 242-248):
+    #   captured name "FACTORY-CORE"
+    #   |> String.replace("-", "_")  → "FACTORY_CORE"
+    #   |> String.upcase()           → "FACTORY_CORE"
+    #   |> then(&:"spec_#{&1}")      → :spec_FACTORY_CORE
+    atom_specs = MapSet.new([:spec_FACTORY_CORE, :spec_FACTORY_GATE])
+
+    input = %{
+      issue:
+        issue(489, "D-373(g) atom specs",
+          body:
+            "Touches SPEC-FACTORY-CORE.md and SPEC-FACTORY-GATE.md. " <>
+              "References D-373."
+        ),
+      declared_scope: %{
+        deps: [],
+        files: MapSet.new(["lib/tau/factory/brief_assembler.ex"]),
+        codepoints: MapSet.new(),
+        specs: atom_specs,
+        resources: MapSet.new()
+      },
+      gating_test_paths: ["test/tau/factory/brief_assembler_test.exs"],
+      spec_refs: ["D-372", "D-373"]
+    }
+
+    # Must not raise — FunctionClauseError on bare atom is the pre-fix failure mode.
+    result =
+      try do
+        BriefAssembler.assemble(input, [])
+      rescue
+        err ->
+          flunk(
+            "D-373(g): assemble/2 must NOT raise when :specs contains atoms; " <>
+              "IssueSelector.extract_specs/1 always emits atoms like :spec_FACTORY_CORE. " <>
+              "render_set_member/1 has no atom clause → FunctionClauseError. " <>
+              "Got exception: #{inspect(err)}"
+          )
+      end
+
+    assert is_binary(result),
+           "D-373(g): assemble/2 must return a String.t() when :specs contains atoms; " <>
+             "got: #{inspect(result)}"
+
+    assert result != "",
+           "D-373(g): assemble/2 must return a non-empty String.t() when :specs contains atoms"
+
+    # Each spec atom must appear in the assembled prompt in a human-readable form.
+    # The render must include the substantive content of each atom name so the
+    # implementer can identify which SPECs are in scope. Checking for the
+    # distinguishing substrings "FACTORY_CORE" and "FACTORY_GATE" (present in the
+    # atom names :spec_FACTORY_CORE and :spec_FACTORY_GATE respectively).
+    assert result =~ "FACTORY_CORE",
+           "D-373(g): the atom :spec_FACTORY_CORE must render with its name in the " <>
+             "assembled prompt; got: #{inspect(result)}"
+
+    assert result =~ "FACTORY_GATE",
+           "D-373(g): the atom :spec_FACTORY_GATE must render with its name in the " <>
+             "assembled prompt; got: #{inspect(result)}"
+  end
+
+  # ---------------------------------------------------------------------------
+  # D-373(h): full realistic IssueSelector scope shape (files + codepoints +
+  #           atom specs + atom resources, all non-empty) must not raise and
+  #           must render all members readably (D-373 totality over real types)
+  #
+  # This exercises the COMPLETE production scope shape from elaborate_issue/1:
+  #   :files      → MapSet.t(String.t())     (file paths as strings)
+  #   :codepoints → MapSet.t({String.t(), atom()})  ({path, :"line_NN"} tuples)
+  #   :specs      → MapSet.t(atom())         (e.g. :spec_FACTORY_CORE)
+  #   :resources  → MapSet.t(atom())         (reserved; currently label-derived atoms)
+  #   :deps       → [String.t()]             (e.g. ["unit-42"])
+  #
+  # Prior D-373 tests left :resources always MapSet.new() (empty) because the
+  # elaborator currently emits MapSet.new() for resources (label-derived, not yet
+  # wired). However, the type contract is MapSet.t(atom()) — assemble/2 MUST
+  # handle non-empty :resources with atom members without crashing, because
+  # the elaborator may emit them as soon as label-derived resources land.
+  # Gate this now so the implementer must handle atom resources.
+  #
+  # PRE-IMPL FAILURE: FunctionClauseError — render_set_member/1 has no atom
+  # clause, so any non-empty :specs OR :resources with atom members crashes.
+  # ---------------------------------------------------------------------------
+  @tag :d_373
+  test "D-373(h): D-373 never-raises holds for the FULL realistic IssueSelector scope shape — files+codepoints+atom specs+atom resources all non-empty" do
+    # Full realistic scope with production types for every field.
+    # :specs → atoms (IssueSelector.extract_specs/1 output)
+    # :resources → atoms (type contract; label-derived atoms are reserved)
+    full_scope = %{
+      deps: ["unit-42"],
+      files: MapSet.new(["lib/tau/factory/brief_assembler.ex", "lib/tau/factory/supervisor.ex"]),
+      codepoints:
+        MapSet.new([
+          {"lib/tau/factory/brief_assembler.ex", :line_59},
+          {"lib/tau/factory/issue_selector.ex", :line_192}
+        ]),
+      specs: MapSet.new([:spec_FACTORY_CORE, :spec_FACTORY_GATE]),
+      resources: MapSet.new([:resource_gh_api])
+    }
+
+    input = %{
+      issue:
+        issue(489, "D-373(h) full realistic scope",
+          body:
+            "All scope fields non-empty with production types. " <>
+              "Touches lib/tau/factory/brief_assembler.ex:59 and SPEC-FACTORY-CORE.md."
+        ),
+      declared_scope: full_scope,
+      gating_test_paths: ["test/tau/factory/brief_assembler_test.exs"],
+      spec_refs: ["D-372", "D-373"]
+    }
+
+    # Must not raise.
+    result =
+      try do
+        BriefAssembler.assemble(input, [])
+      rescue
+        err ->
+          flunk(
+            "D-373(h): assemble/2 must NOT raise for the full realistic IssueSelector " <>
+              "scope shape (files+codepoints+atom specs+atom resources all non-empty). " <>
+              "FunctionClauseError on atom specs/resources is the known crash path — " <>
+              "render_set_member/1 handles only String.t() and {path, :line_NN} tuples, " <>
+              "not bare atoms. Got exception: #{inspect(err)}"
+          )
+      end
+
+    assert is_binary(result),
+           "D-373(h): assemble/2 must return a String.t() for full realistic scope; " <>
+             "got: #{inspect(result)}"
+
+    assert result != "",
+           "D-373(h): assemble/2 must return a non-empty String.t() for full realistic scope"
+
+    # Files must appear.
+    assert result =~ "lib/tau/factory/brief_assembler.ex",
+           "D-373(h): file 'lib/tau/factory/brief_assembler.ex' must appear in the " <>
+             "assembled prompt; got: #{inspect(result)}"
+
+    # Codepoints must appear (path + line number).
+    assert result =~ "lib/tau/factory/issue_selector.ex",
+           "D-373(h): codepoint path 'lib/tau/factory/issue_selector.ex' must appear; " <>
+             "got: #{inspect(result)}"
+
+    assert result =~ "192",
+           "D-373(h): line number '192' must appear for codepoint issue_selector.ex:192; " <>
+             "got: #{inspect(result)}"
+
+    # Atom specs must render with their names present.
+    assert result =~ "FACTORY_CORE",
+           "D-373(h): atom :spec_FACTORY_CORE must render readably in the assembled " <>
+             "prompt; got: #{inspect(result)}"
+
+    # Atom resources must render with their names present.
+    assert result =~ "gh_api",
+           "D-373(h): atom :resource_gh_api must render readably in the assembled " <>
+             "prompt — a bare atom must not crash render_set_member/1; " <>
+             "got: #{inspect(result)}"
+  end
 end
