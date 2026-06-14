@@ -41,7 +41,12 @@ defmodule Tau.Factory.ConflictCheck do
   """
   @spec clear?(scope(), in_flight()) :: :clear | {:conflict, clause()}
   def clear?(declared_scope, in_flight) do
-    if Map.get(declared_scope, :universal_conflict, false) and map_size(in_flight) > 0 do
+    candidate_sentinel = Map.get(declared_scope, :universal_conflict, false)
+
+    in_flight_has_sentinel =
+      Enum.any?(Map.values(in_flight), &Map.get(&1, :universal_conflict, false))
+
+    if (candidate_sentinel or in_flight_has_sentinel) and map_size(in_flight) > 0 do
       {:conflict, :no_dependency}
     else
       in_flight_ids = MapSet.new(Map.keys(in_flight))

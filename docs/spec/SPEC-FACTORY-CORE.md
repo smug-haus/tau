@@ -398,6 +398,12 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
   resource-isolatable.
 - Invariants (properties, §6 D-312): symmetry; non-trivial self-conflict;
   monotone-in-`F`; each clause necessary; gating-path collision blocks.
+- `scope()` type: `%{deps: [unit_id], files: MapSet.t(String.t()),
+  codepoints: MapSet.t({String.t(), atom()}), specs: MapSet.t(atom()),
+  resources: MapSet.t(atom()), optional(:universal_conflict) => boolean()}` —
+  the `universal_conflict: true` sentinel (D-371) causes `clear?/2` to return
+  `{:conflict, :no_dependency}` against any non-empty `F`, regardless of
+  whether the sentinel is the candidate or an in-flight member (symmetric).
 
 ### B3: {Coordinator, Unit} ↔ Ledger.Writer (C1)
 
