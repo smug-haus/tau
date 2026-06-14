@@ -309,15 +309,15 @@ defmodule Tau.Factory.Supervisor do
     resources: MapSet.new()
   }
 
-  defp to_unit_work_item({issue, _scope, hash, branch}) do
+  defp to_unit_work_item({issue, scope, hash, branch}) do
     number = Map.get(issue, "number", 0)
 
     brief =
-      BriefAssembler.assemble(%{issue: issue, declared_scope: @empty_scope}, [])
+      BriefAssembler.assemble(%{issue: issue, declared_scope: scope}, [])
 
     %{
       unit_id: "unit-#{number}",
-      declared_scope: @empty_scope,
+      declared_scope: scope,
       hash: hash,
       branch: branch,
       run: "run-1",
