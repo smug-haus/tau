@@ -129,7 +129,7 @@ defmodule Tau.Factory.UnitSnapshotDurabilityTest do
       report_to: report_to,
       ledger: ledger,
       worker_fun: fn _role -> {:ok, spawn_worker()} end,
-      gate_fun: fn -> :pass end,
+      gate_fun: fn _coord -> :pass end,
       merge_fun: fn _uid, _hash -> :queued end,
       timeouts: [state_timeout_ms: 5_000]
     ]
@@ -173,7 +173,7 @@ defmodule Tau.Factory.UnitSnapshotDurabilityTest do
 
       opts =
         base_unit_opts(unit_id, sched, test_pid, ledger,
-          gate_fun: fn -> :pass end,
+          gate_fun: fn _coord -> :pass end,
           merge_fun: fn _uid, _hash -> :queued end
         )
 
@@ -222,7 +222,7 @@ defmodule Tau.Factory.UnitSnapshotDurabilityTest do
       start_supervised!({@unit_supervisor, name: sup}, id: sup)
 
       # gate always fails → ladder exhausts → :escalated.
-      gate_fun = fn -> {:fail, ["always-fail"]} end
+      gate_fun = fn _coord -> {:fail, ["always-fail"]} end
 
       opts =
         base_unit_opts(unit_id, sched, test_pid, ledger,
@@ -281,7 +281,7 @@ defmodule Tau.Factory.UnitSnapshotDurabilityTest do
       # never reaches a terminal sink. We signal entry to gating, then block.
       gate_entered = self()
 
-      gate_fun = fn ->
+      gate_fun = fn _coord ->
         send(gate_entered, :gate_entered)
 
         receive do
@@ -364,7 +364,7 @@ defmodule Tau.Factory.UnitSnapshotDurabilityTest do
 
       opts =
         base_unit_opts(unit_id, sched, test_pid, ledger,
-          gate_fun: fn -> :pass end,
+          gate_fun: fn _coord -> :pass end,
           merge_fun: fn _uid, _hash -> :queued end
         )
 
@@ -432,7 +432,7 @@ defmodule Tau.Factory.UnitSnapshotDurabilityTest do
       gate_calls = :counters.new(1, [])
       regate_entered = self()
 
-      gate_fun = fn ->
+      gate_fun = fn _coord ->
         n = :counters.get(gate_calls, 1)
         :counters.add(gate_calls, 1, 1)
 
@@ -547,7 +547,7 @@ defmodule Tau.Factory.UnitSnapshotDurabilityTest do
       # waiting on its worker rather than looping further through the retry ladder.
       gate_calls = :counters.new(1, [])
 
-      gate_fun = fn ->
+      gate_fun = fn _coord ->
         n = :counters.get(gate_calls, 1)
         :counters.add(gate_calls, 1, 1)
 

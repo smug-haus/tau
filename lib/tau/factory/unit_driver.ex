@@ -94,8 +94,10 @@ defmodule Tau.Factory.UnitDriver do
     * `:repo_dir`          — `String.t()`; the parent git repo for worker
                              worktrees.
     * `:agent_bin`         — `String.t()`; the agent executable each worker runs.
-    * `:gate_fun`          — `(-> :pass | {:fail, findings})`; injected gate
-                             seam (passed through to the Unit unchanged).
+    * `:gate_fun`          — `(coordinate :: String.t() -> :pass | {:fail, findings})`; injected
+                             gate seam (passed through to the Unit unchanged). The Unit
+                             supplies the coordinate (`data.head_sha || data.hash`) at
+                             call time (D-361 symmetric with merge).
     * `:merge_authority`   — atom/pid of a (possibly stubbed) `MergeAuthority`;
                              the `:merge_fun` calls `request_merge/2` against it.
     * `:report_to`         — pid receiving `{:unit_terminal, unit_id, outcome,

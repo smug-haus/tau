@@ -113,7 +113,6 @@ defmodule Mix.Tasks.Tau.Factory.Dogfood do
 
     # Step 6 — Derive the deterministic work_item coordinate (mirrors IssueSelector).
     unit_id = "unit-#{issue_number}"
-    hash = issue_hash(issue_number, Sandbox.issue_title())
     run_id = "run-1"
     frozen_paths = MapSet.new([Sandbox.gating_test_path()])
 
@@ -124,14 +123,14 @@ defmodule Mix.Tasks.Tau.Factory.Dogfood do
     sup_name = :"tau_factory_dogfood_#{:erlang.unique_integer([:positive])}"
     writer_name = :"#{sup_name}_writer"
 
-    # Step 8 — Build the arity-0 gate_fun closure.
-    # The closure captures all work_item coordinates; creates a host-isolated
-    # gate workspace at call time (after worker commits) and calls Gate.run/1.
+    # Step 8 — Build the arity-1 gate_fun closure (D-361).
+    # The closure is arity-1: the Unit supplies the coordinate (data.head_sha || data.hash)
+    # at call time. The coordinator captures all static context (repo_dir, unit_id, run,
+    # frozen_paths, ledger); the runtime coordinate comes from the Unit seam.
     gate_fun =
       GateFun.build(
         repo_dir: repo,
         unit_id: unit_id,
-        hash: hash,
         run: run_id,
         frozen_paths: frozen_paths,
         ledger: writer_name
@@ -396,13 +395,5 @@ defmodule Mix.Tasks.Tau.Factory.Dogfood do
     dir = Path.join(repo, ".tau-factory")
     File.mkdir_p!(dir)
     Path.join(dir, "ledger.db")
-  end
-
-  # Deterministic content hash for the work_item coordinate.
-  # Mirrors IssueSelector.content_hash/2 (private): sha256("N:title").
-  # SPEC-FACTORY-CORE §4 B10 / unit_id_for → "unit-N".
-  defp issue_hash(number, title) do
-    :crypto.hash(:sha256, "#{number}:#{title}")
-    |> Base.encode16(case: :lower)
   end
 end

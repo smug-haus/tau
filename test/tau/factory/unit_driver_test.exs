@@ -266,7 +266,7 @@ defmodule Tau.Factory.UnitDriverTest do
         brief: "implement the thing"
       }
 
-      deps = deps_for(sub, fn -> :pass end, merge_authority, test_pid)
+      deps = deps_for(sub, fn _coord -> :pass end, merge_authority, test_pid)
 
       unit_pid = @unit_driver.drive(work_item, deps)
 
@@ -362,7 +362,7 @@ defmodule Tau.Factory.UnitDriverTest do
         brief: "implement the thing"
       }
 
-      deps = deps_for(sub, fn -> {:fail, [:always_fails]} end, merge_authority, test_pid)
+      deps = deps_for(sub, fn _coord -> {:fail, [:always_fails]} end, merge_authority, test_pid)
 
       unit_pid = @unit_driver.drive(work_item, deps)
       assert is_pid(unit_pid), "D-340: drive/2 must return the Unit pid"
@@ -427,7 +427,7 @@ defmodule Tau.Factory.UnitDriverTest do
         brief: "implement the thing"
       }
 
-      deps = deps_for(sub, fn -> :pass end, merge_authority, test_pid)
+      deps = deps_for(sub, fn _coord -> :pass end, merge_authority, test_pid)
 
       unit_pid = @unit_driver.drive(work_item, deps)
       assert is_pid(unit_pid), "D-340: drive/2 must return the Unit pid"

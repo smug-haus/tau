@@ -753,15 +753,17 @@ pre-declared (V1) — its actual commit is then the coordinate gated and merged.
 
 ### 7.3 `gate_fun` construction (completing the §4 B11 deferral)
 
-The Unit's `:gate_fun` seam is **arity-0** (`-> :pass | {:fail, findings}`); the
-real gate is `Gate.run/1` over a `%Gate.Request{}`. The harness/supervisor builds
-the arity-0 closure that constructs the Request at drive time and folds the
-`%Verdict{}`: `workspace` = a host-isolated checkout for the engine's revert
+The Unit's `:gate_fun` seam is **arity-1** (`(coordinate :: String.t() -> :pass |
+{:fail, findings})`); the real gate is `Gate.run/1` over a `%Gate.Request{}`. The
+Unit supplies the coordinate (`data.head_sha || data.hash`) at the `gating` state
+entry (D-361 symmetric with `awaiting_merge`). The harness/supervisor builds the
+arity-1 closure that receives the coordinate, sets `Request.hash` to it, and folds
+the `%Verdict{}`: `workspace` = a host-isolated checkout for the engine's revert
 (distinct from the worker's writable worktree), `merge_base` = `git merge-base
 origin/main HEAD` in that workspace, `frozen_paths` = the declared gating-test
-path set (D-304), `unit`/`hash`/`run`/`diff`/`policy_pin`/`ledger` from the
-work-item and supervisor context. Detail and field provenance: SPEC-FACTORY-CORE
-§4 B11.
+path set (D-304), `unit`/`run`/`diff`/`policy_pin`/`ledger` from the work-item
+and supervisor context; `hash` comes from the Unit at call time (D-361/D-363).
+Detail and field provenance: SPEC-FACTORY-CORE §4 B11.
 
 ### 7.4 Sandbox + the local-origin safety guard (D-359, V1)
 

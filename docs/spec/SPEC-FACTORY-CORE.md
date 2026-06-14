@@ -57,9 +57,10 @@ hand-thread per-child opts). §6: D-357. Appendix B lists
 
 **Amendment (2026-06-13, PR #481 — P5c-7 dogfood capstone, AC-12):** Completes
 the P5c-6 §4 B11 `:gate_fun` / `:agent_bin` deferral (the #480 critic's note):
-`:agent_bin` is the D-326 `{:packet,4}` agent path; `:gate_fun` is the **arity-0**
-Unit seam wrapping `Tau.Factory.Gate.run/1` over a `%Gate.Request{}` built at
-drive time (records exactly where each Request field comes from). Adds the
+`:agent_bin` is the D-326 `{:packet,4}` agent path; `:gate_fun` is the **arity-1**
+Unit seam (D-361 — the Unit supplies the coordinate `data.head_sha || data.hash`
+at call time) wrapping `Tau.Factory.Gate.run/1` over a `%Gate.Request{}` built
+at call time (records exactly where each Request field comes from). Adds the
 `:unit_timeouts` opt (**D-358** — widen the per-state Unit `:state_timeout_ms`
 past `T_unit` so a real agent run does not spuriously escalate; OQ-2). Records the
 **dogfood harness** contract: a **deterministic scripted `agent_bin`** (the
@@ -537,17 +538,19 @@ callers that pass no `:ledger` opt are unaffected (back-compat).
   the only legal producer of a verdict (G appends to L per B3 / D-335). G owns
   D-304..D-308, D-322, D-323.
 - **The gate keys on the captured `head_sha` (D-361 / `[C121-B11]`, PR #503).**
-  The Unit's `:gate_fun` seam is arity-0 (§4 B11 / arch §7.3); the closure that
-  builds `%Gate.Request{}` MUST set `Request.hash` to the Unit's captured
-  `data.head_sha` (the agent-asserted coordinate, B8/D-362), NOT the declared
+  The Unit's `:gate_fun` seam is **arity-1**: `(coordinate :: String.t() -> :pass |
+  {:fail, findings})`. The Unit supplies the coordinate
+  (`data.head_sha || data.hash`) at the `gating` state entry, symmetric with the
+  merge coordinate in `awaiting_merge` (D-361). The closure MUST use the received
+  coordinate as `Request.hash` — the agent-asserted `head_sha`, NOT the declared
   `work_item.hash`. `Request.hash` is the `(hash, run, half)` verdict coordinate
   the gate appends to L (Gate.Request docstring; SPEC-FACTORY-GATE B1); keying it
   on the actual commit is what makes the verdict refer to the agent's real work.
   The gate **content** is already the branch tip (the harness builds the gate
   workspace via `git worktree add --detach <branch>`, `dogfood/gate_fun.ex`), so
   this change aligns the verdict *label* with the content the gate already ran on.
-  **Fallback (D-363):** when `data.head_sha` is `nil`, the closure uses the
-  declared `work_item.hash` unchanged.
+  **Fallback (D-363):** when `data.head_sha` is `nil`, the Unit passes the declared
+  `work_item.hash` as the coordinate (nil-fallback symmetric with merge).
 
 ### B8: Unit (C6) ↔ Worker fleet (W) — *cited, SPEC-FACTORY-FLEET*
 
@@ -694,11 +697,13 @@ Tau.Factory.Supervisor.start_link(opts) :: Supervisor.on_start()
     :agent_bin  — String.t();   path to the worker agent executable each Worker
                                 runs (the {:packet,4} D-326 agent). Threaded into
                                 the assembled drive_fun deps. (P5c-7, #475.)
-    :gate_fun   — (-> :pass | {:fail, [finding]}) | nil; the per-unit gate seam
-                                (arity-0, the Unit's contract — see "gate_fun
-                                completion" below). nil ⇒ no real gate wired (the
-                                P5c-6 idle path drove no unit). Threaded into the
-                                assembled drive_fun deps. (P5c-7, #475.)
+    :gate_fun   — (coordinate :: String.t() -> :pass | {:fail, [finding]}) | nil;
+                                the per-unit gate seam (arity-1; the Unit supplies
+                                the coordinate `data.head_sha || data.hash` at call
+                                time — see "gate_fun completion" below, D-361).
+                                nil ⇒ no real gate wired (the P5c-6 idle path drove
+                                no unit). Threaded into the assembled drive_fun deps.
+                                (P5c-7, #475.)
     :unit_timeouts — keyword();  per-state Unit timeout overrides threaded into
                                 every driven Unit's :timeouts opt (default
                                 [state_timeout_ms: 30_000]). Real agent runs need
@@ -721,16 +726,19 @@ closes it.
   `decode_event/1`).
 
 - **`:gate_fun` — the arity contract and how it wraps `Gate.run/1`.** The
-  **Unit's** `:gate_fun` seam is **arity-0** returning `:pass | {:fail,
-  findings}` (`unit.ex`; called as `data.gate_fun.()` in `gating/3`). The
-  **real** gate is `Tau.Factory.Gate.run/1`, which takes a fully-built
+  **Unit's** `:gate_fun` seam is **arity-1** returning `:pass | {:fail,
+  findings}` (`unit.ex`; called as `data.gate_fun.(coordinate)` in `gating/3`
+  where `coordinate = data.head_sha || data.hash`, symmetric with `awaiting_merge`,
+  D-361). The **real** gate is `Tau.Factory.Gate.run/1`, which takes a fully-built
   `%Tau.Factory.Gate.Request{}` and returns a `%Tau.Factory.Gate.Verdict{}`
   (cited B7 / SPEC-FACTORY-GATE §4 B1; `lib/tau/factory/gate.ex`). The
-  supervisor/dogfood therefore builds a **request-bearing arity-0 closure** that
-  adapts `Gate.run/1`-over-`Request` to the Unit's arity-0 seam:
+  supervisor/dogfood therefore builds a **request-bearing arity-1 closure** that
+  adapts `Gate.run/1`-over-`Request` to the Unit's arity-1 seam. The closure uses
+  the received coordinate (the captured `head_sha`, or declared `work_item.hash`
+  via nil-fallback, D-363) as `Gate.Request.hash`:
 
   ```
-  gate_fun = fn ->
+  gate_fun = fn coordinate ->
     req = %Gate.Request{
       unit:         unit_id,        # work_item.unit_id
       diff:         diff,            # merge_base..HEAD unified diff in the gate workspace
@@ -738,7 +746,7 @@ closes it.
       policy_pin:   policy_pin,       # admission-pinned policy (HR-8); in the dogfood a hermetic oracle pin
       workspace:    gate_workspace,   # a host-isolated checkout the engine reverts in (D-309)
       merge_base:   merge_base,       # `git merge-base origin/main HEAD` in the workspace
-      hash:         hash,              # the unit's content/HEAD hash (work_item.hash)
+      hash:         coordinate,        # the captured head_sha (or declared hash via fallback, D-361/D-363)
       run:          run,               # the run identifier (work_item.run)
       ledger:       ledger              # the started Ledger.Writer (WAL-before-ack, D-335)
     }
@@ -749,8 +757,9 @@ closes it.
   end
   ```
 
-  **Where each `Gate.Request` field comes from at drive time.** `:unit`, `:hash`,
-  `:run`, `:branch` are `work_item` fields (B10 IssueSelector / B6 merge-map).
+  **Where each `Gate.Request` field comes from at drive time.** `:unit`, `:run`,
+  `:branch` are `work_item` fields (B10 IssueSelector / B6 merge-map). `:hash`
+  (= `coordinate`) is the Unit-supplied runtime value (`data.head_sha || data.hash`).
   `:frozen_paths` is the declared gating-test path set frozen at scope-freeze
   (cited B7 / SPEC-FACTORY-GATE D-304). `:merge_base` is computed in the gate
   `:workspace` (`git merge-base origin/main HEAD`). `:workspace` is a
@@ -765,9 +774,11 @@ closes it.
   The Unit consumes `work_ready(worker_id, branch, head_sha)` and now **captures**
   `branch`/`head_sha` into its data (D-362; `unit.ex` `implementing/3` and
   `oracle/3` current-worker clauses write `%{data | branch: branch, head_sha:
-  head_sha}`). Both `gate_fun` (the arity-0 closure above, via `Request.hash`) and
-  `merge_fun` (via the merge-map `hash`/`branch`) key on that captured
-  agent-asserted `head_sha`, not the unit's pre-declared `work_item.hash` (D-361).
+  head_sha}`). Both `gate_fun` (the arity-1 closure above — the Unit passes
+  `data.head_sha || data.hash` as the coordinate, which the closure sets as
+  `Request.hash`) and `merge_fun` (via the merge-map `hash`/`branch`) key on that
+  captured agent-asserted `head_sha`, not the unit's pre-declared `work_item.hash`
+  (D-361).
   For the dogfood the change is observably a no-op (D-363): the scripted agent's
   asserted HEAD == the declared `hash` by construction, so the captured and
   declared coordinates coincide. The fix is the strict refinement a
@@ -1212,7 +1223,7 @@ Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 - `lib/tau/factory/unit.ex` (C6; D-318, D-340, **D-356** awaiting_merge subscribe-before-request consume + unsubscribe-on-exit, **D-362** capture `work_ready` `branch`/`head_sha` into data, **D-361** key `merge_fun` on captured `head_sha`/`branch`, plus B6/B7/B8 cited edges) — PR-CORE-3/PR #477/PR #503
 - `lib/tau/factory/unit_driver.ex` (D-340, **D-356** `:janitor` threading + no driver-side merge bridge / no driver reclaim; **D-361** build the merge map `hash`/`branch` from the captured `head_sha`; the real `drive_fun` wiring Unit→fleet→gate→merge seams) — PR #477/PR #503
 - `lib/tau/factory/gate/request.ex` (**D-361** `Request.hash` is the captured `head_sha`, not the declared `work_item.hash`; the gate-closure construction site) — PR #503
-- `lib/tau/factory/dogfood/gate_fun.ex` (**D-361/D-363** the arity-0 gate closure sets `Request.hash` from the captured `head_sha`, falling back to declared hash when `nil`) — PR #503
+- `lib/tau/factory/dogfood/gate_fun.ex` (**D-361/D-363** the arity-1 gate closure receives the coordinate (`head_sha || declared hash`) from the Unit and sets `Request.hash` to it) — PR #503
 - `lib/tau/factory/retry.ex` (C8; D-318) — PR-CORE-3
 - `lib/tau/factory/kill_switch.ex` (C9; D-321) — PR-CORE-4
 - `lib/tau/factory/supervisor.ex` + `lib/tau/application.ex` (tree; rest_for_one spine; **D-357** config-gated `start_link/1` assembly + seam-threading, B11; **D-358** `:unit_timeouts` thread; **gate_fun/agent_bin** thread completing the P5c-6 deferral, §4 B11) — PR-CORE-1 / PR #480 / PR #481

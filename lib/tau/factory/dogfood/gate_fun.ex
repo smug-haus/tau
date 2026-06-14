@@ -1,12 +1,12 @@
 defmodule Tau.Factory.Dogfood.GateFun do
   @moduledoc """
-  Builds the arity-0 `gate_fun` closure for the `mix tau.factory.dogfood` harness.
+  Builds the arity-1 `gate_fun` closure for the `mix tau.factory.dogfood` harness.
 
-  The Unit's `:gate_fun` seam is `(-> :pass | {:fail, [finding]})`. The real
-  gate is `Tau.Factory.Gate.run/1` over a `%Tau.Factory.Gate.Request{}`. This
-  module builds the request-bearing arity-0 closure that adapts
-  `Gate.run/1`-over-`Request` to the Unit's arity-0 seam, as specified in
-  SPEC-FACTORY-CORE §4 B11 ("gate_fun completion", P5c-7).
+  The Unit's `:gate_fun` seam is `(coordinate :: String.t() -> :pass | {:fail, [finding]})`.
+  The real gate is `Tau.Factory.Gate.run/1` over a `%Tau.Factory.Gate.Request{}`. This
+  module builds the request-bearing arity-1 closure that adapts
+  `Gate.run/1`-over-`Request` to the Unit's arity-1 seam, as specified in
+  SPEC-FACTORY-CORE §4 B11 ("gate_fun completion", P5c-7, D-361).
 
   The closure creates a **host-isolated gate workspace** (a `git worktree add`
   of `repo_dir` on the feature branch) at call time — AFTER the worker has
@@ -30,34 +30,32 @@ defmodule Tau.Factory.Dogfood.GateFun do
   require Logger
 
   @doc """
-  Build the arity-0 `gate_fun` closure for the dogfood harness.
+  Build the arity-1 `gate_fun` closure for the dogfood harness.
 
   The closure captures:
     - `repo_dir`     — the sandbox working repo (worker's parent git dir).
     - `unit_id`      — the stable unit identity string (e.g. `"unit-1"`).
-    - `hash`         — the pre-declared content hash from the work_item
-                       (used as the Ledger coordinate; [C121-B11] — not the
-                       git HEAD SHA).
     - `run`          — the run identifier string (e.g. `"run-1"`).
     - `frozen_paths` — the declared gating-test path set (D-304; a
                        `MapSet.t(String.t())`).
     - `ledger`       — the started `Tau.Factory.Ledger.Writer` name/pid
                        (WAL-before-ack, D-335).
 
-  Returns an arity-0 function `(-> :pass | {:fail, [term()]})`.
+  The returned closure is arity-1: `(coordinate :: String.t() -> :pass | {:fail, [term()]})`.
+  The Unit supplies the coordinate (`data.head_sha || data.hash`) at call time (D-361).
+  The coordinate becomes the `Gate.Request.hash` — i.e. the captured head_sha (or the
+  declared work_item.hash via nil-fallback per D-363) is used as the gate's hash key.
   """
   @spec build(
           repo_dir: String.t(),
           unit_id: String.t(),
-          hash: String.t(),
           run: String.t(),
           frozen_paths: MapSet.t(String.t()),
           ledger: GenServer.server()
-        ) :: (-> :pass | {:fail, [term()]})
+        ) :: (String.t() -> :pass | {:fail, [term()]})
   def build(params) do
     repo_dir = Keyword.fetch!(params, :repo_dir)
     unit_id = Keyword.fetch!(params, :unit_id)
-    hash = Keyword.fetch!(params, :hash)
     run = Keyword.fetch!(params, :run)
     frozen_paths = Keyword.fetch!(params, :frozen_paths)
     ledger = Keyword.fetch!(params, :ledger)
@@ -66,8 +64,8 @@ defmodule Tau.Factory.Dogfood.GateFun do
     # The mutation half is fully real (no oracle pin for :mutation).
     policy_pin = %{oracle: %{critic: :pass, reviewer: :pass}}
 
-    fn ->
-      run_gate(repo_dir, unit_id, hash, run, frozen_paths, ledger, policy_pin)
+    fn coordinate ->
+      run_gate(repo_dir, unit_id, coordinate, run, frozen_paths, ledger, policy_pin)
     end
   end
 
