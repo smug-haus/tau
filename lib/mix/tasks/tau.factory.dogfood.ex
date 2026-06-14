@@ -50,7 +50,7 @@ defmodule Mix.Tasks.Tau.Factory.Dogfood do
 
   use Mix.Task
 
-  alias Tau.Factory.Dogfood.Agent, as: DogfoodAgent
+  alias Tau.Factory.AgentBin
   alias Tau.Factory.Dogfood.GateFun
   alias Tau.Factory.Dogfood.Sandbox
   alias Tau.Factory.IssueSelector
@@ -107,8 +107,13 @@ defmodule Mix.Tasks.Tau.Factory.Dogfood do
     # Step 4 — Start the OTP application so PubSub etc. are up.
     Mix.Task.run("app.start")
 
-    # Step 5 — Write the scripted agent_bin to a temp file.
-    agent_bin = write_agent_bin()
+    # Step 5 — Resolve the agent_bin via AgentBin.resolve/1 (D-376).
+    # Default factory config is read from Application.get_env(:tau, :factory, []).
+    # The default mode is scripted/replay (D-357 gate: :claude_code is off by
+    # default), so existing dogfood behaviour is preserved unless the operator
+    # explicitly sets agent_mode: :claude_code in the factory config.
+    factory_opts = Application.get_env(:tau, :factory, [])
+    {agent_bin, _spawn_opts} = AgentBin.resolve(factory_opts)
     Mix.shell().info("[dogfood] agent_bin: #{agent_bin}")
 
     # Step 6 — Derive the deterministic work_item coordinate (mirrors IssueSelector).
@@ -263,17 +268,6 @@ defmodule Mix.Tasks.Tau.Factory.Dogfood do
   end
 
   defp seeded?(repo), do: File.exists?(Path.join(repo, "mix.exs"))
-
-  # ---------------------------------------------------------------------------
-  # Private — agent_bin
-  # ---------------------------------------------------------------------------
-
-  defp write_agent_bin do
-    bin_path =
-      Path.join(System.tmp_dir!(), "tau_dogfood_agent_#{:erlang.unique_integer([:positive])}")
-
-    DogfoodAgent.write(bin_path)
-  end
 
   # ---------------------------------------------------------------------------
   # Private — await :merged via Ledger polling

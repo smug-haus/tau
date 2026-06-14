@@ -27,6 +27,10 @@ the worker's agent in place of the canned dogfood script, via an
 contract unchanged (§4 B4-A1, §6 D-364..D-367). Couples to #486 (the real
 `head_sha` thread) which *consumes* the coordinate this bridge produces — cited,
 not owned here.
+#511 amendment — adds **D-376** (`AgentBin.resolve/1` config-gated selector; §4
+B4-A1 extension, §6, Appendix B). Wires `mix tau.factory.dogfood` to use
+`AgentBin.resolve/1`; default mode stays scripted so existing dogfood gates are
+unaffected.
 
 ## 0. Why this spec exists
 
@@ -742,6 +746,39 @@ Detection: `coding_agent_shim_heartbeat_test.exs` — a Replay stream with a gap
 longer than `heartbeat_interval` produces **no** heartbeat across the gap (the
 self-clock counter-example fails), and resumes pulsing when events resume.
 
+**D-376 — Config-gated `agent_bin` selector (`AgentBin.resolve/1`, #511):**
+`Tau.Factory.AgentBin.resolve/1` is the sole site that maps the factory's
+`:agent_mode` config key to an `agent_bin` executable + `spawn_opts` pair.
+
+```
+resolve(opts :: keyword()) :: {agent_bin_path :: String.t(), spawn_opts :: keyword()}
+```
+
+Three modes, exhaustive and mutually exclusive:
+
+- **`:claude_code`** — writes a `CodingAgentShim` executable with
+  `Tau.CodingAgents.ClaudeCode` baked as the adapter (D-364..D-367 bridge).
+  Returns `spawn_opts = [agent_mode: :claude_code]` so the Worker's
+  `open_port_and_finish/1` path fires the D-374 metered-API preflight +
+  credential scrub (SPEC-FACTORY-GOV). The baked shim's config, when decoded
+  from its Base64 blob, carries `adapter: Tau.CodingAgents.ClaudeCode`.
+
+- **`:scripted` / `:replay`** — writes the `Tau.Factory.Dogfood.Agent` scripted
+  binary. Returns `spawn_opts = []`; no D-374 preflight. Behaviour identical to
+  today's dogfood path.
+
+- **absent / any other atom** — defaults to the scripted path (D-357 gate: real
+  agent mode is **off** by default). Returns `spawn_opts = []`.
+
+Formally: `□( resolve(opts).spawn_opts contains agent_mode: :claude_code ⟺
+opts[:agent_mode] == :claude_code )`.
+
+The resolver is a **pure function** (write of the shim file is a required
+side-effect for producing the executable, not hidden process state). It holds no
+ETS, no GenServer, no `Application.put_env/3`. Detection:
+`test/tau/factory/agent_bin_test.exs` — 6 gating tests covering all three mode
+branches plus the D-357 default-off invariant.
+
 **D-367 — Shim crash containment preserves the Worker's crash domain (#487, A1):**
 The shim Port is linked into the Worker (D-316), so a shim crash propagates to the
 Worker exactly as the canned script's would and the janitor capture (B5) is
@@ -850,6 +887,9 @@ Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 - `test/tau/factory/oracle_spawn_order_test.exs` (D-304 mechanism, cited) — PR-FLEET-4
 - `lib/tau/factory/coding_agent_shim.ex` (B4-A1; D-364..D-367 — drives `Tau.CodingAgent`, owns branch+commit, emits `work_ready`/heartbeat frames) — PR-A1 (#487)
 - `lib/tau/factory/dogfood/agent.ex` (the canned script the shim replaces as the real-dogfood `agent_bin`; D-358 retained for the orchestration smoke) — PR-A1 (#487)
+- `lib/tau/factory/agent_bin.ex` (D-376 — `AgentBin.resolve/1`; config-gated selector mapping `:agent_mode` → `{agent_bin_path, spawn_opts}`) — PR #512 (#511)
+- `lib/mix/tasks/tau.factory.dogfood.ex` (D-376 — wired to `AgentBin.resolve/1`; default mode stays scripted/replay; existing dogfood gates unaffected) — PR #512 (#511)
+- `test/tau/factory/agent_bin_test.exs` (D-376 — 6 gating tests; all three mode branches + D-357 default-off) — PR #512 (#511)
 - `test/tau/factory/coding_agent_shim_bridge_test.exs` (D-364 — `%Done{}`→`work_ready` mapping over Replay) — PR-A1
 - `test/tau/factory/coding_agent_shim_isolation_test.exs` (D-365 — shim+sub-agent inside `ws`/namespace) — PR-A1
 - `test/tau/factory/coding_agent_shim_heartbeat_test.exs` (D-366 — heartbeat tracks stream progress) — PR-A1
