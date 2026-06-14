@@ -6,9 +6,10 @@ defmodule Tau.Factory.Unit do
 
       planned → oracle → implementing → gating → awaiting_merge → merged
       gating {:fail,_} → retry ladder → implementing | escalated
+      worker_exit (semantic) → retry ladder → implementing | escalated (D-326)
       awaiting_merge :rejected → gating (re-gate, INV-2)
       any non-terminal + :state_timeout → escalated (C107)
-      worker :DOWN → escalated (B8/C105 infra path, gate never called)
+      worker :DOWN (infra, no prior semantic exit) → escalated (B8/C105)
 
   D-318: total gate invocations == 1 + N_refine + N_pivot (exactly, bounded
   retry via `Tau.Factory.Retry.next/3`). The `gating` state ALWAYS calls
@@ -367,6 +368,32 @@ defmodule Tau.Factory.Unit do
     {:keep_state, data}
   end
 
+  # D-326 [C111b-B8 / C105-B5]: semantic worker exit — route to retry ladder,
+  # NEVER gate. Covers :no_work_product (exit-0-without-work_ready),
+  # :error (agent-reported failure), {:exit_status, n} (non-zero exit code),
+  # and any other non-completion semantic reason.
+  #
+  # Race handling: Process.demonitor(mref, [:flush]) flushes any queued :DOWN
+  # from the BEAM mailbox synchronously, so a :DOWN that was already delivered
+  # before we processed this worker_exit message is discarded. A :DOWN that
+  # arrives after the demonitor+flush is suppressed by the demonitor. This
+  # provides one-exit-one-outcome disjointness (B8) regardless of ordering.
+  #
+  # The guard `not is_nil(worker_id)` ensures this clause is only active when
+  # the 3-tuple seam is in use. 2-tuple workers (nil worker_id) still rely on
+  # the legacy :DOWN handler for infra crash detection (test 4 preserved).
+  def implementing(:info, {:worker_exit, worker_id, _reason}, %{worker_id: worker_id} = data)
+      when not is_nil(worker_id) do
+    Process.demonitor(data.worker_mref, [:flush])
+    new_data = %{data | worker_pid: nil, worker_id: nil, worker_mref: nil}
+    advance_retry_ladder(new_data)
+  end
+
+  # D-326 [B8 stale-worker]: worker_exit keyed by a different worker_id — discard.
+  def implementing(:info, {:worker_exit, _other_id, _reason}, data) do
+    {:keep_state, data}
+  end
+
   def implementing(:state_timeout, :worker_stalled, data) do
     Logger.warning("[Unit #{data.unit_id}] implementing :state_timeout — worker stalled")
     demonitor_worker(data)
@@ -430,24 +457,8 @@ defmodule Tau.Factory.Unit do
 
       {:fail, findings} ->
         new_data = %{data | last_findings: findings}
-
-        case Retry.next(:gate_fail, new_data.refine_count, new_data.pivot_count) do
-          {:refine, _k} ->
-            # Bump refine_count; go back to implementing for another attempt.
-            bumped = %{new_data | refine_count: new_data.refine_count + 1}
-            {:next_state, :implementing, bumped, [{:next_event, :internal, :on_enter}]}
-
-          :pivot ->
-            # The pivot attempt: go back to implementing one more time.
-            # On that attempt's gate-fail, Retry.next(_, N_REFINE, 1) = :exhausted.
-            bumped = %{new_data | pivot_count: new_data.pivot_count + 1}
-            {:next_state, :implementing, bumped, [{:next_event, :internal, :on_enter}]}
-
-          :exhausted ->
-            # Reached after the pivot attempt's gate fails:
-            # Retry.next(_, N_REFINE, N_PIVOT) → :exhausted → terminal.
-            escalate(new_data, :E_RETRY_EXHAUSTED)
-        end
+        # D-326: shared retry-ladder path (same as semantic worker_exit).
+        advance_retry_ladder(new_data)
     end
   end
 
@@ -547,6 +558,30 @@ defmodule Tau.Factory.Unit do
   @spec escalate(map(), atom()) :: {:next_state, :escalated, map()}
   defp escalate(data, reason) do
     terminal(data, :escalated, data.last_findings, reason)
+  end
+
+  # D-326: shared retry-ladder transition used by both the gating {:fail, _}
+  # path and the semantic worker_exit path (C111b-B8 / C105-B5). Applies
+  # Retry.next/3 on the current counters and either re-enters :implementing
+  # (refine or pivot) or escalates with :E_RETRY_EXHAUSTED.
+  #
+  # This factoring ensures gating-fail and worker-exit use one code path:
+  # the ladder logic is not duplicated.
+  @spec advance_retry_ladder(map()) ::
+          {:next_state, :implementing, map()} | {:next_state, :escalated, map()}
+  defp advance_retry_ladder(data) do
+    case Retry.next(:worker_exit, data.refine_count, data.pivot_count) do
+      {:refine, _k} ->
+        bumped = %{data | refine_count: data.refine_count + 1}
+        {:next_state, :implementing, bumped, [{:next_event, :internal, :on_enter}]}
+
+      :pivot ->
+        bumped = %{data | pivot_count: data.pivot_count + 1}
+        {:next_state, :implementing, bumped, [{:next_event, :internal, :on_enter}]}
+
+      :exhausted ->
+        escalate(data, :E_RETRY_EXHAUSTED)
+    end
   end
 
   # Demonitor the current worker if a monitor ref is present.
