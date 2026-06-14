@@ -329,6 +329,25 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
 - **[C112-B10]** The external tracker is the authority for *what to build*; L is
   the authority for *what has been done*. The reconciliation pass crosses this
   boundary read-only (the tracker is projected, never a second writer of L).
+- **★ [C131-B8] The agent's task crosses to the Worker as an assembled prompt,
+  not a bare issue title (A2, D-372/D-373).** The fact "here is the task to solve"
+  crosses from intake (the `work_item`) to the agent (the shim's
+  `Tau.CodingAgent.task.prompt`) through the Worker's `:brief`. Today the brief is
+  set to the issue *title* alone (`supervisor.ex:to_unit_work_item/1`), and the
+  scripted agent ignores it (`task.prompt = ""`). A real agent driven by the
+  A1 shim (`Tau.CodingAgents.ClaudeCode`) has nothing to solve from a title. The
+  information that MUST survive the crossing is the autonomous analogue of the
+  human coordinator's draft-PR-body implementer brief (`factory-loop.md`): the
+  **issue body**, the **linked SPEC/AC/D-NNN context**, the **declared scope**
+  (`ConflictCheck.scope()`, B10/I2), the **gating-test paths**, and the **arch
+  pointers** (`docs/arch/04-software-architecture/*` — per Tau memory
+  `feedback_brief_implementers_with_arch`, NOT only SPEC §-refs). No component
+  assembles this; the brief crossing *loses everything but the title*. The
+  `BriefAssembler` (§4 B10 amendment below, D-372) is the intake component that
+  composes the available inputs into `task.prompt`, mirroring how the
+  `:elaborate_fun` seam composes the issue into `ConflictCheck.scope()`. The
+  assembly is a pure function of inputs already present in the `work_item` plus
+  static arch pointers — no LLM call on the assembly path (D-373).
 - **★ [C113-B3]** **Resume-read routed through the writer process.** The
   resume-read op `Ledger.Reader.latest_unit_snapshots/1` is routed through
   the `Ledger.Writer` GenServer process via `GenServer.call/2` — NOT through a
@@ -776,6 +795,79 @@ the B11 supervisor/seam contract that follows.
   only populates the `issue_map`'s real fields; the `body` / `labels` keys the
   heuristic reads are already in the §4 B10 `--json` projection. No ordering
   dependency in either direction — referenced, not implemented here.
+
+**Amendment (PR #508 / B10, A2 — brief/issue → prompt assembler; D-372, D-373).**
+The B10 amendment above turns the issue into a *declared scope*; this amendment
+turns the issue (and its full context) into the *agent's prompt*. The two are
+disjoint intake projections of the same `work_item`: the elaborator feeds the
+Scheduler's admission predicate (a `ConflictCheck.scope()`); the assembler feeds
+the agent's task (a `task.prompt :: String.t()`). This sub-section pins the
+assembler contract.
+
+- **The gap being closed.** `to_unit_work_item/1` (`lib/tau/factory/supervisor.ex`)
+  sets `brief: title` — the brief carried to the Worker is only the issue title;
+  the shim's `task.prompt` is the hardcoded empty string
+  (`coding_agent_shim.ex` Runner: `task = %{prompt: "", workspace: ws, …}`). The
+  scripted Replay agent ignores the prompt, so the dogfood "works" only because no
+  real agent is in the loop. A real agent (A1, `Tau.CodingAgents.ClaudeCode`) needs
+  a real prompt. **[C131-B8]**
+
+- **The assembler component (the seam).** `Tau.Factory.BriefAssembler` is a plain
+  pure functional module (no GenServer — OTP non-negotiable §3). It exposes the
+  assembly through an injected, **pure** seam mirroring `:gh_fun` / `:elaborate_fun`:
+
+  ```
+  Tau.Factory.BriefAssembler.assemble(input :: map(), opts :: keyword()) :: String.t()
+
+  input :: %{
+    required(:issue)            => map(),                  # issue_map: "number","title","body","labels"
+    required(:declared_scope)   => ConflictCheck.scope(),  # the B10/I2 elaborated scope
+    optional(:gating_test_paths)=> [String.t()],           # test-author's declared paths (factory-loop 4b)
+    optional(:spec_refs)        => [String.t()],           # cited SPEC ids / AC-N / D-NNN tokens
+    optional(:arch_pointers)    => [String.t()]            # docs/arch/04-software-architecture/* paths
+  }
+
+  opts:
+    :assemble_fun — ((input) -> String.t())   # default: the heuristic template assembler (D-372)
+  ```
+
+  The injected `:assemble_fun` (D-373) follows the established `*_fun` pattern so a
+  stronger, LLM-assisted prompt author is a *substitution*, not a rewrite — exactly
+  as `:elaborate_fun` (D-370) makes the scope elaborator swappable. The default
+  assembler is pure and network-free: it composes a labelled, section-structured
+  Markdown prompt from the inputs already in the `work_item` plus the static arch
+  pointers; it does NOT call an LLM on the assembly path.
+
+- **Invocation point.** `Tau.Factory.Supervisor.to_unit_work_item/1` is the single
+  assembly site: it already receives `{issue, scope, hash, branch}` from
+  `IssueSelector` and constructs the `work_item` map. It replaces `brief: title`
+  with `brief: BriefAssembler.assemble(%{issue: issue, declared_scope: scope, …})`.
+  The assembled brief then rides the *existing* path unchanged — `UnitDriver.drive/2`
+  → `WorkerSupervisor.spawn/5` → `Worker.init/1` → the shim — so no new boundary is
+  introduced. The shim contract is extended (A1 wiring, not A2) so the Runner sets
+  `task.prompt = brief` instead of `""`; A2 owns the assembler and the contract that
+  `task.prompt` equals the assembled brief; the transport of the brief into the
+  shim's baked config is the A1 implementer's wiring, deliberately not over-pinned
+  here.
+
+- **Composition contract (D-372).** Every input field present in `input` is
+  consumed — appears, labelled, in the assembled prompt (V3: no machinery that
+  enforces nothing; no stated input silently dropped). The issue body, the declared
+  scope, the gating-test paths, the SPEC/AC/D-NNN refs, and the arch pointers each
+  occupy a distinct labelled section. The arch-pointer section is mandatory and
+  non-empty (it carries at least the `docs/arch/04-software-architecture/` root),
+  discharging `feedback_brief_implementers_with_arch`.
+
+- **Graceful-degradation / failure posture (D-373).** The assembler does NOT assume
+  the issue text is complete (V1 — there is no impossibility hidden here: it
+  composes the inputs it *has*, it does not infer the inputs it lacks). An absent
+  optional input degrades to an explicit "(none declared)" marker in its section,
+  never a crash and never a silently-omitted section. For any non-empty issue (a
+  `"number"` and a `"title"`) the assembler returns a non-empty `String.t()`; it
+  never raises on partial input and never returns `""`. Pre: `input` carries at
+  least `:issue` (with `"number"`/`"title"`) and `:declared_scope`. Post: a
+  non-empty prompt whose section set is a superset of `{issue, scope, arch}` and
+  includes every *present* optional input.
 
 ### B11: `Tau.Factory.Supervisor` ↔ {`Tau.Application`, tests} — config-gated assembly + seam-threading (P5c-6, #474; D-357)
 
@@ -1295,6 +1387,31 @@ no post-hoc actual-path check). Enforced by `issue_elaboration_test.exs` (an
 empty-signal issue's scope clears against an empty `F` but defers against any
 non-empty `F`).
 
+**D-372 — Brief assembly is complete over its declared inputs (A2, [C131-B8]):**
+`Tau.Factory.BriefAssembler.assemble/2` composes `task.prompt` from the
+`work_item`'s inputs (issue body, declared `ConflictCheck.scope()`, gating-test
+paths, SPEC/AC/D-NNN refs) **plus** the static `docs/arch/04-software-architecture`
+pointers, and **every input present in `input` appears, labelled, in the assembled
+prompt** — no stated input is silently dropped (V3) and the arch-pointer section is
+mandatory and non-empty (`feedback_brief_implementers_with_arch`). Enforced by
+`brief_assembler_test.exs` (an `input` carrying each field yields a prompt
+containing each field's content under its labelled section, and the arch section is
+present even when no other optional input is supplied).
+
+**D-373 — Assembly is an injected pure seam that degrades, never crashes (A2,
+[C131-B8]):** the issue→prompt mapping is the injected `:assemble_fun ::
+(input -> String.t())` (defaulting to the D-372 heuristic template), following the
+codebase's `*_fun` injection pattern, so (a) a stronger LLM-assisted prompt author
+is a *substitution*, not a rewrite of `Supervisor`/`UnitDriver`/`Worker`, and (b)
+the default is pure and network-free — no LLM call on the assembly path. The
+assembler does not assume the issue text is complete: an absent optional input
+degrades to an explicit placeholder in its section, and for any non-empty issue
+(carrying `"number"`/`"title"`) the assembler returns a non-empty `String.t()`,
+never raising on partial input and never returning `""`. Enforced by
+`brief_assembler_test.exs` (a stub `assemble_fun` is honoured; the default is pure;
+partial input degrades to placeholders without raising; output is always
+non-empty).
+
 ## 7. Acceptance criteria
 
 Each is expressed against the user-facing path with an observable signal.
@@ -1386,6 +1503,8 @@ Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 - `lib/tau/factory/unit_driver.ex` (D-340, **D-356** `:janitor` threading + no driver-side merge bridge / no driver reclaim; **D-361** build the merge map `hash`/`branch` from the captured `head_sha`; the real `drive_fun` wiring Unit→fleet→gate→merge seams) — PR #477/PR #503
 - `lib/tau/factory/gate/request.ex` (**D-361** `Request.hash` is the captured `head_sha`, not the declared `work_item.hash`; the gate-closure construction site) — PR #503
 - `lib/tau/factory/dogfood/gate_fun.ex` (**D-361/D-363** the arity-1 gate closure receives the coordinate (`head_sha || declared hash`) from the Unit and sets `Request.hash` to it) — PR #503
+- `lib/tau/factory/brief_assembler.ex` (B10/A2; **D-372** complete-over-inputs composition, **D-373** injected `:assemble_fun` pure seam + graceful degradation; the issue→`task.prompt` intake projection, invoked at `supervisor.ex:to_unit_work_item/1`) — PR #508
+- `lib/tau/factory/supervisor.ex` (**D-372** `to_unit_work_item/1` sets `brief:` via `BriefAssembler.assemble/2` instead of `brief: title`) — PR #508
 - `lib/tau/factory/retry.ex` (C8; D-318) — PR-CORE-3
 - `lib/tau/factory/kill_switch.ex` (C9; D-321) — PR-CORE-4
 - `lib/tau/factory/supervisor.ex` + `lib/tau/application.ex` (tree; rest_for_one spine; **D-357** config-gated `start_link/1` assembly + seam-threading, B11; **D-358** `:unit_timeouts` thread; **gate_fun/agent_bin** thread completing the P5c-6 deferral, §4 B11) — PR-CORE-1 / PR #480 / PR #481
@@ -1395,6 +1514,7 @@ Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 - `test/tau/factory/ledger_durability_test.exs` (D-315) — PR-CORE-1
 - `test/tau/factory/conflict_check_property_test.exs` (D-312, D-343) — PR-CORE-2
 - `test/tau/factory/budget_admission_test.exs` (D-320, D-332) — PR-CORE-2
+- `test/tau/factory/brief_assembler_test.exs` (**D-372** complete-over-inputs composition; **D-373** injected `:assemble_fun` seam, pure default, graceful degradation, non-empty output) — PR #508
 - `test/tau/factory/retry_property_test.exs` (D-318) — PR-CORE-3
 - `test/tau/factory/escalation_property_test.exs` + `unit_timeout_test.exs` (D-317) — PR-CORE-3
 - `test/tau/factory/kill_switch_test.exs` (D-321) — PR-CORE-4
@@ -1418,4 +1538,4 @@ B8 → `SPEC-FACTORY-FLEET` (D-309–D-311, D-313, D-314, D-316); `E-DESTRUCTIVE
 `SPEC-FACTORY-CORE` to `.claude/rules/spec-before-code.md` (catalog) and the
 `D-NNN` block table in `docs/MISSION.md` (D-312, D-315, D-317, D-318, D-320,
 D-321, D-330–D-333, D-335, D-336, D-340, D-342–D-344, D-355–D-359,
-D-361–D-363 → this SPEC).
+D-361–D-363, D-369–D-373 → this SPEC).

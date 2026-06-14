@@ -384,6 +384,65 @@ test wired a real string-scope work-item into a real Scheduler. The elaboration
 makes `IssueSelector → Scheduler → ConflictCheck` type-correct on a real issue
 (SPEC-FACTORY-CORE [C124-B10]).
 
+### 2.7 Where the agent's prompt comes from — issue → `task.prompt` (A2; D-372/D-373)
+
+§2.6 projects the issue onto the *Scheduler's* admission predicate (a
+`ConflictCheck.scope()`). This subsection records the **disjoint, parallel
+projection** onto the *agent's* task: the issue (and its full context) → the shim's
+`Tau.CodingAgent.task.prompt :: String.t()`. It is the autonomous analogue of the
+human coordinator's draft-PR-body implementer brief (`factory-loop.md`): without
+it, a real agent (A1, `Tau.CodingAgents.ClaudeCode`) is handed an empty prompt and
+has nothing to solve. The boundary detail is SPEC-FACTORY-CORE §4 B10 (PR #508
+amendment); the D-NNN are D-372/D-373.
+
+**The gap (V3, an orphaned input).** The `work_item` already carries every input a
+brief needs — the `issue_map` (body/labels), the elaborated `declared_scope`
+(§2.6), and downstream the test-author's gating-test paths and the cited SPEC/AC/
+D-NNN. Yet `to_unit_work_item/1` sets `brief: title` and the shim hardcodes
+`task.prompt = ""`. The brief crossing **loses everything but the title**: the
+inputs exist but no component composes them into the prompt. The `BriefAssembler`
+is the intake component that consumes those inputs (V3 — every stated input is
+actually consumed; V12 — no machinery that enforces nothing).
+
+**The composition contract (D-372).** The default assembler emits a labelled,
+section-structured Markdown prompt with one section per input — issue body,
+declared scope, gating-test paths, SPEC/AC/D-NNN refs — **plus a mandatory
+arch-pointer section** carrying at least the `docs/arch/04-software-architecture/`
+root. The arch section is non-negotiable: Tau memory
+`feedback_brief_implementers_with_arch` requires pointing agents at the worked-out
+architecture, not only SPEC §-refs. Every *present* input appears, labelled; an
+*absent* optional input degrades to an explicit "(none declared)" placeholder — a
+missing input never crashes the assembler and never silently drops its section.
+
+**The discriminating question — static template vs richer assembly vs LLM, and why
+a heuristic template is the default (the cheapest-to-reverse decision, mirroring
+§2.6/D-370).** The fact that decides the mechanism is the same one that decided the
+elaborator: *who can be held to the contract on the synchronous intake path*. An
+LLM prompt author is unauditable and network-bound on a path that must be fast and
+deterministic; a static template over inputs already in the `work_item` is pure,
+testable with fixtures, and complete-over-its-inputs by construction. The heuristic
+template is therefore the default (D-372), reached through an **injected pure seam**
+`:assemble_fun :: (input -> String.t())` (D-373) — the established `*_fun` pattern —
+so a stronger, separately-verified LLM prompt author is a *substitution*, not a
+rewrite of `Supervisor`/`UnitDriver`/`Worker`, if prompt quality ever justifies the
+cost. This is the exact shape §2.6 chose for `:elaborate_fun`, applied to the
+prompt projection.
+
+**No impossibility hidden here (V1).** Unlike the elaborator — where free issue
+text cannot yield a *provably complete* impact set, forcing the over-declare bias —
+the assembler has no completeness obligation to fake: it composes the inputs it
+*has*; it does not infer inputs it lacks. Partial inputs are a *normal* state
+(early-phase issues, no gating-test paths yet), handled by graceful degradation,
+not an error. For any non-empty issue the assembler returns a non-empty prompt.
+
+**Invocation point and the unchanged downstream path.** `to_unit_work_item/1`
+(`supervisor.ex`) is the single assembly site; it swaps `brief: title` for
+`brief: BriefAssembler.assemble(%{issue: issue, declared_scope: scope, …})`. The
+assembled brief rides the *existing* `UnitDriver → WorkerSupervisor → Worker → shim`
+path unchanged — no new boundary. The A1 shim wiring (`task.prompt = brief` instead
+of `""`) is the consumer side; A2 owns the assembler and the contract that
+`task.prompt` equals the assembled brief.
+
 ---
 
 ## 3. U — Unit/PR FSM (`gen_statem` per entity)
