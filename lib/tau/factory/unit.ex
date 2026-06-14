@@ -283,8 +283,12 @@ defmodule Tau.Factory.Unit do
   end
 
   # Handle monitored worker :DOWN (infra crash path, B8/C105).
+  # D-326: guard with `is_nil(data.worker_id)` — only the legacy 2-tuple seam
+  # (worker_id == nil) escalates E_WORKER_DOWN via :DOWN. For the 3-tuple path,
+  # :DOWN is not an authoritative outcome; the fleet sends worker_exit (or the
+  # state_timeout fires for vanish-without-exit → E_WORKER_STALLED).
   def oracle(:info, {:DOWN, _mref, :process, worker_pid, reason}, %{worker_pid: worker_pid} = data)
-      when not is_nil(worker_pid) do
+      when not is_nil(worker_pid) and is_nil(data.worker_id) do
     Logger.warning("[Unit #{data.unit_id}] oracle worker :DOWN: #{inspect(reason)}")
     new_data = %{data | worker_pid: nil, worker_mref: nil}
     escalate(new_data, :E_WORKER_DOWN)
@@ -401,12 +405,16 @@ defmodule Tau.Factory.Unit do
   end
 
   # Handle monitored worker :DOWN (infra crash path, B8/C105).
+  # D-326: guard with `is_nil(data.worker_id)` — only the legacy 2-tuple seam
+  # (worker_id == nil) escalates E_WORKER_DOWN via :DOWN. For the 3-tuple path,
+  # :DOWN is not an authoritative outcome; the fleet sends worker_exit (or the
+  # state_timeout fires for vanish-without-exit → E_WORKER_STALLED).
   def implementing(
         :info,
         {:DOWN, _mref, :process, worker_pid, reason},
         %{worker_pid: worker_pid} = data
       )
-      when not is_nil(worker_pid) do
+      when not is_nil(worker_pid) and is_nil(data.worker_id) do
     Logger.warning("[Unit #{data.unit_id}] implementing worker :DOWN: #{inspect(reason)}")
     new_data = %{data | worker_pid: nil, worker_mref: nil}
     # C105: infra crash — do NOT call gate_fun. Route straight to escalated.
