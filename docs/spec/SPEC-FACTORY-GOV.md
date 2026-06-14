@@ -124,11 +124,12 @@ factory worker path):
     stop with reason `:metered_path_refused` (fail-closed; NO fallback).
     The death-cert monitor maps this to
     `{:worker_exit, worker_id, :metered_path_refused}`.
-  - Env scrub: append `{~c"ANTHROPIC_API_KEY", false}` to the Port's
-    `{:env, list}` when `agent_mode == :claude_code`. Erlang Port treats
-    `{key, false}` as "remove from child env" (POSIX unsetenv). This
-    ensures the child never inherits a metered key even if one is set in
-    the calling process env.
+  - Env scrub: append `{~c"ANTHROPIC_API_KEY", false}`,
+    `{~c"ANTHROPIC_AUTH_TOKEN", false}`, and `{~c"ANTHROPIC_BASE_URL", false}`
+    to the Port's `{:env, list}` when `agent_mode == :claude_code`. Erlang
+    Port treats `{key, false}` as "remove from child env" (POSIX unsetenv).
+    All three metered-spend vectors are scrubbed so the child never inherits
+    any metered Anthropic credential even if set in the calling process env.
 
 **[C223-B1 addition]** A metered-capable worker spawn MUST pass the D-374
 preflight at the `Worker.open_port_and_finish/1` funnel before `Port.open`.
@@ -528,12 +529,17 @@ call `creds_check_fun.()` BEFORE `Port.open`. If it returns
 `{:error, _}`, the Port is NEVER opened; the worker stops with
 `:metered_path_refused` (the death-cert monitor maps this to
 `{:worker_exit, worker_id, :metered_path_refused}`). The Port env MUST
-include `{~c"ANTHROPIC_API_KEY", false}` to prevent the child from
-inheriting a metered key. NO fallback to the metered path is permitted.
-Non-`:claude_code` modes are unchanged.
+include all three metered Anthropic credential variables set to `false`
+to prevent the child from inheriting any metered-spend vector:
+`{~c"ANTHROPIC_API_KEY", false}`, `{~c"ANTHROPIC_AUTH_TOKEN", false}`,
+and `{~c"ANTHROPIC_BASE_URL", false}`. These cover the primary API key,
+the metered bearer token honoured by the claude CLI, and the proxy
+endpoint redirect respectively. NO fallback to the metered path is
+permitted. Non-`:claude_code` modes are unchanged.
 Enforced by `test/tau/factory/cost_safety_fence_test.exs`
 (tags `:d_374` — 3 tests): (a) fail-closed: absent creds → refusal, no
-Port open; (b) env scrub: canary `ANTHROPIC_API_KEY` absent from child;
+Port open; (b) env scrub: canaries for `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_BASE_URL` all absent from child;
 (c) creds-present: preflight passes, worker proceeds normally.
 
 ## 7. Acceptance criteria

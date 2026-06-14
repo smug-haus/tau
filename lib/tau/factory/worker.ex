@@ -77,10 +77,13 @@ defmodule Tau.Factory.Worker do
     - `:agent_mode`          — atom (default: `nil`); when `:claude_code`, the
                                D-374 preflight fires before `Port.open`: runs
                                `creds_check_fun.()` and appends
-                               `{~c"ANTHROPIC_API_KEY", false}` to the Port env
-                               so the child never inherits a metered API key.
-                               Any other value (including absent) disables the
-                               preflight (non-`:claude_code` modes unchanged).
+                               `{~c"ANTHROPIC_API_KEY", false}`,
+                               `{~c"ANTHROPIC_AUTH_TOKEN", false}`, and
+                               `{~c"ANTHROPIC_BASE_URL", false}` to the Port env
+                               so the child never inherits any metered Anthropic
+                               credential. Any other value (including absent)
+                               disables the preflight (non-`:claude_code` modes
+                               unchanged).
     - `:creds_check_fun`     — zero-arity function
                                `(-> :ok | {:error, :subscription_creds_absent})`.
                                Default checks `~/.claude/.credentials.json` via
@@ -353,14 +356,23 @@ defmodule Tau.Factory.Worker do
         {String.to_charlist(k), String.to_charlist(v)}
       end)
 
-    # D-374 env scrub: when agent_mode is :claude_code, append
-    # {~c"ANTHROPIC_API_KEY", false} so the child process never inherits
-    # a metered API key even if it is set in the calling env.
+    # D-374 env scrub: when agent_mode is :claude_code, append all three
+    # metered-spend variables with {key, false} so the child process never
+    # inherits any metered Anthropic credential from the calling env.
     # Erlang Port {:env, list} is additive; appending {key, false} removes
     # an inherited var (POSIX: unsetenv semantics via Erlang's child_setup).
+    #
+    # Scrubbed variables (all three are metered-spend vectors):
+    #   ANTHROPIC_API_KEY    — primary API key
+    #   ANTHROPIC_AUTH_TOKEN — metered bearer token honoured by the claude CLI
+    #   ANTHROPIC_BASE_URL   — proxy endpoint redirect (paid spend vector)
     metered_scrub =
       if agent_mode == :claude_code do
-        [{~c"ANTHROPIC_API_KEY", false}]
+        [
+          {~c"ANTHROPIC_API_KEY", false},
+          {~c"ANTHROPIC_AUTH_TOKEN", false},
+          {~c"ANTHROPIC_BASE_URL", false}
+        ]
       else
         []
       end
