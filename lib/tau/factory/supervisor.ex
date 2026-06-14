@@ -170,6 +170,10 @@ defmodule Tau.Factory.Supervisor do
     agent_bin = Keyword.get(opts, :agent_bin)
     gate_fun = Keyword.get(opts, :gate_fun)
     unit_timeouts = Keyword.get(opts, :unit_timeouts, [])
+    # D-376 refine: agent_mode and creds_check_fun from AgentBin.resolve/1 spawn_opts
+    # threaded via supervisor_opts → deps so UnitDriver passes them to WorkerSupervisor.
+    agent_mode = Keyword.get(opts, :agent_mode)
+    creds_check_fun = Keyword.get(opts, :creds_check_fun)
 
     # Derive per-supervisor child names for isolation (tests / multiple instances).
     writer_name = derive_name(sup_name, __MODULE__, LedgerWriter)
@@ -231,6 +235,12 @@ defmodule Tau.Factory.Supervisor do
       agent_bin: agent_bin,
       gate_fun: gate_fun,
       unit_timeouts: unit_timeouts,
+      # D-376 refine: agent_mode and creds_check_fun threaded from AgentBin.resolve/1
+      # spawn_opts via supervisor_opts → deps → UnitDriver → WorkerSupervisor.spawn/5
+      # so the Worker's D-374 preflight fires for :claude_code mode. nil/absent →
+      # UnitDriver omits the key → Worker skips preflight (non-:claude_code unchanged).
+      agent_mode: agent_mode,
+      creds_check_fun: creds_check_fun,
       report_to: coord_name
     }
 
