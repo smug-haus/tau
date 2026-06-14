@@ -13,11 +13,12 @@ defmodule Tau.Factory.ConflictCheck do
   @type unit_id :: String.t()
 
   @type scope :: %{
-          deps: [unit_id()],
-          files: MapSet.t(String.t()),
-          codepoints: MapSet.t({String.t(), atom()}),
-          specs: MapSet.t(atom()),
-          resources: MapSet.t(atom())
+          required(:deps) => [unit_id()],
+          required(:files) => MapSet.t(String.t()),
+          required(:codepoints) => MapSet.t({String.t(), atom()}),
+          required(:specs) => MapSet.t(atom()),
+          required(:resources) => MapSet.t(atom()),
+          optional(:universal_conflict) => boolean()
         }
 
   @type in_flight :: %{unit_id() => scope()}
@@ -40,17 +41,21 @@ defmodule Tau.Factory.ConflictCheck do
   """
   @spec clear?(scope(), in_flight()) :: :clear | {:conflict, clause()}
   def clear?(declared_scope, in_flight) do
-    in_flight_ids = MapSet.new(Map.keys(in_flight))
-    members = Map.values(in_flight)
+    if Map.get(declared_scope, :universal_conflict, false) and map_size(in_flight) > 0 do
+      {:conflict, :no_dependency}
+    else
+      in_flight_ids = MapSet.new(Map.keys(in_flight))
+      members = Map.values(in_flight)
 
-    with :ok <- check_no_dependency(declared_scope, in_flight_ids),
-         :ok <- check_disjoint_sets(members, declared_scope, :files, :disjoint_files),
-         :ok <-
-           check_disjoint_sets(members, declared_scope, :codepoints, :disjoint_codepoints),
-         :ok <- check_disjoint_sets(members, declared_scope, :specs, :no_shared_spec),
-         :ok <-
-           check_disjoint_sets(members, declared_scope, :resources, :resource_isolatable) do
-      :clear
+      with :ok <- check_no_dependency(declared_scope, in_flight_ids),
+           :ok <- check_disjoint_sets(members, declared_scope, :files, :disjoint_files),
+           :ok <-
+             check_disjoint_sets(members, declared_scope, :codepoints, :disjoint_codepoints),
+           :ok <- check_disjoint_sets(members, declared_scope, :specs, :no_shared_spec),
+           :ok <-
+             check_disjoint_sets(members, declared_scope, :resources, :resource_isolatable) do
+        :clear
+      end
     end
   end
 
