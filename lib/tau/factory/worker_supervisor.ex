@@ -73,6 +73,8 @@ defmodule Tau.Factory.WorkerSupervisor do
     - `:worker_id`           — override the generated id (optional).
     - `:expected_head`       — SHA string (optional; overrides expected HEAD in
                                verify_position; used by tests to inject a mismatch).
+    - `:extra_env`           — list of `{key, value}` string pairs merged into
+                               the Port's env after the namespace map (D-365).
   """
   @spec spawn(atom() | pid(), atom(), String.t(), String.t(), keyword()) ::
           {:ok, String.t()} | {:error, term()}

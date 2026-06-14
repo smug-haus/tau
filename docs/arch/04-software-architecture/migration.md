@@ -17,7 +17,7 @@ a Claude prompt loop + three CLI checks — is the part that becomes a real
 supervised OTP system (research `tau-current-analysis.md` §5, GAP-1..GAP-8).
 
 Cross-references: layer-03 components (L/K/S/G/W/U/M); layer-04
-`supervision-tree.md` (topology), `traceability.md` (module index, D-300..D-360,
+`supervision-tree.md` (topology), `traceability.md` (module index, D-300..D-369,
 INV/CON/LIV), `gate-and-toolchain.md` (HR-3, the three pure gate modules),
 `worker-fleet.md` (W), `control-plane.md` (K/S), `merge-and-integration.md` (M),
 `durable-spine.md` (L); HR-1..HR-9 from `../03-system-architecture/`.

@@ -260,6 +260,33 @@ conforming wiring is P5c-3).
   there, subprocesses are free-running and share `$HOME`; here, every sub-agent
   inherits `state.ns` and dies inside the worker's crash domain.
 
+### 4a. The real coding agent as the worker's `agent_bin` — the CodingAgent shim (A1, #487)
+
+The §4 `agent_bin` is, in production dogfooding, **not** the canned
+`Tau.Factory.Dogfood.Agent` script — it is the real `Tau.CodingAgent` substrate
+(`docs/spec/SPEC-CODING-AGENT.md`; `Tau.CodingAgents.ClaudeCode`). The two speak
+**different execution models** — the Worker speaks a raw `{:packet,4}` Port
+emitting a `work_ready` frame (this §4 / D-326); the adapter speaks an Elixir
+`Enumerable.t()` of `%Tau.CodingAgent.Event{}` ending in a single, dispatcher-
+guaranteed `%Event.Done{}`. The bridge between them is pinned in
+**SPEC-FACTORY-FLEET §4 B4-A1 + D-364..D-367**.
+
+The shape chosen is an **`agent_bin`-shaped CodingAgent shim** (over in-process
+driving) precisely because it keeps *this* §4 contract — the linked `Port`, the
+`{:env, ns}` namespace, `{:cd, ws}`, the `{:packet,4}` `work_ready` frame, and the
+crash domain — **unchanged**: the bridge lives entirely inside the shim, so the
+Worker is untouched and the wrong-guess cost is one deletable executable rather
+than a six-invariant Worker rewrite. The shim owns the **branch+commit step** the
+CodingAgent substrate does not perform (the adapter edits files but emits no
+commit/branch/`head_sha`), maps `%Done{0}`-over-non-empty-diff → `work_ready`
+with the **agent's real `head_sha`**, maps `%Done{0}`-over-empty-diff and
+`%Done{-1}`/`%Error{}` to the D-326 no-completion paths, and derives the worker
+**heartbeat from consumed stream events** rather than a self-clock (so a wedged
+agent is detectable — D-366). The shim and its `claude` sub-subprocess run wholly
+**inside `state.ns` + `ws`** (D-365), which is exactly the "external-process
+contrast" fix above made concrete. The real-`head_sha` this produces is consumed
+by **#486 (C1)** in the Unit FSM/gate/merge (cited, not implemented in A1).
+
 ---
 
 ## 5. Oracle-separation spawn ordering + identity (INV-5, HR-7)

@@ -7,4 +7,5 @@
 #                  Mix task subprocess (e.g. the P5c-7 dogfood capstone,
 #                  `test/tau/factory/dogfood_e2e_test.exs` — AC-12). Opt in with
 #                  `mix test --include integration`.
+
 ExUnit.start(exclude: [:smoke, :tui_smoke, :tui_ux, :external, :integration])

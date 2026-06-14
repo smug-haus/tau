@@ -9,7 +9,8 @@ violation. This is the Appendix-B source-map of the proposed `SPEC-FACTORY-*`
 (see `../06-roadmap/spec-factory.md`).
 
 > **D-NNN allocation is PROVISIONAL.** This document uses a fenced block
-> **D-300 … D-360** for the factory. Per the project's `D-NNN` discipline
+> **D-300 … D-369** for the factory (extended for the A1 Worker↔CodingAgent
+> bridge, D-364..D-367, #487). Per the project's `D-NNN` discipline
 > (`docs/MISSION.md`), before adoption each identifier MUST be verified free
 > across the whole repo and all branches (`git log --all --grep`, plus
 > `grep -rn` over `lib test docs .claude`). Renumber on collision.

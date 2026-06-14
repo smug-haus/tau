@@ -42,6 +42,7 @@ defmodule Tau.Factory.Worker do
   alias Tau.Factory.Worker.Isolation
   alias Tau.Factory.Toolchain
   alias Tau.Factory.WorkspaceJanitor
+  alias Tau.Provider.Event.Heartbeat
   alias Tau.Provider.Event.WorkReady
 
   # ---------------------------------------------------------------------------
@@ -70,6 +71,8 @@ defmodule Tau.Factory.Worker do
     - `:janitor`             — pid or name of `WorkspaceJanitor`; when present,
                                the janitor is used as the independent monitor
                                instead of the built-in death-monitor process.
+    - `:extra_env`           — list of `{key, value}` string pairs merged into
+                               the Port's env AFTER the namespace map (D-365).
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -101,6 +104,7 @@ defmodule Tau.Factory.Worker do
     heartbeat_interval = Keyword.get(opts, :heartbeat_interval)
     expected_head_override = Keyword.get(opts, :expected_head)
     janitor = Keyword.get(opts, :janitor)
+    extra_env = Keyword.get(opts, :extra_env, [])
 
     # Unique private worktree path under the parent repo's parent dir.
     ws = Path.join([Path.dirname(repo_dir), ".worker-wt-#{worker_id}"])
@@ -124,6 +128,7 @@ defmodule Tau.Factory.Worker do
           heartbeat_interval: heartbeat_interval,
           expected_head_override: expected_head_override,
           janitor: janitor,
+          extra_env: extra_env,
           ws: ws
         }
 
@@ -225,7 +230,12 @@ defmodule Tau.Factory.Worker do
 
     # Step 3: verify position
     # Resolve the actual HEAD SHA in the worktree (after `git worktree add`).
-    %{base_ref: base_ref, repo_dir: repo_dir, expected_head_override: expected_head_override} = ctx
+    %{
+      base_ref: base_ref,
+      repo_dir: repo_dir,
+      expected_head_override: expected_head_override
+    } = ctx
+
     observed_head = git_rev_parse(ws, "HEAD")
     observed_branch = git_rev_parse(ws, "--abbrev-ref", "HEAD")
 
@@ -272,6 +282,8 @@ defmodule Tau.Factory.Worker do
       ns: ns
     } = ctx
 
+    extra_env = Map.get(ctx, :extra_env, [])
+
     # Step 4: register with the janitor (or arm the death-monitor) BEFORE
     # opening the Port, so that any raise during Port.open is caught by the
     # janitor's :DOWN handler — no unmonitored worktree leak (D-314, SPEC B5).
@@ -284,10 +296,20 @@ defmodule Tau.Factory.Worker do
     end
 
     # Step 5: open Port (linked by default — agent crash propagates to worker).
-    env_list =
+    # Build env_list from namespace map, then merge any extra_env overrides
+    # (D-365: extra_env allows per-worker isolation keys to be injected by
+    # the caller, e.g. a test-supplied XDG_DATA_HOME probe path).
+    ns_env =
       Enum.map(ns, fn {var, dir} ->
         {String.to_charlist(var), String.to_charlist(dir)}
       end)
+
+    extra_env_charlist =
+      Enum.map(extra_env, fn {k, v} ->
+        {String.to_charlist(k), String.to_charlist(v)}
+      end)
+
+    env_list = ns_env ++ extra_env_charlist
 
     port =
       Port.open({:spawn_executable, agent_bin}, [
@@ -298,12 +320,12 @@ defmodule Tau.Factory.Worker do
         {:cd, ws}
       ])
 
-    # Step 6: arm heartbeat timer.
-    timer =
-      if heartbeat_interval do
-        Process.send_after(self(), :heartbeat, heartbeat_interval)
-      end
-
+    # Step 6: heartbeat timer.
+    # D-366: heartbeats are now event-driven (port heartbeat frames from the shim)
+    # rather than self-clocked. The self-clock timer is NOT armed here.
+    # The :heartbeat_interval opt is preserved in state as metadata (the shim
+    # reads it at write time for rate-limiting). heartbeat_timer starts nil and
+    # is kept nil throughout — the dispatch(%Heartbeat{}) handler checks it.
     :telemetry.execute(
       [:tau, :factory, :worker, :start],
       %{},
@@ -322,7 +344,7 @@ defmodule Tau.Factory.Worker do
        report_to: report_to,
        registry: registry,
        heartbeat_interval: heartbeat_interval,
-       heartbeat_timer: timer,
+       heartbeat_timer: nil,
        # D-326: set to true when the agent emits work_ready before exiting.
        # Exit-0 without work_ready is fail-closed → :no_work_product.
        work_ready_seen?: false
@@ -373,11 +395,14 @@ defmodule Tau.Factory.Worker do
   # Decode a {packet,4}-framed JSON payload into a typed event struct.
   # The BEAM strips the 4-byte BE length prefix, so `frame` is raw JSON bytes.
   # Extend Tau.Provider.Event; never use ad-hoc formats (OTP non-negotiable).
-  @spec decode_event(binary()) :: WorkReady.t() | {:unknown, binary()}
+  @spec decode_event(binary()) :: WorkReady.t() | Heartbeat.t() | {:unknown, binary()}
   defp decode_event(frame) do
     case Jason.decode(frame) do
       {:ok, %{"type" => "work_ready", "branch" => branch, "head_sha" => head_sha}} ->
         %WorkReady{branch: branch, head_sha: head_sha}
+
+      {:ok, %{"type" => "heartbeat"}} ->
+        %Heartbeat{}
 
       _ ->
         {:unknown, frame}
@@ -388,13 +413,41 @@ defmodule Tau.Factory.Worker do
   # D-326: the Worker is the SOLE forwarder of work_ready to report_to
   # (single-writer discipline — mirrors the independent monitor's sole
   # ownership of worker_exit). Forward ONCE and set work_ready_seen? true.
-  @spec dispatch(WorkReady.t() | {:unknown, binary()}, map()) :: map()
+  #
+  # D-366: heartbeat frames from the shim drive the Worker's liveness signal.
+  # On receipt, the self-clock timer is cancelled (switching from self-clock
+  # mode to event-driven mode) and {:worker_heartbeat, worker_id} is sent to
+  # report_to. Telemetry fires so the Watchdog's worker_stalled inference
+  # (B7/C206) tracks real agent progress. A self-clock that fires regardless
+  # of stream events cannot detect a wedged agent — heartbeat frames can.
+  @spec dispatch(WorkReady.t() | Heartbeat.t() | {:unknown, binary()}, map()) :: map()
   defp dispatch(%WorkReady{branch: branch, head_sha: head_sha}, state) do
     if not is_nil(state.report_to) and not state.work_ready_seen? do
       send(state.report_to, {:work_ready, state.worker_id, branch, head_sha})
     end
 
     %{state | work_ready_seen?: true}
+  end
+
+  defp dispatch(%Heartbeat{}, state) do
+    # Cancel the self-clock timer (if any) — switch to event-driven heartbeat mode.
+    # Once event-driven, we no longer re-arm the timer; heartbeats come only from
+    # port frames so a stalled agent stops pulsing (D-366).
+    if state.heartbeat_timer do
+      Process.cancel_timer(state.heartbeat_timer)
+    end
+
+    :telemetry.execute(
+      [:tau, :factory, :worker, :heartbeat],
+      %{},
+      %{worker_id: state.worker_id, role: state.role}
+    )
+
+    if state.report_to do
+      send(state.report_to, {:worker_heartbeat, state.worker_id})
+    end
+
+    %{state | heartbeat_timer: nil}
   end
 
   defp dispatch({:unknown, _frame}, state) do
