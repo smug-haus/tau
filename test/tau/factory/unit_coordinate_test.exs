@@ -19,8 +19,15 @@ defmodule Tau.Factory.UnitCoordinateTest do
 
   When `data.head_sha` is non-`nil` (captured from `work_ready`), BOTH the
   gate seam and the merge seam MUST use `data.head_sha` as the coordinate —
-  NOT the pre-declared `work_item.hash`. The merge spy's received `hash`
-  argument is the observable signal for the merge seam (B6).
+  NOT the pre-declared `work_item.hash`. Two tests exercise this:
+
+  - **Merge coordinate** (existing): the merge spy's received `hash` argument is the
+    observable signal for the merge seam (B6). PASSES — merge half already implemented.
+  - **Gate coordinate** (new): an arity-1 `gate_fun` spy records the coordinate it
+    is called with; the assert verifies it equals the captured `head_sha`, not the
+    declared hash. FAILS until the implementer makes `gating` call
+    `data.gate_fun.(coordinate)` with the same `coordinate = data.head_sha || data.hash`
+    used by `awaiting_merge`.
 
   ### D-363 — Total back-compat: legacy 2-tuple seam falls through to declared hash (§6)
 
@@ -32,26 +39,28 @@ defmodule Tau.Factory.UnitCoordinateTest do
 
   ## Fail-before validity (oracle separation, factory-loop §4b)
 
-  The current branch (`feat/486-head-sha-coordinate`) has NOT yet implemented
-  the capture/threading:
+  After the initial PR #503 commit, capture (D-362) and the merge coordinate
+  (D-361 merge half) are already implemented. The `:head_sha` key is initialised
+  to `nil` in `init/1` (D-363). As a result, D-362, D-361 (merge), and D-363
+  all PASS on the current branch.
 
-  - `oracle/3` and `implementing/3` use `_branch` / `_head_sha` (discarded).
-  - `awaiting_merge` calls `data.merge_fun.(data.unit_id, data.hash)` — always
-    the pre-declared hash, never the captured one.
-  - The `data` map initialised in `init/1` has NO `:head_sha` or `:branch` key.
+  The SOLE remaining fail-before is the gate coordinate half of D-361:
 
-  As a result:
+  - `gating/3` currently calls `data.gate_fun.()` (arity-0). The decided
+    contract requires `data.gate_fun.(coordinate)` where
+    `coordinate = data.head_sha || data.hash` (symmetric with `merge_fun`).
+  - The new "D-361 gate-coordinate" test injects an arity-1 spy
+    (`fn coord -> send(test_pid, {:gate_coord, coord}); :pass end`).
+  - Pre-implementer, calling an arity-1 function with 0 args raises
+    `BadArityError` inside the Unit gen_statem, crashing the process.
+    The test's `assert_receive {:gate_coord, ^agent_head_sha}` therefore
+    times out — the right failure for the right reason.
 
-  - D-362 test: `:sys.get_state` after work_ready finds `data` has no `:head_sha`
-    key → `Map.get(data, :head_sha, :key_missing)` returns `:key_missing`, not the
-    asserted `head_sha` string → assertion fails.
-  - D-361 test: spy `merge_fun` receives the declared `"declared-hash-XXX"`, not
-    the asserted `"agent-sha-YYY"` → assertion fails.
-  - D-363 test: `Map.has_key?(data, :head_sha)` is `false` (key absent from the
-    current data map) → assertion fails.
+  All `gate_fun` injections in this file use arity-1 (`fn _coord -> ... end`)
+  so they remain correct after the implementer lands the arity-1 contract.
 
   ## D-NNN linkage
-    - D-361 — `test "D-361: ..."`
+    - D-361 — `test "D-361: ..."` (two tests: merge coordinate + gate coordinate)
     - D-362 — `test "D-362: ..."`
     - D-363 — `test "D-363: ..."`
   """
@@ -184,7 +193,7 @@ defmodule Tau.Factory.UnitCoordinateTest do
         scheduler: sched,
         report_to: self(),
         worker_fun: worker_fun,
-        gate_fun: fn -> {:fail, [:stop_here]} end,
+        gate_fun: fn _coord -> {:fail, [:stop_here]} end,
         merge_fun: fn _uid, _hash -> :queued end,
         timeouts: [state_timeout_ms: 5_000]
       ]
@@ -281,7 +290,7 @@ defmodule Tau.Factory.UnitCoordinateTest do
         report_to: self(),
         pubsub: Tau.PubSub,
         worker_fun: worker_fun,
-        gate_fun: fn -> :pass end,
+        gate_fun: fn _coord -> :pass end,
         merge_fun: merge_fun,
         timeouts: [state_timeout_ms: 5_000]
       ]
@@ -312,6 +321,114 @@ defmodule Tau.Factory.UnitCoordinateTest do
                "Got: #{inspect(received_hash)}. " <>
                "Current code calls merge_fun(data.unit_id, data.hash) which is always the " <>
                "pre-declared hash — the captured coordinate is not yet threaded to merge_fun."
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # D-361 (gate coordinate) — gate_fun receives captured head_sha, not declared hash
+  # ---------------------------------------------------------------------------
+
+  describe "D-361 — gate_fun receives captured head_sha as the coordinate, not the declared hash" do
+    @tag :d_361
+    test "D-361: gate verdict coordinate keys on captured head_sha, not declared hash" do
+      test_pid = self()
+      unit_id = "u-gate-coord-#{System.unique_integer([:positive])}"
+      sched = unique(:sched_d361_gate)
+      sup = unique(:sup_d361_gate)
+      start_scheduler(sched)
+      start_supervised!({@unit_supervisor, name: sup}, id: sup)
+
+      # Declared hash and agent-asserted head_sha are deliberately different so
+      # the test can distinguish which value gate_fun received.
+      declared_hash = "declared-hash-gate-d361-#{System.unique_integer([:positive])}"
+      agent_head_sha = "agent-sha-gate-d361-#{System.unique_integer([:positive])}"
+      agent_branch = "feat/branch-gate-d361"
+
+      assert declared_hash != agent_head_sha,
+             "Test setup: declared_hash and agent_head_sha must differ to make D-361 gate observable"
+
+      {:ok, worker_id_store} = Agent.start_link(fn -> nil end)
+      on_exit(fn -> if Process.alive?(worker_id_store), do: Agent.stop(worker_id_store) end)
+
+      worker_fun = fn role ->
+        worker_pid = spawn_worker()
+
+        case role do
+          :test_author ->
+            {:ok, worker_pid}
+
+          :implementer ->
+            worker_id = "wid-gate-d361-#{System.unique_integer([:positive])}"
+            Agent.update(worker_id_store, fn _ -> worker_id end)
+            {:ok, worker_pid, worker_id}
+        end
+      end
+
+      # arity-1 gate_fun spy: records the coordinate it is called with, then
+      # returns :pass so the Unit can proceed (if the implementer has landed
+      # the arity-1 contract). Pre-implementer, calling this with 0 args raises
+      # BadArityError inside the Unit gen_statem — the process crashes and the
+      # assert_receive below times out, producing the right failure.
+      gate_fun = fn coord ->
+        send(test_pid, {:gate_coord, coord})
+        :pass
+      end
+
+      # merge_fun must broadcast so the Unit can reach :merged if gate passes.
+      merge_fun = fn uid, _hash ->
+        Phoenix.PubSub.broadcast(Tau.PubSub, "factory:pr:#{uid}", {:merge_result, :merged})
+        :queued
+      end
+
+      opts = [
+        unit_id: unit_id,
+        declared_scope: empty_scope(),
+        hash: declared_hash,
+        scheduler: sched,
+        report_to: self(),
+        pubsub: Tau.PubSub,
+        worker_fun: worker_fun,
+        gate_fun: gate_fun,
+        merge_fun: merge_fun,
+        timeouts: [state_timeout_ms: 5_000]
+      ]
+
+      unit_pid = @unit_supervisor.start_unit(sup, opts)
+      assert is_pid(unit_pid)
+
+      # Drive oracle through (legacy {:worker_done}).
+      advance_oracle_to_implementing_via_legacy(unit_pid)
+
+      assert wait_for_state(unit_pid, :implementing),
+             "D-361 gate: Unit must reach :implementing after oracle completes"
+
+      worker_id = Agent.get(worker_id_store, & &1)
+      refute is_nil(worker_id), "D-361 gate: worker_id must be set by 3-tuple worker_fun"
+
+      # Deliver work_ready with the agent-asserted coordinate (differs from declared hash).
+      # The Unit will transition to :gating and call gate_fun with the coordinate.
+      send(unit_pid, {:work_ready, worker_id, agent_branch, agent_head_sha})
+
+      # Assert the gate spy was called with the captured head_sha — NOT the declared hash.
+      # Pre-implementer failure: gate_fun.() is called arity-0 on an arity-1 closure,
+      # raising BadArityError in the Unit gen_statem → process crashes → assert_receive
+      # times out with no message received.
+      assert_receive {:gate_coord, received_coord},
+                     5_000,
+                     "D-361 gate: gate_fun must be called with the captured head_sha coordinate. " <>
+                       "Pre-implementer, gate_fun.() (arity-0) crashes on the arity-1 spy, so " <>
+                       "no {:gate_coord, _} is ever sent. " <>
+                       "The implementer must change gating to call data.gate_fun.(coordinate) " <>
+                       "where coordinate = data.head_sha || data.hash."
+
+      assert received_coord == agent_head_sha,
+             "D-361 gate: gate_fun must receive the captured head_sha (\"#{agent_head_sha}\"), " <>
+               "NOT the pre-declared work_item.hash (\"#{declared_hash}\"). " <>
+               "Got: #{inspect(received_coord)}."
+
+      refute received_coord == declared_hash,
+             "D-361 gate: gate_fun received the pre-declared hash instead of the captured head_sha. " <>
+               "The coordinate threading is not yet implemented in the gating state."
     end
   end
 
@@ -349,7 +466,7 @@ defmodule Tau.Factory.UnitCoordinateTest do
         report_to: self(),
         pubsub: Tau.PubSub,
         worker_fun: worker_fun,
-        gate_fun: fn -> :pass end,
+        gate_fun: fn _coord -> :pass end,
         merge_fun: merge_fun,
         timeouts: [state_timeout_ms: 5_000]
       ]
