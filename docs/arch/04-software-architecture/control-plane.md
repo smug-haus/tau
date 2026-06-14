@@ -556,6 +556,27 @@ defmodule Tau.Factory.Unit do
   defp enter_waiting(state, ms, data),
     do: {:next_state, state, data, [{:state_timeout, ms, :stall}]}
 
+  # D-377 — heartbeat-driven liveness: a current-worker progress pulse RE-ARMS
+  # the waiting-state timeout, so a progressing real agent never trips the cap.
+  # The cap is thus a per-heartbeat *inactivity deadline*, not a run-duration cap.
+  def oracle(:info, {:worker_heartbeat, w}, %{worker_id: w} = data),
+    do: {:keep_state, data, [{:state_timeout, data.state_timeout_ms, :stall}]}
+  def implementing(:info, {:worker_heartbeat, w}, %{worker_id: w} = data),
+    do: {:keep_state, data, [{:state_timeout, data.state_timeout_ms, :stall}]}
+  # A heartbeat from a SUPERSEDED worker does not re-arm (B8 stale-worker discard).
+  def oracle(:info, {:worker_heartbeat, _other}, data),       do: {:keep_state, data}
+  def implementing(:info, {:worker_heartbeat, _other}, data), do: {:keep_state, data}
+
+  # D-379 — the Watchdog's heartbeat-absence trigger for the CURRENT worker routes
+  # to the SAME retry ladder as :state_timeout (D-378: one stall outcome per
+  # worker; the transition clears worker_id so later stall events are discarded).
+  def oracle(:info, {:worker_stalled, w}, %{worker_id: w} = data),
+    do: stall_escalate(%{data | worker_id: nil}, :oracle)
+  def implementing(:info, {:worker_stalled, w}, %{worker_id: w} = data),
+    do: stall_escalate(%{data | worker_id: nil}, :implementing)
+  def oracle(:info, {:worker_stalled, _other}, data),       do: {:keep_state, data}
+  def implementing(:info, {:worker_stalled, _other}, data), do: {:keep_state, data}
+
   # A wedged worker is first a SEMANTIC stall (refine/pivot on a fresh worker),
   # escalating to E-* only if the stall persists past the retry ladder.
   defp stall_escalate(data, _state) do
@@ -570,17 +591,37 @@ end
 
 **Two complementary liveness guards close every non-progress state (H-2):**
 
-1. **Per-state timeout (above).** `oracle`, `implementing`, `gating`, and
-   `awaiting_merge` each arm a `{:state_timeout, ms, :stall}` on entry, reset by
-   worker progress heartbeats. A stall (including a silently-wedged worker that
-   never crashes) fires the timeout → the retry ladder → escalation. No waiting
-   state can sit forever without emitting a trigger.
-2. **Worker watchdog.** The worker (`worker-fleet.md`) emits periodic progress
-   events over its `Port`; a `WorkerSupervisor`-side watchdog converts *absence*
-   of heartbeats beyond a threshold into a synthetic `worker_stalled` event to U
-   — covering the case where the Port is alive but the sub-agent is hung (no
-   `:DOWN` would ever fire). This is the missing trigger source the bare monitor
-   cannot provide.
+1. **Per-state timeout (above), reset by progress heartbeats (D-377).** `oracle`,
+   `implementing`, `gating`, and `awaiting_merge` each arm a `{:state_timeout, ms,
+   :stall}` on entry. In the worker-awaiting states (`oracle`, `implementing`) the
+   Unit **re-arms** that timeout on every current-worker `{:worker_heartbeat, w}`
+   — the live pulse the Worker forwards from D-366 shim frames (`worker-fleet.md`).
+   So `ms` is a *per-heartbeat inactivity deadline* (max silence between two
+   progress pulses), not an absolute run-duration cap: a genuinely-progressing
+   agent that pulses at least once per `ms` window NEVER trips the cap, while a
+   silently-wedged worker (no pulse) trips it at `ms` → the retry ladder →
+   escalation. This is the GOV4 refinement of D-358: the fixed cap no longer
+   either spuriously kills a slow-but-healthy run or, when widened to mask that,
+   masks a wedge — the deadline keys on silence, not elapsed time.
+2. **Worker watchdog (D-379).** The worker (`worker-fleet.md`) emits periodic
+   progress events over its `Port`; the fleet `Watchdog` converts *absence* of
+   heartbeats beyond a threshold into a synthetic `worker_stalled(w)` event — the
+   case where the Port is alive but the sub-agent is hung (no `:DOWN` ever fires).
+   The wiring is load-bearing and previously orphaned (V3): the `UnitDriver`
+   `worker_fun` seam **registers each spawned worker** with the `Watchdog`
+   addressed to the owning Unit, and the Unit **consumes** `{:worker_stalled,
+   ^worker_id}` (above), routing it through the same retry ladder as a
+   `:state_timeout` stall. The Watchdog's `heartbeat_timeout` and the Unit's
+   `state_timeout_ms` are set from the **same** `:unit_timeouts`-derived threshold
+   (D-358) so the two heartbeat-absence detectors cannot disagree.
+
+**One stall outcome per worker (D-378).** Three timers observe a single wedge —
+the Unit's `:state_timeout` (D-377), the Watchdog's `worker_stalled` (D-379), and
+the dispatcher's `:inactivity_timeout_ms` → `%Done{-1}` → `worker_exit`. To
+prevent a double-advance of the ladder (V6), all three are `worker_id`-keyed and
+the **first** stall-class trigger consumed clears `data.worker_id`; every later
+stall-class event for that superseded id hits the stale-worker discard clause and
+advances nothing.
 
 Together these guarantee the property INV-18 totality actually needs: **every
 reachable non-progress state eventually produces a trigger**, which the
@@ -607,15 +648,21 @@ end
 def implementing(:info, {:work_ready, _other, _b, _s}, data), do: {:keep_state, data}
 ```
 
-Three keyed-by-`worker_id` worker triggers are **disjoint** and U distinguishes
-them structurally (the `worker_event` family of system-architecture.md §1, U
-`E_in`):
+Four keyed-by-`worker_id` worker signals are **disjoint** and U distinguishes them
+structurally (the `worker_event` family of system-architecture.md §1, U `E_in`).
+The first three are *outcome* triggers (transition U out of the waiting state);
+`worker_heartbeat` is a *liveness* pulse (keeps U in the state, resets the cap):
 
 | trigger | meaning | U action |
 |---------|---------|----------|
 | `work_ready(w, branch, head_sha)` | agent declared a **stable diff** (success) | → `gating` (`request_gate`) |
 | `worker_exit(w, reason)` (`:DOWN`) | worker/agent **crashed or exited** | infra path → `escalated`; gate NOT called (FR-8.2) |
-| `worker_stalled(w)` | watchdog saw **heartbeat absence** (wedged, no `:DOWN`) | retry ladder (semantic stall) → refine/pivot/escalate |
+| `worker_stalled(w)` | watchdog saw **heartbeat absence** (wedged, no `:DOWN`) | retry ladder (semantic stall) → refine/pivot/escalate (D-379) |
+| `worker_heartbeat(w)` | live progress pulse (D-366 shim frame) | **reset** `:state_timeout`; stay in state (D-377) |
+
+The three stall/exit triggers collapse to **one** ladder advance per worker
+(D-378): the first one consumed clears `data.worker_id`, so later stall-class
+events for that superseded id are discarded.
 
 **Why a clean Port exit is NOT the completion trigger (the load-bearing
 decision).** The discriminating question is operational: *can a normally-exiting

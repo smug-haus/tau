@@ -81,10 +81,9 @@ Block-to-SPEC allocation:
 | D-300 – D-303, D-341 | SPEC-FACTORY-MERGE |
 | D-304 – D-308, D-322, D-323, D-354 | SPEC-FACTORY-GATE |
 | D-309 – D-311, D-313, D-314, D-316, D-334, D-364 – D-367, D-376, D-381, D-382 | SPEC-FACTORY-FLEET |
-| D-312, D-315, D-317, D-318, D-320, D-321, D-330 – D-333, D-335, D-336, D-340, D-342 – D-344, D-355 – D-359, D-369 – D-373, D-380 | SPEC-FACTORY-CORE |
+| D-312, D-315, D-317, D-318, D-320, D-321, D-330 – D-333, D-335, D-336, D-340, D-342 – D-344, D-355 – D-359, D-369 – D-373, D-377 – D-380 | SPEC-FACTORY-CORE |
 | D-319, D-351 – D-353, D-374 | SPEC-FACTORY-GOV |
 | D-361 – D-363 | SPEC-FACTORY-CORE (C1 unit-coordinate identity; PR #503) |
-| D-377 – D-379 | reserved — SPEC-FACTORY-GOV (heartbeat-driven Unit liveness; unmerged `feat/491-heartbeat-timeout`, #491) |
 | D-300 – D-385 | reserved — SPEC-FACTORY-\* family (autonomous factory; `docs/arch/`) |
 
 A SPEC needing a D-NNN outside its allocated block MUST update this table
