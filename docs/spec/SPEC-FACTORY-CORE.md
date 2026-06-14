@@ -1539,26 +1539,43 @@ w}` at sub-`state_timeout_ms` intervals past the old fixed cap stays in
 `implementing` and never escalates `E_WORKER_STALLED`; with no heartbeats it trips
 at `state_timeout_ms` exactly as before.
 
-**D-378 — Exactly one authoritative stall signal per worker per state
-(disjointness, [C107-B5], V3/V6):** Three timers observe a single wedged worker —
-the Unit's own `:state_timeout` (D-377, heartbeat-reset), the fleet `Watchdog`'s
-heartbeat-absence `worker_stalled(w)` (D-317, B8), and the dispatcher's
-`:inactivity_timeout_ms` (which manufactures `%Done{exit_status: -1}` →
-`worker_exit(w, …)`, D-366). To prevent a double-advance of the retry ladder
-(V6), the Unit collapses them to **one outcome per worker per state**: all three
-arrive as `worker_id`-keyed events, and the **first** stall-class trigger consumed
-in a waiting state transitions the Unit out of that state and clears
-`data.worker_id` (sets it `nil` alongside `Process.demonitor(mref, [:flush])`).
-Every subsequent stall-class event for that now-superseded `worker_id` matches the
-existing stale-worker discard clause (`keep_state`), so it advances nothing. The
-Unit's `:state_timeout :worker_stalled` and the Watchdog's `:info
-{:worker_stalled, ^worker_id}` BOTH route through the **same** retry ladder
-(`advance_retry_ladder/1`, the shared path D-326 already established for semantic
-`worker_exit`), so the two stall sources are semantically identical and produce
-one ladder advance regardless of which fires first. Enforced by an FSM test:
-delivering `:state_timeout`, `{:worker_stalled, w}`, and `{:worker_exit, w, …}`
-for one worker in close succession advances the retry ladder exactly once
-(`attempt_count`/`refine_count` increments by one, not three).
+**D-378 — Exactly one outcome per worker per state; two-outcome model
+(disjointness, [C107-B5], V3/V6):** Stall-class signals for a single wedged worker
+produce **exactly one** outcome in the waiting state via `worker_id`-keyed
+disjointness: the first stall-class signal consumed clears `data.worker_id` (sets
+it `nil` alongside `Process.demonitor(mref, [:flush])`); every subsequent
+stall-class event for that now-superseded `worker_id` matches the stale-worker
+discard clause (`keep_state`) and advances nothing.
+
+The two stall-class sources are **semantically distinct** (two-outcome model):
+
+1. **The Unit's own `:state_timeout :worker_stalled`** (D-377, real gen_statem timer;
+   fires only on total heartbeat silence) → `escalate(:E_WORKER_STALLED)`.  This is
+   the hard-stall path: the worker has emitted zero progress pulses within
+   `state_timeout_ms`, indicating a genuine wedge.  Gate is NOT called (C105).
+   Preserves #490/D-326.
+
+2. **The Watchdog's `{:worker_stalled, ^worker_id}` info message** (D-379;
+   heartbeat-absence beyond `heartbeat_timeout`) → **deferred re-spawn**: clears
+   `worker_id`, sends `:deferred_spawn` to the mailbox tail (D-378 disjointness,
+   so pending stale signals are discarded first), then `do_spawn_worker/1` bumps
+   `attempt_count` and writes a Ledger snapshot (D-315 RPO=0) before calling
+   `worker_fun`.  This path does NOT consume a refine/pivot slot — it is a
+   pre-gate re-spawn, not a gate-fail retry.
+
+The Watchdog's `{:worker_stalled}` and the dispatcher's `worker_exit(w, …)` are
+both stale-discarded after the first stall-class signal clears `worker_id`,
+ensuring exactly one combined increment of (`refine_count + attempt_count`) per
+worker across all three potential stall sources. Enforced by an FSM test:
+delivering `{:worker_stalled, w}`, `{:worker_exit, w, …}`, and a second
+`{:worker_stalled, w}` for one worker in close succession advances the combined
+metric by exactly one (not three).
+
+*§3 note (surfaced during PR #513 implementation):* the deferred re-spawn path
+(`{:worker_stalled, w}` → `:deferred_spawn` → `do_spawn_worker/1`) MUST call
+`snapshot_state(:implementing, data)` and bump `attempt_count`, identical to
+`implementing(:internal, :on_enter, data)`, to satisfy D-315 RPO=0 on
+crash-resume.
 
 **D-379 — The Unit consumes the Watchdog `worker_stalled(w)` trigger; the fleet
 registers each worker with the Watchdog (B8 wiring, [C107-B5], V3 orphan-invariant
@@ -1571,16 +1588,18 @@ previously-orphaned wiring: (a) the `UnitDriver.drive/2` `worker_fun` seam (or t
 heartbeat_timeout: …)`), so the Watchdog's `{:worker_stalled, worker_id}` is
 delivered to the **owning Unit** (its `report_to`), not dropped; and (b) the Unit
 adds `:info {:worker_stalled, ^worker_id}` clauses to `oracle`/`implementing` that
-route to `advance_retry_ladder/1` (D-378) for the current worker and discard the
-stale-worker variant. Without this, the `worker_stalled` trigger named in B8 has
-**no producer reaching the Unit and no consumer in the Unit** — the orphan
-invariant V3 flags. The Watchdog `heartbeat_timeout` and the Unit
+route to the deferred re-spawn path (D-378 two-outcome model: clears `worker_id`,
+sends `:deferred_spawn` to the mailbox tail, `do_spawn_worker/1` bumps
+`attempt_count` and snapshots to the Ledger per D-315) for the current worker, and
+discard the stale-worker variant. Without this, the `worker_stalled` trigger named
+in B8 has **no producer reaching the Unit and no consumer in the Unit** — the
+orphan invariant V3 flags. The Watchdog `heartbeat_timeout` and the Unit
 `state_timeout_ms` (D-377) are set from the SAME `:unit_timeouts`-derived value so
 the two heartbeat-absence detectors share one threshold and cannot disagree about
 liveness (V6 path-arithmetic: one threshold, two detectors, one verdict). Enforced
 by a wiring test (a spawned worker is registered with the Watchdog) and an FSM test
 (a Unit in `implementing` receiving `{:worker_stalled, current_worker_id}` advances
-the retry ladder; a stale-worker `{:worker_stalled, _}` is ignored).
+the combined metric by one; a stale-worker `{:worker_stalled, _}` is ignored).
 
 **D-380 — Single admission authority + admission self-exclusion (real-run
 integration, [C132-B1], [C133-B1]):** one unit is admitted to `F` **exactly once,

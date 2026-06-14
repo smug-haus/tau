@@ -615,13 +615,23 @@ end
    `state_timeout_ms` are set from the **same** `:unit_timeouts`-derived threshold
    (D-358) so the two heartbeat-absence detectors cannot disagree.
 
-**One stall outcome per worker (D-378).** Three timers observe a single wedge —
-the Unit's `:state_timeout` (D-377), the Watchdog's `worker_stalled` (D-379), and
-the dispatcher's `:inactivity_timeout_ms` → `%Done{-1}` → `worker_exit`. To
-prevent a double-advance of the ladder (V6), all three are `worker_id`-keyed and
-the **first** stall-class trigger consumed clears `data.worker_id`; every later
-stall-class event for that superseded id hits the stale-worker discard clause and
-advances nothing.
+**One stall outcome per worker — two-outcome model (D-378).** Stall-class signals
+for a single wedge produce exactly one outcome via `worker_id`-keyed disjointness:
+the first stall-class signal clears `data.worker_id`; every later stall-class event
+for that superseded id hits the stale-worker discard clause and advances nothing.
+The two stall-class sources are semantically distinct:
+
+- The Unit's OWN `:state_timeout :worker_stalled` (D-377; fires only on total
+  heartbeat silence) → `escalate(:E_WORKER_STALLED)` (hard-stall path; gate NOT
+  called; preserves #490/D-326).
+- The Watchdog's `{:worker_stalled, ^worker_id}` info message (D-379;
+  heartbeat-absence) → deferred re-spawn: clears `worker_id`, sends `:deferred_spawn`
+  to the mailbox tail (so pending stale signals are discarded first), then
+  `do_spawn_worker/1` bumps `attempt_count` and writes a Ledger snapshot (D-315
+  RPO=0). Does NOT consume a refine/pivot slot.
+
+A real wedge resolves bounded (no hang; never both retries AND escalates for one
+stall event).
 
 Together these guarantee the property INV-18 totality actually needs: **every
 reachable non-progress state eventually produces a trigger**, which the
@@ -657,12 +667,15 @@ The first three are *outcome* triggers (transition U out of the waiting state);
 |---------|---------|----------|
 | `work_ready(w, branch, head_sha)` | agent declared a **stable diff** (success) | → `gating` (`request_gate`) |
 | `worker_exit(w, reason)` (`:DOWN`) | worker/agent **crashed or exited** | infra path → `escalated`; gate NOT called (FR-8.2) |
-| `worker_stalled(w)` | watchdog saw **heartbeat absence** (wedged, no `:DOWN`) | retry ladder (semantic stall) → refine/pivot/escalate (D-379) |
+| `worker_stalled(w)` | watchdog saw **heartbeat absence** (wedged, no `:DOWN`) | deferred re-spawn: bumps `attempt_count`, snapshots Ledger (D-315/D-379); does NOT consume a refine slot |
 | `worker_heartbeat(w)` | live progress pulse (D-366 shim frame) | **reset** `:state_timeout`; stay in state (D-377) |
 
-The three stall/exit triggers collapse to **one** ladder advance per worker
-(D-378): the first one consumed clears `data.worker_id`, so later stall-class
-events for that superseded id are discarded.
+The stall/exit triggers collapse to **exactly one** combined metric increment per
+worker (D-378): the first stall-class signal consumed clears `data.worker_id`, so
+later signals for that superseded id are discarded. The Unit's own `:state_timeout`
+escalates `E_WORKER_STALLED`; the Watchdog's `{:worker_stalled, w}` triggers a
+deferred re-spawn (bumps `attempt_count`, snapshots Ledger — does not consume a
+refine slot). See D-378 two-outcome model.
 
 **Why a clean Port exit is NOT the completion trigger (the load-bearing
 decision).** The discriminating question is operational: *can a normally-exiting
