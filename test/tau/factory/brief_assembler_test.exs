@@ -151,7 +151,8 @@ defmodule Tau.Factory.BriefAssemblerTest do
   end
 
   # ---------------------------------------------------------------------------
-  # D-372(c): Supervisor.to_unit_work_item/1 sets :brief to the assembled prompt
+  # D-372(c): Supervisor.to_unit_work_item/1 sets :brief to the assembled prompt,
+  #           AND projects the real declared_scope (not @empty_scope) into it.
   #
   # SPEC: "Tau.Factory.Supervisor.to_unit_work_item/1 is the single assembly
   # site: it replaces `brief: title` with
@@ -160,19 +161,42 @@ defmodule Tau.Factory.BriefAssemblerTest do
   #
   # The invocation point is exercised via the REAL public path:
   # Supervisor.start_link/1 (enabled: true) wraps to_unit_work_item/1 inside
-  # wrapped_drive_fun, so we inject a sentinel drive_fun that captures the
-  # work_item it receives, deliver one open issue via gh_fun, and inspect :brief.
+  # wrapped_drive_fun, so we inject a sentinel drive_fun that receives the
+  # assembled work_item and sends it to the test process for inspection.
   #
-  # PRE-IMPL FAILURE: the current wrapped_drive_fun calls to_unit_work_item/1
-  # which sets `brief: title` (the bare issue title). This test asserts that
-  # :brief != the bare title and contains the mandatory arch pointer. When
-  # BriefAssembler does not exist the Supervisor fails to start (or compile),
-  # so the start_supervised! call itself fails before the drive_fun is reached.
-  # Either way the test fails — compile error or assertion failure.
+  # Synchronization: the sentinel sends {:d372c_drive_called, work_item} to
+  # the test pid. assert_receive with a 5 000 ms deadline is deterministic
+  # under full-suite load (replaces the flaky Process.sleep/1 that caused
+  # intermittent failures at seed values where 112 async cases starve the
+  # Coordinator's first loop iteration past the 300 ms window).
+  #
+  # Scope assertion (D-372 declared_scope projection):
+  # The issue body mentions `lib/tau/factory/d372_scope_sentinel.ex` (no
+  # line citation), which the default IssueSelector elaborator places into
+  # the scope's :files set. to_unit_work_item/1 MUST pass that scope to
+  # BriefAssembler.assemble/2 rather than the hard-wired @empty_scope.
+  # The assembled :brief must therefore contain the sentinel filename.
+  # This assertion FAILS against the current impl that discards `_scope`
+  # and always passes @empty_scope — the brief will say "(none declared)"
+  # for the Declared Scope section instead of the sentinel filename.
+  #
+  # PRE-IMPL FAILURE (scope): assertion failure — brief contains
+  # "(none declared)" instead of the sentinel file.
+  # PRE-IMPL FAILURE (compile): if BriefAssembler does not exist, the
+  # Supervisor fails to compile and start_supervised! raises.
   # ---------------------------------------------------------------------------
+
+  # Sentinel file that must appear in the assembled brief when scope is
+  # threaded correctly. Must not match any real file to avoid false positives.
+  @d372c_scope_sentinel "lib/tau/factory/d372_scope_sentinel.ex"
+
   @tag :d_372
   @tag :capture_log
-  test "D-372(c): Supervisor.to_unit_work_item/1 sets :brief to the assembled prompt, not the bare title" do
+  test "D-372(c): Supervisor.to_unit_work_item/1 sets :brief to the assembled prompt, not the bare title, and projects the real declared_scope" do
+    # Capture test pid BEFORE start_supervised! so the sentinel closure
+    # can send to it deterministically.
+    test_pid = self()
+
     # Throwaway git repo (mirrors merge_result_pubsub_test.exs pattern).
     repo_dir = Briefly.create!(type: :directory)
     git = fn args -> System.cmd("git", args, cd: repo_dir, stderr_to_stdout: true) end
@@ -186,23 +210,26 @@ defmodule Tau.Factory.BriefAssemblerTest do
     db_path = Briefly.create!(extname: ".db")
     sup_name = :"brief_asm_d372c_#{System.unique_integer([:positive])}"
 
-    # Shared cell to capture the work_item passed to our sentinel drive_fun.
-    capture = :ets.new(:d372c_capture, [:public, :set])
-
-    # An open issue with a known title and body.
+    # Issue body references @d372c_scope_sentinel (no line number), so the
+    # default IssueSelector elaborator puts it into the scope's :files set.
+    # to_unit_work_item/1 must thread this scope through to BriefAssembler.
     bare_title = "A2: brief/issue→prompt assembler"
 
     issue_map =
-      issue(489, bare_title, body: "Build BriefAssembler for real agents. References D-372.")
+      issue(489, bare_title,
+        body:
+          "Build BriefAssembler for real agents. References D-372.\n" <>
+            "Touches #{@d372c_scope_sentinel}."
+      )
 
     gh_fun = fn _milestone -> {:ok, [issue_map]} end
 
-    # Sentinel drive_fun: captures the work_item then returns :ok to satisfy
-    # the Coordinator's drive_fun contract (§4 B10).
+    # Sentinel drive_fun: sends the work_item to the test process and returns
+    # a stub pid to satisfy the Coordinator's drive_fun arity-2 contract.
+    # Uses send/2 rather than ETS so synchronization is a single assert_receive
+    # with no polling loop and no fixed sleep.
     sentinel_drive_fun = fn work_item, _deps ->
-      :ets.insert(capture, {:work_item, work_item})
-      # Prevent the Coordinator from trying to start a real Unit (no agent_bin
-      # in this test scope — just return a stub pid-ish value).
+      send(test_pid, {:d372c_drive_called, work_item})
       spawn(fn -> :ok end)
     end
 
@@ -222,24 +249,22 @@ defmodule Tau.Factory.BriefAssemblerTest do
         id: sup_name
       )
 
-    # Give the Coordinator one cycle to call select_fun → drive_fun.
-    Process.sleep(300)
+    # Deterministic synchronization: wait for the Coordinator to call drive_fun.
+    # 5 000 ms is generous; a loaded CI machine typically reaches drive_fun in
+    # < 100 ms. assert_receive fails immediately on timeout rather than silently
+    # succeeding when the sleep outlasts the coordinator's first iteration.
+    assert_receive {:d372c_drive_called, work_item},
+                   5_000,
+                   "D-372(c): timed out waiting for drive_fun to be called — " <>
+                     "the Coordinator did not reach drive_fun within 5 s. " <>
+                     "Likely BriefAssembler is missing (compile error) or the " <>
+                     "supervisor did not select the injected issue."
 
-    brief =
-      case :ets.lookup(capture, :work_item) do
-        [{:work_item, work_item}] ->
-          Map.get(work_item, :brief, :__missing__)
-
-        [] ->
-          :not_captured
-      end
+    brief = Map.get(work_item, :brief, :__missing__)
 
     assert is_binary(brief),
            "D-372(c): the work_item :brief delivered to drive_fun must be a String.t(); " <>
-             "got: #{inspect(brief)}. " <>
-             "If :not_captured, the Coordinator did not call drive_fun — " <>
-             "likely BriefAssembler is missing (compile error) or the supervisor " <>
-             "does not select the injected issue."
+             "got: #{inspect(brief)}"
 
     # The brief must not be the bare title — it must be the assembled prompt.
     refute brief == bare_title,
@@ -251,6 +276,29 @@ defmodule Tau.Factory.BriefAssemblerTest do
     assert brief =~ "docs/arch/04-software-architecture",
            "D-372(c): the assembled brief must include the docs/arch/04-software-architecture " <>
              "pointer section (D-372 arch-mandatory); got brief: #{inspect(brief)}"
+
+    # D-372 declared_scope projection: the sentinel file placed in the scope's
+    # :files set by the elaborator MUST appear under the "Declared Scope" /
+    # "**Files:**" label in the assembled brief. Asserting the labelled form
+    # "**Files:** <sentinel>" avoids a false positive — the sentinel also appears
+    # in the issue-body section of the brief, so a bare `=~` match on the
+    # filename alone would succeed even when scope is discarded.
+    #
+    # FAILS against the current impl where to_unit_work_item/1 discards the real
+    # scope and passes @empty_scope to BriefAssembler, producing:
+    #   **Files:** (none declared)
+    # instead of:
+    #   **Files:** lib/tau/factory/d372_scope_sentinel.ex
+    scope_files_line = "**Files:** #{@d372c_scope_sentinel}"
+
+    assert brief =~ scope_files_line,
+           "D-372(c): the assembled brief must contain \"#{scope_files_line}\" " <>
+             "in the Declared Scope section — the IssueSelector elaborator " <>
+             "extracted #{inspect(@d372c_scope_sentinel)} from the issue body into " <>
+             "scope.files, and to_unit_work_item/1 must thread that scope through " <>
+             "to BriefAssembler.assemble/2 rather than substituting @empty_scope. " <>
+             "Current impl produces \"**Files:** (none declared)\" instead. " <>
+             "Got brief: #{inspect(brief)}"
   end
 
   # ---------------------------------------------------------------------------
