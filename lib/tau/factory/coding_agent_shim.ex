@@ -52,9 +52,13 @@ defmodule Tau.Factory.CodingAgentShim do
     - `:replay_fixture_phases` — list of `{events, delay_ms}` for phased replay.
     - `:gap_before_phase_ms`   — list of gap delays before each phase (default: [0, 0, …]).
     - `:replay_delay_ms`       — inter-event delay ms for single-fixture replay.
-    - `:workspace_backend`     — module (default: `Tau.CodingAgent.Workspace.Cwd`).
     - `:heartbeat_interval_ms` — ms between heartbeat frame emissions (default: nil = every event).
     - `:inspect_env_file`      — when set, the shim writes its effective env vars to this path.
+
+  Note: `:workspace_backend` is intentionally absent. The shim always sets
+  `task.workspace = ws` (the worker's cwd) directly, which IS the
+  `Tau.CodingAgent.Workspace.Cwd` passthrough — the adapter API does not
+  accept a backend module. Callers need not pass this option.
   """
   @spec write(String.t(), keyword()) :: String.t()
   def write(dest_path, opts \\ []) do
@@ -65,7 +69,6 @@ defmodule Tau.Factory.CodingAgentShim do
       replay_fixture_phases: Keyword.get(opts, :replay_fixture_phases),
       gap_before_phase_ms: Keyword.get(opts, :gap_before_phase_ms),
       replay_delay_ms: Keyword.get(opts, :replay_delay_ms, 0),
-      workspace_backend: Keyword.get(opts, :workspace_backend, Tau.CodingAgent.Workspace.Cwd),
       heartbeat_interval_ms: Keyword.get(opts, :heartbeat_interval_ms),
       inspect_env_file: Keyword.get(opts, :inspect_env_file)
     }

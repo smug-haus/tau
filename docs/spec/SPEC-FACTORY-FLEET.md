@@ -374,10 +374,15 @@ shapes can meet the seam:
 - **(i) `agent_bin`-shaped CodingAgent shim (recommended).** A small executable
   (a release task / escript, e.g. `Tau.Factory.CodingAgentShim`) the Worker
   `Port.open`s as `agent_bin` *exactly as today* (B4 unchanged). Inside its own
-  BEAM the shim drives `Tau.CodingAgent.run/4` (or the dispatcher stream) against
-  `Tau.CodingAgents.ClaudeCode`, **commits** the agent's edits to the worktree,
-  and emits the D-326 `{:packet,4}` `work_ready` frame on the adapter's terminal
-  `%Event.Done{}` before exiting.
+  BEAM the shim calls `adapter.start(task, ctx)` to obtain a lazy
+  `Enumerable.t()` of `%Tau.CodingAgent.Event{}` and **consumes it lazily and
+  directly** — treating each consumed event as a live D-366 heartbeat pulse —
+  **commits** the agent's edits to the worktree on a successful terminal
+  `%Event.Done{}`, and emits the D-326 `{:packet,4}` `work_ready` frame before
+  exiting. Note: `Tau.CodingAgent.run/4` is a **blocking** convenience that
+  drains the whole stream and returns only when complete — it is **unsuitable**
+  for the shim because it cannot drive per-event live heartbeats (D-366). The
+  shim MUST call `adapter.start/2` directly.
 - **(ii) In-process drive.** The Worker GenServer calls `Tau.CodingAgent.run/4`
   directly (no `agent_bin` Port for the agent), mapping `%Event.Done{}` →
   `work_ready` in-process.
@@ -409,13 +414,33 @@ passes its environment through (D-365).
   Worker's `{:packet,4}` stdout — mirroring the dogfood script's stderr discipline
   and `ClaudeCode`'s "stderr NOT redirected to stdout").
 - **Drive.** The shim builds a `Tau.CodingAgent.task` (`%{prompt, workspace: ws,
-  …}`) — the issue→prompt assembly is **A2 (#488), cited not owned here** — and
-  drives `ClaudeCode` via the dispatcher. It consumes the **dispatcher-guaranteed
-  single `%Event.Done{}`** terminal event (SPEC-CODING-AGENT §4 B4: "every run
-  terminates with exactly one `%Done{}`"). V1-clean: the shim relies on the
-  dispatcher *manufacturing* a terminal `%Done{}` (including the synthetic
+  …}`) — the issue→prompt assembly is **A2 (#488), cited not owned here** — then
+  calls `adapter.start(task, ctx)` to obtain a lazy `Enumerable.t()` of
+  `%Tau.CodingAgent.Event{}` and **consumes it lazily, event by event**. Each
+  consumed event that carries progress information (`AssistantText`, `ToolUse`,
+  `ToolResult`, `FileEdit`) is treated as a **live D-366 heartbeat pulse** as it
+  arrives, so heartbeats are derived from real agent progress rather than a
+  self-clock timer.
+
+  **Why `Tau.CodingAgent.run/4` is unsuitable here** (and must NOT be
+  re-introduced): `run/4` is a *blocking* convenience that calls `drain/1`
+  internally, consuming the whole stream and returning `{:ok, %{events, done}}`
+  only when the adapter terminates. A blocking drain cannot emit per-event
+  heartbeats during the run (D-366 requires live pulses *as events arrive*).
+  The shim MUST call `adapter.start/2` directly.
+
+  The shim relies on the **substrate's adapter-level guarantee** (SPEC-CODING-AGENT
+  §4 B4: "every run terminates with exactly one `%Done{}`"): the adapter
+  *manufactures* a terminal `%Done{}` (including the synthetic
   `exit_status ∈ {-1,-2}` sentinels for death/timeout/cancel), **not** on the
   agent always emitting a parseable completion of its own.
+
+  The shim MUST also handle **stream-exhaustion-without-`%Done{}`** — an
+  adapter stream that ends with no terminal event (e.g. a real `claude` binary
+  dies mid-stream before the adapter can manufacture a synthetic Done). In this
+  case the shim MUST exit non-zero and emit **no** `work_ready` (D-364/D-367).
+  A wedged adapter stream (no events, never ends) stops pulsing heartbeats;
+  the Worker watchdog then raises `worker_stalled` (D-366/B7).
 - **Commit ownership (the load-bearing new logic — D-364).** `Tau.CodingAgents.ClaudeCode`
   edits files in `task.workspace` but **does not** `git commit`, **does not**
   create a branch, and **does not** produce a `head_sha`. The `%Event.Done{}`
