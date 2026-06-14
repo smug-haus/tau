@@ -121,6 +121,23 @@ defmodule Tau.Provider.Event do
     @type t :: %__MODULE__{branch: String.t(), head_sha: String.t()}
   end
 
+  defmodule Heartbeat do
+    @moduledoc """
+    A liveness pulse emitted by the CodingAgent shim (D-366).
+
+    Emitted in-band over the agent's `{:packet, 4}` Port as a JSON frame
+    `{"type":"heartbeat"}` derived from consumed CodingAgent stream events
+    (`AssistantText`, `ToolUse`, `ToolResult`, `FileEdit`), rate-limited to
+    at most once per `heartbeat_interval`. The Worker decodes this frame and
+    forwards `{:worker_heartbeat, worker_id}` to `report_to` and emits
+    `[:tau, :factory, :worker, :heartbeat]` telemetry so the Watchdog's
+    `worker_stalled` inference is driven by real agent progress, not a
+    self-clock timer (SPEC-FACTORY-FLEET §4 B4-A1, §6 D-366).
+    """
+    defstruct []
+    @type t :: %__MODULE__{}
+  end
+
   @type t ::
           Start.t()
           | TextStart.t()
@@ -135,4 +152,5 @@ defmodule Tau.Provider.Event do
           | Done.t()
           | Error.t()
           | WorkReady.t()
+          | Heartbeat.t()
 end
