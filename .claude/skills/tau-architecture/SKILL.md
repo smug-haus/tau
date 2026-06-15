@@ -85,10 +85,16 @@ directories. It does NOT auto-register agents from `<project>/.claude/agents/`. 
 means `Task({subagent_type: "critic", ...})` returns "Agent type 'critic' not found"
 when invoked from within this project's harness commands.
 
-**Workaround (Path C):** Invoke personas via the Task tool **without** `subagent_type`.
-Instead, inline the persona's system prompt (from the `.claude/agents/<name>.md` body)
-directly in the Task tool's `prompt` argument. The persona files serve as the canonical
-source to copy from. This is how `/pr` and `/test-persona` work.
+**CORRECTION (2026-06-15): the limitation above is retired for the Agent tool.**
+`implementer` / `test-author` / `reviewer` / `critic` ARE registered subagent types
+and MUST be spawned via `subagent_type`. This is mandatory because the `agent_type`
+the harness stamps into the PreToolUse payload is what `.claude/hooks/enforce-agent-paths.py`
+uses to mechanically scope writes (`implementer` → `lib/**`+`web/lib/**` only;
+`test-author` → `test/**`; `reviewer`/`critic` → no writes). Spawning these roles
+WITHOUT `subagent_type` (the old inline-persona workaround) nulls `agent_type` and
+defeats that enforcement — so the inline-persona path is **deprecated** for these roles.
+(If a future slash-command context genuinely cannot resolve a project agent type,
+treat that as a bug to fix, not a reason to drop `subagent_type`.)
 
 **Future path:** Two options exist for a proper fix:
 - Path A: Find and configure a `settings.json` key that adds project-local agent

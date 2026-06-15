@@ -39,7 +39,7 @@ You receive tasks, maintain the solution tree, spawn subagents, decide on outcom
 
 Rules: `Plan` before `critic`; `implementer` over `general-purpose` inside `lib/tau/` or `test/`; both `critic` and `reviewer` MUST PASS before opening a PR.
 
-**Persona dispatch:** Do NOT use `subagent_type: "critic"` / `"reviewer"` / `"implementer"` — Claude Code does not auto-register project-local agents at `.claude/agents/`. Instead invoke the Task tool without `subagent_type` and inline the persona prompt from `.claude/agents/<name>.md`. See `tau-architecture` §Subagent Routing for details.
+**Persona dispatch (CORRECTED 2026-06-15):** Spawn `implementer` / `test-author` / `reviewer` / `critic` **via `subagent_type`** (they ARE registered/auto-discovered). This is **mandatory**: the `agent_type` it stamps into the PreToolUse payload is what `.claude/hooks/enforce-agent-paths.py` keys on to mechanically scope writes — **`implementer` may write ONLY `lib/**` (+ `web/lib/**`); `test-author` only `test/**`; `reviewer`/`critic` may not write at all.** Spawning these roles WITHOUT `subagent_type` (generic Agent + inlined persona) nulls `agent_type` and defeats the enforcement — do not do it. Specs/docs/`MISSION.md` are authored by a non-restricted role (shaper/`general-purpose`) BEFORE the implementer, never by the implementer. The prior "do not use subagent_type / inline personas" guidance was wrong and is retired.
 
 Worktree isolation isolates git refs but **not** absolute-path writes — brief subagents to use relative paths. Detail in `tau-architecture`.
 
