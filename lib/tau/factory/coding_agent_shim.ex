@@ -235,7 +235,14 @@ defmodule Tau.Factory.CodingAgentShim.Runner do
   end
 
   defp run_single_stream(ws, adapter, fixture, delay_ms, hb_state) do
-    task = %{prompt: "", workspace: ws, replay_fixture: fixture}
+    # D-381: read the brief from the Worker-injected TAU_AGENT_PROMPT env var.
+    # Falls back to "" when absent (back-compat with Replay / non-D-381 paths).
+    task = %{
+      prompt: System.get_env("TAU_AGENT_PROMPT") || "",
+      workspace: ws,
+      replay_fixture: fixture
+    }
+
     ctx = if delay_ms > 0, do: %{replay_delay_ms: delay_ms}, else: %{}
 
     case adapter.start(task, ctx) do
@@ -255,7 +262,13 @@ defmodule Tau.Factory.CodingAgentShim.Runner do
       if gap_ms > 0, do: Process.sleep(gap_ms)
 
       # The events in this phase may or may not include a terminal Done.
-      task = %{prompt: "", workspace: ws, replay_fixture: events}
+      # D-381: read the brief from the Worker-injected TAU_AGENT_PROMPT env var.
+      task = %{
+        prompt: System.get_env("TAU_AGENT_PROMPT") || "",
+        workspace: ws,
+        replay_fixture: events
+      }
+
       ctx = if delay_ms > 0, do: %{replay_delay_ms: delay_ms}, else: %{}
 
       case adapter.start(task, ctx) do

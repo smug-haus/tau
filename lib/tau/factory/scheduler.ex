@@ -116,7 +116,11 @@ defmodule Tau.Factory.Scheduler do
 
   @impl GenServer
   def handle_call({:admit, unit_id, declared_scope}, _from, state) do
-    case evaluate_admission(declared_scope, state) do
+    # D-380 self-exclusion: evaluate admission over F ∖ {unit_id} so a unit
+    # never conflicts with its own in-flight entry (idempotent upsert).
+    f_prime = Map.delete(state.f, unit_id)
+
+    case evaluate_admission(declared_scope, %{state | f: f_prime}) do
       :admit ->
         new_f = Map.put(state.f, unit_id, declared_scope)
         {:reply, :admit, %{state | f: new_f}}
