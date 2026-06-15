@@ -381,22 +381,19 @@ defmodule Tau.Factory.Worker do
     # Applied for all agent_modes (benign for Replay; task data, not a secret).
     # TAU_AGENT_PROMPT is task data — it is NOT added to the D-374 metered scrub.
     #
-    # Erlang limitation: Erlang's Port {:env, [{key, []}]} (empty charlist) is
-    # treated as {key, false} = unset the variable. We cannot set an empty-string
-    # env var via the Port env override mechanism.
-    # Workaround for brief == "": set the C-level env before Port.open so the
-    # child inherits it via fork. Omit TAU_AGENT_PROMPT from prompt_env in that case.
-    # The BEAM process is a dedicated Worker GenServer; empty-brief forks are rare
-    # and the race window is the brief fork() syscall duration (sub-millisecond).
-    # For non-empty briefs the Port env override mechanism is used (no :os call).
-    {env_list, port_env_needs_cleanup} =
+    # Omit-on-empty: when brief == "", TAU_AGENT_PROMPT is NOT injected into the
+    # Port env at all. The shim Runner reads System.get_env("TAU_AGENT_PROMPT") || ""
+    # so an absent var yields "" — identical observable behaviour with no global
+    # OS-env mutation (:os.putenv/:os.unsetenv are process-wide and unsafe under
+    # concurrent Worker.init calls).
+    prompt_env =
       if brief == "" do
-        true = :os.putenv(~c"TAU_AGENT_PROMPT", ~c"")
-        {ns_env ++ extra_env_charlist ++ metered_scrub, true}
+        []
       else
-        prompt_env = [{~c"TAU_AGENT_PROMPT", String.to_charlist(brief)}]
-        {ns_env ++ extra_env_charlist ++ metered_scrub ++ prompt_env, false}
+        [{~c"TAU_AGENT_PROMPT", String.to_charlist(brief)}]
       end
+
+    env_list = ns_env ++ extra_env_charlist ++ metered_scrub ++ prompt_env
 
     port =
       Port.open({:spawn_executable, agent_bin}, [
@@ -406,11 +403,6 @@ defmodule Tau.Factory.Worker do
         {:env, env_list},
         {:cd, ws}
       ])
-
-    # Restore C-level env after fork when we used the :os.putenv workaround.
-    if port_env_needs_cleanup do
-      :os.unsetenv(~c"TAU_AGENT_PROMPT")
-    end
 
     # Step 6: heartbeat timer.
     # D-366: heartbeats are now event-driven (port heartbeat frames from the shim)

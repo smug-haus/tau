@@ -849,18 +849,21 @@ bridge):** the per-unit brief (`work_item.brief`, composed by CORE D-372)
 reaches the per-unit shim's `Tau.CodingAgent.task.prompt`. Because `agent_bin` is
 resolved **once** at supervisor setup (D-376), the per-unit prompt cannot be baked
 at shim-write time; it crosses the existing B4 `Port` boundary as an **environment
-variable**. The Worker sets `{"TAU_AGENT_PROMPT", brief}` in the `Port.open`
-`:env` list (per-spawn, alongside `ns`/`extra_env`/the D-374 scrub); the shim's
-`Runner.main/1` reads `System.get_env("TAU_AGENT_PROMPT")` and sets
-`task.prompt = it || ""`. Holds for every agent_mode (Replay ignores it; benign).
-`□( brief ≠ "" ⇒ shim builds task.prompt == brief ) ∧ □( real :claude_code run ⇒
-claude argv contains "-p", brief, NOT "-p", "" )`. **Orthogonality (D-374):** the
-metered-spend scrub touches only the three `ANTHROPIC_*` keys;
-`TAU_AGENT_PROMPT` is task data and MUST NOT be added to the scrub. Detection:
-`coding_agent_shim_prompt_test.exs` — a Worker spawned with a non-empty `:brief`
-and `agent_mode: :claude_code` (with `claude` stubbed by a Replay/fixture source)
-produces an argv carrying the brief as `-p <brief>`; a `""` brief yields `-p ""`;
-the `ANTHROPIC_*` scrub is unaffected.
+variable**. Injection is **omit-on-empty**: when `brief` is non-empty the Worker
+appends `{"TAU_AGENT_PROMPT", brief}` to the `Port.open` `:env` list
+(per-spawn, alongside `ns`/`extra_env`/the D-374 scrub); when `brief == ""`
+the key is **omitted entirely** — no `:os.putenv`/`:os.unsetenv` global-env
+mutation (unsafe under concurrent `Worker.init` calls). The shim's
+`Runner.main/1` reads `System.get_env("TAU_AGENT_PROMPT") || ""` — absent is
+equivalent to `""` — and sets `task.prompt = it`. Holds for every agent_mode
+(Replay ignores it; benign). `□( brief ≠ "" ⇒ shim builds task.prompt == brief )
+∧ □( real :claude_code run ⇒ claude argv contains "-p", brief, NOT "-p", "" )`.
+**Orthogonality (D-374):** the metered-spend scrub touches only the three
+`ANTHROPIC_*` keys; `TAU_AGENT_PROMPT` is task data and MUST NOT be added to
+the scrub. Detection: `coding_agent_shim_prompt_test.exs` — a Worker spawned
+with a non-empty `:brief` and `agent_mode: :claude_code` (with `claude` stubbed
+by a Replay/fixture source) produces an argv carrying the brief as `-p <brief>`;
+a `""` brief yields `-p ""`; the `ANTHROPIC_*` scrub is unaffected.
 
 ## 7. Acceptance criteria
 
