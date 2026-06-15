@@ -1,19 +1,18 @@
 defmodule Tau.Factory.MergeBuildCleanTreeTest do
   @moduledoc """
-  Gating tests for PR #522 (issue #521, D-384).
+  Gating tests for PR #522 (issue #521, D-385).
 
-  D-384 — MergeAuthority.default_build/3 produces a clean rebased tree from any
-  prior repo_dir state; a staged deletion (the run-#4 index state) MUST NOT
-  prevent rebase or lose committed work.
+  D-385 — MergeAuthority build MUST run in a PRIVATE ephemeral worktree forked
+  from the unit branch; M MUST NOT checkout/rebase/run the toolchain in the
+  shared repo_dir tree. After a build, repo_dir's HEAD stays on its original
+  branch (main) and its index is clean. repo_dir is the ref anchor only.
 
-  Both tests FAIL before the implementer adds:
-    1. `git reset --hard HEAD` before `git rebase` in `default_build/3`
-       (lib/tau/factory/merge_authority.ex)
-    2. `.gitignore` containing `.tau-factory/` written by `Sandbox.seed/1`
-       (lib/tau/factory/dogfood/sandbox.ex)
+  Test 1 gates D-385: with a concurrent worktree holding unit-1, default_build
+  still produces :merged and never mutates repo_dir's HEAD or index.
+  Test 2 gates Sandbox.seed hygiene: .gitignore exists and suppresses .tau-factory/.
 
-  These tests exercise the REAL default build path via `request_merge/2` with
-  NO `build_fun` override — oracle separation is genuine.
+  Both tests FAIL before the implementer adds private-worktree build isolation
+  to default_build/3 in lib/tau/factory/merge_authority.ex.
   """
 
   use ExUnit.Case, async: true
@@ -25,9 +24,7 @@ defmodule Tau.Factory.MergeBuildCleanTreeTest do
   alias Tau.Factory.Dogfood.Sandbox
 
   # ---------------------------------------------------------------------------
-  # Test-local CAS stub
-  # No production code — just an inline module that satisfies the CAS behaviour
-  # the MergeAuthority asks for, so committing completes without a real remote.
+  # Test-local CAS stub — satisfies the CAS behaviour without a real remote.
   # ---------------------------------------------------------------------------
 
   defmodule StubCas do
@@ -39,32 +36,31 @@ defmodule Tau.Factory.MergeBuildCleanTreeTest do
   end
 
   # ---------------------------------------------------------------------------
-  # Git helpers (mirrored from merge_serialized_test.exs pattern)
+  # Git helpers
   # ---------------------------------------------------------------------------
 
   # Build a real git topology:
   #   origin.git — bare repo
-  #   work/      — clone with main + unit branch
+  #   work/      — clone; main has two commits (base + divergent);
+  #                unit-1 branches from the FIRST commit and carries a
+  #                COMMITTED, WARNING-FREE work file (lib/work.ex).
   #
-  # main has TWO commits (base + divergent), unit-1 branches from the FIRST
-  # commit and adds `lib/work.ex` — so the rebase is genuinely non-trivial
-  # (there is a divergent commit on main that must be applied on top).
+  # The divergent commit on main makes the rebase genuinely non-trivial.
+  # A minimal mix project (mix.exs + test/test_helper.exs) is seeded on
+  # both main and unit-1 so Health.check (mix compile + mix test) passes
+  # once the private-worktree build rebases and runs in the worktree.
   #
-  # Also seeds a minimal Elixir project (mix.exs + test/test_helper.exs) on
-  # main so Health.check (mix compile + mix test) passes after the fix lands.
-  #
-  # Returns {origin_path, work_path, base_oid, unit_tip}
-  defp setup_dirty_repo(tmp_dir) do
+  # Returns {origin_path, work_path, base_oid}
+  defp setup_repo(tmp_dir) do
     origin_path = Path.join(tmp_dir, "origin.git")
     work_path = Path.join(tmp_dir, "work")
 
-    # Init non-bare work repo, identity, initial commit on main.
     {_, 0} = System.cmd("git", ["init", "-b", "main", work_path])
     git = fn args -> System.cmd("git", args, cd: work_path, stderr_to_stdout: true) end
     git.(["config", "user.email", "test@tau.test"])
     git.(["config", "user.name", "Tau Test"])
 
-    # Seed a minimal Elixir project so Health.check passes (mix compile + mix test).
+    # Minimal Elixir project scaffold so Health.check passes.
     File.mkdir_p!(Path.join(work_path, "lib"))
     File.mkdir_p!(Path.join(work_path, "test"))
 
@@ -78,19 +74,19 @@ defmodule Tau.Factory.MergeBuildCleanTreeTest do
 
     File.write!(Path.join(work_path, "test/test_helper.exs"), "ExUnit.start()\n")
 
-    # Initial commit — the base off which unit-1 will branch.
+    # Base commit — the fork point for unit-1.
     git.(["add", "."])
     {_, 0} = git.(["commit", "-m", "base: scaffold"])
-    {base_oid_raw, 0} = git.(["rev-parse", "HEAD"])
-    base_oid = String.trim(base_oid_raw)
+    {base_raw, 0} = git.(["rev-parse", "HEAD"])
+    base_oid = String.trim(base_raw)
 
-    # Create bare origin and push main at base.
+    # Bare origin — push main at base.
     {_, 0} = System.cmd("git", ["init", "--bare", origin_path])
     {_, 0} = System.cmd("git", ["symbolic-ref", "HEAD", "refs/heads/main"], cd: origin_path)
     {_, 0} = git.(["remote", "add", "origin", origin_path])
     {_, 0} = git.(["push", "-u", "origin", "main"])
 
-    # Branch unit-1 from base_oid; add a COMMITTED work-product file.
+    # unit-1 branches from base; carries a committed, warning-free work file.
     {_, 0} = git.(["checkout", "-b", "unit-1"])
 
     File.write!(
@@ -99,12 +95,10 @@ defmodule Tau.Factory.MergeBuildCleanTreeTest do
     )
 
     {_, 0} = git.(["add", "lib/work.ex"])
-    {_, 0} = git.(["commit", "-m", "feat: add lib/work.ex (committed unit work)"])
-    {unit_tip_raw, 0} = git.(["rev-parse", "HEAD"])
-    unit_tip = String.trim(unit_tip_raw)
+    {_, 0} = git.(["commit", "-m", "feat: add lib/work.ex"])
     {_, 0} = git.(["push", "origin", "unit-1"])
 
-    # Return to main, add a DIVERGENT commit (makes rebase non-trivial).
+    # Divergent commit on main (makes rebase non-trivial).
     {_, 0} = git.(["checkout", "main"])
     File.write!(Path.join(work_path, "README"), "divergent main commit\n")
     {_, 0} = git.(["add", "README"])
@@ -112,10 +106,9 @@ defmodule Tau.Factory.MergeBuildCleanTreeTest do
     {_, 0} = git.(["push", "origin", "main"])
 
     # Stay on main.
-    {origin_path, work_path, base_oid, unit_tip}
+    {origin_path, work_path, base_oid}
   end
 
-  # Seed pass verdicts for a unit in the given writer.
   defp seed_pass_verdicts(writer, unit) do
     for half <- [:critic, :reviewer] do
       {:ok, _} =
@@ -130,29 +123,56 @@ defmodule Tau.Factory.MergeBuildCleanTreeTest do
   end
 
   # ---------------------------------------------------------------------------
-  # D-384 test 1 — build on dirty repo (staged deletion of committed file)
+  # D-385 Test 1 — build isolation: private worktree; repo_dir HEAD untouched
   # ---------------------------------------------------------------------------
 
-  describe "D-384 — default_build idempotent on dirty repo_dir" do
-    @tag :d_384
-    # Allow enough time for Health.check (mix compile + mix test) after the fix.
-    @tag timeout: 120_000
-    test "D-384: staged deletion of committed work file does not block rebase; committed content survives at built tip" do
+  describe "D-385 — default_build uses private ephemeral worktree; repo_dir HEAD stays on main" do
+    @tag :d_385
+    # Health.check runs mix compile + mix test — allow ample time.
+    @tag timeout: 180_000
+    test "D-385: concurrent worktree holding unit-1 does not cause collision; outcome :merged; repo_dir HEAD stays on main; index clean" do
       tmp_dir = Briefly.create!(type: :directory)
-      test_pid = self()
 
       unit = %{
-        id: "d384-unit-#{System.unique_integer([:positive])}",
-        hash: "hash-d384-#{System.unique_integer([:positive])}",
-        run: "run-d384-001",
+        id: "d385-unit-#{System.unique_integer([:positive])}",
+        hash: "hash-d385-#{System.unique_integer([:positive])}",
+        run: "run-d385-001",
         branch: "unit-1"
       }
 
-      {_origin_path, work_path, _base_oid, _unit_tip} = setup_dirty_repo(tmp_dir)
+      {_origin_path, work_path, _base_oid} = setup_repo(tmp_dir)
 
-      # Start Ledger.Writer with pass verdicts so CAS proceeds to commit.
+      # Record repo_dir's starting HEAD (must be main).
+      {starting_head_raw, 0} =
+        System.cmd("git", ["rev-parse", "--abbrev-ref", "HEAD"], cd: work_path)
+
+      starting_head = String.trim(starting_head_raw)
+
+      assert starting_head == "main",
+             "D-385 setup: repo_dir must start on main; got #{inspect(starting_head)}"
+
+      # REPRODUCE THE COLLISION PRECONDITION:
+      # A concurrent worktree checks out unit-1 in repo_dir. If default_build
+      # tries `git checkout unit-1` in repo_dir (the pre-D-385 bug), git returns
+      # "fatal: 'unit-1' is already used by worktree" and the build fails.
+      other_ws = Path.join(tmp_dir, "other-worker-ws")
+
+      {wt_out, wt_exit} =
+        System.cmd("git", ["worktree", "add", other_ws, "unit-1"],
+          cd: work_path,
+          stderr_to_stdout: true
+        )
+
+      assert wt_exit == 0,
+             "D-385 setup: failed to add competing worktree for unit-1: #{wt_out}"
+
+      on_exit(fn ->
+        System.cmd("git", ["worktree", "remove", "--force", other_ws], cd: work_path)
+      end)
+
+      # Ledger.Writer with pass verdicts so CAS proceeds to commit.
       db_path = Briefly.create!(extname: ".db")
-      writer_name = :"test_d384_writer_#{System.unique_integer([:positive])}"
+      writer_name = :"test_d385_writer_#{System.unique_integer([:positive])}"
 
       writer =
         start_supervised!(
@@ -162,56 +182,15 @@ defmodule Tau.Factory.MergeBuildCleanTreeTest do
 
       seed_pass_verdicts(writer, unit)
 
-      # Subscribe to PubSub BEFORE starting MA so we receive the merge result.
+      # Subscribe to the per-unit PubSub topic BEFORE starting MA.
+      # Topic: "factory:pr:<unit.id>" — D-356 (MergeAuthority broadcasts here).
       Phoenix.PubSub.subscribe(Tau.PubSub, "factory:pr:#{unit.id}")
 
-      # Attach a telemetry listener for :reject events so we can detect the
-      # non-terminal build failure (git_error requeue) WITHOUT waiting for
-      # infinite requeue cycles to time out. The :reject telemetry fires on
-      # the FIRST failed build attempt; PubSub :rejected fires only on terminal
-      # (health_red) ejections. We use telemetry as the early-failure signal.
-      telemetry_handler_id = "d384-reject-#{System.unique_integer([:positive])}"
-
-      :telemetry.attach(
-        telemetry_handler_id,
-        [:tau, :factory, :merge, :reject],
-        fn _event, _measurements, _metadata, _config ->
-          send(test_pid, :build_rejected_by_telemetry)
-        end,
-        nil
-      )
-
-      on_exit(fn -> :telemetry.detach(telemetry_handler_id) end)
-
-      # Check out the unit branch so the index has lib/work.ex tracked.
-      # The staged deletion must be planted on unit-1, not on main — main
-      # never had lib/work.ex so force-remove there is a no-op.
-      {_, 0} =
-        System.cmd("git", ["checkout", "unit-1"],
-          cd: work_path,
-          stderr_to_stdout: true
-        )
-
-      # PLANT the run-#4 index state: a staged deletion of the committed file.
-      # This replicates the dirty-repo condition that causes `git rebase` to abort
-      # without `git reset --hard HEAD` first (the bug D-384 fixes).
-      {_, 0} =
-        System.cmd("git", ["update-index", "--force-remove", "lib/work.ex"],
-          cd: work_path,
-          stderr_to_stdout: true
-        )
-
-      # Confirm the deletion is actually staged (guard: setup must be correct).
-      {git_status, 0} = System.cmd("git", ["status", "--short"], cd: work_path)
-
-      assert String.contains?(git_status, "D") and String.contains?(git_status, "lib/work.ex"),
-             "D-384 setup: staged deletion not visible in git status; got: #{inspect(git_status)}"
-
-      # Start MergeAuthority with NO build_fun override — exercises the REAL
-      # default_build/3 path (lib/tau/factory/merge_authority.ex).
-      # Inject StubCas so the commit step does not push to a real remote.
-      ma_name = :"test_d384_ma_#{System.unique_integer([:positive])}"
-      tasks_name = :"test_d384_tasks_#{System.unique_integer([:positive])}"
+      # Start MergeAuthority with NO build_fun override.
+      # This exercises the REAL default_build/3 path — oracle separation is genuine.
+      # Inject StubCas so commit step does not push to a real remote.
+      ma_name = :"test_d385_ma_#{System.unique_integer([:positive])}"
+      tasks_name = :"test_d385_tasks_#{System.unique_integer([:positive])}"
 
       _ma_pid =
         start_supervised!(
@@ -226,76 +205,94 @@ defmodule Tau.Factory.MergeBuildCleanTreeTest do
           id: ma_name
         )
 
-      # Submit the unit — exercises the REAL default_build/3 via request_merge/2.
-      # default_build/3 is private; request_merge is the real entry point.
+      # Submit the unit via the REAL entry point — no build_fun override.
       :queued = MergeAuthority.request_merge(ma_name, unit)
 
-      # Wait for either:
-      #   {:merge_result, :merged}   — build + commit succeeded (expected after fix)
-      #   :build_rejected_by_telemetry — telemetry :reject fired on requeue
-      #                                  (expected before fix: staged deletion aborts rebase)
-      #
-      # The CURRENT code (no reset --hard) will trigger :build_rejected_by_telemetry
-      # because rebase fails, returns {:build_failed, {:git_error, 1, ...}}, and
-      # the MA requeues. We surface that as a test failure so the test fails RED.
-      # After the fix, the :merged PubSub message arrives instead.
+      # Wait for the per-unit PubSub outcome.
+      # Pre-fix: default_build tries `git checkout unit-1` in repo_dir →
+      # "fatal: 'unit-1' is already used by worktree" → {:build_failed,
+      # {:git_error, 128, "..."}} → MA requeues → no :merged broadcast.
+      # Post-fix: default_build uses a private `--detach` worktree →
+      # no collision → rebase succeeds → Health.check passes → :merged.
       outcome =
         receive do
           {:merge_result, :merged} ->
             :merged
 
-          :build_rejected_by_telemetry ->
-            :build_failed_on_dirty_repo
+          {:merge_result, :rejected} ->
+            :rejected
         after
-          # Health.check (mix compile + mix test) can take ~30s; allow headroom.
-          90_000 -> :timeout
+          # Health.check (mix compile + mix test) takes ~30s; generous headroom.
+          150_000 -> :timeout
         end
 
-      # D-384 assertion (a): build MUST succeed.
-      # Current code fails: git rebase aborts due to staged deletion →
-      # {:build_failed, {:git_error, 1, "cannot rebase..."}} → :reject telemetry →
-      # outcome == :build_failed_on_dirty_repo → this assert fires.
+      # D-385 assertion (a): outcome MUST be :merged.
+      # Pre-fix failure: outcome == :timeout (MA requeues indefinitely due to
+      # git checkout collision; no terminal rejection is ever broadcast).
       assert outcome == :merged,
-             "D-384: expected :merged but got #{inspect(outcome)}. " <>
-               "default_build/3 failed on dirty repo_dir (run-#4 staged deletion). " <>
-               "Fix: add 'git reset --hard HEAD' before 'git rebase <base>' in default_build/3."
+             "D-385: expected :merged but got #{inspect(outcome)}. " <>
+               "default_build/3 likely tried `git checkout unit-1` in repo_dir while a " <>
+               "concurrent worktree holds that branch. Fix: use a private `--detach` " <>
+               "worktree in default_build/3 (the D-385 private-worktree build isolation)."
 
-      # D-384 assertion (b): committed work file survives at the built tip.
-      {file_content_at_tip, show_exit} =
-        System.cmd("git", ["show", "HEAD:lib/work.ex"], cd: work_path, stderr_to_stdout: true)
+      # D-385 assertion (b): committed work file survives at the built tip.
+      {work_ex_content, show_exit} =
+        System.cmd("git", ["show", "origin/unit-1:lib/work.ex"],
+          cd: work_path,
+          stderr_to_stdout: true
+        )
 
       assert show_exit == 0,
-             "D-384: lib/work.ex must exist at the built tip"
+             "D-385: lib/work.ex must exist at the built tip on origin/unit-1"
 
-      assert String.contains?(file_content_at_tip, "def answer"),
-             "D-384: committed content must survive at built tip; got: #{inspect(file_content_at_tip)}"
+      assert String.contains?(work_ex_content, "def answer"),
+             "D-385: committed content must survive at built tip; got: #{inspect(work_ex_content)}"
 
-      # D-384 assertion (c): tip is rebased onto the divergent main commit.
-      {parent_subject, 0} =
-        System.cmd("git", ["log", "--oneline", "-1", "HEAD^"], cd: work_path)
+      # D-385 assertion (c): the tip on unit-1 is rebased onto the divergent main commit.
+      {parent_subject, _} =
+        System.cmd("git", ["log", "--oneline", "-1", "origin/unit-1^"],
+          cd: work_path,
+          stderr_to_stdout: true
+        )
 
       assert String.contains?(parent_subject, "divergent"),
-             "D-384: tip parent must be the divergent main commit; got: #{inspect(parent_subject)}"
+             "D-385: tip parent must be the divergent main commit; got: #{inspect(parent_subject)}"
 
-      # D-384 assertion (d): working tree is clean after build.
-      {status_after, 0} = System.cmd("git", ["status", "--short"], cd: work_path)
+      # D-385 assertion (d): repo_dir HEAD still points at main after build.
+      # This is the direct INV-11 / D-385 falsifier: if default_build checked out
+      # unit-1 in repo_dir, HEAD would have moved off main.
+      {head_after_raw, 0} =
+        System.cmd("git", ["rev-parse", "--abbrev-ref", "HEAD"], cd: work_path)
+
+      head_after = String.trim(head_after_raw)
+
+      assert head_after == "main",
+             "D-385 (INV-11): repo_dir HEAD must remain on main after build; " <>
+               "got #{inspect(head_after)}. default_build mutated repo_dir's HEAD — " <>
+               "M must use a private ephemeral worktree, leaving repo_dir as ref anchor only."
+
+      # D-385 assertion (e): repo_dir index/working tree is clean after build.
+      # If default_build ran rebase in repo_dir, the index would be dirty.
+      {status_after, 0} =
+        System.cmd("git", ["status", "--porcelain"], cd: work_path)
 
       assert String.trim(status_after) == "",
-             "D-384: working tree must be clean after build; got: #{inspect(status_after)}"
+             "D-385 (INV-11): repo_dir index/working tree must be clean after build; " <>
+               "got: #{inspect(status_after)}. default_build left dirty state in repo_dir."
     end
   end
 
   # ---------------------------------------------------------------------------
-  # D-384 test 2 — Sandbox.seed writes .gitignore containing .tau-factory/
+  # D-385 Test 2 — Sandbox.seed hygiene: .gitignore protects .tau-factory/
   # ---------------------------------------------------------------------------
 
-  describe "D-384 — Sandbox.seed writes .gitignore to protect Ledger dir" do
-    @tag :d_384
-    test "D-384: after Sandbox.seed/1, .gitignore exists and contains .tau-factory/" do
+  describe "D-385 — Sandbox.seed hygiene: .gitignore contains .tau-factory/" do
+    @tag :d_385
+    test "D-385: after Sandbox.seed/1, .gitignore exists and suppresses .tau-factory/ from git status" do
       tmp_dir = Briefly.create!(type: :directory)
       work_path = Path.join(tmp_dir, "seed_work")
 
-      # Minimal git repo setup so Sandbox.seed/1 has a valid git repo to operate on.
+      # Minimal git repo for Sandbox.seed/1 to operate on.
       {_, 0} = System.cmd("git", ["init", "-b", "main", work_path])
       git = fn args -> System.cmd("git", args, cd: work_path, stderr_to_stdout: true) end
       git.(["config", "user.email", "test@tau.test"])
@@ -307,7 +304,7 @@ defmodule Tau.Factory.MergeBuildCleanTreeTest do
       {_, 0} = System.cmd("git", ["symbolic-ref", "HEAD", "refs/heads/main"], cd: origin_path)
       {_, 0} = git.(["remote", "add", "origin", origin_path])
 
-      # Seed requires an initial commit + push before it can commit scaffold.
+      # Initial commit so seed/1 can push the scaffold commit.
       File.write!(Path.join(work_path, ".keep"), "")
       {_, 0} = git.(["add", ".keep"])
       {_, 0} = git.(["commit", "-m", "initial"])
@@ -316,26 +313,26 @@ defmodule Tau.Factory.MergeBuildCleanTreeTest do
       # Invoke Sandbox.seed/1 — the function under test.
       :ok = Sandbox.seed(work_path)
 
-      # D-384 assertion: .gitignore must exist and contain .tau-factory/.
+      # D-385 assertion: .gitignore must exist.
       gitignore_path = Path.join(work_path, ".gitignore")
 
       assert File.exists?(gitignore_path),
-             "D-384: Sandbox.seed/1 must write .gitignore; file missing at #{gitignore_path}"
+             "D-385: Sandbox.seed/1 must write .gitignore; file missing at #{gitignore_path}"
 
       gitignore_content = File.read!(gitignore_path)
 
       assert String.contains?(gitignore_content, ".tau-factory/"),
-             "D-384: .gitignore must contain '.tau-factory/' to protect the Ledger dir; " <>
+             "D-385: .gitignore must contain '.tau-factory/' to protect the Ledger dir; " <>
                "got content: #{inspect(gitignore_content)}"
 
-      # D-384 corollary: after seed, no untracked .tau-factory/ entry appears
-      # in git status (the .gitignore must suppress it).
+      # D-385 corollary: after seeding, a .tau-factory/ directory must NOT appear
+      # as an untracked entry in git status — the .gitignore suppresses it.
       File.mkdir_p!(Path.join(work_path, ".tau-factory"))
       File.write!(Path.join(work_path, ".tau-factory/ledger.db"), "")
       {status_out, 0} = System.cmd("git", ["status", "--short"], cd: work_path)
 
       refute String.contains?(status_out, ".tau-factory"),
-             "D-384: .tau-factory/ must be suppressed by .gitignore in git status; " <>
+             "D-385: .tau-factory/ must be suppressed by .gitignore in git status; " <>
                "got: #{inspect(status_out)}"
     end
   end
