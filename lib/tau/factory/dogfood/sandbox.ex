@@ -18,14 +18,43 @@ defmodule Tau.Factory.Dogfood.Sandbox do
 
   @issue_title "add Sandbox.answer/0 returning 42"
   @issue_number 1
+  @issue_body """
+  Add a public function `Sandbox.answer/0` that returns the integer `42`.
+
+  ## Acceptance criteria
+
+  - `Sandbox.answer/0` returns `42` (integer).
+  - The function is defined in `lib/sandbox.ex` as a public module function.
+
+  ## Implementation notes
+
+  - Create `lib/sandbox.ex` with a `defmodule Sandbox` block.
+  - Define `def answer, do: 42` inside the module.
+  - No dependencies required; the sandbox mix project scaffold is already present.
+  """
 
   @doc "The fixed issue number (always 1 in the dogfood harness)."
   @spec issue_number() :: integer()
   def issue_number, do: @issue_number
 
+  @doc "The seeded dogfood issue as a gh-shaped map (number + title + actionable body)."
+  @spec issue_map() :: %{String.t() => term()}
+  def issue_map,
+    do: %{"number" => issue_number(), "title" => issue_title(), "body" => issue_body()}
+
   @doc "The fixed issue title used to seed the dogfood sandbox."
   @spec issue_title() :: String.t()
   def issue_title, do: @issue_title
+
+  @doc """
+  The actionable body for the seeded dogfood issue.
+
+  Describes what the implementer must build and the acceptance criteria.
+  Used to produce an actionable brief (not "(none declared)") for the seeded
+  issue (D-382).
+  """
+  @spec issue_body() :: String.t()
+  def issue_body, do: @issue_body
 
   @doc """
   The gating-test relative path that Gate 5.3 mutation uses.

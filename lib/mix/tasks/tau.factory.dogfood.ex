@@ -143,7 +143,7 @@ defmodule Mix.Tasks.Tau.Factory.Dogfood do
 
     # Step 9 — Build the gh_fun: returns the seeded issue ONCE, then empty.
     # After the Coordinator drives the single unit, select_fun → nil → idle.
-    issue_map = %{"number" => issue_number, "title" => Sandbox.issue_title()}
+    issue_map = %{Sandbox.issue_map() | "number" => issue_number}
     # Use an Agent to hold mutable "served?" flag — OTP non-negotiable (#1).
     {:ok, flag_pid} = Agent.start_link(fn -> false end)
 

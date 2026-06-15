@@ -865,6 +865,36 @@ with a non-empty `:brief` and `agent_mode: :claude_code` (with `claude` stubbed
 by a Replay/fixture source) produces an argv carrying the brief as `-p <brief>`;
 a `""` brief yields `-p ""`; the `ANTHROPIC_*` scrub is unaffected.
 
+**D-382 — Role-aware brief: role threaded worker→brief→TAU_AGENT_PROMPT (#517):**
+`BriefAssembler.assemble/2` accepts a `:role` opt (`:test_author` | `:implementer`)
+and appends a role-specific actionable instruction section:
+- `:test_author` → instructs the agent to WRITE the gating test, names the expected
+  `test/...` path (from `gating_test_paths`), and states the agent is in a fresh
+  isolated worktree it must edit and commit.
+- `:implementer` → instructs the agent to IMPLEMENT the issue to satisfy the gating
+  test. Does NOT include the test-author write instruction.
+
+Two roles produce DIFFERENT briefs for the same input (`brief_assembler_role_test.exs`,
+tests D-382(a)–D-382(e)).
+
+**End-to-end threading:** `Supervisor.build_unit_work_item/1` assembles all three
+variants (`brief`, `test_author_brief`, `implementer_brief`) from the same input and
+stores them in the work_item. `UnitDriver.worker_fun/1` selects the role-specific
+brief (`test_author_brief` for `:test_author`, `implementer_brief` for `:implementer`)
+at worker spawn time, injecting it as `TAU_AGENT_PROMPT` via the D-381 Port env
+mechanism. This closes the gap where both oracle and implementing workers previously
+received the same role-agnostic brief.
+
+**Actionable seeded issue:** `Tau.Factory.Dogfood.Sandbox.issue_body/0` returns a
+real, non-empty body string describing what the implementer must build and the
+acceptance criteria, ensuring the assembled brief for the seeded dogfood issue is
+actionable (not `(none declared)`).
+
+`Tau.Factory.Supervisor.to_unit_work_item/2` is the public role-threading seam:
+accepts a 4-tuple work_item and a `role:` keyword, returns a work_item with `:brief`
+set to the role-specific assembled brief. Enforced by `brief_assembler_role_test.exs`
+(D-382(a)–D-382(e), tagged `:d_382`).
+
 ## 7. Acceptance criteria
 
 Each is expressed against the user-facing path with an observable signal. PR
@@ -943,6 +973,15 @@ groupings are indicative.
   passes — with `claude` stubbed by a fixture source, the captured argv contains
   the brief; a `""` brief yields `-p ""`; the `ANTHROPIC_*` metered scrub
   (D-374) is unaffected.
+- **AC-D382 (PR #517, D-382 — role-aware brief threaded to TAU_AGENT_PROMPT):**
+  `BriefAssembler.assemble/2` with `role: :test_author` produces a brief containing
+  the test-author write instruction and the expected gating-test path; with
+  `role: :implementer` it produces a brief containing the implementer instruction;
+  the two briefs differ; a real issue body appears in the brief (not `(none
+  declared)`); and `Supervisor.to_unit_work_item/2` with an explicit role produces
+  a work_item where `:brief` carries the role-specific content.
+  Signal: `mix test test/tau/factory/brief_assembler_role_test.exs` passes (all
+  5 tests, D-382(a)–D-382(e), tagged `:d_382`).
 
 ## Appendix B — Source map
 
@@ -976,6 +1015,11 @@ Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 - `test/tau/factory/coding_agent_shim_heartbeat_test.exs` (D-366 — heartbeat tracks stream progress) — PR-A1
 - `test/tau/factory/coding_agent_shim_containment_test.exs` (D-367 — `claude`/dispatcher crash surfaces, not hang) — PR-A1
 - `test/tau/factory/coding_agent_shim_prompt_test.exs` (**D-381** — per-unit brief delivered to `task.prompt` via `TAU_AGENT_PROMPT`; argv carries `-p <brief>`; `ANTHROPIC_*` scrub unaffected) — PR #515
+- `lib/tau/factory/brief_assembler.ex` (**D-382** — `assemble/2` gains `:role` opt; role-specific instruction section; compact empty-section rendering for role briefs) — PR #517
+- `lib/tau/factory/dogfood/sandbox.ex` (**D-382** — `issue_body/0` exposes the actionable seeded-issue body) — PR #517
+- `lib/tau/factory/supervisor.ex` (**D-382** — `to_unit_work_item/2` public role-threading seam; `build_unit_work_item/1` stores `:test_author_brief`/`:implementer_brief`) — PR #517
+- `lib/tau/factory/unit_driver.ex` (**D-382** — `worker_fun` selects role-specific brief at spawn time from work_item) — PR #517
+- `test/tau/factory/brief_assembler_role_test.exs` (**D-382** — 5 gating tests; D-382(a)–D-382(e)) — PR #517
 
 **Cross-SPEC boundaries (cited, not owned here):** B1/B6/B7 → `SPEC-FACTORY-CORE`
 (D-315 durable capture record, D-317 `worker_stalled` consumer, D-318 retry
