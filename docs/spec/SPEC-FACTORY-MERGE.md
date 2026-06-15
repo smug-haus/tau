@@ -22,6 +22,13 @@ telemetry projection). Updates §5 `:committing` exit description and §6 D-NNN
 block. Cited by SPEC-FACTORY-CORE §4 B3 (Unit `:awaiting_merge` reconcile-on-entry,
 D-344 amendment).
 
+**Amendment (2026-06-15, PR #522):** Introduces **D-385** (build tree-isolation,
+INV-11 enforcement). `rebase_train` + `health_check` MUST run in a PRIVATE
+ephemeral worktree (`.merge-wt-<nonce>`, `--detach`); `repo_dir` is the ref
+anchor only. Adds §4 B2 Workspace clause, §5 `:integrating` note, §6 D-385
+invariant, Appendix-B source-map entries. Makes the dirty-tree/branch-collision
+class structurally unreachable (mirrors Worker INV-11 + Gate `.gate-ws-*`).
+
 **Amendment (2026-06-13, PR #477):** Introduces **D-356** (merge-result PubSub
 delivery, M's emission half). M, on every terminal outcome of a train member,
 **broadcasts `{:merge_result, :merged | :rejected}` to PubSub topic
@@ -257,6 +264,14 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
   `:DOWN` (requeue). M's mailbox stays free for `T_int` (`[C203]`).
 - Invariant: `:integrating` arms a `:state_timeout`; a wedged build cannot hang M
   (`[C207]`). The build runs **off the mailbox** — never inside `handle_call`.
+- **Workspace (D-385):** `rebase_train` + `health_check` run in a PRIVATE
+  ephemeral worktree (`.merge-wt-<nonce>`, sibling of `repo_dir`), forked
+  `--detach` from the unit branch and reclaimed `--force` before the Task
+  returns — symmetric with the Worker's `.worker-wt-*` (INV-11) and the Gate's
+  `.gate-ws-*`. M MUST NOT `checkout`/`rebase`/run the toolchain in the shared
+  `repo_dir` tree; `repo_dir` is the ref anchor only (`fetch`/`rev-parse`/
+  `worktree`/CAS `push`). Makes the dirty-tree / branch-already-checked-out
+  collision class structurally unreachable.
 
 ### B3: Merge Authority COMMIT (C1) ↔ Ledger verdict read (*cited D-335*)
 
@@ -346,7 +361,7 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
 | State | Meaning | Entry | Exit |
 |-------|---------|-------|------|
 | `:idle` | Accept submissions; assemble the next train; handle revocation notices | start (rebuild train+queue from L); commit/requeue done | non-empty green batch → `:integrating` |
-| `:integrating` | Monitored `Task` runs `rebase → gate → health` **off the mailbox**; M still accepts submissions for the *next* train but starts no second train (INV-3) | a green batch assembled, `base` captured | `Task {:built,…}` → `:committing`; `{:build_failed, :health_red}` → `:idle` (bisect/eject); `:DOWN` → `:idle` (requeue); `:state_timeout` → `:idle` (requeue wedged build) |
+| `:integrating` | Monitored `Task` runs `rebase → gate → health` **off the mailbox** in a **private ephemeral worktree** (`.merge-wt-<nonce>`, D-385); M still accepts submissions for the *next* train but starts no second train (INV-3) | a green batch assembled, `base` captured | `Task {:built,…}` → `:committing`; `{:build_failed, :health_red}` → `:idle` (bisect/eject); `:DOWN` → `:idle` (requeue); `:state_timeout` → `:idle` (requeue wedged build) |
 | `:committing` | **Short** critical section: `assert_all_verdicts_live` (re-read latest, HR-2) then `cas_push` (`--force-with-lease`, HR-1) | `Task` returned `:built` | push `:ok` → `:idle` (commit, broadcast `:merged`); `{:error, :stale_ref}` → `:idle` (requeue all); `{:revoked, u}` → `:idle` (eject `u`, retry rest) |
 
 ```
@@ -368,7 +383,7 @@ always the off-mailbox `Task` (`[C203]`). `:committing` is always short
 ```
 submitted(green) ─enqueue→ wait-queue (FIFO + aging by restale_count)
   assemble(B)  → train [u1..uB], base = head(origin/main)         (:integrating)
-  rebase_train → tip ; gate_batch_tip(tip) ; health_check(tip)    (off-mailbox Task)
+  rebase_train → tip ; gate_batch_tip(tip) ; health_check(tip)    (off-mailbox Task; D-385: all in private .merge-wt-<nonce>, not repo_dir)
     health RED → bisect(train) → eject culprit (→ U refines) → re-integrate rest
     Task :ok   → :committing:
        assert_all_verdicts_live(train):
@@ -496,6 +511,22 @@ on M produces a `{:merge_result, _}` on `"factory:pr:#{id}"` and **no** driver
 bridge mediates it). *Counterpart to SPEC-FACTORY-CORE D-356 (U subscribe-before-
 request); the two halves share the identifier — one invariant, two enforcers.*
 
+**D-385 — Build tree-isolation (INV-11 enforcement, D-303 workspace):**
+`rebase_train` + `health_check` (§4 B2, B5; D-303) run in a PRIVATE ephemeral
+worktree (`.merge-wt-<nonce>`, sibling of `repo_dir`), forked `--detach` from
+the unit branch via `git worktree add --detach` and reclaimed with
+`git worktree remove --force` before the build Task returns (same-turn teardown,
+INV-15 symmetric). M MUST NOT `checkout`/`rebase`/run the toolchain in the
+shared `repo_dir` working tree; `repo_dir` serves as ref anchor only
+(`fetch`, `worktree add/remove`, CAS `push`). This makes the
+dirty-tree / "branch already checked out" collision class structurally
+unreachable — symmetric with the Worker's `.worker-wt-*` (INV-11,
+SPEC-FACTORY-FLEET) and the Gate's `.gate-ws-*` (SPEC-FACTORY-GATE).
+Enforced by `merge_build_clean_tree_test.exs` (oracle-separated gating test;
+PR #522): a concurrent worktree holding the unit branch does not cause a
+collision, the outcome is `:merged`, and `repo_dir`'s HEAD remains on `main`
+with a clean index after the build.
+
 **D-341 — Fair merge progress, no starvation (LIV-2):**
 M serves merge-ready units from a **FIFO + aging** wait-queue;
 `effective_priority(seq, restale_count) = seq − aging_weight · restale_count` is
@@ -556,9 +587,12 @@ Each is expressed against an observable signal. PR groupings are indicative.
 Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 
 - `lib/tau/factory/merge_authority.ex` (C1; D-300, D-301, D-302, D-303, D-341,
-  D-355, D-356 — the `gen_statem`, `:idle`/`:integrating`/`:committing`; D-356
-  PubSub broadcast of `{:merge_result, _}` to `"factory:pr:#{id}"` on every
-  terminal member outcome) — PR-MERGE-1..5/PR#465/PR#477
+  D-355, D-356, D-385 — the `gen_statem`, `:idle`/`:integrating`/`:committing`;
+  D-356 PubSub broadcast of `{:merge_result, _}` to `"factory:pr:#{id}"` on every
+  terminal member outcome; D-385 private-worktree build isolation in `default_build/3`)
+  — PR-MERGE-1..5/PR#465/PR#477/PR#522
+- `test/tau/factory/merge_build_clean_tree_test.exs` (D-385 gating test) — PR#522
+- `lib/tau/factory/dogfood/sandbox.ex` (D-385 `.gitignore` hygiene in `seed/1`) — PR#522
 - `test/tau/factory/merge_result_pubsub_test.exs` (D-356 emission gating test) — PR#477
 - `lib/tau/factory/ledger/migrations.ex` (D-355 migration `20260612_010_merge_outcomes`) — PR#465
 - `lib/tau/factory/ledger/writer.ex` (D-355 `record_merge_outcome/2`,
