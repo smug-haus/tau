@@ -50,6 +50,7 @@ defmodule Tau.Factory.UnitDriver do
   `docs/spec/SPEC-FACTORY-MERGE.md` §6 D-356.
   """
 
+  alias Tau.Factory.Fleet.Watchdog
   alias Tau.Factory.MergeAuthority
   alias Tau.Factory.UnitSupervisor
   alias Tau.Factory.WorkerSupervisor
@@ -103,6 +104,14 @@ defmodule Tau.Factory.UnitDriver do
     * `:report_to`         — pid receiving `{:unit_terminal, unit_id, outcome,
                              provenance}` (the coordinator seam).
     * `:ledger`            — optional; `GenServer.server()` | `nil`.
+    * `:watchdog`          — optional; atom/pid of a running `Tau.Factory.Fleet.Watchdog`.
+                             When present, the `worker_fun` closure registers each spawned
+                             Worker with the Watchdog so that heartbeat absence delivers
+                             `{:worker_stalled, worker_id}` to the owning Unit (D-379).
+                             When absent (nil), no registration — existing behaviour
+                             unchanged.
+    * `:heartbeat_timeout_ms` — optional; heartbeat-absence window in ms (default 30_000).
+                                Only used when `:watchdog` is present.
   """
   @spec drive(map(), map()) :: pid()
   def drive(work_item, deps) do
@@ -166,6 +175,20 @@ defmodule Tau.Factory.UnitDriver do
     # is ZERO — the janitor exclusively owns capture-before-destroy (D-313/D-314).
     janitor_pid = deps[:janitor] || WorkspaceJanitor
 
+    # D-379(b) / D-379: optional Watchdog registration. When :watchdog is present
+    # in deps, the worker_fun closure registers each spawned Worker with the Watchdog
+    # so that heartbeat absence fires {:worker_stalled, worker_id} to the owning Unit.
+    # D-379 (non-blocking): :heartbeat_timeout_ms is derived from the Unit's
+    # state_timeout_ms (via :unit_timeouts) so both detectors share ONE threshold.
+    # An explicit :heartbeat_timeout_ms in deps overrides the derived value (the
+    # test-injection seam). When :watchdog is absent (nil), no registration.
+    watchdog = Map.get(deps, :watchdog)
+
+    heartbeat_timeout_ms =
+      Map.get_lazy(deps, :heartbeat_timeout_ms, fn ->
+        Keyword.get(unit_timeouts, :state_timeout_ms, 30_000)
+      end)
+
     # oracle_base_ref: optional per-work_item override for the oracle
     # (test_author) worker's checkout ref. When provided, the oracle Worker
     # checks out `oracle_base_ref` instead of `base_ref`. This lets harnesses
@@ -218,6 +241,18 @@ defmodule Tau.Factory.UnitDriver do
         {:ok, worker_id} ->
           case resolve_worker_pid(worker_registry, worker_id) do
             {:ok, worker_pid} ->
+              # D-379(b): register with Watchdog when present so heartbeat absence
+              # delivers {:worker_stalled, worker_id} to the owning Unit (unit_pid).
+              # subscribe-before-spawn ordering: registration happens in the Unit's
+              # process context (worker_fun is called from within the Unit), so
+              # unit_pid == self() here.
+              if watchdog do
+                :ok =
+                  Watchdog.register(watchdog, worker_id, worker_pid, unit_pid,
+                    heartbeat_timeout: heartbeat_timeout_ms
+                  )
+              end
+
               {:ok, worker_pid, worker_id}
 
             {:error, reason} ->

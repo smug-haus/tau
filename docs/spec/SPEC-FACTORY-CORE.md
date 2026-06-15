@@ -699,6 +699,53 @@ callers that pass no `:ledger` opt are unaffected (back-compat).
   `worker_exit(w, :no_work_product)` (**D-326, cited owner: SPEC-FACTORY-FLEET**).
   W owns isolation/capture D-309..D-311, D-313, D-314, D-316 and the completion
   contract D-326.
+- **Heartbeat-driven liveness — consume half (GOV4, D-377/D-378/D-379).** Beyond
+  the three disjoint *outcome* events above, W forwards a fourth `worker_id`-keyed
+  signal the Unit consumes: `worker_heartbeat(w)` — the live progress pulse the
+  Worker forwards from D-366 shim frames. The Unit re-arms its waiting-state
+  `:state_timeout` on every current-worker `worker_heartbeat(w)` (**D-377**), so a
+  progressing real agent never trips the fixed cap; the cap becomes a *per-heartbeat
+  inactivity deadline*, not an absolute run-duration cap. The Unit ALSO consumes
+  the Watchdog's `worker_stalled(w)` (the heartbeat-absence trigger, D-317): the
+  fleet wiring registers each spawned worker with the `Watchdog`, addressed to the
+  owning Unit (**D-379**).
+- **ONE symmetric worker-outcome rule for BOTH worker-awaiting states (GOV4
+  re-shape, D-378).** `oracle` and `implementing` are the two states that await a
+  worker, and they MUST handle the worker-outcome signal set **identically** —
+  divergence between them is forbidden. The single rule table is:
+
+  | signal (for the **current** `worker_id`) | outcome | re-enters |
+  |---|---|---|
+  | `work_ready(w, branch, head_sha)` | success: capture coord (D-362), advance | oracle→implementing; implementing→gating |
+  | `worker_exit(w, reason)` (semantic death-cert: `:no_work_product` / `:error` / `{:exit_status, _}`) | **retry ladder** (gate NOT called) | **the originating waiting state** |
+  | `worker_stalled(w)` (Watchdog heartbeat-absence) | **retry ladder** (gate NOT called) | **the originating waiting state** |
+  | `worker_heartbeat(w)` | reset `:state_timeout`; stay (D-377) | — |
+  | `:DOWN` with `worker_id == nil` (legacy 2-tuple seam only) | `escalate(E_WORKER_DOWN)` | — (terminal) |
+
+  Plus two state-level rules, identical in both states:
+  - Unit's **own** `:state_timeout` (real `gen_statem` timer; fires only on total
+    heartbeat silence past the cap) → `escalate(E_WORKER_STALLED)` (the hard-stall
+    path; gate NOT called; preserves #490/D-326).
+  - Any of the above signals for a **superseded** `worker_id` (`_other_id`) →
+    stale-worker discard (`keep_state`); advances nothing.
+
+  The "originating waiting state" rule is load-bearing: a stalled/exited
+  test-author re-enters **`oracle`** (re-runs the test-author), NOT `implementing`
+  — re-spawning the wrong role would skip oracle-separation. The shared
+  `advance_retry_ladder/2` therefore takes the originating state and re-enters it
+  via `{:next_state, <that state>, …, [{:next_event, :internal, :on_enter}]}`,
+  whose `:on_enter` already bumps `attempt_count` and writes a Ledger snapshot
+  (D-315 RPO=0). There is **no separate `:deferred_spawn` / `do_spawn_worker`
+  path** — the plain ladder's `:next_state` transition is the re-spawn (see D-378).
+
+  **Collapse to exactly-one (D-378).** The Unit's own `:state_timeout`, the
+  Watchdog's `worker_stalled`, and the dispatcher's `:inactivity_timeout_ms` →
+  `worker_exit` collapse to **exactly one** outcome per worker per state: the first
+  stall-class signal consumed clears `data.worker_id` (and `:demonitor`s), after
+  which every other stall-class event for that superseded `worker_id` hits the
+  stale-worker discard clause. The Watchdog's `heartbeat_timeout` and the Unit
+  `state_timeout_ms` share one `:unit_timeouts`-derived threshold (D-358) so the
+  two detectors cannot disagree.
 - **Pinned Unit seam (D-326 / PR #468 amendment).** The `worker_fun` injectable
   returns `{:ok, worker_pid :: pid(), worker_id :: String.t()}` (3-tuple) for
   D-326-aware workers; the Unit stores `data.worker_id` (test-observable via
@@ -1096,6 +1143,14 @@ as "wedged". The supervisor's `:unit_timeouts` opt is threaded into the assemble
 single unit reaches `:merged` without a spurious escalation (D-358). This widens a
 liveness *bound*, not the liveness *guarantee*: the timeout still fires —
 eventually — on a genuinely-wedged worker; it is set above `T_unit`, not removed.
+**GOV4 refinement (D-377).** The per-state `:state_timeout` is additionally
+**reset on every current-worker `{:worker_heartbeat, w}`** (the D-366 progress
+pulse), so it is a *per-heartbeat inactivity deadline*, not an absolute
+run-duration cap. With D-377 the cap need only exceed the *gap between two
+progress pulses* (seconds), not the whole `T_unit` (minutes); a progressing real
+agent never trips it, and a wedge (no pulses) trips it within one deadline window
+— removing the D-358 tension where widening to avoid spurious kills also blunted
+wedge detection.
 
 **Gated assembly (enabled path).** When the gate is on, the supervisor assembles
 the full control subtree in the `supervision-tree.md` §3 order — PubSub up first
@@ -1189,6 +1244,7 @@ state ∈ {planned, oracle, implementing, gating, refine_k, awaiting_merge, merg
    gating + {:fail,f}        → refine_k        (k<N → implementing; k=N → pivot → implementing; pivot red → escalated [E-RETRY-EXHAUSTED])
    awaiting_merge + M reject → gating          (re-gate; INV-2)
    {oracle,implementing,gating,awaiting_merge} + :state_timeout/worker_stalled → refine/pivot/escalate
+   {oracle,implementing} + worker_heartbeat(current w) → RESET :state_timeout (D-377; progressing agent never trips)
    any non-terminal + escalation(e) → escalated (terminal)
 ```
 
@@ -1491,6 +1547,129 @@ never raising on partial input and never returning `""`. Enforced by
 partial input degrades to placeholders without raising; output is always
 non-empty).
 
+**D-377 — Heartbeat-driven liveness: the Unit resets its `:state_timeout` on
+every current-worker progress heartbeat (GOV4, OQ-2 refinement of D-358,
+[C107-B5], V6):** Each Unit state that awaits a worker (`oracle`, `implementing`)
+re-arms its `{:state_timeout, state_timeout_ms, :worker_stalled}` on every
+`{:worker_heartbeat, worker_id}` received from the **current** worker (the `B8`
+`worker_id`-keyed liveness pulse the Worker forwards from D-366 shim frames). A
+heartbeat from a superseded `worker_id` is discarded (B8 stale-worker discard) and
+does **not** re-arm. Consequently a genuinely-progressing real agent — which
+pulses a heartbeat at least once per `state_timeout_ms` window (D-366 derives the
+pulse from real stream progress) — NEVER trips `:state_timeout`, so the fixed
+wall-clock ceases to bound a *healthy* run. The `state_timeout_ms` is thereby
+re-interpreted as a **per-heartbeat inactivity deadline** (the maximum silence
+between two progress pulses), not an absolute run-duration cap; D-358's
+operator-overridable `:unit_timeouts` continues to set its value. This closes the
+D-358 residual (a fixed cap either spuriously kills a slow-but-healthy agent or is
+set so high it masks a wedge): the deadline now keys on *silence*, not *elapsed
+time*. Enforced by an oracle-separated FSM test: a Unit fed `{:worker_heartbeat,
+w}` at sub-`state_timeout_ms` intervals past the old fixed cap stays in
+`implementing` and never escalates `E_WORKER_STALLED`; with no heartbeats it trips
+at `state_timeout_ms` exactly as before.
+
+**D-378 — Exactly one outcome per worker per state; ONE symmetric rule for
+`oracle` and `implementing` (disjointness, [C107-B5], GOV4 re-shape, V3/V5/V6):**
+Both worker-awaiting states (`oracle`, `implementing`) handle the worker-outcome
+signal set **identically** — the §4 B8 rule table is the single source. The two
+**event-message** stall-class signals — `{:worker_stalled, ^worker_id}` (Watchdog
+heartbeat-absence) and `{:worker_exit, ^worker_id, reason}` (semantic death-cert) —
+route to the **same retry ladder**, `advance_retry_ladder(state, data)`, which
+re-enters the **originating waiting state** (`oracle → oracle`, `implementing →
+implementing`) via `{:next_state, state, …, [{:next_event, :internal, :on_enter}]}`.
+Re-entering the originating state (not always `implementing`) is mandatory so a
+stalled/exited test-author re-runs the **test-author**, not the implementer.
+
+Stall-class signals for a single wedged worker produce **exactly one** outcome via
+`worker_id`-keyed disjointness: the first stall-class signal consumed clears
+`data.worker_id` (sets it `nil` alongside `Process.demonitor(mref, [:flush])`) and
+fires the `:next_state` ladder transition; every subsequent stall-class event for
+that now-superseded `worker_id` matches the stale-worker discard clause
+(`keep_state`) and advances nothing.
+
+The Unit's **own** `:state_timeout` is a **separate, terminal** outcome (NOT the
+ladder): it fires only on total heartbeat silence past the cap and
+`escalate(:E_WORKER_STALLED)`s (the hard-stall path; gate NOT called; preserves
+#490/D-326). This is the only place `E_WORKER_STALLED` arises; the event-message
+`worker_stalled`/`worker_exit` signals never escalate directly — they retry,
+escalating to `E_RETRY_EXHAUSTED` only after the ladder is spent.
+
+**No `:deferred_spawn` (GOV4 re-shape — the deferred path is dropped, V5).** The
+prior design routed `{:worker_stalled, w}` through a `:deferred_spawn` → mailbox
+tail → `do_spawn_worker/1` dance whose stated purpose was to drain stale stall
+signals for the old `worker_id` before re-spawning. That purpose is **vacuous**:
+discrimination is by `worker_id`, not by mailbox-drain order. The re-spawn produces
+a **fresh** `worker_id` (D-326), so any stale signal for the old id is discarded by
+the `_other_id` clause regardless of when it is drained. Worse, a `gen_statem`
+`{:next_event, :internal, :on_enter}` is processed **before** pending `:info`
+messages already in the mailbox, so the plain ladder re-spawns *first* and the
+queued stale signals then hit the new state instance where `worker_id` is the new
+worker's id (or `nil` for the legacy seam) → all stale-discarded. Exactly-once and
+D-315 durability therefore come for **free** from the plain ladder: its `:on_enter`
+already bumps `attempt_count` and `snapshot_state`s before spawning. Dropping the
+deferred path removes a state-machine surface (one fewer message form, one fewer
+crash cut, V8) while *strengthening* the guarantee.
+
+Enforced by symmetric FSM tests in **both** states: delivering `{:worker_stalled,
+w}`, `{:worker_exit, w, …}`, and a second `{:worker_stalled, w}` for one worker in
+close succession advances the combined (`refine_count + attempt_count`) metric by
+exactly one (not three), and re-enters the originating state.
+
+**Worker-outcome ladder counter (D-378 clarification).** The worker-outcome retry
+ladder (`advance_retry_ladder/2`, from `{:worker_stalled,^w}`/`{:worker_exit,^w,_}`)
+and the gate-failure ladder (`advance_gate_ladder/1`, from
+`{:gate_outcome,{:fail,_}}`) are distinct bounded budgets sharing one `Retry.next/3`
+bound (`N_REFINE + N_PIVOT`). The gate ladder advances `refine_count`/`pivot_count`;
+the worker-outcome ladder advances `attempt_count` and MUST NOT touch `refine_count`
+(a worker that produced no work product has no gate-rejected product to refine). Both
+exhaust to `E_RETRY_EXHAUSTED` independently. The worker-outcome ladder uses a
+dedicated position counter (`stall_count`, starting at 0) so the full `N_REFINE +
+N_PIVOT` budget is available for genuine stall/exit events and is not pre-consumed by
+the initial oracle/implementing spawns (which legitimately increment `attempt_count`
+but are not retries). The arch pseudocode in `docs/arch/04-software-architecture/
+control-plane.md` uses an idealized single `data.k`; the committed implementation
+uses the distinct fields `attempt_count`/`refine_count`/`pivot_count`/`stall_count`
+per this clarification.
+
+**D-379 — The Unit consumes the Watchdog `worker_stalled(w)` and the dispatcher
+`worker_exit(w, reason)` triggers in BOTH waiting states; the fleet registers each
+worker with the Watchdog (B8 wiring, [C107-B5], GOV4 re-shape, V3 orphan-invariant
+closure):** B8 names `worker_stalled(w)` and `worker_exit(w, reason)` as disjoint
+worker events the Unit consumes, and §3 Q3 mandates the heartbeat-absence watchdog
+as the only thing that makes total escalation hold over reachable *states*. This
+invariant pins the previously-orphaned wiring **symmetrically across `oracle` and
+`implementing`**:
+
+(a) **Producer.** The `UnitDriver.drive/2` `worker_fun` seam (or the
+`WorkerSupervisor.spawn/5` path) registers **every** spawned worker — test-author
+*and* implementer — with the fleet `Watchdog` (`Watchdog.register(watchdog,
+worker_id, worker_pid, unit_pid, heartbeat_timeout: …)`), so the Watchdog's
+`{:worker_stalled, worker_id}` is delivered to the **owning Unit** (its
+`report_to`), not dropped.
+
+(b) **Consumer — both states, identical clauses.** Each of `oracle` and
+`implementing` carries `:info {:worker_stalled, ^worker_id}` AND `:info
+{:worker_exit, ^worker_id, _reason}` current-worker clauses that clear `worker_id`,
+demonitor, and call `advance_retry_ladder(<this state>, data)`; plus the matching
+`_other_id` stale-worker discard clauses. **The run-#2 gap this closes: `oracle`
+previously had NO `worker_exit` clause** — an oracle worker exiting
+`:no_work_product` fell through to `handle_unexpected/4`, was ignored, and only the
+300 s `:state_timeout` eventually fired `E_WORKER_STALLED` (a spurious hard-stall
+for what was really a routine semantic retry). Both states now consume both
+event-message stall signals identically. Without this wiring the `worker_stalled` /
+`worker_exit` triggers named in B8 have **no producer reaching the Unit and/or no
+consumer in one of the two states** — the orphan invariant V3 flags.
+
+The Watchdog `heartbeat_timeout` and the Unit `state_timeout_ms` (D-377) are set
+from the SAME `:unit_timeouts`-derived value so the two heartbeat-absence detectors
+share one threshold and cannot disagree about liveness (V6 path-arithmetic: one
+threshold, two detectors, one verdict). Enforced by a wiring test (a spawned worker
+is registered with the Watchdog) and symmetric FSM tests (a Unit in **`oracle`**
+*and* a Unit in **`implementing`** each receiving `{:worker_stalled,
+current_worker_id}` or `{:worker_exit, current_worker_id, _}` advances the combined
+metric by one and re-enters its originating state; a stale-worker variant is
+ignored).
+
 **D-380 — Single admission authority + admission self-exclusion (real-run
 integration, [C132-B1], [C133-B1]):** one unit is admitted to `F` **exactly once,
 by the Unit FSM `planned` state alone** (the authority holding the real
@@ -1605,8 +1784,8 @@ Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 - `lib/tau/factory/escalation.ex` (C7; D-317) — PR-CORE-3
 - `lib/tau/factory/scheduler.ex` (C4; D-312, D-320, D-343, **D-380** evaluate `ConflictCheck.clear?` + capacity over `F ∖ {unit_id}`; upsert on admit) — PR-CORE-2 / PR #515
 - `lib/tau/factory/conflict_check.ex` (C5; D-312, D-343 — **unchanged for D-380**: stays unit-id-agnostic; the self-exclusion is an S-level set op, not a C5 change) — PR-CORE-2
-- `lib/tau/factory/unit.ex` (C6; D-318, D-340, **D-356** awaiting_merge subscribe-before-request consume + unsubscribe-on-exit, **D-362** capture `work_ready` `branch`/`head_sha` into data, **D-361** key `merge_fun` on captured `head_sha`/`branch`, plus B6/B7/B8 cited edges) — PR-CORE-3/PR #477/PR #503
-- `lib/tau/factory/unit_driver.ex` (D-340, **D-356** `:janitor` threading + no driver-side merge bridge / no driver reclaim; **D-361** build the merge map `hash`/`branch` from the captured `head_sha`; the real `drive_fun` wiring Unit→fleet→gate→merge seams) — PR #477/PR #503
+- `lib/tau/factory/unit.ex` (C6; D-318, D-340, **D-356** awaiting_merge subscribe-before-request consume + unsubscribe-on-exit, **D-362** capture `work_ready` `branch`/`head_sha` into data, **D-361** key `merge_fun` on captured `head_sha`/`branch`, **D-377** reset `:state_timeout` on current-worker `{:worker_heartbeat, w}` in `oracle`/`implementing`, **D-378** one-outcome-per-worker collapse via `worker_id`-clear + stale-worker discard (ONE symmetric rule for both states; no `:deferred_spawn`), **D-379** both `oracle`/`implementing` consume `{:worker_stalled, ^worker_id}` AND `{:worker_exit, ^worker_id, _}` → `advance_retry_ladder(<originating state>, data)` (re-enters the originating waiting state; closes the run-#2 oracle-`worker_exit` gap), plus B6/B7/B8 cited edges) — PR-CORE-3/PR #477/PR #503/PR #513
+- `lib/tau/factory/unit_driver.ex` (D-340, **D-356** `:janitor` threading + no driver-side merge bridge / no driver reclaim; **D-361** build the merge map `hash`/`branch` from the captured `head_sha`; **D-379** register each spawned worker with the fleet `Watchdog` (`report_to` = owning Unit) sharing the `:unit_timeouts`-derived `heartbeat_timeout`; the real `drive_fun` wiring Unit→fleet→gate→merge seams) — PR #477/PR #503/PR #513
 - `lib/tau/factory/gate/request.ex` (**D-361** `Request.hash` is the captured `head_sha`, not the declared `work_item.hash`; the gate-closure construction site) — PR #503
 - `lib/tau/factory/dogfood/gate_fun.ex` (**D-361/D-363** the arity-1 gate closure receives the coordinate (`head_sha || declared hash`) from the Unit and sets `Request.hash` to it) — PR #503
 - `lib/tau/factory/brief_assembler.ex` (B10/A2; **D-372** complete-over-inputs composition, **D-373** injected `:assemble_fun` pure seam + graceful degradation; the issue→`task.prompt` intake projection, invoked at `supervisor.ex:to_unit_work_item/1`) — PR #508
@@ -1635,6 +1814,7 @@ Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 - `test/tau/factory/factory_supervision_test.exs` (**D-357** config-gated subtree assembly + default-OFF; AC-P5c6) — PR #480
 - `test/tau/factory/dogfood_e2e_test.exs` (**AC-12** e2e: one real PR open-issue→merged→green-health, no human; **D-358** widened timeouts, no spurious escalation; `@tag :integration`) — PR #481
 - `test/tau/factory/dogfood_guard_test.exs` (**AC-13 / D-359** non-local origin hard-refuse; local bare-repo acceptance) — PR #481
+- `test/tau/factory/unit_heartbeat_liveness_test.exs` (**D-377** heartbeat resets `:state_timeout` — a Unit fed `{:worker_heartbeat, w}` at sub-`state_timeout_ms` intervals past the old cap never escalates `E_WORKER_STALLED`, no-heartbeat trips at the cap; **D-378** delivering `{:worker_stalled, w}` + `{:worker_exit, w, …}` + a second `{:worker_stalled, w}` for one worker advances the combined metric exactly once and re-enters the originating state — asserted **symmetrically in BOTH `oracle` and `implementing`**; **D-379** both states consume current-worker `{:worker_stalled, w}` AND `{:worker_exit, w, _}` → `advance_retry_ladder(<originating state>, _)`, ignore the stale-worker variants, and `UnitDriver` registers each spawned worker with the `Watchdog`; the deferred-spawn path is removed and D-315 durability is provided by the ladder's `:on_enter`) — PR #513
 
 **Cross-SPEC boundaries (cited, not owned here):** B6 → `SPEC-FACTORY-MERGE`
 (D-300–D-303, D-341); B7 → `SPEC-FACTORY-GATE` (D-304–D-308, D-322, D-323);
