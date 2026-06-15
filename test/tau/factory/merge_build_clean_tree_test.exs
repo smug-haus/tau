@@ -92,7 +92,12 @@ defmodule Tau.Factory.MergeBuildCleanTreeTest do
 
     # Branch unit-1 from base_oid; add a COMMITTED work-product file.
     {_, 0} = git.(["checkout", "-b", "unit-1"])
-    File.write!(Path.join(work_path, "lib/work.ex"), "defmodule Work, do: def answer, do: 42\n")
+
+    File.write!(
+      Path.join(work_path, "lib/work.ex"),
+      "defmodule Work do\n  def answer, do: 42\nend\n"
+    )
+
     {_, 0} = git.(["add", "lib/work.ex"])
     {_, 0} = git.(["commit", "-m", "feat: add lib/work.ex (committed unit work)"])
     {unit_tip_raw, 0} = git.(["rev-parse", "HEAD"])
