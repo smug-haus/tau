@@ -20,6 +20,9 @@ defmodule Tau.CodingAgents.ClaudeCode.Argv do
       the adapter is responsible for the tempfile lifecycle).
     * `--allowed-tools <csv>` when `task.allowed_tools` is a list.
       `:all` (the default) omits the flag.
+    * `--dangerously-skip-permissions` when `task.skip_permissions` is
+      `true` (D-383). Absent or `false` omits the flag — interactive
+      default-deny is retained.
 
   D-036: no credentials are read or injected here. The CLI inherits
   the host user's auth on its own.
@@ -43,6 +46,7 @@ defmodule Tau.CodingAgents.ClaudeCode.Argv do
     |> maybe_append_resume(task)
     |> maybe_append_mcp(Keyword.get(opts, :mcp_config_path))
     |> maybe_append_allowed_tools(task)
+    |> maybe_append_skip_permissions(task)
   end
 
   defp maybe_append_resume(argv, %{resume_id: id}) when is_binary(id) and id != "" do
@@ -63,4 +67,10 @@ defmodule Tau.CodingAgents.ClaudeCode.Argv do
   end
 
   defp maybe_append_allowed_tools(argv, _), do: argv
+
+  defp maybe_append_skip_permissions(argv, %{skip_permissions: true}) do
+    argv ++ ["--dangerously-skip-permissions"]
+  end
+
+  defp maybe_append_skip_permissions(argv, _), do: argv
 end
