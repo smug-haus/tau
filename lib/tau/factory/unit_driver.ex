@@ -175,13 +175,19 @@ defmodule Tau.Factory.UnitDriver do
     # is ZERO — the janitor exclusively owns capture-before-destroy (D-313/D-314).
     janitor_pid = deps[:janitor] || WorkspaceJanitor
 
-    # D-379(b): optional Watchdog registration. When :watchdog is present in deps,
-    # the worker_fun closure registers each spawned Worker with the Watchdog so that
-    # heartbeat absence fires {:worker_stalled, worker_id} to the owning Unit.
-    # :heartbeat_timeout_ms defaults to the standard state_timeout_ms baseline.
-    # When :watchdog is absent (nil), no registration — existing behaviour unchanged.
+    # D-379(b) / D-379: optional Watchdog registration. When :watchdog is present
+    # in deps, the worker_fun closure registers each spawned Worker with the Watchdog
+    # so that heartbeat absence fires {:worker_stalled, worker_id} to the owning Unit.
+    # D-379 (non-blocking): :heartbeat_timeout_ms is derived from the Unit's
+    # state_timeout_ms (via :unit_timeouts) so both detectors share ONE threshold.
+    # An explicit :heartbeat_timeout_ms in deps overrides the derived value (the
+    # test-injection seam). When :watchdog is absent (nil), no registration.
     watchdog = Map.get(deps, :watchdog)
-    heartbeat_timeout_ms = Map.get(deps, :heartbeat_timeout_ms, 30_000)
+
+    heartbeat_timeout_ms =
+      Map.get_lazy(deps, :heartbeat_timeout_ms, fn ->
+        Keyword.get(unit_timeouts, :state_timeout_ms, 30_000)
+      end)
 
     # oracle_base_ref: optional per-work_item override for the oracle
     # (test_author) worker's checkout ref. When provided, the oracle Worker

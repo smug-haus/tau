@@ -1615,6 +1615,22 @@ w}`, `{:worker_exit, w, …}`, and a second `{:worker_stalled, w}` for one worke
 close succession advances the combined (`refine_count + attempt_count`) metric by
 exactly one (not three), and re-enters the originating state.
 
+**Worker-outcome ladder counter (D-378 clarification).** The worker-outcome retry
+ladder (`advance_retry_ladder/2`, from `{:worker_stalled,^w}`/`{:worker_exit,^w,_}`)
+and the gate-failure ladder (`advance_gate_ladder/1`, from
+`{:gate_outcome,{:fail,_}}`) are distinct bounded budgets sharing one `Retry.next/3`
+bound (`N_REFINE + N_PIVOT`). The gate ladder advances `refine_count`/`pivot_count`;
+the worker-outcome ladder advances `attempt_count` and MUST NOT touch `refine_count`
+(a worker that produced no work product has no gate-rejected product to refine). Both
+exhaust to `E_RETRY_EXHAUSTED` independently. The worker-outcome ladder uses a
+dedicated position counter (`stall_count`, starting at 0) so the full `N_REFINE +
+N_PIVOT` budget is available for genuine stall/exit events and is not pre-consumed by
+the initial oracle/implementing spawns (which legitimately increment `attempt_count`
+but are not retries). The arch pseudocode in `docs/arch/04-software-architecture/
+control-plane.md` uses an idealized single `data.k`; the committed implementation
+uses the distinct fields `attempt_count`/`refine_count`/`pivot_count`/`stall_count`
+per this clarification.
+
 **D-379 — The Unit consumes the Watchdog `worker_stalled(w)` and the dispatcher
 `worker_exit(w, reason)` triggers in BOTH waiting states; the fleet registers each
 worker with the Watchdog (B8 wiring, [C107-B5], GOV4 re-shape, V3 orphan-invariant
