@@ -66,7 +66,7 @@ Block-to-SPEC allocation:
 |---|---|
 | D-001 – D-028 | SPEC-USER-TURN — core session FSM invariants |
 | D-029, D-030, D-043, D-044 | SPEC-CIRCUIT-BREAKER |
-| D-031 – D-039, D-375 | SPEC-CODING-AGENT |
+| D-031 – D-039, D-375, D-383 | SPEC-CODING-AGENT |
 | D-040 – D-042, D-048, D-049, D-056, D-058 – D-062, D-076 – D-089 | SPEC-USER-TURN — amendments |
 | D-045 – D-047 | SPEC-MEMORY-STORE |
 | D-050 – D-055, D-057 | SPEC-OTEL-REPORTER |

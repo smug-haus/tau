@@ -52,6 +52,7 @@ defmodule Tau.CodingAgent do
           optional(:session_id) => String.t(),
           optional(:resume_id) => String.t() | nil,
           optional(:allowed_tools) => [String.t()] | :all,
+          optional(:skip_permissions) => boolean(),
           optional(:mcp_servers) => [map()],
           optional(:timeout) => pos_integer() | :infinity
         }

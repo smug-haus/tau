@@ -132,10 +132,20 @@ expressing the change.
         session_id: String.t(),
         resume_id: String.t() | nil,
         allowed_tools: [String.t()] | :all,
+        skip_permissions: boolean(),
         mcp_servers: [map()],
         timeout: pos_integer() | :infinity
       }
 ```
+
+**Headless permission posture (D-383).** `task.skip_permissions` controls the
+adapter's permission posture. `true` ⇒ the `ClaudeCode` adapter appends
+`--dangerously-skip-permissions`; absent/`false` ⇒ no permission flag
+(interactive default-deny retained). Opt-in: only a contained-context caller (a
+sandboxed factory worker — SPEC-FACTORY-FLEET) may set it `true`; non-factory
+callers (interactive session, the Delegate tool) MUST leave it unset. Permission
+posture only — does NOT alter D-036 (no credential injection) or D-374/D-375
+(metered-credential scrub).
 
 **Session-mode integration shape (Phase 1B Team B, resolved 2026-05-15
 toward "FSM-extended").** The session FSM (`lib/tau/session.ex`,
@@ -266,6 +276,7 @@ worktree vs cwd. `:coding_agent_workspace_backend` can be passed to
 | **D-038** | Cost line items MUST be tagged by source so the user sees the split. Each `%Tau.CodingAgent.Event.Cost{}` folds into the session-cost aggregator as a `%Tau.CodingAgent.Cost{}` record carrying the adapter atom (`source/1` yields `"coding_agent.<agent>"`); provider-direct cost continues to land tagged `"provider.<provider>"` via the existing `[:tau, :provider, :request, :stop]` event. The session FSM emits `[:tau, :coding_agent, :cost]` per fold (D-034 parity) and persists a `coding_agent_cost` JSONL event so `/resume` recomputes totals from disk. Cost-folding failures MUST degrade gracefully (D-035): `[:tau, :coding_agent, :cost, :failed]` surfaces the reason but does not crash the session. |
 | **D-039** | Delegate-tool recursion MUST bottom out. `Tau.Tools.Builtin.Delegate` carries a `depth` parameter (default 0) and refuses calls at `depth >= 2`, returning a `ToolResult{is_error: true, details.kind: :depth_exceeded}` synchronously before any dispatcher starts. The same ceiling propagates through the per-run tau-context MCP server's `tau_delegate` tool (`tau_context_max_depth` in `Tau.CodingAgent.Dispatcher.ctx`), so coding-agent-driven re-entry hits the same limit. Each Delegate invocation is **stateless** (no resume id is persisted across calls — SPEC §7 Q5). |
 | **D-375** | Adapter-level metered-credential scrub — defense-in-depth. `Tau.CodingAgents.ClaudeCode.start/2` MUST pass `{:env, [{~c"ANTHROPIC_API_KEY", false}, {~c"ANTHROPIC_AUTH_TOKEN", false}, {~c"ANTHROPIC_BASE_URL", false}]}` in `Port.open` options by default so the `claude` subprocess never inherits any metered Anthropic credential from the host environment (Erlang Port treats `{key, false}` as POSIX unsetenv on the child). The three scrubbed variables cover all metered-spend vectors: `ANTHROPIC_API_KEY` (primary API key), `ANTHROPIC_AUTH_TOKEN` (metered bearer token honoured by the claude CLI), and `ANTHROPIC_BASE_URL` (proxy endpoint redirect). The sole opt-out is `ctx[:allow_metered] == true`, which passes all three through to the child unchanged. This invariant is a sibling of D-374 (factory-plane guard) and together they form the two-layer cost-safety fence: D-374 is fail-closed at the worker-spawn boundary; D-375 is defense-in-depth at the adapter boundary. Enforced by `test/tau/factory/cost_safety_fence_test.exs` (tags `:d_375` — 2 tests): (a) default: canaries for all three variables absent from `claude` child env; (b) `allow_metered: true`: all three canaries present in child env. |
+| **D-383** | Headless permission posture — opt-in boolean. `task.skip_permissions: true` ⇒ `ClaudeCode` adapter appends `--dangerously-skip-permissions`; absent/`false` ⇒ flag absent (interactive default-deny retained). Sound because outer boundaries contain the agent: worker workspace isolation (FLEET D-309–D-316) + metered-credential scrub (D-374/D-375) + ActionClassifier on egress (D-319). Interactive permission prompts are inapplicable headless (deadlock). The factory sandbox path sets `skip_permissions: true` via `AgentBin.resolve/1`; real-tau defaults to `false` until self-hosting wires it (#494); non-factory callers (interactive session, Delegate tool) MUST leave it unset. Back-compat: a task built without `:skip_permissions` → no flag. Enforced by `test/tau/factory/skip_permissions_d383_test.exs` (tags `:d_383` — 7 tests). |
 
 ## 7. Resolved design questions
 
@@ -392,7 +403,18 @@ lib/tau/permissions/matchers.ex                  # Glob/Regex arg_for: Delegate(
 config/config.exs                                # builtin_tools registration
 ```
 
-Total runtime invariants claimed by this spec: **D-031 through D-039** (9).
+PR #520 — D-383 headless skip-permissions (this PR — landing):
+
+```
+lib/tau/coding_agent.ex                              # task typespec: optional(:skip_permissions) => boolean()
+lib/tau/coding_agents/claude_code/argv.ex            # maybe_append_skip_permissions/2 (D-383)
+lib/tau/factory/agent_bin.ex                         # resolve_claude_code passes skip_permissions to shim
+lib/tau/factory/coding_agent_shim.ex                 # config bakes + Runner threads skip_permissions into task
+lib/mix/tasks/tau.factory.dogfood.ex                 # sandbox path sets skip_permissions: true via AgentBin.resolve/1
+test/tau/factory/skip_permissions_d383_test.exs      # D-383 gating test (7 tests, :d_383 tag)
+```
+
+Total runtime invariants claimed by this spec: **D-031 through D-039, D-375, D-383** (11).
 
 ## Appendix B — non-goals discussion
 

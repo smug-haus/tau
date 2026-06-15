@@ -70,7 +70,8 @@ defmodule Tau.Factory.CodingAgentShim do
       gap_before_phase_ms: Keyword.get(opts, :gap_before_phase_ms),
       replay_delay_ms: Keyword.get(opts, :replay_delay_ms, 0),
       heartbeat_interval_ms: Keyword.get(opts, :heartbeat_interval_ms),
-      inspect_env_file: Keyword.get(opts, :inspect_env_file)
+      inspect_env_file: Keyword.get(opts, :inspect_env_file),
+      skip_permissions: Keyword.get(opts, :skip_permissions, false)
     }
 
     encoded_config =
@@ -210,9 +211,11 @@ defmodule Tau.Factory.CodingAgentShim.Runner do
     # Initial heartbeat state: last_hb_at = nil (no heartbeat sent yet).
     initial_hb_state = %{last_hb_at: nil, interval_ms: hb_interval}
 
+    skip_permissions = config[:skip_permissions] || false
+
     case resolve_stream_mode(config) do
       {:single, fixture, delay_ms} ->
-        run_single_stream(ws, config.adapter, fixture, delay_ms, initial_hb_state)
+        run_single_stream(ws, config.adapter, fixture, delay_ms, initial_hb_state, skip_permissions)
 
       {:phased, phases, gaps} ->
         run_phased_stream(ws, config.adapter, phases, gaps, initial_hb_state)
@@ -234,13 +237,14 @@ defmodule Tau.Factory.CodingAgentShim.Runner do
     {:single, [], config[:replay_delay_ms] || 0}
   end
 
-  defp run_single_stream(ws, adapter, fixture, delay_ms, hb_state) do
+  defp run_single_stream(ws, adapter, fixture, delay_ms, hb_state, skip_permissions) do
     # D-381: read the brief from the Worker-injected TAU_AGENT_PROMPT env var.
     # Falls back to "" when absent (back-compat with Replay / non-D-381 paths).
     task = %{
       prompt: System.get_env("TAU_AGENT_PROMPT") || "",
       workspace: ws,
-      replay_fixture: fixture
+      replay_fixture: fixture,
+      skip_permissions: skip_permissions
     }
 
     ctx = if delay_ms > 0, do: %{replay_delay_ms: delay_ms}, else: %{}

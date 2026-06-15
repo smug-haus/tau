@@ -113,7 +113,11 @@ defmodule Mix.Tasks.Tau.Factory.Dogfood do
     # default), so existing dogfood behaviour is preserved unless the operator
     # explicitly sets agent_mode: :claude_code in the factory config.
     factory_opts = Application.get_env(:tau, :factory, [])
-    {agent_bin, spawn_opts} = AgentBin.resolve(factory_opts)
+    # D-383: the dogfood sandbox is the contained-context path — set skip_permissions: true
+    # so the :claude_code adapter runs headless (no interactive permission prompts).
+    # AgentBin.resolve/1 threads this only for :claude_code mode; scripted/replay paths
+    # ignore it (resolve_scripted/0 does not carry skip_permissions).
+    {agent_bin, spawn_opts} = AgentBin.resolve(Keyword.put(factory_opts, :skip_permissions, true))
     Mix.shell().info("[dogfood] agent_bin: #{agent_bin}")
 
     # Step 6 — Derive the deterministic work_item coordinate (mirrors IssueSelector).

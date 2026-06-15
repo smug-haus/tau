@@ -72,10 +72,12 @@ defmodule Tau.Factory.AgentBin do
     dest_path = unique_tmp_path("tau_agentbin_claude_code")
 
     branch = Keyword.get(opts, :branch, "main")
+    skip_permissions = Keyword.get(opts, :skip_permissions, false)
 
     CodingAgentShim.write(dest_path,
       adapter: Tau.CodingAgents.ClaudeCode,
-      branch: branch
+      branch: branch,
+      skip_permissions: skip_permissions
     )
 
     {dest_path, [agent_mode: :claude_code]}
