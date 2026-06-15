@@ -229,10 +229,29 @@ S.state = %{
 (system-architecture.md §1 S.δ):
 
 ```
-admit(u) ⟺  ConflictCheck.clear?(declared(u), F)            # five clauses, HR-4
+admit(u) ⟺  ConflictCheck.clear?(declared(u), F ∖ {u})      # five clauses, HR-4; SELF-EXCLUDED (D-380)
         ∧  budget_precheck(u) = :ok                          # INV-21, ETS snapshot
-        ∧  fleet_headroom?(W_cap)                            # |F| < W_cap (§2.5)
+        ∧  fleet_headroom?(|F ∖ {u}| < W_cap)                # capacity over F∖{u} (§2.5)
 ```
+
+**Self-exclusion (D-380, #515).** The conflict and capacity checks evaluate over
+`F ∖ {unit_id}`, never the raw `F` — a unit can never conflict with its own
+in-flight entry. This is the structural reason (a) a single unscopable unit
+(the `universal_conflict` sentinel, §2.6.D-371) admits against its excluded-empty
+`F'` instead of self-conflicting, and (b) the §2.4 scope-amendment re-admit of an
+already-present unit is **idempotent** (returns `:admit`, replaces the scope). The
+exclusion is an **S-level set operation** keyed by `unit_id`; `ConflictCheck` (C5)
+stays unit-id-agnostic and keeps P-CC-2 (a non-trivial *scope* self-conflicts).
+
+**Single admission authority (D-380, #515).** `admit/3` has **exactly one** caller
+— the Unit FSM `planned` state, which holds the real `declared_scope`. K
+**selects and drives** but MUST NOT admit. An early implementation had K admit with
+an `@empty_scope` placeholder *and* the Unit admit with the real scope — a
+**double admission of one unit against one Scheduler**: the empty-scope `F` entry
+both blinded other units' conflict checks (a soundness hole, the dual of the
+under-declaration in §2.6) and made the Unit's real-scope admit self-conflict via
+the sentinel (the first-real-run wedge). One unit, one admit, by the authority
+that holds the real scope.
 
 `W_cap` is **not** the naïve `W*`. It is derived from measured gate-stage
 utilization `ρ_g < 1 − margin` with `T_unit(W)` modeled *endogenously*
@@ -307,7 +326,11 @@ is *not* a silent in-flight mutation — U emits a `scope_amendment`, the unit i
 re-runs `ConflictCheck` against the *current* `F`. Re-admission is a fresh,
 monotone decision; there is no in-flight scope drift, and INV-13 holds against
 the *amended* declaration. This is the structural reading of `factory-loop.md`'s
-"scope growth becomes a separate PR or a deliberate, logged re-plan".
+"scope growth becomes a separate PR or a deliberate, logged re-plan". The
+re-admit is **idempotent** by §2.2's self-exclusion (D-380): because the check
+runs over `F ∖ {unit_id}`, a re-submitted unit never conflicts with its *own*
+prior `F` entry — even if the withdraw step has not yet landed — so the amended
+admit is decided purely against the *other* in-flight units.
 
 ### 2.5 Budget pre-check (INV-21) and monotone admission (LIV-4)
 
@@ -439,9 +462,25 @@ not an error. For any non-empty issue the assembler returns a non-empty prompt.
 (`supervisor.ex`) is the single assembly site; it swaps `brief: title` for
 `brief: BriefAssembler.assemble(%{issue: issue, declared_scope: scope, …})`. The
 assembled brief rides the *existing* `UnitDriver → WorkerSupervisor → Worker → shim`
-path unchanged — no new boundary. The A1 shim wiring (`task.prompt = brief` instead
-of `""`) is the consumer side; A2 owns the assembler and the contract that
+path unchanged — no new boundary. A2 owns the assembler and the contract that
 `task.prompt` equals the assembled brief.
+
+**The consumer side — delivery across the Worker↔shim Port (D-381, #515).** A2
+gets the brief as far as the Worker's `:brief`, but the **first real-`claude` run
+showed the brief stops there**: the shim baked only adapter+branch (`agent_bin` is
+resolved **once** at supervisor setup, `AgentBin.resolve/1`, D-376) and hardcoded
+`task.prompt = ""`, so the real agent ran `claude -p ""`. The per-unit prompt
+therefore cannot be a shim-write-time bake; it must cross the *existing* B4 `Port`
+boundary at *spawn* time. The cheapest-to-reverse seam (V3, mirroring why A1 chose
+the Port-shim over an in-process drive) is an **environment variable**:
+the Worker — which is per-unit and already builds a per-spawn `:env` list — sets
+`TAU_AGENT_PROMPT = brief` at `Port.open`, and the shim's `Runner.main/1` reads it
+into `task.prompt`. Rejected: baking the brief per-unit by moving `AgentBin.resolve/1`
+to unit-spawn time (a per-unit shim rewrite; re-homes the one-time `agent_bin`
+construction). The delivery is **orthogonal to the #509/D-374 metered-spend scrub**
+— that scrub removes only the three `ANTHROPIC_*` keys; `TAU_AGENT_PROMPT` is task
+data, never a credential, and is never scrubbed. The boundary detail is
+SPEC-FACTORY-FLEET §4 B4-A1 ("Prompt delivery"); the invariant is D-381.
 
 ---
 

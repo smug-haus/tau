@@ -20,7 +20,6 @@ defmodule Tau.Factory.Coordinator do
   @behaviour :gen_statem
 
   alias Tau.Factory.Ledger.Reader, as: LedgerReader
-  alias Tau.Factory.Scheduler
 
   require Logger
 
@@ -45,8 +44,8 @@ defmodule Tau.Factory.Coordinator do
                       to the Coordinator to signal completion.
 
   Optional options:
-    - `:scheduler`  — atom | pid | nil; when non-nil, `Scheduler.admit/3`
-                      is called before driving.
+    - `:scheduler`  — atom | pid | nil; passed through to `data.scheduler`
+                      (D-380: admission is performed by the Unit FSM, not here).
     - `:on_halted`  — pid; notified with `:coordinator_halted` when the
                       Coordinator reaches `:halted`.
     - `:ledger`     — `GenServer.server()` reference to a running
@@ -298,32 +297,12 @@ defmodule Tau.Factory.Coordinator do
   # Private helpers
   # ---------------------------------------------------------------------------
 
-  # Drive a unit: optionally gate through Scheduler, then call drive_fun.
-  defp drive_unit(%{scheduler: nil} = data, work, unit_id) do
+  # Drive a unit: call drive_fun and mark unit in-flight.
+  # D-380 single-authority: the Coordinator MUST NOT call Scheduler.admit.
+  # The Unit FSM planned state is the sole admitter (with the real declared_scope).
+  defp drive_unit(data, work, unit_id) do
     :ok = data.drive_fun.(work)
     %{data | in_flight: unit_id}
-  end
-
-  @empty_scope %{
-    deps: [],
-    files: MapSet.new(),
-    codepoints: MapSet.new(),
-    specs: MapSet.new(),
-    resources: MapSet.new()
-  }
-
-  defp drive_unit(data, work, unit_id) do
-    declared_scope = @empty_scope
-
-    case Scheduler.admit(data.scheduler, unit_id, declared_scope) do
-      :admit ->
-        :ok = data.drive_fun.(work)
-        %{data | in_flight: unit_id}
-
-      {:defer, _reason} ->
-        # Deferred: stay idle until a future event re-triggers the loop.
-        %{data | in_flight: nil}
-    end
   end
 
   defp notify_halted(%{on_halted: nil}), do: :ok

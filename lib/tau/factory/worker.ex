@@ -377,7 +377,23 @@ defmodule Tau.Factory.Worker do
         []
       end
 
-    env_list = ns_env ++ extra_env_charlist ++ metered_scrub
+    # D-381: inject TAU_AGENT_PROMPT so the subprocess (shim) reads the brief.
+    # Applied for all agent_modes (benign for Replay; task data, not a secret).
+    # TAU_AGENT_PROMPT is task data — it is NOT added to the D-374 metered scrub.
+    #
+    # Omit-on-empty: when brief == "", TAU_AGENT_PROMPT is NOT injected into the
+    # Port env at all. The shim Runner reads System.get_env("TAU_AGENT_PROMPT") || ""
+    # so an absent var yields "" — identical observable behaviour with no global
+    # OS-env mutation (:os.putenv/:os.unsetenv are process-wide and unsafe under
+    # concurrent Worker.init calls).
+    prompt_env =
+      if brief == "" do
+        []
+      else
+        [{~c"TAU_AGENT_PROMPT", String.to_charlist(brief)}]
+      end
+
+    env_list = ns_env ++ extra_env_charlist ++ metered_scrub ++ prompt_env
 
     port =
       Port.open({:spawn_executable, agent_bin}, [

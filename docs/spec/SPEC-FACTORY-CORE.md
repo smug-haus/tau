@@ -89,6 +89,31 @@ Conforms to arch `control-plane.md` §3.2.1 (which already showed the capturing
 clause) and `merge-and-integration.md`; resolves the `control-plane.md`
 §3.2.1↔§7.2 contradiction in favour of capture.
 
+**Amendment (2026-06-14, PR #515 — real-run integration: admission
+self-exclusion + single admission authority; D-380).** The first
+factory-driven *real-`claude`* run surfaced a coordination defect: `unit-N` is
+admitted **twice** against the **one** Scheduler — once by the Coordinator's
+`drive_unit/3` with an `@empty_scope` (`coordinator.ex`), then again by the Unit
+FSM `planned` state with the **real** `declared_scope` (`unit.ex`). For an
+unscopable seed issue (the D-371 `universal_conflict` sentinel), the Unit's
+second admit runs `ConflictCheck.clear?/2` against an `F` that already holds the
+unit's **own** first entry → the sentinel branch fires `{:conflict,
+:no_dependency}` → `escalate(:E_SCHEDULER_DEFER)`. The unit self-conflicts and
+the loop wedges before any work. There are **two** distinct defects: (1) a
+**double admission** of one unit against one authority (the contract assumes one
+admit per unit — §3 Q2 `admit→withdraw→re-admit` is forbidden absent a
+`release`), and (2) a **soundness** bug — the Coordinator's `@empty_scope` admit
+records the unit in `F` with an *empty* scope, blinding every *other* unit's
+conflict check to the unit's real files. The fix pins **single admission
+authority at the Unit FSM** (which holds the real `declared_scope`) and adds
+**self-exclusion** in the Scheduler as the structural guarantee that a unit can
+never conflict with its own `F` entry. §3 Q1/Q2/Q6 record the constraint; §4
+B1 pins single-authority + the `admit/3` self-exclusion post-condition; §4 B2
+pins that `ConflictCheck` stays unit-id-agnostic (P-CC-2 self-conflict on scope
+is preserved — the exclusion lives in S, not C5); §6 adds **D-380**. Conforms
+to arch `control-plane.md` §2.2 (the admission predicate) and §2.4
+(scope-amendment re-admission, which now relies on self-exclusion to be idempotent).
+
 ## 0. Why this spec exists
 
 The factory's control core is the brain of an autonomous loop that takes a
@@ -180,6 +205,32 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
 - **[C102-B1]** The in-flight set `F` is written only by the Scheduler (C4) on
   admit/terminal. The Coordinator and Units *read* admission results; they never
   mutate `F`.
+- **★ [C132-B1] One unit is admitted exactly once, by exactly one authority — the
+  Unit FSM `planned` state — and the authority that admits is the one holding the
+  unit's *real* `declared_scope` (D-380, V3).** The Coordinator (K) **selects and
+  drives**; it MUST NOT call `Scheduler.admit/3`. An admit by K is unsound *and*
+  redundant: K does not hold the real scope (it would admit with an `@empty_scope`
+  placeholder), so the unit's `F` entry would carry an **empty** scope, blinding
+  every *other* unit's `ConflictCheck` to the unit's real files (a missed-conflict
+  corruption, the dual of [C130-B10] under-declaration). It is also a **second
+  admit of the same `unit_id` against the same Scheduler**, which Q2's
+  no-`admit→withdraw→re-admit` ordering forbids absent a prior `release`. Single
+  authority = the Unit FSM, which holds `data.declared_scope` (the real elaborated
+  scope, D-369..D-371). K's `drive_fun` invokes the unit driver directly; the
+  admission gate lives once, in U's `planned → oracle` transition (§5 FSM; §4 B1).
+- **★ [C133-B1] A unit can never conflict with its own in-flight entry — the
+  Scheduler self-excludes the candidate from `F` before the conflict check (D-380,
+  V3).** `Scheduler.admit(unit_id, scope)` MUST evaluate `ConflictCheck.clear?`
+  over `F ∖ {unit_id}`, never over the raw `F`. Self-exclusion is the structural
+  guarantee that makes admission **idempotent for a unit already in `F`** (a re-admit
+  on the scope-amendment path, §4 B2 / arch §2.4, returns `:admit` against the
+  unit's own prior entry rather than self-conflicting) and is the **sole** reason
+  the D-371 `universal_conflict` sentinel does not make a single unscopable unit
+  conflict with itself. The exclusion lives in **S** (which holds `F` keyed by
+  `unit_id` and receives the candidate's `unit_id`), **not** in `ConflictCheck`
+  (C5) — C5 stays unit-id-agnostic and keeps P-CC-2 (a non-trivial *scope* still
+  self-conflicts when handed to itself; §4 B2, §6 D-312). One invariant
+  ("no unit self-conflicts via its own `F` membership"), one enforcer (S).
 
 ### Q2: What ordering assumptions are implicit?
 
@@ -400,11 +451,25 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
 
 ### B1: Coordinator (C3) ↔ Scheduler (C4)
 
-- `admit/2 :: (unit_id, declared_scope) -> :admit | {:defer, reason}` (`call`).
+- `admit/2 :: (unit_id, declared_scope) -> :admit | {:defer, reason}` (`call`;
+  the implementation arity is `admit/3` — `(server, unit_id, declared_scope)`).
 - Pre: Scheduler running; `Ledger.Writer` running.
-- Post: `:admit` ⟺ `ConflictCheck.clear?(declared_scope, F)` ∧
-  `budget_precheck(unit) == :ok` ∧ `|F| < W_cap`; on `:admit`, `unit_id` is added
-  to `F` before the reply (single-writer of `F`).
+- Post: `:admit` ⟺ `ConflictCheck.clear?(declared_scope, F ∖ {unit_id})` ∧
+  `budget_precheck(unit) == :ok` ∧ `|F ∖ {unit_id}| < W_cap`; on `:admit`,
+  `unit_id ↦ declared_scope` is **upserted** into `F` before the reply
+  (single-writer of `F`).
+- **Self-exclusion (D-380, [C133-B1]):** the conflict check and capacity check are
+  evaluated over `F ∖ {unit_id}`, never the raw `F`. A unit therefore never
+  conflicts with its own in-flight entry, and a re-admit of an already-present
+  `unit_id` (the scope-amendment path, B2 / arch §2.4) is **idempotent** —
+  it returns `:admit` and replaces the unit's scope, never `{:conflict, _}` against
+  itself. The exclusion is by `unit_id` (S holds `F` keyed by it); `ConflictCheck`
+  (C5) never sees the candidate's id (B2).
+- **Single admission authority (D-380, [C132-B1]):** the **only** caller of
+  `admit/3` is the Unit FSM `planned` state (§5), which holds the real
+  `declared_scope`. The Coordinator (K) selects and drives but MUST NOT admit
+  (an empty-scope K-admit is unsound — it blinds other units' checks — and is a
+  forbidden double-admit of one unit against one Scheduler).
 - Invariant (**D-343, monotone**): a `{:defer, _}` never demotes a unit's queue
   position; deferred units are served in arrival order with aging.
 
@@ -417,12 +482,26 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
   resource-isolatable.
 - Invariants (properties, §6 D-312): symmetry; non-trivial self-conflict;
   monotone-in-`F`; each clause necessary; gating-path collision blocks.
+- **Unit-id-agnostic (D-380, [C133-B1]):** `clear?/2` receives only `(scope, F')`
+  where the **Scheduler** has already excluded the candidate (`F' = F ∖ {unit_id}`).
+  C5 has **no** knowledge of the candidate's id, so the self-exclusion fix MUST
+  NOT be placed here. P-CC-2 (a non-trivial *scope* never clears against an equal
+  *scope*) is **preserved unchanged** — it is a property of the pure predicate over
+  *scopes*, not over *unit identities*. The "a unit never self-conflicts via its
+  own `F` membership" guarantee is an S-level set operation (`F ∖ {unit_id}`),
+  not a C5 change. The D-371 `universal_conflict` sentinel branch below operates
+  over the already-excluded `F'`, so a single unscopable unit (its own entry
+  excluded) sees an *empty* `F'` and clears.
 - `scope()` type: `%{deps: [unit_id], files: MapSet.t(String.t()),
   codepoints: MapSet.t({String.t(), atom()}), specs: MapSet.t(atom()),
   resources: MapSet.t(atom()), optional(:universal_conflict) => boolean()}` —
   the `universal_conflict: true` sentinel (D-371) causes `clear?/2` to return
-  `{:conflict, :no_dependency}` against any non-empty `F`, regardless of
-  whether the sentinel is the candidate or an in-flight member (symmetric).
+  `{:conflict, :no_dependency}` against any non-empty argument set, regardless of
+  whether the sentinel is the candidate or an in-flight member (symmetric). Note
+  the argument set `clear?/2` receives is the Scheduler's already-excluded
+  `F ∖ {unit_id}` (D-380, [C133-B1]): a **single** unscopable unit sees an empty
+  argument set and clears; the sentinel still serializes it against every *other*
+  in-flight member.
 
 ### B3: {Coordinator, Unit} ↔ Ledger.Writer (C1)
 
@@ -1412,6 +1491,27 @@ never raising on partial input and never returning `""`. Enforced by
 partial input degrades to placeholders without raising; output is always
 non-empty).
 
+**D-380 — Single admission authority + admission self-exclusion (real-run
+integration, [C132-B1], [C133-B1]):** one unit is admitted to `F` **exactly once,
+by the Unit FSM `planned` state alone** (the authority holding the real
+`declared_scope`); the Coordinator selects and drives but **never** calls
+`Scheduler.admit/3`. The Scheduler evaluates `ConflictCheck.clear?` and the
+capacity check over `F ∖ {unit_id}` — a unit **never** conflicts with its own
+in-flight entry, so (a) a single unscopable unit (D-371 `universal_conflict`)
+admits against its excluded-empty `F'` instead of self-conflicting, and (b)
+re-admit of an already-present `unit_id` (the scope-amendment path) is idempotent
+(returns `:admit`, replaces the scope). The exclusion is by `unit_id` in the
+Scheduler; `ConflictCheck` (C5) stays unit-id-agnostic and P-CC-2 (scope
+self-conflict) is preserved. Two defects are jointly closed: the
+**double-admission self-conflict** (`unit.ex` admit sees the Coordinator's prior
+empty-scope `F` entry → `escalate(:E_SCHEDULER_DEFER)`) and the **soundness** hole
+(an empty-scope `F` entry blinds other units' conflict checks). Enforced by
+`scheduler_self_exclusion_test.exs` (admit `unit-1` with a sentinel/non-trivial
+scope; re-admit the **same** `unit_id` against an `F` already holding it →
+`:admit`, not `{:conflict, _}`; and a single sentinel unit admits into the
+excluded-empty `F'`) and by an integration assertion that the Coordinator's
+`drive_unit` performs **no** `Scheduler.admit` call.
+
 ## 7. Acceptance criteria
 
 Each is expressed against the user-facing path with an observable signal.
@@ -1487,6 +1587,12 @@ PR groupings are indicative.
   (`select_fun → nil`, no in-flight unit, no `Unit` spawned); and on a default
   boot (factory disabled) no `Tau.Factory.Coordinator` exists. Signal: both Test A
   (enabled assembly + idle) and Test B (default-OFF) assert it.
+- **AC-D380 (PR #515, D-380):** `mix test test/tau/factory/scheduler_self_exclusion_test.exs`
+  passes — re-admitting the **same** `unit_id` against an `F` already holding it
+  returns `:admit` (not `{:conflict, _}`), a single `universal_conflict` unit
+  admits into its excluded-empty `F'`, and the Coordinator's `drive_unit` issues
+  **no** `Scheduler.admit` call (single authority = the Unit FSM). Signal: the
+  test asserts the self-exclusion verdict and the absence of the K-side admit.
 
 ## Appendix B — Source map
 
@@ -1495,10 +1601,10 @@ Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 - `lib/tau/factory/ledger/writer.ex` (C1; D-315, D-330–D-333, D-335, D-336) — PR-CORE-1/5
 - `lib/tau/factory/ledger/schema/*.ex` + `lib/tau/factory/ledger/migrations.ex` (Exqlite schema; D-335 partial unique index) — PR-CORE-1/5
 - `lib/tau/factory/budget/owner.ex` (C2; D-320, D-332) — PR-CORE-2
-- `lib/tau/factory/coordinator.ex` (C3; D-317, D-321, D-342, D-344) — PR-CORE-3/4
+- `lib/tau/factory/coordinator.ex` (C3; D-317, D-321, D-342, D-344, **D-380** `drive_unit/3` MUST NOT call `Scheduler.admit`; drop the `@empty_scope` admit — single admission authority is the Unit FSM) — PR-CORE-3/4 / PR #515
 - `lib/tau/factory/escalation.ex` (C7; D-317) — PR-CORE-3
-- `lib/tau/factory/scheduler.ex` (C4; D-312, D-320, D-343) — PR-CORE-2
-- `lib/tau/factory/conflict_check.ex` (C5; D-312, D-343) — PR-CORE-2
+- `lib/tau/factory/scheduler.ex` (C4; D-312, D-320, D-343, **D-380** evaluate `ConflictCheck.clear?` + capacity over `F ∖ {unit_id}`; upsert on admit) — PR-CORE-2 / PR #515
+- `lib/tau/factory/conflict_check.ex` (C5; D-312, D-343 — **unchanged for D-380**: stays unit-id-agnostic; the self-exclusion is an S-level set op, not a C5 change) — PR-CORE-2
 - `lib/tau/factory/unit.ex` (C6; D-318, D-340, **D-356** awaiting_merge subscribe-before-request consume + unsubscribe-on-exit, **D-362** capture `work_ready` `branch`/`head_sha` into data, **D-361** key `merge_fun` on captured `head_sha`/`branch`, plus B6/B7/B8 cited edges) — PR-CORE-3/PR #477/PR #503
 - `lib/tau/factory/unit_driver.ex` (D-340, **D-356** `:janitor` threading + no driver-side merge bridge / no driver reclaim; **D-361** build the merge map `hash`/`branch` from the captured `head_sha`; the real `drive_fun` wiring Unit→fleet→gate→merge seams) — PR #477/PR #503
 - `lib/tau/factory/gate/request.ex` (**D-361** `Request.hash` is the captured `head_sha`, not the declared `work_item.hash`; the gate-closure construction site) — PR #503
@@ -1513,6 +1619,7 @@ Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 - `lib/tau/factory/dogfood/` (the scripted deterministic `agent_bin` and sandbox-seeding helpers — the seeded issue + its real gating test; emits the D-326 `work_ready` frame) — PR #481
 - `test/tau/factory/ledger_durability_test.exs` (D-315) — PR-CORE-1
 - `test/tau/factory/conflict_check_property_test.exs` (D-312, D-343) — PR-CORE-2
+- `test/tau/factory/scheduler_self_exclusion_test.exs` (**D-380** self-exclusion + idempotent re-admit + Coordinator issues no admit — single authority) — PR #515
 - `test/tau/factory/budget_admission_test.exs` (D-320, D-332) — PR-CORE-2
 - `test/tau/factory/brief_assembler_test.exs` (**D-372** complete-over-inputs composition; **D-373** injected `:assemble_fun` seam, pure default, graceful degradation, non-empty output) — PR #508
 - `test/tau/factory/retry_property_test.exs` (D-318) — PR-CORE-3

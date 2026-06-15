@@ -31,6 +31,14 @@ not owned here.
 B4-A1 extension, §6, Appendix B). Wires `mix tau.factory.dogfood` to use
 `AgentBin.resolve/1`; default mode stays scripted so existing dogfood gates are
 unaffected.
+#515 amendment (real-run integration) — adds **D-381**: per-unit **prompt
+delivery** across the Worker↔shim `Port` (§4 B4-A1, §6, Appendix B). A2/#488
+(CORE D-372) *composes* the brief and threads it to the Worker's `:brief`, but the
+brief stopped at the Worker state and never reached the shim — the real `claude`
+ran as `claude -p ""`. D-381 pins the delivery seam: the Worker sets a
+`TAU_AGENT_PROMPT` env var at `Port.open` and the shim reads it into
+`task.prompt`. Orthogonal to the #509/D-374 metered-spend scrub (the prompt is
+task data, never a credential).
 
 ## 0. Why this spec exists
 
@@ -417,8 +425,41 @@ passes its environment through (D-365).
   `claude` subprocess's stdout/stderr go to *its* stderr / a log, never the
   Worker's `{:packet,4}` stdout — mirroring the dogfood script's stderr discipline
   and `ClaudeCode`'s "stderr NOT redirected to stdout").
+- **Prompt delivery — the per-unit brief reaches the per-unit shim's `task.prompt`
+  (the load-bearing new logic — D-381).** A2/#488 (SPEC-FACTORY-CORE D-372)
+  *composes* the brief and threads it as `work_item.brief` → `WorkerSupervisor.spawn/5`
+  → the Worker's `:brief`. But the brief **stops at the Worker GenServer state**: it
+  is never delivered to the shim subprocess, so the shim builds `task.prompt = ""`
+  and the real `claude` runs as `claude -p ""` (the issue surfaced on the first
+  real run). The structural cause is that `agent_bin` is **resolved once** at
+  supervisor setup (`AgentBin.resolve/1`, D-376) — adapter + a static `branch`
+  are baked into the shim before any unit exists, so the *per-unit* prompt cannot
+  be a write-time bake. **Decision (cheapest-to-reverse, V3):** the **per-unit
+  brief crosses the existing Worker↔shim `Port` boundary (B4) as an environment
+  variable**, `TAU_AGENT_PROMPT`, set by the Worker at `Port.open` time (the Worker
+  *is* per-unit; the env list it already builds is per-spawn) and read by the
+  shim's `Runner.main/1` into `task.prompt`. Rejected alternative (b) — bake the
+  brief into the shim per-unit by moving `AgentBin.resolve/1` to unit-spawn time —
+  is a heavier change (a fresh shim executable written per unit) and re-homes the
+  one-time `agent_bin` construction; reversing a wrong (b) guess touches the
+  supervisor/UnitDriver wiring, whereas (a) is one env key added at one site and
+  one `System.get_env` read. **(a) is selected.** Contract:
+    - The Worker appends `{"TAU_AGENT_PROMPT", brief}` to the `Port.open` `:env`
+      list (alongside `ns`, `extra_env`, and the D-374 metered-scrub). It is set
+      for **every** agent_mode (Replay and `:claude_code`); the Replay shim
+      ignores `task.prompt`, so the key is benign there.
+    - The shim's `Runner.main/1` reads `System.get_env("TAU_AGENT_PROMPT")` and
+      builds `task.prompt = it || ""`. Absent var → `""` (back-compat: existing
+      Replay/dogfood paths that set no prompt are unchanged).
+    - **#509 (D-374/D-375) interaction (pinned).** The metered-spend env scrub
+      removes **only** `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` /
+      `ANTHROPIC_BASE_URL`. `TAU_AGENT_PROMPT` is **not** a metered key and MUST
+      NOT be added to the scrub list — the fence and the prompt-delivery channel
+      are orthogonal. The prompt is task data, never a credential.
 - **Drive.** The shim builds a `Tau.CodingAgent.task` (`%{prompt, workspace: ws,
-  …}`) — the issue→prompt assembly is **A2 (#488), cited not owned here** — then
+  …}`) — the issue→prompt **composition** is **A2 (#488)/D-372, cited not owned
+  here**; the brief→`task.prompt` **delivery** across the Port is **D-381, owned
+  here** (see "Prompt delivery" above) — then
   calls `adapter.start(task, ctx)` to obtain a lazy `Enumerable.t()` of
   `%Tau.CodingAgent.Event{}` and **consumes it lazily, event by event**. Each
   consumed event that carries progress information (`AssistantText`, `ToolUse`,
@@ -507,7 +548,8 @@ that coordinate is **discarded by the Unit FSM today** (`unit.ex` matches
 `data.hash`). Threading the real `head_sha` through gate+merge is **#486 (C1)** —
 a separate ARCH GAP with its own D-NNN. Without #486 the shim's real `head_sha`
 lands but is ignored, so a useful real-dogfood smoke needs **A1 ∧ #486** (and a
-real prompt from **A2/#488**). This contract therefore *produces* the coordinate
+real prompt *composed* by **A2/#488/D-372** and *delivered* to the shim by
+**D-381**, this contract). This contract therefore *produces* the coordinate
 and *names its consumer*; it does not implement the consumption. (V2-clean: the
 shape solves exactly A1 — replace the canned agent — and explicitly defers C1/A2.)
 
@@ -802,6 +844,27 @@ not silent-hang ) ∧ □( crashes(shim) ⇒ blast_radius ⊆ {worker} )`. Detec
 shim emits a non-recoverable terminal event and exits non-zero (Worker observes a
 death-cert), and a sibling worker is unaffected.
 
+**D-381 — Per-unit prompt delivery across the Worker↔shim Port (#515, A1/A2
+bridge):** the per-unit brief (`work_item.brief`, composed by CORE D-372)
+reaches the per-unit shim's `Tau.CodingAgent.task.prompt`. Because `agent_bin` is
+resolved **once** at supervisor setup (D-376), the per-unit prompt cannot be baked
+at shim-write time; it crosses the existing B4 `Port` boundary as an **environment
+variable**. Injection is **omit-on-empty**: when `brief` is non-empty the Worker
+appends `{"TAU_AGENT_PROMPT", brief}` to the `Port.open` `:env` list
+(per-spawn, alongside `ns`/`extra_env`/the D-374 scrub); when `brief == ""`
+the key is **omitted entirely** — no `:os.putenv`/`:os.unsetenv` global-env
+mutation (unsafe under concurrent `Worker.init` calls). The shim's
+`Runner.main/1` reads `System.get_env("TAU_AGENT_PROMPT") || ""` — absent is
+equivalent to `""` — and sets `task.prompt = it`. Holds for every agent_mode
+(Replay ignores it; benign). `□( brief ≠ "" ⇒ shim builds task.prompt == brief )
+∧ □( real :claude_code run ⇒ claude argv contains "-p", brief, NOT "-p", "" )`.
+**Orthogonality (D-374):** the metered-spend scrub touches only the three
+`ANTHROPIC_*` keys; `TAU_AGENT_PROMPT` is task data and MUST NOT be added to
+the scrub. Detection: `coding_agent_shim_prompt_test.exs` — a Worker spawned
+with a non-empty `:brief` and `agent_mode: :claude_code` (with `claude` stubbed
+by a Replay/fixture source) produces an argv carrying the brief as `-p <brief>`;
+a `""` brief yields `-p ""`; the `ANTHROPIC_*` scrub is unaffected.
+
 ## 7. Acceptance criteria
 
 Each is expressed against the user-facing path with an observable signal. PR
@@ -873,13 +936,20 @@ groupings are indicative.
   no-completion/retry outcomes (D-364); the shim+sub-agent stay inside `ws` and
   the namespace (D-365); heartbeats track stream progress not a clock (D-366);
   a `claude`/dispatcher crash surfaces as a terminal event, not a hang (D-367).
+- **AC-D381 (PR #515, D-381 — per-unit prompt delivery):** a Worker spawned with
+  a non-empty `:brief` and `agent_mode: :claude_code` delivers that brief to the
+  shim's `task.prompt`, so the resulting `claude` argv carries `-p <brief>` (not
+  `-p ""`). Signal: `mix test test/tau/factory/coding_agent_shim_prompt_test.exs`
+  passes — with `claude` stubbed by a fixture source, the captured argv contains
+  the brief; a `""` brief yields `-p ""`; the `ANTHROPIC_*` metered scrub
+  (D-374) is unaffected.
 
 ## Appendix B — Source map
 
 Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 
 - `lib/tau/factory/worker_supervisor.ex` (C1; D-316, death-certificate) — PR-FLEET-1
-- `lib/tau/factory/worker.ex` (C2; D-309, D-310, D-311, D-316 + heartbeat emission; D-326 `work_ready` decode/forward in `handle_info({port,{:data,_}},…)`) — PR-FLEET-1/2; D-326 wiring is P5c-3
+- `lib/tau/factory/worker.ex` (C2; D-309, D-310, D-311, D-316 + heartbeat emission; D-326 `work_ready` decode/forward in `handle_info({port,{:data,_}},…)`; **D-381** append `{"TAU_AGENT_PROMPT", brief}` to the `Port.open` `:env` list in `open_port_final/5`) — PR-FLEET-1/2; D-326 wiring is P5c-3; D-381 is PR #515
 - `lib/tau/factory/worker_registry.ex` (C3; key-not-pid identity) — PR-FLEET-1
 - `lib/tau/factory/worker/isolation.ex` (C5; D-309, D-311 — pure namespace/verify helpers) — PR-FLEET-2
 - `lib/tau/factory/workspace_janitor.ex` (C4; D-313, D-314, D-334 — `:DOWN` monitor) — PR-FLEET-3
@@ -896,7 +966,7 @@ Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 - `test/tau/factory/worker_stalled_test.exs` (watchdog; feeds CORE D-317) — PR-FLEET-4
 - `test/tau/factory/worker_completion_event_test.exs` (D-326 — `work_ready` vs exit-0 no-op vs stale `worker_id`) — P5c-3
 - `test/tau/factory/oracle_spawn_order_test.exs` (D-304 mechanism, cited) — PR-FLEET-4
-- `lib/tau/factory/coding_agent_shim.ex` (B4-A1; D-364..D-367 — drives `Tau.CodingAgent`, owns branch+commit, emits `work_ready`/heartbeat frames) — PR-A1 (#487)
+- `lib/tau/factory/coding_agent_shim.ex` (B4-A1; D-364..D-367 — drives `Tau.CodingAgent`, owns branch+commit, emits `work_ready`/heartbeat frames; **D-381** `Runner.main/1` reads `System.get_env("TAU_AGENT_PROMPT")` into `task.prompt` in `run_single_stream`/`run_phased_stream`) — PR-A1 (#487); D-381 is PR #515
 - `lib/tau/factory/dogfood/agent.ex` (the canned script the shim replaces as the real-dogfood `agent_bin`; D-358 retained for the orchestration smoke) — PR-A1 (#487)
 - `lib/tau/factory/agent_bin.ex` (D-376 — `AgentBin.resolve/1`; config-gated selector mapping `:agent_mode` → `{agent_bin_path, spawn_opts}`) — PR #512 (#511)
 - `lib/mix/tasks/tau.factory.dogfood.ex` (D-376 — wired to `AgentBin.resolve/1`; default mode stays scripted/replay; existing dogfood gates unaffected) — PR #512 (#511)
@@ -905,6 +975,7 @@ Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 - `test/tau/factory/coding_agent_shim_isolation_test.exs` (D-365 — shim+sub-agent inside `ws`/namespace) — PR-A1
 - `test/tau/factory/coding_agent_shim_heartbeat_test.exs` (D-366 — heartbeat tracks stream progress) — PR-A1
 - `test/tau/factory/coding_agent_shim_containment_test.exs` (D-367 — `claude`/dispatcher crash surfaces, not hang) — PR-A1
+- `test/tau/factory/coding_agent_shim_prompt_test.exs` (**D-381** — per-unit brief delivered to `task.prompt` via `TAU_AGENT_PROMPT`; argv carries `-p <brief>`; `ANTHROPIC_*` scrub unaffected) — PR #515
 
 **Cross-SPEC boundaries (cited, not owned here):** B1/B6/B7 → `SPEC-FACTORY-CORE`
 (D-315 durable capture record, D-317 `worker_stalled` consumer, D-318 retry
