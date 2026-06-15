@@ -1,56 +1,63 @@
 defmodule Tau.Factory.UnitHeartbeatLivenessTest do
   @moduledoc """
-  Gating tests for PR #513 (issue #491 — GOV4 heartbeat-driven Unit liveness).
+  Gating tests for PR #513 (issue #491 — GOV4 unified oracle/implementing
+  worker-outcome FSM, D-377/D-378/D-379 + D-315 durability).
 
-  Advances D-315, D-377, D-378, D-379 (SPEC-FACTORY-CORE §3/§4/§6):
+  ## Invariants under test
 
   - **D-377** — the Unit re-arms its `:state_timeout` on every current-worker
-    `{:worker_heartbeat, worker_id}` pulse. A progressing worker never trips the
-    fixed cap; absence of heartbeats escalates `E_WORKER_STALLED` at the deadline.
+    `{:worker_heartbeat, worker_id}` pulse **in both `oracle` and `implementing`**.
+    A progressing worker never trips the fixed cap; absence of heartbeats
+    escalates `E_WORKER_STALLED` at the deadline.
 
-  - **D-378** — exactly ONE advance of the retry ladder per worker per state when
-    stall signals arrive in close succession (`{:worker_stalled, w}`,
-    `{:worker_exit, w, _}` for the same worker). The first consumed signal
-    clears `data.worker_id`; later ones hit the stale-worker discard clause.
-    Separately: the Unit's OWN `:state_timeout` (real gen_statem timer; fires on
-    total heartbeat silence) escalates `E_WORKER_STALLED` — the hard-stall path
-    (D-377, preserves #490/D-326). These two classes are disjoint: the first
-    stall-class signal consumed clears `worker_id` → later signals discard →
-    EXACTLY ONE outcome per worker, no double-fire.
+  - **D-378** — **ONE symmetric rule for BOTH waiting states.** `oracle` and
+    `implementing` handle the worker-outcome signal set identically:
+    - `{:worker_stalled, ^worker_id}` → retry ladder → **originating state**
+      (oracle→oracle, implementing→implementing).
+    - `{:worker_exit, ^worker_id, reason}` → retry ladder → **originating state**.
+    - First stall-class signal clears `data.worker_id`; later signals for the
+      same worker hit the stale-discard clause → EXACTLY ONE ladder advance per
+      worker per state.
+    The `advance_retry_ladder/2` function takes the originating state so
+    re-spawn re-enters the correct role.
 
-  - **D-379** — (a) the Unit routes `{:worker_stalled, ^worker_id}` → retry ladder
-    (same path as `:state_timeout`); stale-worker `{:worker_stalled, _}` is
-    discarded. (b) `UnitDriver.drive/2` registers each spawned worker with the
-    fleet `Watchdog` (via a `:watchdog` dep), delivering `{:worker_stalled, _}`
-    to the owning Unit.
+  - **D-379** — (a) `oracle` AND `implementing` both consume `{:worker_stalled,
+    ^worker_id}` AND `{:worker_exit, ^worker_id, _}` → retry ladder; stale-worker
+    variants are discarded. (b) `UnitDriver.drive/2` registers each spawned worker
+    with the fleet `Watchdog` (via a `:watchdog` dep), delivering
+    `{:worker_stalled, _}` to the owning Unit.
+    **Run-#2 regression**: `oracle` previously had NO `{:worker_exit, _, _}` clause —
+    an oracle worker exiting with `:no_work_product` would be silently discarded
+    rather than routed to the retry ladder.
 
-  - **D-315** — RPO=0 durability for the stall re-spawn path: the deferred spawn
-    triggered by `{:worker_stalled, ^worker_id}` MUST call `snapshot_state/2`
-    (i.e. write a Ledger snapshot) AND bump `attempt_count`, exactly as the normal
-    `:on_enter` path does. The deferred path (`advance_retry_ladder_deferred/1` →
-    `do_spawn_worker/1`) currently skips both, violating D-315.
+  - **D-315** — RPO=0 durability for stall re-spawn: the ladder's `:on_enter`
+    bumps `attempt_count` **and** calls `snapshot_state/2` (writing a Ledger row)
+    **before** spawning the next worker — in BOTH `oracle` and `implementing`.
+    There is **no separate `:deferred_spawn` / `do_spawn_worker` path**; the
+    ladder transition is the re-spawn.
 
   ## Fail-before validity (oracle-separation, factory-loop §4b)
 
-  These tests fail against the current branch because:
-  - `oracle`/`implementing` have no `{:worker_heartbeat, _}` clause — D-377 absent.
-  - `oracle`/`implementing` have no `{:worker_stalled, _}` clause — D-379 absent.
-  - `UnitDriver.drive/2` has no `:watchdog` dep and does not call
-    `Watchdog.register/5` — D-379 producer absent.
-  - The deferred-spawn path (`advance_retry_ladder_deferred/1` → `do_spawn_worker/1`)
-    skips `attempt_count++` and `snapshot_state(:implementing, ...)` — D-315 absent.
+  These tests fail against the current RED branch (`821c7af`) because:
+  - `oracle` has no `{:worker_exit, _, _}` clause (run-#2 regression, D-379).
+  - `advance_retry_ladder/2` is arity-1 and hardcodes `:implementing` as the
+    re-entered state — an oracle stall re-enters `:implementing`, not `:oracle`.
+  - `implementing`'s `{:worker_stalled, _}` uses the removed
+    `:deferred_spawn`/`do_spawn_worker` path instead of `advance_retry_ladder/2`.
+  - D-315 oracle path: oracle ladder re-enter skips `attempt_count++` and
+    `snapshot_state/2` (the `:on_enter` of the wrongly-re-entered state runs,
+    but for `:implementing`, not `:oracle`).
 
   ## AC / D-NNN linkage (Gate 5.1)
 
   Every test name and @tag carries D-315, D-377, D-378, or D-379.
   """
 
-  # async: false — this module exercises timing-sensitive OTP state_timeout
-  # behaviour. Under full-suite concurrency (100+ test processes) the BEAM
-  # scheduler starves a spawned heartbeat sender, causing false state_timeout
-  # trips in D-377. Serialising the module eliminates scheduler starvation as
-  # a confound; the individual tests still start uniquely-named supervisors so
-  # there is no inter-test resource collision.
+  # async: false — exercises timing-sensitive OTP :state_timeout behaviour.
+  # Under full-suite concurrency the BEAM scheduler can starve a heartbeat
+  # sender, causing false :state_timeout trips. Serialising the module
+  # eliminates scheduler starvation as a confound; individual tests still
+  # start uniquely-named supervisors so there is no inter-test collision.
   use ExUnit.Case, async: false
 
   @moduletag :capture_log
@@ -106,7 +113,7 @@ defmodule Tau.Factory.UnitHeartbeatLivenessTest do
     writer_name
   end
 
-  # Base opts threaded through each test.  `overrides` replaces defaults.
+  # Base opts threaded through each test. `overrides` replaces defaults.
   defp base_unit_opts(unit_id, scheduler_name, report_to, overrides) do
     defaults = [
       unit_id: unit_id,
@@ -148,6 +155,31 @@ defmodule Tau.Factory.UnitHeartbeatLivenessTest do
     end
   end
 
+  # Poll until the Unit is in :oracle; return {:oracle, data} or
+  # {:timeout, last_state} on deadline.
+  defp wait_for_oracle(unit_pid, deadline_ms \\ 2_000) do
+    deadline = System.monotonic_time(:millisecond) + deadline_ms
+    do_wait_oracle(unit_pid, deadline)
+  end
+
+  defp do_wait_oracle(unit_pid, deadline) do
+    case :sys.get_state(unit_pid) do
+      {:oracle, data} ->
+        {:oracle, data}
+
+      {:planned, _} ->
+        if System.monotonic_time(:millisecond) >= deadline do
+          {:timeout, :planned}
+        else
+          Process.sleep(20)
+          do_wait_oracle(unit_pid, deadline)
+        end
+
+      {state, data} ->
+        {state, data}
+    end
+  end
+
   # Advance past oracle by sending work_ready to the oracle worker.
   defp advance_past_oracle(unit_pid, oracle_worker_id, deadline_ms \\ 2_000) do
     deadline = System.monotonic_time(:millisecond) + deadline_ms
@@ -177,10 +209,10 @@ defmodule Tau.Factory.UnitHeartbeatLivenessTest do
   end
 
   # ---------------------------------------------------------------------------
-  # D-377 — heartbeat resets state_timeout; absence trips stall at deadline
+  # D-377 — heartbeat resets :state_timeout in BOTH waiting states
   # ---------------------------------------------------------------------------
 
-  describe "D-377 — heartbeat resets :state_timeout, progressing worker never escalates" do
+  describe "D-377 — heartbeat resets :state_timeout; progressing worker never escalates" do
     @tag :d_377
     test "D-377: {worker_heartbeat, current_worker_id} at sub-timeout intervals keeps Unit in :implementing past old fixed cap" do
       test_pid = self()
@@ -191,11 +223,7 @@ defmodule Tau.Factory.UnitHeartbeatLivenessTest do
       start_scheduler(scheduler_name)
       start_supervised!({@unit_supervisor, name: sup_name}, id: sup_name)
 
-      # Generous timeout — 1000ms gives the BEAM scheduler ample room under full
-      # suite load (100+ concurrent tests) without being so tight that jitter
-      # causes a false trip.  Without D-377 heartbeat-reset the Unit would still
-      # escalate E_WORKER_STALLED at state_timeout_ms; with D-377 each pulse
-      # re-arms the timer so the Unit stays in :implementing indefinitely.
+      # 1000ms gives the BEAM scheduler ample room under full suite load.
       state_timeout_ms = 1_000
 
       oracle_worker_id = "w-hb-oracle-#{System.unique_integer([:positive])}"
@@ -225,23 +253,14 @@ defmodule Tau.Factory.UnitHeartbeatLivenessTest do
              "D-377: Unit must reach :implementing; got #{inspect(result)}"
 
       # Drive heartbeats from the TEST PROCESS at 200ms intervals (well below the
-      # 1000ms state_timeout_ms) for 3× the deadline (3000ms total).  Driving
-      # from the test process — rather than a spawned ticker — ensures the sends
-      # are not subject to a separate process being starved by the scheduler under
-      # full-suite load.  The test process itself is always the scheduling victim
-      # here, and it uses Process.sleep between sends, which is deterministic.
-      #
-      # Without D-377: the state_timeout fires at 1000ms on the first iteration
-      # (no reset clause) and the Unit escalates → test fails.
-      # With D-377: each {:worker_heartbeat, impl_worker_id} re-arms the 1000ms
-      # timer, so the Unit is still :implementing at 3000ms.
+      # 1000ms state_timeout_ms) for 3× the deadline (3000ms total).
+      # Without D-377: the state_timeout fires at 1000ms → escalate.
+      # With D-377: each pulse re-arms the timer → Unit stays in :implementing.
       hb_interval_ms = 200
       total_hb_duration_ms = 3 * state_timeout_ms
 
       hb_loop_from_test(unit_pid, impl_worker_id, hb_interval_ms, total_hb_duration_ms)
 
-      # Immediately after the heartbeat loop finishes, the Unit must still be in
-      # :implementing (the last heartbeat re-armed the timer; no escalation).
       {state_after, _data} = :sys.get_state(unit_pid)
 
       assert state_after == :implementing,
@@ -249,8 +268,59 @@ defmodule Tau.Factory.UnitHeartbeatLivenessTest do
                "intervals (well below #{state_timeout_ms}ms state_timeout) MUST stay " <>
                "in :implementing past the old fixed cap (#{total_hb_duration_ms}ms total). " <>
                "Got state=#{inspect(state_after)}. " <>
-               "FAIL-BEFORE: no {:worker_heartbeat, _} clause exists — the Unit trips " <>
-               ":state_timeout at #{state_timeout_ms}ms and escalates E_WORKER_STALLED."
+               "FAIL-BEFORE: no {:worker_heartbeat, _} clause in oracle/3 or implementing/3."
+    end
+
+    @tag :d_377
+    test "D-377: {worker_heartbeat, current_worker_id} at sub-timeout intervals keeps Unit in :oracle past old fixed cap" do
+      test_pid = self()
+      unit_id = "u-hb-oracle-reset-#{System.unique_integer([:positive])}"
+      scheduler_name = :"sched_hb_oracle_reset_#{System.unique_integer([:positive])}"
+      sup_name = :"sup_hb_oracle_reset_#{System.unique_integer([:positive])}"
+
+      start_scheduler(scheduler_name)
+      start_supervised!({@unit_supervisor, name: sup_name}, id: sup_name)
+
+      state_timeout_ms = 1_000
+
+      oracle_worker_id = "w-hb-oracle2-#{System.unique_integer([:positive])}"
+      call_count = :counters.new(1, [:atomics])
+
+      worker_fun = fn _role ->
+        n = :counters.get(call_count, 1)
+        :counters.add(call_count, 1, 1)
+        pid = spawn_worker()
+        if n == 0, do: {:ok, pid, oracle_worker_id}, else: {:ok, pid, "re-spawned"}
+      end
+
+      opts =
+        base_unit_opts(unit_id, scheduler_name, test_pid,
+          worker_fun: worker_fun,
+          timeouts: [state_timeout_ms: state_timeout_ms]
+        )
+
+      unit_pid = @unit_supervisor.start_unit(sup_name, opts)
+      assert is_pid(unit_pid)
+
+      # Wait in :oracle state — do NOT advance past oracle.
+      result = wait_for_oracle(unit_pid)
+
+      assert match?({:oracle, _}, result),
+             "D-377 oracle: Unit must reach :oracle; got #{inspect(result)}"
+
+      hb_interval_ms = 200
+      total_hb_duration_ms = 3 * state_timeout_ms
+
+      hb_loop_from_test(unit_pid, oracle_worker_id, hb_interval_ms, total_hb_duration_ms)
+
+      {state_after, _data} = :sys.get_state(unit_pid)
+
+      assert state_after == :oracle,
+             "D-377: Unit fed {:worker_heartbeat, current_id} in :oracle at #{hb_interval_ms}ms " <>
+               "intervals MUST stay in :oracle past the old fixed cap " <>
+               "(#{total_hb_duration_ms}ms total). " <>
+               "Got state=#{inspect(state_after)}. " <>
+               "FAIL-BEFORE: no {:worker_heartbeat, _} clause in oracle/3."
     end
 
     @tag :d_377
@@ -291,7 +361,7 @@ defmodule Tau.Factory.UnitHeartbeatLivenessTest do
       assert match?({:implementing, _}, result),
              "D-377: Unit must reach :implementing; got #{inspect(result)}"
 
-      # No heartbeats sent — state_timeout must fire at deadline.
+      # No heartbeats — state_timeout must fire at deadline.
       assert_receive {:unit_terminal, ^unit_id, :escalated, provenance},
                      500,
                      "D-377: without heartbeats, Unit MUST escalate via :state_timeout " <>
@@ -305,37 +375,31 @@ defmodule Tau.Factory.UnitHeartbeatLivenessTest do
   end
 
   # ---------------------------------------------------------------------------
-  # D-378 — exactly one ladder advance when REAL stall signals arrive in succession
+  # D-378 — ONE symmetric rule: both :oracle and :implementing advance ladder
+  # EXACTLY ONCE for a burst of stall signals
   # ---------------------------------------------------------------------------
   #
-  # Contract (reconciled two-outcome model):
+  # The UNIFIED contract: oracle and implementing handle worker_stalled and
+  # worker_exit identically — advance_retry_ladder/2 takes the originating
+  # state and re-enters IT, not hardcoded :implementing.
   #
-  # The Watchdog delivers TWO kinds of signals to the Unit:
-  #   {: worker_stalled, worker_id} — heartbeat-absence (the retry-ladder path)
-  #   {:worker_exit,    worker_id, reason} — worker process exited (retry-ladder)
-  #
-  # The Unit's OWN :state_timeout (total heartbeat silence) is SEPARATE and
-  # escalates E_WORKER_STALLED (tested by D-377 above).
-  #
-  # D-378 disjointness: the FIRST stall-class signal consumed clears
+  # D-378 disjointness: the first stall-class signal consumed clears
   # data.worker_id → later signals for the SAME worker hit the stale-worker
-  # discard clause → EXACTLY ONE ladder advance per worker, no double-fire.
+  # discard clause → EXACTLY ONE ladder advance per worker per state.
   # ---------------------------------------------------------------------------
 
-  describe "D-378 — exactly one retry-ladder advance for close-succession real stall signals" do
+  describe "D-378 — exactly one retry-ladder advance for close-succession stall signals in :implementing" do
     @tag :d_378
-    test "D-378: worker_stalled then worker_exit then second worker_stalled for same worker advances ladder EXACTLY ONCE - later signals stale-discarded" do
+    test "D-378 implementing: burst stall signals for same worker advance ladder EXACTLY ONCE re-entering :implementing" do
       test_pid = self()
-      unit_id = "u-d378-once-#{System.unique_integer([:positive])}"
-      scheduler_name = :"sched_d378_#{System.unique_integer([:positive])}"
-      sup_name = :"sup_d378_#{System.unique_integer([:positive])}"
+      unit_id = "u-d378-impl-once-#{System.unique_integer([:positive])}"
+      scheduler_name = :"sched_d378_impl_#{System.unique_integer([:positive])}"
+      sup_name = :"sup_d378_impl_#{System.unique_integer([:positive])}"
 
       start_scheduler(scheduler_name)
       start_supervised!({@unit_supervisor, name: sup_name}, id: sup_name)
 
-      # Disable the real state_timeout with a long timer so we can deliver signals
-      # manually and control the ordering precisely.
-      oracle_worker_id = "w-d378-oracle-#{System.unique_integer([:positive])}"
+      oracle_worker_id = "w-d378-impl-oracle-#{System.unique_integer([:positive])}"
       impl_worker_id = "w-d378-impl-#{System.unique_integer([:positive])}"
       call_count = :counters.new(1, [:atomics])
 
@@ -349,7 +413,6 @@ defmodule Tau.Factory.UnitHeartbeatLivenessTest do
       opts =
         base_unit_opts(unit_id, scheduler_name, test_pid,
           worker_fun: worker_fun,
-          # Long timeout so the real :state_timeout does not fire during the test.
           timeouts: [state_timeout_ms: 10_000]
         )
 
@@ -360,27 +423,21 @@ defmodule Tau.Factory.UnitHeartbeatLivenessTest do
       result = wait_for_implementing(unit_pid)
 
       assert match?({:implementing, _}, result),
-             "D-378: Unit must reach :implementing; got #{inspect(result)}"
+             "D-378 implementing: Unit must reach :implementing; got #{inspect(result)}"
 
       {:implementing, data_before} = result
       refine_before = Map.get(data_before, :refine_count, 0)
       attempt_before = Map.get(data_before, :attempt_count, 0)
 
-      # Deliver three successive REAL stall signals for the SAME worker in one burst.
-      # D-378: the first {:worker_stalled, impl_worker_id} must clear data.worker_id;
-      # the second and third signals (worker_exit and another worker_stalled for the
-      # same id) must hit the stale-worker discard clause and be ignored.
-      #
-      # NOTE: we do NOT use the synthetic info-form {:state_timeout, :worker_stalled}
-      # message — that was a production-dead clause used only to support the prior
-      # test. The REAL signals are {:worker_stalled, w} and {:worker_exit, w, _},
-      # which are what the fleet Watchdog and worker supervisor actually deliver.
+      # Burst of three stall signals for the SAME implementing worker.
+      # D-378: first clears worker_id; second + third are stale-discarded.
+      # Result: exactly ONE ladder advance, Unit re-enters :implementing
+      # (the originating state, per the unified symmetric rule).
       send(unit_pid, {:worker_stalled, impl_worker_id})
       send(unit_pid, {:worker_exit, impl_worker_id, :no_work_product})
       send(unit_pid, {:worker_stalled, impl_worker_id})
 
-      # Allow all three messages to be processed, plus the deferred :deferred_spawn
-      # to fire (it lands at the end of the mailbox after the stale signals).
+      # Allow all three messages to be processed plus the on_enter to run.
       Process.sleep(400)
 
       {state_after, data_after} = :sys.get_state(unit_pid)
@@ -392,34 +449,121 @@ defmodule Tau.Factory.UnitHeartbeatLivenessTest do
       total_advance_after = refine_after + attempt_after
 
       assert state_after == :implementing,
-             "D-378: after exactly one ladder advance Unit must be in :implementing; " <>
-               "got #{inspect(state_after)}"
+             "D-378 implementing: after exactly one ladder advance Unit must be in " <>
+               ":implementing (originating state); got #{inspect(state_after)}. " <>
+               "FAIL-BEFORE: advance_retry_ladder/1 hardcodes :implementing so this " <>
+               "may accidentally pass — but advance_retry_ladder/2 (originating state) " <>
+               "must re-enter :implementing for the implementing case."
 
       assert total_advance_after - total_advance_before == 1,
-             "D-378: three stall signals for one worker must advance ladder EXACTLY once. " <>
-               "Advanced by #{total_advance_after - total_advance_before} (expected 1). " <>
+             "D-378 implementing: three stall signals for one worker must advance " <>
+               "ladder EXACTLY once. Advanced by " <>
+               "#{total_advance_after - total_advance_before} (expected 1). " <>
                "refine #{refine_before}->#{refine_after}, " <>
                "attempt #{attempt_before}->#{attempt_after}. " <>
-               "FAIL-BEFORE: no {:worker_stalled,_} clause / no worker_id-clear."
+               "FAIL-BEFORE: deferred-spawn path or double-fire."
     end
   end
 
-  # ---------------------------------------------------------------------------
-  # D-379(a) — Unit consumes {worker_stalled, ^worker_id} → ladder; stale → discard
-  # ---------------------------------------------------------------------------
-
-  describe "D-379(a) — Unit routes {worker_stalled, current_id} to retry ladder; stale is discarded" do
-    @tag :d_379
-    test "D-379: {:worker_stalled, current_worker_id} in :implementing advances retry ladder (same as :state_timeout)" do
+  describe "D-378 — exactly one retry-ladder advance for close-succession stall signals in :oracle" do
+    @tag :d_378
+    test "D-378 oracle: burst stall signals for same oracle worker advance ladder EXACTLY ONCE and re-enter :oracle (NOT :implementing)" do
       test_pid = self()
-      unit_id = "u-d379a-stalled-#{System.unique_integer([:positive])}"
-      scheduler_name = :"sched_d379a_#{System.unique_integer([:positive])}"
-      sup_name = :"sup_d379a_#{System.unique_integer([:positive])}"
+      unit_id = "u-d378-oracle-once-#{System.unique_integer([:positive])}"
+      scheduler_name = :"sched_d378_oracle_#{System.unique_integer([:positive])}"
+      sup_name = :"sup_d378_oracle_#{System.unique_integer([:positive])}"
 
       start_scheduler(scheduler_name)
       start_supervised!({@unit_supervisor, name: sup_name}, id: sup_name)
 
-      oracle_worker_id = "w-d379a-oracle-#{System.unique_integer([:positive])}"
+      oracle_worker_id = "w-d378-oracle-#{System.unique_integer([:positive])}"
+      # Track all worker_fun invocations; the re-spawned oracle gets a new id
+      # so we know the ladder fired.
+      respawn_worker_id = "w-d378-oracle-respawn-#{System.unique_integer([:positive])}"
+      call_count = :counters.new(1, [:atomics])
+
+      worker_fun = fn _role ->
+        n = :counters.get(call_count, 1)
+        :counters.add(call_count, 1, 1)
+        pid = spawn_worker()
+
+        case n do
+          0 -> {:ok, pid, oracle_worker_id}
+          _ -> {:ok, pid, respawn_worker_id}
+        end
+      end
+
+      opts =
+        base_unit_opts(unit_id, scheduler_name, test_pid,
+          worker_fun: worker_fun,
+          timeouts: [state_timeout_ms: 10_000]
+        )
+
+      unit_pid = @unit_supervisor.start_unit(sup_name, opts)
+      assert is_pid(unit_pid)
+
+      # Wait in :oracle — do NOT send work_ready.
+      result = wait_for_oracle(unit_pid)
+
+      assert match?({:oracle, _}, result),
+             "D-378 oracle: Unit must reach :oracle; got #{inspect(result)}"
+
+      {:oracle, data_before} = result
+      refine_before = Map.get(data_before, :refine_count, 0)
+      attempt_before = Map.get(data_before, :attempt_count, 0)
+
+      # Burst of three stall signals for the SAME oracle worker.
+      # D-378 unified symmetric rule: first clears worker_id → re-enters :oracle;
+      # second + third are stale-discarded → exactly ONE ladder advance total.
+      send(unit_pid, {:worker_stalled, oracle_worker_id})
+      send(unit_pid, {:worker_exit, oracle_worker_id, :no_work_product})
+      send(unit_pid, {:worker_stalled, oracle_worker_id})
+
+      # Allow all three messages to process plus the oracle :on_enter.
+      Process.sleep(400)
+
+      {state_after, data_after} = :sys.get_state(unit_pid)
+
+      refine_after = Map.get(data_after, :refine_count, 0)
+      attempt_after = Map.get(data_after, :attempt_count, 0)
+
+      total_advance_before = refine_before + attempt_before
+      total_advance_after = refine_after + attempt_after
+
+      assert state_after == :oracle,
+             "D-378 oracle: after exactly one ladder advance Unit must be in " <>
+               ":oracle (the ORIGINATING state, not :implementing). " <>
+               "Got #{inspect(state_after)}. " <>
+               "FAIL-BEFORE: advance_retry_ladder/1 hardcodes :implementing — " <>
+               "the oracle stall re-enters :implementing, skipping oracle-separation."
+
+      assert total_advance_after - total_advance_before == 1,
+             "D-378 oracle: three stall signals for one oracle worker must advance " <>
+               "ladder EXACTLY once. Advanced by " <>
+               "#{total_advance_after - total_advance_before} (expected 1). " <>
+               "refine #{refine_before}->#{refine_after}, " <>
+               "attempt #{attempt_before}->#{attempt_after}."
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # D-379(a) — Unit consumes {worker_stalled, ^worker_id} AND
+  # {worker_exit, ^worker_id, _} in BOTH :oracle and :implementing;
+  # stale variants are discarded in both states.
+  # ---------------------------------------------------------------------------
+
+  describe "D-379(a) implementing — stalled/exit route to retry ladder; stale discarded" do
+    @tag :d_379
+    test "D-379 implementing: {:worker_stalled, current_worker_id} advances retry ladder and re-enters :implementing" do
+      test_pid = self()
+      unit_id = "u-d379a-impl-stalled-#{System.unique_integer([:positive])}"
+      scheduler_name = :"sched_d379a_impl_#{System.unique_integer([:positive])}"
+      sup_name = :"sup_d379a_impl_#{System.unique_integer([:positive])}"
+
+      start_scheduler(scheduler_name)
+      start_supervised!({@unit_supervisor, name: sup_name}, id: sup_name)
+
+      oracle_worker_id = "w-d379a-impl-oracle-#{System.unique_integer([:positive])}"
       impl_worker_id = "w-d379a-impl-#{System.unique_integer([:positive])}"
       call_count = :counters.new(1, [:atomics])
 
@@ -443,49 +587,109 @@ defmodule Tau.Factory.UnitHeartbeatLivenessTest do
       result = wait_for_implementing(unit_pid)
 
       assert match?({:implementing, _}, result),
-             "D-379: Unit must reach :implementing; got #{inspect(result)}"
+             "D-379 implementing: Unit must reach :implementing; got #{inspect(result)}"
 
       {:implementing, data_before} = result
       refine_before = Map.get(data_before, :refine_count, 0)
       attempt_before = Map.get(data_before, :attempt_count, 0)
 
-      # Deliver the Watchdog's stall signal for the CURRENT worker.
       send(unit_pid, {:worker_stalled, impl_worker_id})
-
       Process.sleep(250)
 
       {state_after, data_after} = :sys.get_state(unit_pid)
 
       assert state_after == :implementing,
-             "D-379: {:worker_stalled, current_worker_id} must advance the retry ladder " <>
-               "and re-enter :implementing; got #{inspect(state_after)}. " <>
-               "FAIL-BEFORE: no {:worker_stalled, _} clause in implementing/3 — " <>
-               "the message is routed to handle_unexpected/4 and silently ignored."
+             "D-379 implementing: {:worker_stalled, current_worker_id} must advance " <>
+               "the retry ladder and re-enter :implementing; got #{inspect(state_after)}. " <>
+               "FAIL-BEFORE: deferred_spawn path still in place; the message is processed " <>
+               "via do_spawn_worker (keep_state, not next_state :implementing via ladder)."
 
       refine_after = Map.get(data_after, :refine_count, 0)
       attempt_after = Map.get(data_after, :attempt_count, 0)
 
       assert refine_after > refine_before or attempt_after > attempt_before,
-             "D-379: {:worker_stalled, current_id} must advance the ladder; " <>
+             "D-379 implementing: {:worker_stalled, current_id} must advance the ladder; " <>
                "refine #{refine_before}→#{refine_after}, " <>
                "attempt #{attempt_before}→#{attempt_after}"
 
       refute_received {:unit_terminal, ^unit_id, _outcome, _prov},
-                      "D-379: a single {:worker_stalled, current_id} must route to retry, " <>
-                        "not terminate the Unit"
+                      "D-379 implementing: a single {:worker_stalled, current_id} must " <>
+                        "route to retry, not terminate the Unit"
     end
 
     @tag :d_379
-    test "D-379: {:worker_stalled, stale_worker_id} in :implementing is silently discarded — no ladder advance" do
+    test "D-379 implementing: {:worker_exit, current_worker_id, :no_work_product} advances retry ladder and re-enters :implementing" do
       test_pid = self()
-      unit_id = "u-d379a-stale-#{System.unique_integer([:positive])}"
-      scheduler_name = :"sched_d379a_stale_#{System.unique_integer([:positive])}"
-      sup_name = :"sup_d379a_stale_#{System.unique_integer([:positive])}"
+      unit_id = "u-d379a-impl-exit-#{System.unique_integer([:positive])}"
+      scheduler_name = :"sched_d379a_impl_exit_#{System.unique_integer([:positive])}"
+      sup_name = :"sup_d379a_impl_exit_#{System.unique_integer([:positive])}"
 
       start_scheduler(scheduler_name)
       start_supervised!({@unit_supervisor, name: sup_name}, id: sup_name)
 
-      oracle_worker_id = "w-d379as-oracle-#{System.unique_integer([:positive])}"
+      oracle_worker_id = "w-d379a-impl-exit-oracle-#{System.unique_integer([:positive])}"
+      impl_worker_id = "w-d379a-impl-exit-#{System.unique_integer([:positive])}"
+      call_count = :counters.new(1, [:atomics])
+
+      worker_fun = fn _role ->
+        n = :counters.get(call_count, 1)
+        :counters.add(call_count, 1, 1)
+        pid = spawn_worker()
+        if n == 0, do: {:ok, pid, oracle_worker_id}, else: {:ok, pid, impl_worker_id}
+      end
+
+      opts =
+        base_unit_opts(unit_id, scheduler_name, test_pid,
+          worker_fun: worker_fun,
+          timeouts: [state_timeout_ms: 10_000]
+        )
+
+      unit_pid = @unit_supervisor.start_unit(sup_name, opts)
+      assert is_pid(unit_pid)
+
+      advance_past_oracle(unit_pid, oracle_worker_id)
+      result = wait_for_implementing(unit_pid)
+
+      assert match?({:implementing, _}, result),
+             "D-379 implementing worker_exit: Unit must reach :implementing; got #{inspect(result)}"
+
+      {:implementing, data_before} = result
+      refine_before = Map.get(data_before, :refine_count, 0)
+      attempt_before = Map.get(data_before, :attempt_count, 0)
+
+      send(unit_pid, {:worker_exit, impl_worker_id, :no_work_product})
+      Process.sleep(250)
+
+      {state_after, data_after} = :sys.get_state(unit_pid)
+
+      assert state_after == :implementing,
+             "D-379 implementing: {:worker_exit, current_worker_id, :no_work_product} must " <>
+               "advance the retry ladder and re-enter :implementing; got #{inspect(state_after)}."
+
+      refine_after = Map.get(data_after, :refine_count, 0)
+      attempt_after = Map.get(data_after, :attempt_count, 0)
+
+      assert refine_after > refine_before or attempt_after > attempt_before,
+             "D-379 implementing: {:worker_exit, current_id, _} must advance the ladder; " <>
+               "refine #{refine_before}→#{refine_after}, " <>
+               "attempt #{attempt_before}→#{attempt_after}"
+
+      refute_received {:unit_terminal, ^unit_id, _outcome, _prov},
+                      "D-379 implementing: a single {:worker_exit, current_id, _} must " <>
+                        "route to retry, not terminate the Unit"
+    end
+
+    @tag :d_379
+    test "D-379 implementing: {:worker_stalled, stale_worker_id} is silently discarded — no ladder advance" do
+      test_pid = self()
+      unit_id = "u-d379a-impl-stale-#{System.unique_integer([:positive])}"
+      scheduler_name = :"sched_d379a_impl_stale_#{System.unique_integer([:positive])}"
+      sup_name = :"sup_d379a_impl_stale_#{System.unique_integer([:positive])}"
+
+      start_scheduler(scheduler_name)
+      start_supervised!({@unit_supervisor, name: sup_name}, id: sup_name)
+
+      oracle_worker_id = "w-d379as-impl-oracle-#{System.unique_integer([:positive])}"
       impl_worker_id = "w-d379as-impl-#{System.unique_integer([:positive])}"
       call_count = :counters.new(1, [:atomics])
 
@@ -509,7 +713,7 @@ defmodule Tau.Factory.UnitHeartbeatLivenessTest do
       result = wait_for_implementing(unit_pid)
 
       assert match?({:implementing, _}, result),
-             "D-379 stale: Unit must reach :implementing; got #{inspect(result)}"
+             "D-379 implementing stale: Unit must reach :implementing; got #{inspect(result)}"
 
       {:implementing, data_before} = result
       refine_before = Map.get(data_before, :refine_count, 0)
@@ -517,25 +721,217 @@ defmodule Tau.Factory.UnitHeartbeatLivenessTest do
 
       stale_id = "w-d379-stale-#{System.unique_integer([:positive])}"
       send(unit_pid, {:worker_stalled, stale_id})
-
       Process.sleep(200)
 
       {state_after, data_after} = :sys.get_state(unit_pid)
 
       assert state_after == :implementing,
-             "D-379 stale: a {:worker_stalled, stale_id} must be discarded — " <>
+             "D-379 implementing stale: a {:worker_stalled, stale_id} must be discarded — " <>
                "Unit remains in :implementing; got #{inspect(state_after)}"
 
       refine_after = Map.get(data_after, :refine_count, 0)
       attempt_after = Map.get(data_after, :attempt_count, 0)
 
       assert refine_before == refine_after and attempt_before == attempt_after,
-             "D-379 stale: stale {:worker_stalled} must NOT advance the ladder; " <>
+             "D-379 implementing stale: stale {:worker_stalled} must NOT advance the ladder; " <>
                "refine #{refine_before}→#{refine_after}, " <>
                "attempt #{attempt_before}→#{attempt_after}"
 
       refute_received {:unit_terminal, ^unit_id, _outcome, _prov},
-                      "D-379 stale: stale {:worker_stalled} must not terminate the Unit"
+                      "D-379 implementing stale: stale {:worker_stalled} must not terminate the Unit"
+    end
+  end
+
+  describe "D-379(a) oracle — routes stalled/exit to retry ladder; stale discarded; re-enters :oracle" do
+    @tag :d_379
+    test "D-379 oracle: {:worker_stalled, current_oracle_worker_id} advances retry ladder re-enters :oracle not :implementing" do
+      test_pid = self()
+      unit_id = "u-d379a-oracle-stalled-#{System.unique_integer([:positive])}"
+      scheduler_name = :"sched_d379a_oracle_#{System.unique_integer([:positive])}"
+      sup_name = :"sup_d379a_oracle_#{System.unique_integer([:positive])}"
+
+      start_scheduler(scheduler_name)
+      start_supervised!({@unit_supervisor, name: sup_name}, id: sup_name)
+
+      oracle_worker_id = "w-d379a-oracle-#{System.unique_integer([:positive])}"
+      call_count = :counters.new(1, [:atomics])
+
+      worker_fun = fn _role ->
+        n = :counters.get(call_count, 1)
+        :counters.add(call_count, 1, 1)
+        pid = spawn_worker()
+        if n == 0, do: {:ok, pid, oracle_worker_id}, else: {:ok, pid, "re-oracle-#{n}"}
+      end
+
+      opts =
+        base_unit_opts(unit_id, scheduler_name, test_pid,
+          worker_fun: worker_fun,
+          timeouts: [state_timeout_ms: 10_000]
+        )
+
+      unit_pid = @unit_supervisor.start_unit(sup_name, opts)
+      assert is_pid(unit_pid)
+
+      result = wait_for_oracle(unit_pid)
+
+      assert match?({:oracle, _}, result),
+             "D-379 oracle: Unit must reach :oracle; got #{inspect(result)}"
+
+      {:oracle, data_before} = result
+      refine_before = Map.get(data_before, :refine_count, 0)
+      attempt_before = Map.get(data_before, :attempt_count, 0)
+
+      send(unit_pid, {:worker_stalled, oracle_worker_id})
+      Process.sleep(250)
+
+      {state_after, data_after} = :sys.get_state(unit_pid)
+
+      assert state_after == :oracle,
+             "D-379 oracle: {:worker_stalled, current_oracle_worker_id} must advance " <>
+               "the retry ladder and re-enter :oracle (the ORIGINATING state). " <>
+               "Got #{inspect(state_after)}. " <>
+               "FAIL-BEFORE: advance_retry_ladder/1 hardcodes :implementing — " <>
+               "the oracle stall re-enters :implementing, violating oracle-separation."
+
+      refine_after = Map.get(data_after, :refine_count, 0)
+      attempt_after = Map.get(data_after, :attempt_count, 0)
+
+      assert refine_after > refine_before or attempt_after > attempt_before,
+             "D-379 oracle: {:worker_stalled, current_id} must advance the ladder; " <>
+               "refine #{refine_before}→#{refine_after}, " <>
+               "attempt #{attempt_before}→#{attempt_after}"
+
+      refute_received {:unit_terminal, ^unit_id, _outcome, _prov},
+                      "D-379 oracle: a single {:worker_stalled, current_oracle_id} must " <>
+                        "route to retry, not terminate the Unit"
+    end
+
+    @tag :d_379
+    test "D-379 oracle: {:worker_exit, current_oracle_worker_id, :no_work_product} advances retry ladder and re-enters :oracle (run-#2 regression)" do
+      test_pid = self()
+      unit_id = "u-d379a-oracle-exit-#{System.unique_integer([:positive])}"
+      scheduler_name = :"sched_d379a_oracle_exit_#{System.unique_integer([:positive])}"
+      sup_name = :"sup_d379a_oracle_exit_#{System.unique_integer([:positive])}"
+
+      start_scheduler(scheduler_name)
+      start_supervised!({@unit_supervisor, name: sup_name}, id: sup_name)
+
+      oracle_worker_id = "w-d379a-oracle-exit-#{System.unique_integer([:positive])}"
+      call_count = :counters.new(1, [:atomics])
+
+      worker_fun = fn _role ->
+        n = :counters.get(call_count, 1)
+        :counters.add(call_count, 1, 1)
+        pid = spawn_worker()
+        if n == 0, do: {:ok, pid, oracle_worker_id}, else: {:ok, pid, "re-oracle-exit-#{n}"}
+      end
+
+      opts =
+        base_unit_opts(unit_id, scheduler_name, test_pid,
+          worker_fun: worker_fun,
+          timeouts: [state_timeout_ms: 10_000]
+        )
+
+      unit_pid = @unit_supervisor.start_unit(sup_name, opts)
+      assert is_pid(unit_pid)
+
+      result = wait_for_oracle(unit_pid)
+
+      assert match?({:oracle, _}, result),
+             "D-379 oracle worker_exit: Unit must reach :oracle; got #{inspect(result)}"
+
+      {:oracle, data_before} = result
+      refine_before = Map.get(data_before, :refine_count, 0)
+      attempt_before = Map.get(data_before, :attempt_count, 0)
+
+      # Run-#2 regression: oracle previously had NO {:worker_exit, _, _} clause.
+      # This signal would fall through to handle_unexpected/4 and be silently
+      # discarded — the oracle worker's no_work_product outcome was invisible to
+      # the Unit, violating D-379 and the unified symmetric rule.
+      send(unit_pid, {:worker_exit, oracle_worker_id, :no_work_product})
+      Process.sleep(250)
+
+      {state_after, data_after} = :sys.get_state(unit_pid)
+
+      assert state_after == :oracle,
+             "D-379 oracle (run-#2 regression): {:worker_exit, current_oracle_worker_id, " <>
+               ":no_work_product} must advance the retry ladder and re-enter :oracle. " <>
+               "Got #{inspect(state_after)}. " <>
+               "FAIL-BEFORE: oracle/3 has NO {:worker_exit, _, _} clause — the message " <>
+               "falls through to handle_unexpected/4 and is silently discarded."
+
+      refine_after = Map.get(data_after, :refine_count, 0)
+      attempt_after = Map.get(data_after, :attempt_count, 0)
+
+      assert refine_after > refine_before or attempt_after > attempt_before,
+             "D-379 oracle: {:worker_exit, current_oracle_id, :no_work_product} must " <>
+               "advance the ladder; refine #{refine_before}→#{refine_after}, " <>
+               "attempt #{attempt_before}→#{attempt_after}. " <>
+               "FAIL-BEFORE: no oracle worker_exit clause; ladder stays flat."
+
+      refute_received {:unit_terminal, ^unit_id, _outcome, _prov},
+                      "D-379 oracle: a single {:worker_exit, current_oracle_id, _} must " <>
+                        "route to retry, not terminate the Unit"
+    end
+
+    @tag :d_379
+    test "D-379 oracle: {:worker_stalled, stale_oracle_id} is silently discarded — no ladder advance" do
+      test_pid = self()
+      unit_id = "u-d379a-oracle-stale-#{System.unique_integer([:positive])}"
+      scheduler_name = :"sched_d379a_oracle_stale_#{System.unique_integer([:positive])}"
+      sup_name = :"sup_d379a_oracle_stale_#{System.unique_integer([:positive])}"
+
+      start_scheduler(scheduler_name)
+      start_supervised!({@unit_supervisor, name: sup_name}, id: sup_name)
+
+      oracle_worker_id = "w-d379as-oracle-#{System.unique_integer([:positive])}"
+      call_count = :counters.new(1, [:atomics])
+
+      worker_fun = fn _role ->
+        n = :counters.get(call_count, 1)
+        :counters.add(call_count, 1, 1)
+        pid = spawn_worker()
+        if n == 0, do: {:ok, pid, oracle_worker_id}, else: {:ok, pid, "re-oracle-stale-#{n}"}
+      end
+
+      opts =
+        base_unit_opts(unit_id, scheduler_name, test_pid,
+          worker_fun: worker_fun,
+          timeouts: [state_timeout_ms: 10_000]
+        )
+
+      unit_pid = @unit_supervisor.start_unit(sup_name, opts)
+      assert is_pid(unit_pid)
+
+      result = wait_for_oracle(unit_pid)
+
+      assert match?({:oracle, _}, result),
+             "D-379 oracle stale: Unit must reach :oracle; got #{inspect(result)}"
+
+      {:oracle, data_before} = result
+      refine_before = Map.get(data_before, :refine_count, 0)
+      attempt_before = Map.get(data_before, :attempt_count, 0)
+
+      stale_id = "w-d379-oracle-stale-#{System.unique_integer([:positive])}"
+      send(unit_pid, {:worker_stalled, stale_id})
+      Process.sleep(200)
+
+      {state_after, data_after} = :sys.get_state(unit_pid)
+
+      assert state_after == :oracle,
+             "D-379 oracle stale: a {:worker_stalled, stale_oracle_id} must be discarded — " <>
+               "Unit remains in :oracle; got #{inspect(state_after)}"
+
+      refine_after = Map.get(data_after, :refine_count, 0)
+      attempt_after = Map.get(data_after, :attempt_count, 0)
+
+      assert refine_before == refine_after and attempt_before == attempt_after,
+             "D-379 oracle stale: stale {:worker_stalled} must NOT advance the ladder; " <>
+               "refine #{refine_before}→#{refine_after}, " <>
+               "attempt #{attempt_before}→#{attempt_after}"
+
+      refute_received {:unit_terminal, ^unit_id, _outcome, _prov},
+                      "D-379 oracle stale: stale {:worker_stalled} must not terminate the Unit"
     end
   end
 
@@ -547,24 +943,20 @@ defmodule Tau.Factory.UnitHeartbeatLivenessTest do
   # spawned worker with the fleet `Watchdog` (`Watchdog.register(watchdog,
   # worker_id, worker_pid, unit_pid, heartbeat_timeout: …)`)".
   #
-  # The observable contract is: when UnitDriver wires a :watchdog dep into its
-  # worker_fun closure, a spawned worker with no heartbeats triggers
-  # {:worker_stalled, worker_id} → Unit, which routes to escalation.
-  #
   # We test this via a Unit with a worker_fun that itself calls
   # Watchdog.register/5 (mirroring the closure UnitDriver.drive/2 will build).
-  # The test then confirms the stall signal arrives at the Unit and is routed
-  # to the retry ladder — demonstrating the full D-379 wiring path.
+  # The test confirms the stall signal arrives at the Unit and routes to the
+  # retry ladder — demonstrating the full D-379 wiring path.
   #
-  # FAIL-BEFORE: the Unit has no {:worker_stalled, _} clause (D-379 absent), so
-  # when the Watchdog fires {:worker_stalled, worker_id} to the Unit it is
-  # silently ignored via handle_unexpected/4.  The Unit never escalates via
-  # this path, and the stall_advance_count assertion fails.
+  # FAIL-BEFORE: the Unit has no {:worker_stalled, _} clause via the proper
+  # advance_retry_ladder/2 path (D-379 absent or using deferred path), so
+  # when the Watchdog fires {:worker_stalled, worker_id} to the Unit the
+  # ladder counter stays flat.
   # ---------------------------------------------------------------------------
 
   describe "D-379(b) — worker_fun that calls Watchdog.register/5 delivers {:worker_stalled, id} to Unit → ladder" do
     @tag :d_379
-    test "D-379: worker registered via Watchdog.register/5 — absence triggers {:worker_stalled, id} routed to retry ladder" do
+    test "D-379: worker registered via Watchdog.register/5 — absence triggers {:worker_stalled, id} routed to retry ladder in :implementing" do
       test_pid = self()
       unit_id = "u-d379b-wd-#{System.unique_integer([:positive])}"
       scheduler_name = :"sched_d379b_#{System.unique_integer([:positive])}"
@@ -574,7 +966,6 @@ defmodule Tau.Factory.UnitHeartbeatLivenessTest do
       start_scheduler(scheduler_name)
       start_supervised!({@unit_supervisor, name: sup_name}, id: sup_name)
 
-      # Very short Watchdog timeout so the test is fast.
       check_interval = 20
       heartbeat_timeout = 60
 
@@ -587,7 +978,7 @@ defmodule Tau.Factory.UnitHeartbeatLivenessTest do
       call_count = :counters.new(1, [:atomics])
 
       # This worker_fun mirrors the closure UnitDriver.drive/2 will build:
-      # it calls Watchdog.register/5 with report_to = self() (the Unit's pid)
+      # calls Watchdog.register/5 with report_to = self() (the Unit's pid)
       # so the Watchdog sends {:worker_stalled, worker_id} to the Unit when no
       # heartbeats arrive within heartbeat_timeout ms.
       worker_fun = fn _role ->
@@ -601,8 +992,6 @@ defmodule Tau.Factory.UnitHeartbeatLivenessTest do
             do: oracle_worker_id,
             else: "w-d379b-impl-#{n}-#{System.unique_integer([:positive])}"
 
-        # D-379: the driver's worker_fun closure calls Watchdog.register/5 with
-        # report_to = self() (the owning Unit's pid at invocation time).
         :ok =
           Watchdog.register(watchdog_name, worker_id, pid, self(),
             heartbeat_timeout: heartbeat_timeout
@@ -614,15 +1003,12 @@ defmodule Tau.Factory.UnitHeartbeatLivenessTest do
       opts =
         base_unit_opts(unit_id, scheduler_name, test_pid,
           worker_fun: worker_fun,
-          # Long Unit state_timeout so the Unit does not trip its own timer —
-          # only the Watchdog should fire.
           timeouts: [state_timeout_ms: 5_000]
         )
 
       unit_pid = @unit_supervisor.start_unit(sup_name, opts)
       assert is_pid(unit_pid)
 
-      # Advance past oracle so the implementing worker is registered too.
       advance_past_oracle(unit_pid, oracle_worker_id)
       result = wait_for_implementing(unit_pid)
 
@@ -635,7 +1021,6 @@ defmodule Tau.Factory.UnitHeartbeatLivenessTest do
 
       # No heartbeats emitted — the Watchdog fires {:worker_stalled, impl_worker_id}
       # to the Unit within heartbeat_timeout + check_interval ms.
-      # D-379(a) must route this to advance_retry_ladder/1.
       Process.sleep(heartbeat_timeout + 4 * check_interval + 50)
 
       {state_after, data_after} = :sys.get_state(unit_pid)
@@ -648,62 +1033,58 @@ defmodule Tau.Factory.UnitHeartbeatLivenessTest do
       assert state_after == :implementing and stall_advanced,
              "D-379(b): a worker registered with Watchdog.register/5 (the closure " <>
                "UnitDriver.drive/2 will build) MUST trigger {:worker_stalled, worker_id} " <>
-               "delivery to the Unit, which routes to the retry ladder. " <>
-               "Got state=#{inspect(state_after)}, refine #{refine_before}→#{refine_after}, " <>
+               "delivery to the Unit, which routes to the retry ladder via " <>
+               "advance_retry_ladder(:implementing, data) (re-enters :implementing). " <>
+               "Got state=#{inspect(state_after)}, " <>
+               "refine #{refine_before}→#{refine_after}, " <>
                "attempt #{attempt_before}→#{attempt_after}. " <>
-               "FAIL-BEFORE: the Unit has no {:worker_stalled, _} clause (D-379 absent) — " <>
-               "the Watchdog fires the signal but the Unit silently discards it via " <>
-               "handle_unexpected/4; the ladder counter stays flat."
+               "FAIL-BEFORE: deferred-spawn path or no worker_stalled clause routes " <>
+               "via advance_retry_ladder/2."
     end
   end
 
   # ---------------------------------------------------------------------------
-  # D-315 — stall re-spawn MUST write a Ledger snapshot (RPO=0 durability)
+  # D-315 — stall re-spawn MUST write a Ledger snapshot via the ladder's
+  # :on_enter (RPO=0 durability) — in BOTH :oracle and :implementing
   # ---------------------------------------------------------------------------
   #
-  # The bug: `advance_retry_ladder_deferred/1` bumps `refine_count` / `pivot_count`
-  # and sends `:deferred_spawn` to the mailbox, then `do_spawn_worker/1` re-spawns
-  # the worker. Neither function calls `snapshot_state(:implementing, ...)` or bumps
-  # `attempt_count`, unlike the normal `:on_enter` path in `implementing(:internal,
-  # :on_enter, data)`:
+  # The unified contract (GOV4 re-shape): when a stall-class signal fires,
+  # advance_retry_ladder/2 emits {:next_state, <originating_state>, data,
+  # [{:next_event, :internal, :on_enter}]}. The :on_enter callback already:
+  #   (a) bumps attempt_count
+  #   (b) calls snapshot_state/2 (writing a Ledger row)
+  #   (c) calls worker_fun to spawn the next worker
   #
-  #   new_data = %{data | attempt_count: data.attempt_count + 1}
-  #   new_data = snapshot_state(:implementing, new_data)   ← MISSING in deferred path
+  # There is NO separate :deferred_spawn / do_spawn_worker path.
   #
-  # This means a Watchdog-triggered stall re-spawn produces no Ledger row. On a
-  # crash after the re-spawn, the Coordinator's D-344 resume rehydrates the PREVIOUS
-  # state from the Ledger — either the original `:implementing` entry (before any
-  # stall) or worse `:oracle` — and re-spawns a worker that was already re-spawned,
-  # duplicating work and violating RPO=0 (D-315).
+  # FAIL-BEFORE (implementing): the deferred path (advance_retry_ladder_deferred/1
+  # → :deferred_spawn → do_spawn_worker/1) uses keep_state, not next_state.
+  # While do_spawn_worker/1 happens to call attempt_count++ and snapshot_state/2,
+  # the advance_retry_ladder/1 call itself uses refine_count++ without calling
+  # :on_enter — the attempt_count bump and snapshot happen in do_spawn_worker,
+  # which is not the canonical on_enter path. The test asserts the ladder-driven
+  # on_enter is the single correct path.
   #
-  # Observable seam: the Unit's `:ledger` opt. When present, every `snapshot_state/2`
-  # call writes a row via `Ledger.Writer.snapshot_unit/2`. We inject a REAL
-  # `Ledger.Writer` (same idiom as `unit_snapshot_durability_test.exs`) and read
-  # back via `Ledger.Reader.latest_unit_snapshots/1`.
-  #
-  # FAIL-BEFORE: the deferred path skips `snapshot_state/2`, so
-  # `latest_unit_snapshots(ledger)` returns the pre-stall entry (or nothing if
-  # the Unit hasn't snapshotted yet at all), not a fresh `:implementing` row.
-  # With the fix, each deferred re-spawn calls `snapshot_state(:implementing, ...)`,
-  # writing a new Ledger row with the bumped `attempt_count` coordinate — and
-  # `latest_unit_snapshots/1` returns `:implementing` (the current state).
+  # FAIL-BEFORE (oracle): advance_retry_ladder/1 (arity-1) hardcodes :implementing
+  # as the next state — the oracle :on_enter runs for :implementing, not :oracle,
+  # so the oracle stall re-spawn violates oracle-separation AND D-315 (the
+  # :implementing on_enter writes the row but with wrong-role semantics).
   # ---------------------------------------------------------------------------
 
-  describe "D-315 — stall-driven deferred re-spawn writes a Ledger snapshot (RPO=0)" do
+  describe "D-315 — stall re-spawn writes Ledger snapshot via ladder :on_enter (RPO=0)" do
     @tag :d_315
-    test "D-315: worker_stalled for current_worker_id triggers deferred re-spawn that writes a new Ledger snapshot with bumped attempt_count" do
+    test "D-315 implementing: worker_stalled triggers ladder re-spawn writing Ledger snapshot with bumped attempt_count" do
       ledger = start_ledger()
       test_pid = self()
-      unit_id = "u-d315-stall-snap-#{System.unique_integer([:positive])}"
-      scheduler_name = :"sched_d315_#{System.unique_integer([:positive])}"
-      sup_name = :"sup_d315_#{System.unique_integer([:positive])}"
+      unit_id = "u-d315-impl-stall-snap-#{System.unique_integer([:positive])}"
+      scheduler_name = :"sched_d315_impl_#{System.unique_integer([:positive])}"
+      sup_name = :"sup_d315_impl_#{System.unique_integer([:positive])}"
 
       start_scheduler(scheduler_name)
       start_supervised!({@unit_supervisor, name: sup_name}, id: sup_name)
 
-      oracle_worker_id = "w-d315-oracle-#{System.unique_integer([:positive])}"
+      oracle_worker_id = "w-d315-impl-oracle-#{System.unique_integer([:positive])}"
       impl_worker_id_1 = "w-d315-impl-1-#{System.unique_integer([:positive])}"
-      # The re-spawned worker after the stall gets a distinct id.
       impl_worker_id_2 = "w-d315-impl-2-#{System.unique_integer([:positive])}"
       call_count = :counters.new(1, [:atomics])
 
@@ -729,8 +1110,6 @@ defmodule Tau.Factory.UnitHeartbeatLivenessTest do
         worker_fun: worker_fun,
         gate_fun: fn _coord -> :pass end,
         merge_fun: fn _uid, _hash -> :queued end,
-        # Long timeout: the real :state_timeout must NOT fire. Only the manual
-        # {:worker_stalled, impl_worker_id_1} signal triggers the deferred path.
         timeouts: [state_timeout_ms: 10_000]
       ]
 
@@ -741,71 +1120,169 @@ defmodule Tau.Factory.UnitHeartbeatLivenessTest do
       result = wait_for_implementing(unit_pid)
 
       assert match?({:implementing, _}, result),
-             "D-315: Unit must reach :implementing; got #{inspect(result)}"
+             "D-315 implementing: Unit must reach :implementing; got #{inspect(result)}"
 
       {:implementing, data_before} = result
       attempt_before = Map.get(data_before, :attempt_count, 0)
 
-      # Confirm a Ledger snapshot exists after the initial :implementing entry
-      # (the normal :on_enter path writes one). This is a sanity pre-condition:
-      # if the normal path also failed to write, the test would be masked.
-      # We allow for the Unit to have just entered implementing so give it a moment.
+      # Sanity: normal :on_enter must write a Ledger snapshot at :implementing.
       Process.sleep(50)
-
       snapshots_before = LedgerReader.latest_unit_snapshots(ledger)
 
       assert Map.get(snapshots_before, unit_id) == :implementing,
-             "D-315 pre-condition: normal :on_enter must write a Ledger snapshot at " <>
-               ":implementing. Got #{inspect(Map.get(snapshots_before, unit_id))} " <>
+             "D-315 implementing pre-condition: normal :on_enter must write a Ledger " <>
+               "snapshot at :implementing. Got #{inspect(Map.get(snapshots_before, unit_id))} " <>
                "(map: #{inspect(snapshots_before)}). " <>
                "Indicates :ledger opt not wired or normal snapshotting path broken."
 
-      # Trigger the deferred-spawn path by delivering a Watchdog stall signal
-      # for the CURRENT implementing worker.
+      # Trigger the ladder re-spawn by delivering a stall signal for the
+      # CURRENT implementing worker. With the unified design:
+      #   {:worker_stalled, impl_worker_id_1}
+      #   → advance_retry_ladder(:implementing, data)
+      #   → {:next_state, :implementing, bumped, [{:next_event, :internal, :on_enter}]}
+      #   → implementing(:internal, :on_enter, bumped)
+      #   → attempt_count++ + snapshot_state(:implementing, ...) + spawn worker 2
       send(unit_pid, {:worker_stalled, impl_worker_id_1})
 
-      # Allow the deferred path to complete: {:worker_stalled, _} clears worker_id
-      # → advance_retry_ladder_deferred sends :deferred_spawn to mailbox end
-      # → :deferred_spawn fires do_spawn_worker → the new worker is running.
-      # The key missing step: snapshot_state(:implementing, ...) and attempt_count++.
+      # Allow the on_enter to complete: next_state fires, on_enter runs,
+      # new worker is spawned.
       Process.sleep(300)
 
       {state_after, data_after} = :sys.get_state(unit_pid)
-
       attempt_after = Map.get(data_after, :attempt_count, 0)
 
-      # Assert 1: the Unit is in :implementing after the deferred re-spawn.
+      # Assert 1: the Unit is in :implementing after the ladder re-spawn.
       assert state_after == :implementing,
-             "D-315: after stall-driven deferred re-spawn, Unit must be back in " <>
+             "D-315 implementing: after stall ladder re-spawn, Unit must be back in " <>
                ":implementing; got #{inspect(state_after)}"
 
-      # Assert 2: attempt_count was bumped (the re-spawn IS a new attempt).
+      # Assert 2: attempt_count was bumped by the :on_enter (the re-spawn IS a new attempt).
       assert attempt_after > attempt_before,
-             "D-315: stall-driven deferred re-spawn MUST increment attempt_count. " <>
-               "attempt_count #{attempt_before} -> #{attempt_after} (expected strictly greater). " <>
-               "FAIL-BEFORE: do_spawn_worker/1 skips attempt_count++, violating D-315."
+             "D-315 implementing: stall ladder re-spawn MUST increment attempt_count " <>
+               "via :on_enter. attempt_count #{attempt_before} -> #{attempt_after} " <>
+               "(expected strictly greater). " <>
+               "FAIL-BEFORE: deferred path's do_spawn_worker bumps attempt_count but " <>
+               "outside the canonical on_enter; with the unified ladder the on_enter " <>
+               "is the single correct path."
 
-      # Assert 3: the Ledger holds a FRESH :implementing snapshot for this unit,
-      # written by snapshot_state/2 during the deferred re-spawn.
-      # Under the current (unfixed) code, do_spawn_worker skips snapshot_state/2,
-      # so the Ledger row is stale (the one written by the first :on_enter).
-      # The test distinguishes these cases via the snapshot_seq counter embedded
-      # in the idempotency key: the deferred re-spawn must write a NEW row
-      # (higher sequence) reflecting the post-stall :implementing state.
+      # Assert 3: the Ledger holds a FRESH :implementing snapshot.
       snapshots_after = LedgerReader.latest_unit_snapshots(ledger)
 
       assert Map.get(snapshots_after, unit_id) == :implementing,
-             "D-315: after stall deferred re-spawn, Ledger must hold :implementing. " <>
+             "D-315 implementing: after stall ladder re-spawn, Ledger must hold :implementing. " <>
+               "Got #{inspect(Map.get(snapshots_after, unit_id))} " <>
+               "(map: #{inspect(snapshots_after)})."
+
+      # Assert 4: no terminal — the stall triggered retry, not escalation.
+      refute_received {:unit_terminal, ^unit_id, _outcome, _prov},
+                      "D-315 implementing: a single {:worker_stalled, current_id} must " <>
+                        "route to retry, not terminate the Unit"
+    end
+
+    @tag :d_315
+    test "D-315 oracle: worker_stalled triggers ladder re-spawn writing Ledger snapshot with bumped attempt_count re-entering :oracle" do
+      ledger = start_ledger()
+      test_pid = self()
+      unit_id = "u-d315-oracle-stall-snap-#{System.unique_integer([:positive])}"
+      scheduler_name = :"sched_d315_oracle_#{System.unique_integer([:positive])}"
+      sup_name = :"sup_d315_oracle_#{System.unique_integer([:positive])}"
+
+      start_scheduler(scheduler_name)
+      start_supervised!({@unit_supervisor, name: sup_name}, id: sup_name)
+
+      oracle_worker_id_1 = "w-d315-oracle-1-#{System.unique_integer([:positive])}"
+      oracle_worker_id_2 = "w-d315-oracle-2-#{System.unique_integer([:positive])}"
+      call_count = :counters.new(1, [:atomics])
+
+      worker_fun = fn _role ->
+        n = :counters.get(call_count, 1)
+        :counters.add(call_count, 1, 1)
+        pid = spawn_worker()
+
+        case n do
+          0 -> {:ok, pid, oracle_worker_id_1}
+          _ -> {:ok, pid, oracle_worker_id_2}
+        end
+      end
+
+      opts = [
+        unit_id: unit_id,
+        declared_scope: empty_scope(),
+        hash: "hash-#{unit_id}",
+        scheduler: scheduler_name,
+        report_to: test_pid,
+        ledger: ledger,
+        worker_fun: worker_fun,
+        gate_fun: fn _coord -> :pass end,
+        merge_fun: fn _uid, _hash -> :queued end,
+        timeouts: [state_timeout_ms: 10_000]
+      ]
+
+      unit_pid = @unit_supervisor.start_unit(sup_name, opts)
+      assert is_pid(unit_pid)
+
+      # Wait in :oracle — do NOT advance past oracle.
+      result = wait_for_oracle(unit_pid)
+
+      assert match?({:oracle, _}, result),
+             "D-315 oracle: Unit must reach :oracle; got #{inspect(result)}"
+
+      {:oracle, data_before} = result
+      attempt_before = Map.get(data_before, :attempt_count, 0)
+
+      # Allow the oracle :on_enter to write its Ledger snapshot.
+      Process.sleep(50)
+      snapshots_before = LedgerReader.latest_unit_snapshots(ledger)
+
+      assert Map.get(snapshots_before, unit_id) == :oracle,
+             "D-315 oracle pre-condition: normal oracle :on_enter must write a Ledger " <>
+               "snapshot at :oracle. Got #{inspect(Map.get(snapshots_before, unit_id))} " <>
+               "(map: #{inspect(snapshots_before)}). " <>
+               "Indicates :ledger opt not wired, or oracle :on_enter snapshot path broken."
+
+      # Trigger the ladder re-spawn by delivering a stall signal for the
+      # CURRENT oracle worker. With the unified design:
+      #   {:worker_stalled, oracle_worker_id_1}
+      #   → advance_retry_ladder(:oracle, data)
+      #   → {:next_state, :oracle, bumped, [{:next_event, :internal, :on_enter}]}
+      #   → oracle(:internal, :on_enter, bumped)
+      #   → attempt_count++ + snapshot_state(:oracle, ...) + spawn oracle worker 2
+      send(unit_pid, {:worker_stalled, oracle_worker_id_1})
+
+      Process.sleep(300)
+
+      {state_after, data_after} = :sys.get_state(unit_pid)
+      attempt_after = Map.get(data_after, :attempt_count, 0)
+
+      # Assert 1: Unit is in :oracle after the ladder re-spawn.
+      assert state_after == :oracle,
+             "D-315 oracle: after stall ladder re-spawn, Unit must be back in :oracle " <>
+               "(the originating state). Got #{inspect(state_after)}. " <>
+               "FAIL-BEFORE: advance_retry_ladder/1 hardcodes :implementing — oracle " <>
+               "stall re-enters :implementing, violating oracle-separation."
+
+      # Assert 2: attempt_count was bumped by oracle :on_enter.
+      assert attempt_after > attempt_before,
+             "D-315 oracle: stall ladder re-spawn MUST increment attempt_count via " <>
+               "oracle :on_enter. attempt_count #{attempt_before} -> #{attempt_after} " <>
+               "(expected strictly greater). " <>
+               "FAIL-BEFORE: advance_retry_ladder/1 hardcodes :implementing; the " <>
+               "wrong :on_enter runs (or no :on_enter if the state doesn't change)."
+
+      # Assert 3: the Ledger holds a FRESH :oracle snapshot.
+      snapshots_after = LedgerReader.latest_unit_snapshots(ledger)
+
+      assert Map.get(snapshots_after, unit_id) == :oracle,
+             "D-315 oracle: after stall ladder re-spawn, Ledger must hold :oracle snapshot. " <>
                "Got #{inspect(Map.get(snapshots_after, unit_id))} " <>
                "(map: #{inspect(snapshots_after)}). " <>
-               "FAIL-BEFORE: do_spawn_worker/1 skips snapshot_state(:implementing,...) — " <>
-               "no new Ledger row written for re-spawn, violating D-315 RPO=0."
+               "FAIL-BEFORE: advance_retry_ladder/1 hardcodes :implementing — the Ledger " <>
+               "would hold :implementing (wrong role) or the wrong attempt_count row."
 
-      # Assert 4: no terminal signal was sent to the test process — the stall
-      # triggered a re-spawn (retry ladder), not escalation.
+      # Assert 4: no terminal.
       refute_received {:unit_terminal, ^unit_id, _outcome, _prov},
-                      "D-315: a single {:worker_stalled, current_id} must route to retry, " <>
-                        "not terminate the Unit"
+                      "D-315 oracle: a single {:worker_stalled, current_oracle_id} must " <>
+                        "route to retry, not terminate the Unit"
     end
   end
 
@@ -814,7 +1291,7 @@ defmodule Tau.Factory.UnitHeartbeatLivenessTest do
   # ---------------------------------------------------------------------------
 
   # Drive {:worker_heartbeat, worker_id} pulses from the TEST PROCESS at
-  # interval_ms for up_to_ms total wall time.  Driving from the test process
+  # interval_ms for up_to_ms total wall time. Driving from the test process
   # (rather than a spawned ticker) ensures the sends are not subject to
   # scheduler starvation of a separate process under full-suite load.
   defp hb_loop_from_test(_unit_pid, _worker_id, _interval_ms, remaining_ms)
