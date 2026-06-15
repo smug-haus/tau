@@ -453,20 +453,60 @@ defmodule Tau.Factory.MergeAuthority do
     String.trim(oid)
   end
 
-  # Default build_fun: fetch + rebase unit branch onto base, run health check,
-  # then return the tip or a build_failed result.
+  # Default build_fun: acquire a private ephemeral worktree, fetch + rebase
+  # the unit branch onto base, run health check, then return the tip or a
+  # build_failed result.  The shared repo_dir is the ref anchor only — its HEAD
+  # and index are NEVER touched (D-385, INV-11).
   defp default_build(repo_dir, [unit | _] = units, base) do
-    git = fn args ->
-      System.cmd("git", args, cd: repo_dir, stderr_to_stdout: true)
+    nonce = :erlang.unique_integer([:positive])
+    merge_wt = Path.join(Path.dirname(repo_dir), ".merge-wt-#{nonce}")
+
+    case System.cmd(
+           "git",
+           ["worktree", "add", "--detach", merge_wt, unit.branch],
+           cd: repo_dir,
+           stderr_to_stdout: true
+         ) do
+      {_, 0} ->
+        try do
+          do_build_in_worktree(repo_dir, merge_wt, units, base)
+        after
+          System.cmd(
+            "git",
+            ["worktree", "remove", "--force", merge_wt],
+            cd: repo_dir,
+            stderr_to_stdout: true
+          )
+        end
+
+      {output, code} ->
+        {:build_failed, {:git_error, code, output}}
+    end
+  end
+
+  # Run the actual fetch/rebase/health steps inside merge_wt (never repo_dir).
+  # repo_dir is used only for ref-ops (fetch writes refs, not the tree).
+  # After a successful rebase we force-push the rebased tip to origin/<branch>
+  # so the tip SHA is addressable on the remote for CAS (cas_push creates the
+  # fast-forward from origin/<branch>'s tip onto origin/main).
+  defp do_build_in_worktree(repo_dir, merge_wt, [unit | _] = units, base) do
+    git_wt = fn args ->
+      System.cmd("git", args, cd: merge_wt, stderr_to_stdout: true)
     end
 
-    with {_, 0} <- git.(["fetch", "origin"]),
-         {_, 0} <- git.(["checkout", unit.branch]),
-         {_, 0} <- git.(["rebase", base]),
-         {tip_raw, 0} <- git.(["rev-parse", "HEAD"]) do
+    with {_, 0} <- System.cmd("git", ["fetch", "origin"], cd: repo_dir, stderr_to_stdout: true),
+         {_, 0} <- git_wt.(["rebase", base]),
+         {tip_raw, 0} <- git_wt.(["rev-parse", "HEAD"]),
+         {_, 0} <-
+           System.cmd(
+             "git",
+             ["push", "--force-with-lease", "origin", "HEAD:#{unit.branch}"],
+             cd: merge_wt,
+             stderr_to_stdout: true
+           ) do
       tip = String.trim(tip_raw)
 
-      case Health.check(repo_dir, :elixir, %{}) do
+      case Health.check(merge_wt, :elixir, %{}) do
         :green ->
           {:built, units, base, tip}
 

@@ -98,6 +98,10 @@ defmodule Tau.Factory.Dogfood.Sandbox do
     # Gate 5.3 can restore it after reverting the production file.
     write_gating_test(work_path)
 
+    # Write .gitignore so .tau-factory/ (the Ledger dir) and build artefacts
+    # are suppressed from git status (D-385 Sandbox.seed hygiene).
+    write_gitignore(work_path)
+
     # Commit everything on main, then push to origin.
     git.(["add", "."])
     git.(["commit", "-m", "seed sandbox project + gating test"])
@@ -146,6 +150,19 @@ defmodule Tau.Factory.Dogfood.Sandbox do
 
   defp write_test_helper(work_path) do
     File.write!(Path.join(work_path, "test/test_helper.exs"), "ExUnit.start()\n")
+  end
+
+  defp write_gitignore(work_path) do
+    content = """
+    # Tau factory — durable Ledger directory (D-385: suppress from git status)
+    .tau-factory/
+
+    # Mix build artefacts
+    /_build/
+    /deps/
+    """
+
+    File.write!(Path.join(work_path, ".gitignore"), content)
   end
 
   defp write_gating_test(work_path) do
