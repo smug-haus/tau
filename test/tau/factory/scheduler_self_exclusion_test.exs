@@ -64,11 +64,8 @@ defmodule Tau.Factory.SchedulerSelfExclusionTest do
   @moduletag :capture_log
   @moduletag :d_380
 
-  alias Tau.Factory.Scheduler
-
   @scheduler Tau.Factory.Scheduler
   @coordinator Tau.Factory.Coordinator
-  @writer Tau.Factory.Ledger.Writer
 
   # ---------------------------------------------------------------------------
   # Helpers

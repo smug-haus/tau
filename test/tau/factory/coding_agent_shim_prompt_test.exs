@@ -42,8 +42,12 @@ defmodule Tau.Factory.CodingAgentShimPromptTest do
     - Test (a): the agent_bin shell script dumps env → `TAU_AGENT_PROMPT` is absent
       from the dump → `assert String.contains?(dump, brief)` fails.
 
-    - Test (b): the shim's fake-claude subprocess receives `-p ""` (not `-p <brief>`)
-      in argv → `assert String.contains?(argv_dump, brief)` fails.
+    - Test (b) [challenge-upheld relaxation]: drives the shim with `brief=""` via the
+      ClaudeCode adapter + fake claude. Asserts argv contains `-p` and that `-p`'s
+      argument is `""`. Does NOT assert whether `TAU_AGENT_PROMPT` is SET or ABSENT
+      in the child env (absent == present-empty per SPEC §4). An omit-on-empty impl
+      satisfies this test. FAILS on current branch if the shim does not reach the
+      ClaudeCode adapter or if Runner.main/1 fails to deliver the empty prompt via -p.
 
     - Test (c): the `ANTHROPIC_*` scrub test should already pass, but we assert
       `TAU_AGENT_PROMPT` is present AND the three `ANTHROPIC_*` vars are absent
@@ -128,7 +132,7 @@ defmodule Tau.Factory.CodingAgentShimPromptTest do
 
   describe "D-381 — Worker injects TAU_AGENT_PROMPT into Port env" do
     @tag :d_381
-    test "D-381: a Worker spawned with a non-empty brief injects TAU_AGENT_PROMPT into the child Port env" do
+    test "D-381(a): a Worker spawned with a non-empty brief injects TAU_AGENT_PROMPT into the child Port env" do
       tmp_dir = mk_tmp("d381_env_inject")
       %{repo_dir: repo_dir, base_ref: base_ref} = setup_git_repo(tmp_dir)
 
@@ -195,63 +199,113 @@ defmodule Tau.Factory.CodingAgentShimPromptTest do
     end
 
     @tag :d_381
-    test "D-381: a Worker spawned with an empty brief injects TAU_AGENT_PROMPT as empty string" do
+    test "D-381(b): a Worker spawned with an empty brief produces claude argv -p '' (absent-or-empty TAU_AGENT_PROMPT both accepted)" do
+      # Challenge-upheld relaxation: SPEC §4 contract is `get_env("TAU_AGENT_PROMPT") || ""`.
+      # An absent var is equivalent to a present-but-empty var — both yield effective prompt "".
+      # The observable contract is: with brief="", the shim produces claude argv that contains
+      # "-p" and that "-p"'s argument is "" (the empty string).
+      # We do NOT test whether TAU_AGENT_PROMPT is SET vs ABSENT in the child env.
+      # An impl that omits the env var on empty brief (no :os.putenv) satisfies this test
+      # because the shim's `get_env || ""` yields "" either way and argv is `-p ""`.
       tmp_dir = mk_tmp("d381_empty_brief")
       %{repo_dir: repo_dir, base_ref: base_ref} = setup_git_repo(tmp_dir)
 
       n = System.unique_integer([:positive])
-      dump_file = Path.join(tmp_dir, "env_dump_empty_#{n}.txt")
+      argv_dump = Path.join(tmp_dir, "claude_argv_empty_#{n}.txt")
 
-      agent_bin = Path.join(tmp_dir, "probe_empty_#{n}")
+      # Fake "claude": dumps argv using a NUL-terminated record per arg so that
+      # empty-string args are preserved faithfully (a plain newline-split would drop
+      # empty lines when trim: true is used). Emits a minimal result JSON so the
+      # ClaudeCode parser does not error. No real claude is invoked.
+      fake_claude = Path.join(tmp_dir, "claude")
 
-      File.write!(agent_bin, """
+      File.write!(fake_claude, """
       #!/bin/sh
-      # Write a sentinel indicating whether the var is set (even if empty),
-      # versus truly absent (unset).
-      if [ -z "${TAU_AGENT_PROMPT+x}" ]; then
-        printf "TAU_AGENT_PROMPT=UNSET\\n" > #{dump_file}
-      else
-        printf "TAU_AGENT_PROMPT=EMPTY_OR_SET:${TAU_AGENT_PROMPT}\\n" > #{dump_file}
-      fi
+      # Dump args NUL-separated so empty strings are preserved.
+      printf "%s\\0" "$@" > #{argv_dump}
+      printf '{"type":"result","subtype":"success","result":"ok","session_id":"d381b-#{n}","is_error":false}\\n'
       exit 0
       """)
 
-      File.chmod!(agent_bin, 0o755)
+      File.chmod!(fake_claude, 0o755)
+
+      old_path = System.get_env("PATH", "")
+      System.put_env("PATH", "#{tmp_dir}:#{old_path}")
+
+      on_exit(fn ->
+        System.put_env("PATH", old_path)
+      end)
+
+      branch = "feat/d381-empty-#{n}"
+      shim_bin = Path.join(tmp_dir, "shim_d381b_#{n}")
+
+      shim_bin =
+        CodingAgentShim.write(shim_bin,
+          adapter: Tau.CodingAgents.ClaudeCode,
+          branch: branch
+        )
 
       {sup, registry_name} = start_fleet(:d381_empty_brief)
       report_to = self()
 
-      # D-381: an empty brief → TAU_AGENT_PROMPT is set to "" (not absent/unset).
-      # Back-compat: absent var → prompt = "" is equivalent, but the Worker MUST
-      # still inject the key (even with an empty value) when brief is "".
-      # FAILS on current branch: Worker never injects the key → UNSET in child env.
+      # Spawn Worker with brief="" (empty). The shim's effective prompt is "".
+      # An impl that omits TAU_AGENT_PROMPT from the Port env on empty brief satisfies
+      # this test: shim reads `get_env("TAU_AGENT_PROMPT") || ""` -> "" -> argv -p "".
+      # An impl that injects TAU_AGENT_PROMPT="" also satisfies it. Both are correct.
+      # FAILS on current branch: Runner.main/1 does NOT read TAU_AGENT_PROMPT at all
+      # (hardcoded task.prompt="") and the shim is not called via the ClaudeCode adapter
+      # (or does not reach fake claude), so argv_dump is missing or does not contain -p.
       {:ok, worker_id} =
         @worker_supervisor.spawn(sup, :implementer, "", base_ref,
           repo_dir: repo_dir,
-          agent_bin: agent_bin,
+          agent_bin: shim_bin,
           report_to: report_to,
           registry: registry_name,
           agent_mode: :claude_code,
           creds_check_fun: fn -> :ok end
         )
 
-      assert_receive {:worker_exit, ^worker_id, _reason},
-                     10_000,
-                     "D-381: Worker must complete within 10s"
+      assert_receive msg
+                     when elem(msg, 0) in [:work_ready, :worker_exit] and
+                            elem(msg, 1) == worker_id,
+                     30_000,
+                     "D-381(b): shim must complete within 30s"
 
-      Process.sleep(200)
+      Process.sleep(300)
 
-      assert File.exists?(dump_file),
-             "D-381: probe agent must have written dump_file=#{dump_file}"
+      assert File.exists?(argv_dump),
+             "D-381(b): fake claude must have run and written argv_dump=#{argv_dump}. " <>
+               "If missing, the shim did not reach ClaudeCode (e.g. early exit or PATH issue)."
 
-      dump_text = File.read!(dump_file)
+      # NUL-separated args — split on NUL without trim so empty-string arguments
+      # are preserved. `printf "%s\0" "$@"` emits each arg followed by NUL, so a
+      # split on NUL gives [arg1, arg2, ..., ""] (trailing empty from the final NUL).
+      argv_args = argv_dump |> File.read!() |> String.split(<<0>>)
 
-      # D-381: var is set (even if empty value).
-      # FAILS on current branch: var is absent (UNSET) → dump contains "UNSET".
-      refute String.contains?(dump_text, "UNSET"),
-             ~s|D-381: TAU_AGENT_PROMPT must be SET in child Port env even when brief is "". | <>
-               ~s|Worker MUST inject {"TAU_AGENT_PROMPT", ""} so the var is set. | <>
-               "dump=#{inspect(dump_text)}"
+      # D-381(b) observable contract:
+      #   1. "-p" appears in argv (ClaudeCode always passes the prompt via -p).
+      #   2. The value immediately following "-p" is "" (empty — not a non-empty brief).
+      #
+      # A correct omit-on-empty impl: Worker omits TAU_AGENT_PROMPT when brief="".
+      # Shim: `get_env("TAU_AGENT_PROMPT") || ""` -> "" -> task.prompt="" -> argv -p "".
+      #
+      # A correct set-on-empty impl: Worker sets TAU_AGENT_PROMPT="" in Port env.
+      # Shim reads "" -> same result.
+      #
+      # Both satisfy this test. The test gates the observable shim behaviour, not the
+      # env-var presence/absence distinction that was over-asserted in the original.
+      assert "-p" in argv_args,
+             "D-381(b): claude argv must contain -p flag. argv_args=#{inspect(argv_args)}"
+
+      p_index = Enum.find_index(argv_args, &(&1 == "-p"))
+      prompt_value = Enum.at(argv_args, p_index + 1, :missing)
+
+      assert prompt_value == "",
+             "D-381(b): with an empty brief, the effective prompt delivered via -p must be " <>
+               ~s|"" (empty string). | <>
+               "Got #{inspect(prompt_value)}. argv_args=#{inspect(argv_args)}. " <>
+               "SPEC §4: absent TAU_AGENT_PROMPT == present-empty — both yield effective prompt ''. " <>
+               "The impl MUST NOT deliver a non-empty prompt when brief is empty."
     end
   end
 
