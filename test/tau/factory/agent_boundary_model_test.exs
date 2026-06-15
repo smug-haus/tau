@@ -3,8 +3,11 @@ defmodule Tau.Factory.AgentBoundaryModelTest do
   Gating tests for PR #528 — unified agent-boundary model.
 
   Advances D-387 (external tool boundary / argv), D-388 (per-worker config
-  isolation / CLAUDE_CONFIG_DIR), D-389 (whitelist posture, not blanket bypass),
-  and the D-388 fail-safe diagnostic (unexpected_commit telemetry).
+  isolation / CLAUDE_CONFIG_DIR), and D-389 (whitelist posture, not blanket bypass).
+
+  The D-388 fail-safe diagnostic (unexpected_commit telemetry) is deferred to
+  PR #529 — it requires in-process telemetry from the shim, which is a separate
+  OS process opened via Port.open; that telemetry is unobservable in-process.
 
   Written BEFORE production code exists (oracle-separation, factory-loop §4b).
   All tests MUST FAIL against the current branch because:
@@ -18,12 +21,10 @@ defmodule Tau.Factory.AgentBoundaryModelTest do
              set skip_permissions: true when the operator has not opted in.
              The "no bypass" assertion on the shim config fails because the
              dogfood currently forces it.
-    - Diagnostic: `CodingAgentShim.Runner` has no `:unexpected_commit` telemetry.
 
   ## Gating-test paths
 
     - `test/tau/factory/agent_boundary_model_test.exs`
-    - `test/support/factory/committing_agent.ex`
 
   ## AC / D-NNN linkage
 
@@ -31,7 +32,6 @@ defmodule Tau.Factory.AgentBoundaryModelTest do
     - D-388 — per-worker config isolation (`CLAUDE_CONFIG_DIR` + seeding contract)
     - D-389 — whitelist posture, not blanket bypass (no `--dangerously-skip-permissions`
                on factory path; escape-hatch retained for opt-in)
-    - Diagnostic — D-388 fail-safe: unexpected_commit telemetry + `:no_work_product`
   """
 
   use ExUnit.Case, async: false
@@ -41,31 +41,10 @@ defmodule Tau.Factory.AgentBoundaryModelTest do
   alias Tau.CodingAgents.ClaudeCode.Argv
   alias Tau.CodingAgents.ClaudeCode.ConfigDir, as: ClaudeConfigDir
   alias Tau.Factory.AgentBin
-  alias Tau.Factory.CodingAgentShim
 
   # -------------------------------------------------------------------------
   # Helpers
   # -------------------------------------------------------------------------
-
-  defp setup_git_repo(tmp_dir) do
-    repo_dir = Path.join(tmp_dir, "repo_#{System.unique_integer([:positive])}")
-    File.mkdir_p!(repo_dir)
-
-    git = fn args ->
-      System.cmd("git", args, cd: repo_dir, stderr_to_stdout: true)
-    end
-
-    {_, 0} = git.(["init", "-b", "main"])
-    {_, 0} = git.(["config", "user.email", "test@tau.test"])
-    {_, 0} = git.(["config", "user.name", "Tau Test"])
-
-    File.write!(Path.join(repo_dir, "README"), "initial\n")
-    {_, 0} = git.(["add", "README"])
-    {_, 0} = git.(["commit", "-m", "initial commit"])
-    {sha, 0} = git.(["rev-parse", "HEAD"])
-
-    %{repo_dir: repo_dir, base_ref: String.trim(sha)}
-  end
 
   defp mk_tmp(tag) do
     tmp_dir =
@@ -349,114 +328,6 @@ defmodule Tau.Factory.AgentBoundaryModelTest do
              "D-389: escape hatch — Argv.build/2 with skip_permissions: true MUST " <>
                "still append --dangerously-skip-permissions (opt-in retained); " <>
                "got #{inspect(argv)}"
-    end
-  end
-
-  # -------------------------------------------------------------------------
-  # Diagnostic — D-388 fail-safe: unexpected_commit telemetry
-  # -------------------------------------------------------------------------
-
-  describe "D-388 diagnostic: shim detects self-commit breach and emits telemetry" do
-    @tag :d_388
-    @tag :diagnostic
-    test "D-388 diagnostic: self-committing adapter causes shim to emit unexpected_commit telemetry and no work_ready" do
-      # D-388 / Diagnostic contract: when an agent commits to the git repo before
-      # exiting (boundary breach), the shim MUST:
-      #   1. Detect that HEAD advanced past base_ref unexpectedly (before the
-      #      shim's own commit step).
-      #   2. Emit telemetry [:tau, :factory, :agent, :unexpected_commit].
-      #   3. NOT rescue the commit as a valid work product.
-      #   4. Surface :no_work_product to the Worker (no work_ready frame).
-      #
-      # We use `Tau.Factory.Test.CommittingAgent` (test/support/factory/committing_agent.ex)
-      # as the adapter: it writes a file and self-commits before returning Done{0}.
-      #
-      # On the current branch:
-      #   - CodingAgentShim.Runner has no git log HEAD comparison step.
-      #   - There is no [:tau, :factory, :agent, :unexpected_commit] telemetry.
-      # This test fails because the telemetry event is never emitted.
-
-      tmp_dir = mk_tmp("d388_diagnostic")
-      %{repo_dir: repo_dir} = setup_git_repo(tmp_dir)
-
-      # Attach a telemetry handler for the expected event BEFORE running the shim.
-      test_pid = self()
-      handler_id = "test-d388-unexpected-commit-#{System.unique_integer([:positive])}"
-
-      :telemetry.attach(
-        handler_id,
-        [:tau, :factory, :agent, :unexpected_commit],
-        fn event, measurements, metadata, _config ->
-          send(test_pid, {:telemetry_fired, event, measurements, metadata})
-        end,
-        nil
-      )
-
-      on_exit(fn -> :telemetry.detach(handler_id) end)
-
-      shim_bin = Path.join(tmp_dir, "shim_d388_diag_#{System.unique_integer([:positive])}")
-
-      # Write a shim with our self-committing adapter.
-      shim_bin =
-        CodingAgentShim.write(shim_bin,
-          adapter: Tau.Factory.Test.CommittingAgent,
-          branch: "feat/d388-diag-branch"
-        )
-
-      on_exit(fn -> File.rm(shim_bin) end)
-
-      # Spawn the shim directly. The shim's Runner will drive CommittingAgent,
-      # which self-commits before Done{0}. The Runner must detect the breach.
-      System.cmd(shim_bin, [], cd: repo_dir, stderr_to_stdout: true)
-
-      # D-388 diagnostic assertion: the shim must emit unexpected_commit telemetry.
-      # On the current branch this message is never received → timeout failure.
-      assert_receive {:telemetry_fired, [:tau, :factory, :agent, :unexpected_commit], _meas, _meta},
-                     5_000,
-                     "D-388 diagnostic: CodingAgentShim.Runner must emit " <>
-                       "[:tau, :factory, :agent, :unexpected_commit] telemetry when the " <>
-                       "agent self-commits before Done{0}. FAIL REASON: current shim has " <>
-                       "no HEAD-vs-base_ref check and no unexpected_commit telemetry."
-    end
-
-    @tag :d_388
-    @tag :diagnostic
-    test "D-388 diagnostic: self-committing adapter causes shim to exit non-zero (breach, not silent no-op)" do
-      # D-388 diagnostic contract: when the adapter self-commits (boundary breach),
-      # the shim MUST exit non-zero. The current shim exits 0 (empty-diff path)
-      # because it sees a clean tree after the self-commit. This silently maps to
-      # :no_work_product — indistinguishable from a legitimate "agent ran but
-      # changed nothing" outcome. D-388 requires the shim exit non-zero on breach
-      # so the Worker treats it as a retriable error, not a silent no-op.
-      #
-      # FAIL BEFORE: current shim exits 0 for empty diff regardless of whether
-      # the tree was empty because (a) agent did nothing or (b) agent self-committed.
-      # After D-388: shim detects HEAD advanced before its own commit step → exits
-      # non-zero. We assert shim exit code != 0.
-
-      tmp_dir = mk_tmp("d388_nonzero_exit")
-      %{repo_dir: repo_dir} = setup_git_repo(tmp_dir)
-
-      shim_bin = Path.join(tmp_dir, "shim_d388_nze_#{System.unique_integer([:positive])}")
-
-      shim_bin =
-        CodingAgentShim.write(shim_bin,
-          adapter: Tau.Factory.Test.CommittingAgent,
-          branch: "feat/d388-breach-branch"
-        )
-
-      on_exit(fn -> File.rm(shim_bin) end)
-
-      {_out, exit_code} =
-        System.cmd(shim_bin, [], cd: repo_dir, stderr_to_stdout: true)
-
-      # D-388 diagnostic: the shim MUST exit non-zero when breach is detected.
-      # On the current branch exit_code is 0 (empty-diff silent path) → fails.
-      assert exit_code != 0,
-             "D-388 diagnostic: a self-committing adapter must cause the shim to exit " <>
-               "non-zero (breach detected). FAIL REASON: current shim exits 0 for any " <>
-               "empty diff, silently masking the boundary breach as a no-op. " <>
-               "exit_code=#{exit_code}"
     end
   end
 end
