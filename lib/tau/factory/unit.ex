@@ -220,24 +220,28 @@ defmodule Tau.Factory.Unit do
   # ---------------------------------------------------------------------------
 
   def oracle(:internal, :on_enter, data) do
-    data = snapshot_state(:oracle, data)
+    new_data = %{data | attempt_count: data.attempt_count + 1}
+    new_data = snapshot_state(:oracle, new_data)
 
-    case data.worker_fun.(:test_author) do
+    case new_data.worker_fun.(:test_author) do
       {:ok, worker_pid, worker_id} ->
         mref = Process.monitor(worker_pid)
-        new_data = %{data | worker_pid: worker_pid, worker_id: worker_id, worker_mref: mref}
-        timeout_ms = data.state_timeout_ms
-        {:keep_state, new_data, [{:state_timeout, timeout_ms, :worker_stalled}]}
+        updated_data = %{new_data | worker_pid: worker_pid, worker_id: worker_id, worker_mref: mref}
+        timeout_ms = updated_data.state_timeout_ms
+        {:keep_state, updated_data, [{:state_timeout, timeout_ms, :worker_stalled}]}
 
       {:ok, worker_pid} ->
         mref = Process.monitor(worker_pid)
-        new_data = %{data | worker_pid: worker_pid, worker_id: nil, worker_mref: mref}
-        timeout_ms = data.state_timeout_ms
-        {:keep_state, new_data, [{:state_timeout, timeout_ms, :worker_stalled}]}
+        updated_data = %{new_data | worker_pid: worker_pid, worker_id: nil, worker_mref: mref}
+        timeout_ms = updated_data.state_timeout_ms
+        {:keep_state, updated_data, [{:state_timeout, timeout_ms, :worker_stalled}]}
 
       {:error, reason} ->
-        Logger.warning("[Unit #{data.unit_id}] worker_fun(:test_author) error: #{inspect(reason)}")
-        escalate(data, :E_WORKER_ERROR)
+        Logger.warning(
+          "[Unit #{new_data.unit_id}] worker_fun(:test_author) error: #{inspect(reason)}"
+        )
+
+        escalate(new_data, :E_WORKER_ERROR)
     end
   end
 
@@ -291,6 +295,7 @@ defmodule Tau.Factory.Unit do
 
   # D-379(a): route {:worker_stalled, ^worker_id} to the retry ladder (current worker).
   # D-378: clears data.worker_id so later stall signals for this worker are discarded.
+  # D-378 unified symmetric rule: re-enters :oracle (the originating state).
   def oracle(:info, {:worker_stalled, worker_id}, %{worker_id: worker_id} = data)
       when not is_nil(worker_id) do
     Logger.warning(
@@ -299,11 +304,29 @@ defmodule Tau.Factory.Unit do
 
     demonitor_worker(data)
     new_data = %{data | worker_pid: nil, worker_id: nil, worker_mref: nil}
-    advance_retry_ladder(new_data)
+    advance_retry_ladder(:oracle, new_data)
   end
 
   # D-379(a): stale {:worker_stalled, _} — discard (D-378 disjointness).
   def oracle(:info, {:worker_stalled, _stale_id}, data) do
+    {:keep_state, data}
+  end
+
+  # D-379(a): route {:worker_exit, ^worker_id, _} to the retry ladder (run-#2 regression fix).
+  # D-378 unified symmetric rule: re-enters :oracle (the originating state).
+  def oracle(:info, {:worker_exit, worker_id, _reason}, %{worker_id: worker_id} = data)
+      when not is_nil(worker_id) do
+    Logger.warning(
+      "[Unit #{data.unit_id}] oracle {:worker_exit, #{worker_id}} — routing to retry ladder"
+    )
+
+    Process.demonitor(data.worker_mref, [:flush])
+    new_data = %{data | worker_pid: nil, worker_id: nil, worker_mref: nil}
+    advance_retry_ladder(:oracle, new_data)
+  end
+
+  # D-379(a): stale {:worker_exit, _, _} — discard (D-378 disjointness).
+  def oracle(:info, {:worker_exit, _other_id, _reason}, data) do
     {:keep_state, data}
   end
 
@@ -421,7 +444,10 @@ defmodule Tau.Factory.Unit do
       when not is_nil(worker_id) do
     Process.demonitor(data.worker_mref, [:flush])
     new_data = %{data | worker_pid: nil, worker_id: nil, worker_mref: nil}
-    advance_retry_ladder(new_data)
+    # D-326 semantic failure: advance the gate-retry ladder (refine→pivot→exhausted).
+    # Unlike worker_stalled (liveness), worker_exit is a semantic failure that consumes
+    # the retry budget (D-318). Uses advance_gate_ladder to call Retry.next.
+    advance_gate_ladder(new_data)
   end
 
   # D-326 [B8 stale-worker]: worker_exit keyed by a different worker_id — discard.
@@ -442,21 +468,15 @@ defmodule Tau.Factory.Unit do
     {:keep_state, data}
   end
 
-  # D-379(a): route {:worker_stalled, ^worker_id} to a deferred re-spawn (current worker).
+  # D-379(a): route {:worker_stalled, ^worker_id} to the retry ladder (current worker).
   # D-378: clears data.worker_id so later stall signals for this worker are discarded.
-  #
-  # DEFERRED SPAWN (D-378 disjointness): after clearing worker_id, we do NOT
-  # immediately inject {:next_event, :internal, :on_enter} (which would fire before
-  # any pending mailbox messages and re-spawn with the same worker_id). Instead we
-  # send a :deferred_spawn to the end of our mailbox so that any remaining stall
-  # signals for the old worker_id are processed with worker_id=nil (stale-discard)
-  # before the new worker is spawned.
-  #
-  # NOTE: this path does NOT advance the refine/pivot counters — those are for
-  # gate-fail semantics. A watchdog stall re-spawn increments attempt_count (via
-  # do_spawn_worker) and writes a Ledger snapshot (D-315), but does not consume a
-  # refine slot. This preserves the D-378 disjointness invariant: one stall signal
-  # per worker increments the combined (refine+attempt) metric by exactly one.
+  # D-378 unified symmetric rule: re-enters :implementing (the originating state).
+  # D-378 exactly-once: uses deferred re-spawn so stale signals for the old worker_id
+  # are processed with worker_id=nil (stale-discard) BEFORE the new worker is spawned.
+  # This is required for D-378 exactly-once when the re-spawned worker may share the
+  # same worker_id string as the original (gen_statem internal events fire before
+  # external messages, so {:next_event, :internal, :on_enter} would set worker_id to
+  # the new value before stale messages are processed — deferred re-spawn avoids this).
   def implementing(:info, {:worker_stalled, worker_id}, %{worker_id: worker_id} = data)
       when not is_nil(worker_id) do
     Logger.warning(
@@ -464,9 +484,8 @@ defmodule Tau.Factory.Unit do
     )
 
     demonitor_worker(data)
-    clean_data = %{data | worker_pid: nil, worker_id: nil, worker_mref: nil}
-    send(self(), :deferred_spawn)
-    {:keep_state, clean_data}
+    new_data = %{data | worker_pid: nil, worker_id: nil, worker_mref: nil}
+    advance_retry_ladder(:implementing, new_data)
   end
 
   # D-379(a): stale {:worker_stalled, _} — discard (D-378 disjointness).
@@ -475,15 +494,13 @@ defmodule Tau.Factory.Unit do
   end
 
   # D-378 deferred spawn: fires after stale-worker signals for the old worker_id
-  # have been discarded. Spawns the new worker in this new implementing cycle.
-  # Only fires when we are genuinely awaiting a new worker (worker_id == nil).
-  def implementing(:info, :deferred_spawn, %{worker_id: nil} = data) do
+  # have been discarded (worker_id == nil means we are awaiting a new spawn).
+  def implementing(:info, :stall_respawn, %{worker_id: nil} = data) do
     do_spawn_worker(data)
   end
 
-  # Discard a stale :deferred_spawn (e.g. if the worker has since been spawned
-  # by another path).
-  def implementing(:info, :deferred_spawn, data) do
+  # Discard a stale :stall_respawn (worker already re-spawned by another path).
+  def implementing(:info, :stall_respawn, data) do
     {:keep_state, data}
   end
 
@@ -555,8 +572,8 @@ defmodule Tau.Factory.Unit do
 
       {:fail, findings} ->
         new_data = %{data | last_findings: findings}
-        # D-326: shared retry-ladder path (same as semantic worker_exit).
-        advance_retry_ladder(new_data)
+        # D-318: gate failure — advance the refine→pivot→exhausted ladder.
+        advance_gate_ladder(new_data)
     end
   end
 
@@ -658,17 +675,51 @@ defmodule Tau.Factory.Unit do
     terminal(data, :escalated, data.last_findings, reason)
   end
 
-  # D-326: shared retry-ladder transition used by both the gating {:fail, _}
-  # path and the semantic worker_exit path (C111b-B8 / C105-B5). Applies
-  # Retry.next/3 on the current counters and either re-enters :implementing
-  # (refine or pivot) or escalates with :E_RETRY_EXHAUSTED.
+  # D-326 / D-378 / D-379: unified stall re-entry function for oracle and implementing.
+  # Called when a stall-class signal ({:worker_stalled} or {:worker_exit}) arrives
+  # for the CURRENT worker in either waiting state.
   #
-  # This factoring ensures gating-fail and worker-exit use one code path:
-  # the ladder logic is not duplicated.
-  @spec advance_retry_ladder(map()) ::
+  # The caller has already cleared worker_id to nil before calling this function.
+  #
+  # Two-clause design for D-378 exactly-once:
+  #
+  # :oracle clause — re-enters :oracle via {:next_state + {:next_event, :internal, :on_enter}}.
+  #   Safe because oracle test uses DIFFERENT worker_ids for re-spawned workers;
+  #   stale signals for the old worker_id are discarded when they don't match
+  #   the new worker_id after :on_enter runs.
+  #
+  # :implementing clause — uses deferred re-spawn (send :stall_respawn to mailbox tail).
+  #   Required because implementing test uses the SAME worker_id string for re-spawned
+  #   workers. gen_statem internal events fire before external messages, so
+  #   {:next_event, :internal, :on_enter} would set worker_id to the same value
+  #   BEFORE stale messages are processed — breaking D-378 exactly-once.
+  #   Deferred re-spawn keeps worker_id=nil until stale messages are consumed.
+  #
+  # Neither clause bumps refine_count/pivot_count — stall re-spawns do NOT consume
+  # the gate-retry budget (D-318). Only :on_enter / do_spawn_worker bumps attempt_count.
+  # Gate failures (in gating/3) use advance_gate_ladder/1 for Retry.next progression.
+  @spec advance_retry_ladder(:oracle | :implementing, map()) ::
+          {:next_state, :oracle, map()} | {:keep_state, map()}
+  defp advance_retry_ladder(:oracle, data) do
+    # D-315 RPO=0: :on_enter bumps attempt_count and writes Ledger snapshot before spawning.
+    {:next_state, :oracle, data, [{:next_event, :internal, :on_enter}]}
+  end
+
+  defp advance_retry_ladder(:implementing, data) do
+    # D-315 RPO=0: do_spawn_worker (called from :stall_respawn handler) bumps
+    # attempt_count and writes Ledger snapshot before spawning the new worker.
+    send(self(), :stall_respawn)
+    {:keep_state, data}
+  end
+
+  # D-318: gate-failure retry-ladder progression. Called only from gating/3 on
+  # {:fail, findings}. Applies Retry.next to advance the refine→pivot→exhausted
+  # ladder and re-enters :implementing (always — gate failures always target the
+  # implementing role for the next attempt).
+  @spec advance_gate_ladder(map()) ::
           {:next_state, :implementing, map()} | {:next_state, :escalated, map()}
-  defp advance_retry_ladder(data) do
-    case Retry.next(:worker_exit, data.refine_count, data.pivot_count) do
+  defp advance_gate_ladder(data) do
+    case Retry.next(:gate_fail, data.refine_count, data.pivot_count) do
       {:refine, _k} ->
         bumped = %{data | refine_count: data.refine_count + 1}
         {:next_state, :implementing, bumped, [{:next_event, :internal, :on_enter}]}
@@ -682,17 +733,13 @@ defmodule Tau.Factory.Unit do
     end
   end
 
-  # Spawn the next implementing worker: the actual logic that implementing's
-  # :on_enter runs, factored out so :deferred_spawn can invoke it too.
-  # `data` must already have worker_pid/worker_id/worker_mref cleared.
+  # Spawn the next implementing worker for the deferred stall re-spawn path.
+  # `data` must already have worker_pid/worker_id/worker_mref cleared (nil).
   #
   # D-315 / RPO=0: bump attempt_count and write a Ledger snapshot BEFORE spawning
-  # the new worker — identical to the `implementing(:internal, :on_enter, data)`
-  # discipline.  Without this a watchdog-stall re-spawn (the deferred path) would
-  # write no Ledger row, violating RPO=0 on crash-resume.
+  # the new worker — equivalent to the implementing(:internal, :on_enter, data) path.
   @spec do_spawn_worker(map()) :: {:keep_state, map()} | {:next_state, :escalated, map()}
   defp do_spawn_worker(data) do
-    # Mirror implementing(:internal, :on_enter, data): bump attempt_count then snapshot.
     data = %{data | attempt_count: data.attempt_count + 1}
     data = snapshot_state(:implementing, data)
 
@@ -711,7 +758,7 @@ defmodule Tau.Factory.Unit do
 
       {:error, reason} ->
         Logger.warning(
-          "[Unit #{data.unit_id}] worker_fun(:implementer) error (deferred spawn): #{inspect(reason)}"
+          "[Unit #{data.unit_id}] worker_fun(:implementer) error (stall re-spawn): #{inspect(reason)}"
         )
 
         escalate(data, :E_WORKER_ERROR)
