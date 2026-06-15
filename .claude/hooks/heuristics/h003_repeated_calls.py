@@ -32,6 +32,7 @@ _READONLY_CMDS = {
     "pwd", "ls", "cat", "tail", "head", "wc", "echo", "printf", "sleep",
     "true", "false", "find", "stat", "date", "env", "which", "test", "[",
     "dirname", "basename", "realpath", "readlink", "file", "du", "df",
+    "ps"
 }
 
 # Read-only `git` subcommands (first arg after `git`).
