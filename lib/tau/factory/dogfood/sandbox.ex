@@ -37,6 +37,11 @@ defmodule Tau.Factory.Dogfood.Sandbox do
   @spec issue_number() :: integer()
   def issue_number, do: @issue_number
 
+  @doc "The seeded dogfood issue as a gh-shaped map (number + title + actionable body)."
+  @spec issue_map() :: %{String.t() => term()}
+  def issue_map,
+    do: %{"number" => issue_number(), "title" => issue_title(), "body" => issue_body()}
+
   @doc "The fixed issue title used to seed the dogfood sandbox."
   @spec issue_title() :: String.t()
   def issue_title, do: @issue_title
