@@ -296,6 +296,49 @@ defmodule Tau.Factory.Supervisor do
   end
 
   # ---------------------------------------------------------------------------
+  # Public helper — D-382 role-threading seam
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Convert an IssueSelector 4-tuple work_item into the map shape that
+  `UnitDriver.drive/2` expects, with a role-specific `:brief` (D-382).
+
+  Accepts a `role:` opt (`:test_author` | `:implementer`); the assembled
+  `:brief` in the returned map is the role-specific brief. When no `:role`
+  is given, `:brief` is the role-agnostic default (implementer-style, no
+  role section).
+
+  This is the public seam for callers that need role-specific work_items
+  (e.g. tests, future UnitDriver per-role spawn paths). The internal
+  `wrapped_drive_fun` in `init/1` calls the private 1-arity form which
+  stores both role briefs and lets `UnitDriver.worker_fun` select at
+  spawn time.
+
+  `work_item` must be a 4-tuple `{issue, scope, hash, branch}` matching
+  the shape returned by `IssueSelector.select/1`.
+  """
+  @spec to_unit_work_item(tuple(), keyword()) :: map()
+  def to_unit_work_item({_issue, _scope, _hash, _branch} = work_item, opts) do
+    role = Keyword.get(opts, :role)
+    base = build_unit_work_item(work_item)
+
+    case role do
+      nil ->
+        base
+
+      r ->
+        role_brief =
+          Map.get(base, role_brief_key(r), Map.get(base, :brief, ""))
+
+        Map.put(base, :brief, role_brief)
+    end
+  end
+
+  defp role_brief_key(:test_author), do: :test_author_brief
+  defp role_brief_key(:implementer), do: :implementer_brief
+  defp role_brief_key(_), do: :brief
+
+  # ---------------------------------------------------------------------------
   # Private helpers
   # ---------------------------------------------------------------------------
 
@@ -306,11 +349,13 @@ defmodule Tau.Factory.Supervisor do
   # matches on a map with atom keys (B6). This conversion closes the gap.
   #
   # Derived fields:
-  #   unit_id   — "unit-<number>" (B10 / D-331 / [C112-B10])
-  #   run       — "run-1" (initial run identifier)
-  #   base_ref  — branch (the feature branch the worker checks out)
-  #   brief     — assembled prompt from BriefAssembler.assemble/2 (D-372)
-  #   declared_scope — the real elaborated scope threaded from the 4-tuple
+  #   unit_id          — "unit-<number>" (B10 / D-331 / [C112-B10])
+  #   run              — "run-1" (initial run identifier)
+  #   base_ref         — branch (the feature branch the worker checks out)
+  #   brief            — role-agnostic assembled prompt (D-372); used as default
+  #   test_author_brief — role-specific brief for the oracle worker (D-382)
+  #   implementer_brief — role-specific brief for the implementing worker (D-382)
+  #   declared_scope   — the real elaborated scope threaded from the 4-tuple
   @empty_scope %{
     deps: [],
     files: MapSet.new(),
@@ -319,27 +364,8 @@ defmodule Tau.Factory.Supervisor do
     resources: MapSet.new()
   }
 
-  defp to_unit_work_item({issue, scope, hash, branch}) do
-    number = Map.get(issue, "number", 0)
-
-    brief =
-      BriefAssembler.assemble(%{issue: issue, declared_scope: scope}, [])
-
-    %{
-      unit_id: "unit-#{number}",
-      declared_scope: scope,
-      hash: hash,
-      branch: branch,
-      run: "run-1",
-      base_ref: branch,
-      # oracle_base_ref: the oracle (test_author) Worker uses `origin/<branch>`
-      # (detached HEAD) so it does NOT lock the named branch while checking out.
-      # This lets the implementing Worker checkout the named branch immediately
-      # after the oracle emits work_ready, without waiting for the oracle's
-      # worktree to be reclaimed (D-358 / SPEC-FACTORY-CORE §4 B11).
-      oracle_base_ref: "origin/#{branch}",
-      brief: brief
-    }
+  defp to_unit_work_item({_issue, _scope, _hash, _branch} = work_item) do
+    build_unit_work_item(work_item)
   end
 
   # Rehydrate path: Coordinator passes unit_id (string) when resuming a
@@ -356,7 +382,44 @@ defmodule Tau.Factory.Supervisor do
       branch: unit_id,
       run: "run-1",
       base_ref: unit_id,
-      brief: ""
+      brief: "",
+      test_author_brief: "",
+      implementer_brief: ""
+    }
+  end
+
+  defp build_unit_work_item({issue, scope, hash, branch}) do
+    number = Map.get(issue, "number", 0)
+
+    assemble_input = %{issue: issue, declared_scope: scope}
+
+    brief =
+      BriefAssembler.assemble(assemble_input, [])
+
+    test_author_brief =
+      BriefAssembler.assemble(assemble_input, role: :test_author)
+
+    implementer_brief =
+      BriefAssembler.assemble(assemble_input, role: :implementer)
+
+    %{
+      unit_id: "unit-#{number}",
+      declared_scope: scope,
+      hash: hash,
+      branch: branch,
+      run: "run-1",
+      base_ref: branch,
+      # oracle_base_ref: the oracle (test_author) Worker uses `origin/<branch>`
+      # (detached HEAD) so it does NOT lock the named branch while checking out.
+      # This lets the implementing Worker checkout the named branch immediately
+      # after the oracle emits work_ready, without waiting for the oracle's
+      # worktree to be reclaimed (D-358 / SPEC-FACTORY-CORE §4 B11).
+      oracle_base_ref: "origin/#{branch}",
+      # D-372: role-agnostic brief (backward compat default)
+      brief: brief,
+      # D-382: role-specific briefs; UnitDriver.worker_fun selects at spawn time
+      test_author_brief: test_author_brief,
+      implementer_brief: implementer_brief
     }
   end
 

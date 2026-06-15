@@ -175,10 +175,26 @@ defmodule Tau.Factory.UnitDriver do
     # Defaults to `base_ref` (existing single-ref behaviour).
     oracle_base_ref = Map.get(work_item, :oracle_base_ref, base_ref)
 
+    # D-382: select the role-specific brief from the work_item. When the
+    # work_item carries dedicated :test_author_brief / :implementer_brief keys
+    # (assembled by Supervisor.build_unit_work_item with role opts), each worker
+    # receives its own role's brief rather than the shared role-agnostic :brief.
+    # Falls back to :brief for backward compat (e.g. rehydrated string work_items).
+    test_author_brief = Map.get(work_item, :test_author_brief, brief)
+    implementer_brief = Map.get(work_item, :implementer_brief, brief)
+
     worker_fun = fn role ->
       unit_pid = self()
 
       wr_base_ref = if role == :test_author, do: oracle_base_ref, else: base_ref
+
+      # D-382: select the role-specific brief for this worker.
+      role_brief =
+        case role do
+          :test_author -> test_author_brief
+          :implementer -> implementer_brief
+          _ -> brief
+        end
 
       base_opts = [
         registry: worker_registry,
@@ -198,7 +214,7 @@ defmodule Tau.Factory.UnitDriver do
           if creds_check_fun, do: Keyword.put(o, :creds_check_fun, creds_check_fun), else: o
         end)
 
-      case WorkerSupervisor.spawn(worker_supervisor, role, brief, wr_base_ref, opts) do
+      case WorkerSupervisor.spawn(worker_supervisor, role, role_brief, wr_base_ref, opts) do
         {:ok, worker_id} ->
           case resolve_worker_pid(worker_registry, worker_id) do
             {:ok, worker_pid} ->

@@ -3,7 +3,7 @@ defmodule Tau.Factory.BriefAssembler do
   Pure, network-free assembler that projects a brief/issue map into a
   `task.prompt` string delivered to the implementer worker.
 
-  ## Contract (D-372 / D-373, SPEC-FACTORY-CORE §4 B10 amendment)
+  ## Contract (D-372 / D-373 / D-382, SPEC-FACTORY-CORE §4 B10 amendment)
 
   ### D-372 — Assembly completeness
 
@@ -19,6 +19,8 @@ defmodule Tau.Factory.BriefAssembler do
       (the pointer section is MANDATORY — present even when no `arch_pointers`
       key is supplied; carries at minimum the root pointer to discharge
       `feedback_brief_implementers_with_arch`).
+    - **Role instructions** — when `:role` opt is supplied, a role-specific
+      actionable instruction section is appended (D-382).
 
   ### D-373 — Injected pure seam that degrades, never crashes
 
@@ -34,9 +36,27 @@ defmodule Tau.Factory.BriefAssembler do
   Output is always a non-empty `String.t()` for any non-empty issue map
   carrying `"number"` and `"title"`.
 
+  ### D-382 — Role-aware brief
+
+  When `:role` opt is supplied (`:test_author` | `:implementer`), a role-specific
+  instruction section is appended to the assembled brief:
+
+    - `:test_author` → instructs the agent to WRITE the gating test for the
+      issue, names the expected `test/...` path (from `gating_test_paths`), and
+      states the agent is operating in a fresh isolated worktree it must edit
+      and commit.
+    - `:implementer` → instructs the agent to IMPLEMENT the issue to satisfy
+      the gating test.
+
+  The two roles produce different briefs for the same input.
+  The `:assemble_fun` bypass is not affected by `:role` — injected functions
+  receive the full input map and are responsible for role handling if needed.
+
   ## API
 
       Tau.Factory.BriefAssembler.assemble(input, [])
+      Tau.Factory.BriefAssembler.assemble(input, role: :test_author)
+      Tau.Factory.BriefAssembler.assemble(input, role: :implementer)
       Tau.Factory.BriefAssembler.assemble(input, assemble_fun: fn input -> "custom" end)
 
   `input` keys (atoms):
@@ -54,6 +74,14 @@ defmodule Tau.Factory.BriefAssembler do
 
   Returns a non-empty `String.t()`. Never raises on partial input.
   When `:assemble_fun` is supplied in `opts`, delegates to it entirely.
+
+  ## Options
+
+    - `:assemble_fun` — `(input :: map() -> String.t())`; when supplied,
+      overrides the default heuristic assembler entirely.
+    - `:role` — `:test_author` | `:implementer`; when supplied, appends a
+      role-specific actionable instruction section (D-382). Ignored when
+      `:assemble_fun` is provided.
   """
   @spec assemble(map(), keyword()) :: String.t()
   def assemble(input, opts) do
@@ -62,7 +90,8 @@ defmodule Tau.Factory.BriefAssembler do
     if assemble_fun do
       assemble_fun.(input)
     else
-      default_assemble(input)
+      role = Keyword.get(opts, :role)
+      default_assemble(input, role)
     end
   end
 
@@ -70,22 +99,90 @@ defmodule Tau.Factory.BriefAssembler do
   # Default heuristic assembler (D-372 template, pure and deterministic)
   # ---------------------------------------------------------------------------
 
-  defp default_assemble(input) do
+  defp default_assemble(input, role) do
     issue = Map.fetch!(input, :issue)
     declared_scope = Map.fetch!(input, :declared_scope)
     gating_test_paths = Map.get(input, :gating_test_paths)
     spec_refs = Map.get(input, :spec_refs)
     arch_pointers = Map.get(input, :arch_pointers)
 
-    sections = [
+    # D-382: when a :role is given, use compact (no-placeholder) rendering for
+    # empty sections — role-specific briefs must not contain "(none declared)"
+    # noise. The D-373 contract ("absent optional keys degrade to (none declared)")
+    # applies only to the role-agnostic default (no :role opt).
+    compact? = not is_nil(role)
+
+    base_sections = [
       issue_section(issue),
-      scope_section(declared_scope),
-      gating_tests_section(gating_test_paths),
-      spec_refs_section(spec_refs),
+      scope_section(declared_scope, compact?),
+      gating_tests_section(gating_test_paths, compact?),
+      spec_refs_section(spec_refs, compact?),
       arch_pointers_section(arch_pointers)
     ]
 
-    Enum.join(sections, "\n\n")
+    role_sections =
+      case role do
+        nil -> []
+        r -> [role_section(r, gating_test_paths)]
+      end
+
+    Enum.join(base_sections ++ role_sections, "\n\n")
+  end
+
+  # ---------------------------------------------------------------------------
+  # D-382 — Role-specific instruction section
+  # ---------------------------------------------------------------------------
+
+  defp role_section(:test_author, gating_test_paths) do
+    paths_text =
+      case gating_test_paths do
+        nil -> "(none declared)"
+        [] -> "(none declared)"
+        paths -> Enum.join(paths, "\n")
+      end
+
+    """
+    ## Your Role: Test Author
+
+    You are the **test author** for this issue. Your task is to WRITE the gating
+    test that will gate the implementer's work.
+
+    **Instructions:**
+
+    1. You are operating in a **fresh isolated worktree**. Edit files in your
+       current working directory and commit your changes.
+    2. Write the gating test for this issue. The test must fail before the
+       implementation exists and pass after.
+    3. Commit the gating test to the expected path(s) listed below.
+
+    **Expected gating-test path(s):**
+
+    #{paths_text}
+
+    Do NOT implement the production code. Write ONLY the gating test and commit it.
+    """
+    |> String.trim_trailing()
+  end
+
+  defp role_section(:implementer, _gating_test_paths) do
+    """
+    ## Your Role: Implementer
+
+    You are the **implementer** for this issue. Your task is to implement the
+    issue to satisfy the gating test written by the test author.
+
+    **Instructions:**
+
+    1. Read the gating-test path(s) listed in the **Gating-Test Paths** section
+       above to understand what the test expects.
+    2. Implement the production code to make the gating test pass.
+    3. Do NOT modify the gating test — implement the production code only.
+    4. Commit your implementation when the gating test passes.
+
+    Implement the issue described above. Your implementation must satisfy the
+    gating test.
+    """
+    |> String.trim_trailing()
   end
 
   defp issue_section(issue) do
@@ -108,18 +205,21 @@ defmodule Tau.Factory.BriefAssembler do
     |> String.trim_trailing()
   end
 
-  defp scope_section(scope) do
+  defp scope_section(scope, compact?) do
     files = Map.get(scope, :files, MapSet.new())
     codepoints = Map.get(scope, :codepoints, MapSet.new())
     specs = Map.get(scope, :specs, MapSet.new())
     resources = Map.get(scope, :resources, MapSet.new())
     deps = Map.get(scope, :deps, [])
 
-    files_text = render_set_or_none(files)
-    codepoints_text = render_set_or_none(codepoints)
-    specs_text = render_set_or_none(specs)
-    resources_text = render_set_or_none(resources)
-    deps_text = render_list_or_none(deps)
+    render_fn = if compact?, do: &render_set_or_dash/1, else: &render_set_or_none/1
+    render_list_fn = if compact?, do: &render_list_or_dash/1, else: &render_list_or_none/1
+
+    files_text = render_fn.(files)
+    codepoints_text = render_fn.(codepoints)
+    specs_text = render_fn.(specs)
+    resources_text = render_fn.(resources)
+    deps_text = render_list_fn.(deps)
 
     """
     ## Declared Scope
@@ -133,10 +233,10 @@ defmodule Tau.Factory.BriefAssembler do
     |> String.trim_trailing()
   end
 
-  defp gating_tests_section(nil), do: gating_tests_section([])
+  defp gating_tests_section(nil, compact?), do: gating_tests_section([], compact?)
 
-  defp gating_tests_section(paths) do
-    content = render_list_or_none(paths)
+  defp gating_tests_section(paths, compact?) do
+    content = if compact?, do: render_list_or_dash(paths), else: render_list_or_none(paths)
 
     """
     ## Gating-Test Paths
@@ -146,10 +246,10 @@ defmodule Tau.Factory.BriefAssembler do
     |> String.trim_trailing()
   end
 
-  defp spec_refs_section(nil), do: spec_refs_section([])
+  defp spec_refs_section(nil, compact?), do: spec_refs_section([], compact?)
 
-  defp spec_refs_section(refs) do
-    content = render_list_or_none(refs)
+  defp spec_refs_section(refs, compact?) do
+    content = if compact?, do: render_list_or_dash(refs), else: render_list_or_none(refs)
 
     """
     ## SPEC / AC / D-NNN References
@@ -230,6 +330,27 @@ defmodule Tau.Factory.BriefAssembler do
   defp render_list_or_none([]), do: "(none declared)"
 
   defp render_list_or_none(list) when is_list(list) do
+    Enum.join(list, ", ")
+  end
+
+  # Compact variants: render empty as "-" instead of "(none declared)".
+  # Used in role-aware briefs (D-382) so the brief is free of the D-373
+  # degradation placeholder.
+
+  defp render_set_or_dash(set) when is_struct(set, MapSet) do
+    if MapSet.size(set) == 0 do
+      "-"
+    else
+      set
+      |> MapSet.to_list()
+      |> Enum.sort()
+      |> Enum.map_join(", ", &render_set_member/1)
+    end
+  end
+
+  defp render_list_or_dash([]), do: "-"
+
+  defp render_list_or_dash(list) when is_list(list) do
     Enum.join(list, ", ")
   end
 end
