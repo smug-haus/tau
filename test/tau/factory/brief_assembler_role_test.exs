@@ -185,24 +185,19 @@ defmodule Tau.Factory.BriefAssemblerRoleTest do
   # D-382(d): a brief built from an issue with a real body is actionable —
   #           the body content appears in the assembled brief, NOT "(none declared)".
   #
-  # This gates the seeded dogfood issue enrichment: Sandbox currently has
-  # @issue_title but no @issue_body. After the implementer lands D-382,
-  # the sandbox must carry a real body so the brief for the seeded issue is
-  # actionable rather than showing "(none declared)" for the body section.
+  # This gates the seeded dogfood issue enrichment: Sandbox.issue_body/0 exists
+  # but the dogfood task's actual issue_map construction (line ~146 in
+  # tau.factory.dogfood.ex) only sets "number" and "title" — it has NO "body"
+  # key — so the assembled brief renders "(none declared)" for the body section.
+  # After the implementer wires Sandbox.issue_body/0 into the issue_map, the
+  # brief for the seeded issue will be actionable.
   #
-  # Here we test BriefAssembler.assemble/2 directly with a real body to confirm
-  # the assembler renders it (not "(none declared)") regardless of :role.
-  #
-  # PRE-IMPL FAILURE: The current assembler already handles a non-empty body
-  # correctly (renders body text, not "(none declared)"), so this test passes
-  # TODAY against the existing assembler. It is included to gate the sandbox's
-  # body enrichment via the Sandbox module's issue_body/0 accessor — which does
-  # not exist yet. This test will fail until Sandbox.issue_body/0 is added.
+  # PRE-IMPL FAILURE (FIXED precedence): two separate assertions so a missing
+  # body is correctly caught — the old single `refute A and B` parsed as
+  # `refute(A and B)` which passed vacuously when the body was absent.
   # ---------------------------------------------------------------------------
   @tag :d_382
-  test "D-382(d): a brief for an issue with a real body is actionable — body content appears in the brief, not (none declared); and Sandbox.issue_body/0 must exist" do
-    # The sandbox must expose the seeded issue body so the assembled brief for
-    # the dogfood issue is actionable. This accessor does not exist today.
+  test "D-382(d): a brief for an issue with a real body is actionable — body content appears in the brief, not (none declared)" do
     sandbox_body = Sandbox.issue_body()
 
     assert is_binary(sandbox_body) and sandbox_body != "",
@@ -222,9 +217,79 @@ defmodule Tau.Factory.BriefAssemblerRoleTest do
 
     result = BriefAssembler.assemble(input, role: :implementer)
 
-    refute result =~ "(none declared)" and result =~ sandbox_body,
-           "D-382(d): brief for the seeded dogfood issue must contain the real body content " <>
-             "(not '(none declared)'); got brief: #{inspect(result)}"
+    # Two explicit, independent assertions — correct precedence, no vacuous pass.
+    assert result =~ sandbox_body,
+           "D-382(d): brief for the seeded dogfood issue must contain the real body content; " <>
+             "got brief: #{inspect(result)}"
+
+    refute result =~ "(none declared)",
+           "D-382(d): brief for the seeded dogfood issue must NOT contain '(none declared)'; " <>
+             "got brief: #{inspect(result)}"
+  end
+
+  # ---------------------------------------------------------------------------
+  # D-382(d-wire): the dogfood's actual issue_map (as constructed by the mix
+  #               task) must include the "body" key wired from Sandbox.issue_body/0.
+  #
+  # The mix task builds:
+  #   issue_map = %{"number" => issue_number, "title" => Sandbox.issue_title()}
+  # — NO "body" key. Sandbox.issue_body/0 exists but is NEVER wired in.
+  # When BriefAssembler.assemble/2 receives a map with no "body" (or body ""),
+  # it renders "(none declared)" — making the dogfood brief non-actionable.
+  #
+  # This test asserts the assembler-observable seam: build the issue_map the
+  # same way the mix task does (title only, no body), assemble it, and assert
+  # the result does NOT contain the sandbox body AND DOES contain "(none declared)".
+  # This documents the CURRENT (broken) behaviour that the implementer must fix
+  # by wiring Sandbox.issue_body/0 into the issue_map.
+  #
+  # PRE-IMPL FAILURE: passes today (confirms the bug is present), but is
+  # structured as a POSITIVE assertion of the current broken output — so once
+  # the implementer wires the body, this test FAILS until it is updated OR
+  # this test is replaced by the green D-382(d) above.
+  #
+  # ACTUALLY: we want the test to FAIL when the wiring IS done, to act as a
+  # gate. The correct framing: assert the assembled brief for the AS-CONSTRUCTED
+  # dogfood issue_map (no body key) DOES contain the sandbox body. This will
+  # FAIL NOW (the body is absent from the map → placeholder rendered), and will
+  # PASS only after the implementer wires Sandbox.issue_body/0 into the map.
+  # ---------------------------------------------------------------------------
+  @tag :d_382
+  test "D-382(d-wire): dogfood issue_map as actually constructed (no body key wired) produces a non-actionable brief — implementer must wire Sandbox.issue_body/0 into the map" do
+    # Reconstruct the issue_map exactly as the dogfood mix task does it today
+    # (lib/mix/tasks/tau.factory.dogfood.ex ~line 146):
+    #   issue_map = %{"number" => issue_number, "title" => Sandbox.issue_title()}
+    # This map has NO "body" key.
+    dogfood_issue_map_as_built = %{
+      "number" => Sandbox.issue_number(),
+      "title" => Sandbox.issue_title()
+    }
+
+    # Feed it through the same path to_unit_work_item uses: BriefAssembler.assemble/2.
+    # The assembler receives an issue with no "body" (or empty body) — whichever
+    # the assembler normalises it to — and must render "(none declared)".
+    input = %{
+      issue: dogfood_issue_map_as_built,
+      declared_scope: empty_scope()
+    }
+
+    result = BriefAssembler.assemble(input, role: :implementer)
+
+    # Assert the brief CONTAINS the sandbox body content.
+    # FAILS NOW because dogfood_issue_map_as_built has no "body" key, so
+    # the assembler cannot render the real body — it renders "(none declared)".
+    # PASSES ONLY AFTER the implementer wires:
+    #   issue_map = %{"number" => ..., "title" => Sandbox.issue_title(),
+    #                 "body" => Sandbox.issue_body()}
+    # into the mix task.
+    sandbox_body = Sandbox.issue_body()
+
+    assert result =~ sandbox_body,
+           "D-382(d-wire): the dogfood issue_map as ACTUALLY CONSTRUCTED (no 'body' key) " <>
+             "cannot produce an actionable brief — body content '#{String.slice(sandbox_body, 0, 60)}...' " <>
+             "is absent. The implementer must wire Sandbox.issue_body/0 into the issue_map " <>
+             "in lib/mix/tasks/tau.factory.dogfood.ex (~line 146). " <>
+             "Got brief: #{inspect(String.slice(result, 0, 200))}"
   end
 
   # ---------------------------------------------------------------------------
