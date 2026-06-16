@@ -136,7 +136,7 @@ defmodule Tau.Factory.Gate.AcLinkagePropertyTest do
 
   property "P-AC3: AC-1 — a (meta)-marked AC is never reported missing" do
     check all(meta_token <- ac_token_gen(), other_token <- any_token_gen()) do
-      # Only AC- tokens support the (meta) marker in this PR's convention.
+      # Both AC- and D-NNN tokens support the (meta) marker (D-322 extends this).
       # meta_token is present with (meta) — should be exempt.
       # other_token is a normal claimed token — we cover it.
       other_token = if other_token == meta_token, do: "D-999", else: other_token
@@ -203,5 +203,48 @@ defmodule Tau.Factory.Gate.AcLinkagePropertyTest do
 
     gating_tests = [%{name: "AC-1: present", tags: [:ac_1]}]
     assert {:pass, []} = AcLinkage.check(pr_body, gating_tests)
+  end
+
+  # ---------------------------------------------------------------------------
+  # D-322 — D-NNN (meta) exemption: a D-NNN (meta) token is NEVER reported
+  # missing. Gate 5.1's meta-exemption applies to D-NNN tokens, not only AC-N.
+  # ---------------------------------------------------------------------------
+
+  @tag :d_322
+  test "D-322: check/2 treats D-NNN (meta) token as exempt — never reported missing" do
+    # PR body with ONLY a D-NNN (meta) token in the AC section.
+    # No gating tests cover it — it must be exempt (not missing).
+    pr_body = """
+    ## Acceptance criteria
+
+    - **D-999 (meta)** verified by CI, not a unit test.
+
+    ## Test plan
+
+    See gating tests.
+    """
+
+    # Empty gating-test list — D-999 has no covering test.
+    # D-322 requires check/2 to return {:pass, []} because D-999 (meta) is exempt.
+    assert {:pass, []} = AcLinkage.check(pr_body, [])
+  end
+
+  @tag :d_322
+  test "D-322: check/2 still reports a non-meta D-NNN token missing when uncovered" do
+    # A D-NNN WITHOUT (meta) must still be reported missing when uncovered.
+    # This guards against an over-broad fix that skips all D-NNN tokens.
+    pr_body = """
+    ## Acceptance criteria
+
+    - **D-888** a normal D-NNN claim with no covering test.
+
+    ## Test plan
+
+    See gating tests.
+    """
+
+    result = AcLinkage.check(pr_body, [])
+    assert {:fail, missing} = result
+    assert "D-888" in missing, "Non-meta D-NNN must be reported missing; got #{inspect(missing)}"
   end
 end
