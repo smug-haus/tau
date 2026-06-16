@@ -59,6 +59,18 @@ into the retry climb. Adds §3 `[C207-B2a]`, the `:build_retry` point span to §
 B8, §5 table/prose edits, §6 D-394, §7 AC-10. `{:health_red,_}` stays terminal at
 first failure (D-303). Resolves #523.
 
+**Amendment (2026-06-16, PR #538):** Introduces **D-395** (merge-retry bound
+durability split). Records that D-394's per-member `build_attempts` counter is
+**volatile, best-effort, per-M-lifetime** — an optimisation that suppresses
+cheap transient-fault build storms within one M lifetime — and that the
+**durable** anti-storm containment is owned by the Unit: its `:awaiting_merge`
+`:state_timeout` (D-317/D-340) and durable D-318 attempt ladder (INV-19). An M
+restart resetting `build_attempts` to 0 cannot cause unbounded *terminal*
+non-progress (D-340 holds independent of M), only bounded repeated build work
+per restart. D-355 is unchanged (terminal-only durability preserved);
+non-terminal build relaunches remain intentionally non-durable, now justified by
+D-395. Outcome of the post-#534 architecture review (S3b). Resolves #537.
+
 ## 0. Why this spec exists
 
 M is the **crux** of the autonomous factory: it is the one component where the
@@ -527,7 +539,10 @@ append-only `merge_outcomes` row in L (via `Ledger.Writer.record_merge_outcome/2
 WAL-before-ack, D-315) **before** the ephemeral telemetry projection fires. The
 row survives the producer (MergeAuthority) dying — RPO=0. Non-terminal requeues
 (`:stale_ref`, task crash, build errors that requeue) write **no** outcome row —
-only terminal outcomes are durable. `Ledger.Reader.merge_outcome_for/2` returns
+only terminal outcomes are durable. Non-terminal build relaunches (D-394) are
+likewise intentionally non-durable — their bound is a volatile optimisation
+(D-395), so this terminal-only durability rule is preserved unchanged.
+`Ledger.Reader.merge_outcome_for/2` returns
 `{:merged, commit_sha}` or `{:rejected, reason}` from these rows, enabling U to
 reconcile on resume without re-submitting an already-landed or
 already-terminally-rejected merge (D-344 / PR #465, #466). Terminal rejection
@@ -598,9 +613,11 @@ batch trains) — is terminally ejected: a durable `merge_outcomes` `:rejected` 
 is written (`reason: :build_retry_exhausted`, D-355 WAL-before-ack, BEFORE the
 telemetry projection), `:reject` telemetry fires, then `{:merge_result,
 :rejected}` is broadcast to `"factory:pr:#{id}"` (D-356); the member is dropped,
-not requeued. `build_attempts` is per-M-lifetime in-memory (NOT WAL-persisted —
-D-355 forbids non-terminal durable rows; an M restart resets it, which is safe —
-re-climbing from 0 is bounded) and is reset to 0 on a member's successful merge
+not requeued. `build_attempts` is per-M-lifetime in-memory and NOT WAL-persisted; it is a
+best-effort transient-fault optimisation, **not** the durable safety bound (see
+**D-395**) — the durable anti-storm containment is the Unit's `:awaiting_merge`
+timeout + D-318 ladder, so an M-restart reset cannot cause unbounded terminal
+non-progress (D-340). It is reset to 0 on a member's successful merge
 and dropped on terminal eject. A **wedged** build (`:state_timeout`) is terminal
 at the first occurrence (B=1, same class as health-red, D-303): immediate
 terminal eject (`reason: :build_wedged`) with durable row + telemetry +
@@ -611,6 +628,31 @@ holds even at a pessimistic 3 s/attempt. `{:health_red, _}` is exempt (terminal
 at first failure, D-303). Enforced by
 `test/tau/factory/merge_build_retry_test.exs` (oracle-separated). Owned by
 SPEC-FACTORY-MERGE (§3 `[C207-B2a]`, §6).
+
+**D-395 — Merge-retry bound durability split:** The Merge Authority's per-member
+build-retry counter `build_attempts` (D-394) is **volatile, best-effort, and
+per-M-lifetime** (`survives_restart = ⊥`): it is an *optimisation* that
+suppresses cheap transient-fault build storms within a single M lifetime,
+**not** the durable anti-storm safety bound. The **durable** containment of
+build-failure non-progress is owned by the **Unit**:
+`□ ( ¬progress(awaiting_merge, u) → ◇_{≤ state_timeout_ms} escalate(u) )`, via
+U's `:awaiting_merge` `:state_timeout` (D-317/D-340; armed once on state entry,
+NOT reset by any M progress signal — D-377's heartbeat-reset is scoped to
+`oracle`/`implementing`, never `awaiting_merge`) and the durable
+`units.attempt_count` ladder (D-318/INV-19). Therefore an M restart resetting
+`build_attempts` to 0 **cannot** cause unbounded *terminal* non-progress (D-340 —
+every accepted unit ◇ terminal — holds independent of M); it can cause only
+**bounded repeated build work** per restart, itself capped by the factory
+supervisor's restart intensity. **Falsification:** a unit that, under any
+schedule of M restarts, neither merges, rejects, nor escalates. **Enforcer:** U's
+durable `:awaiting_merge` timeout + the durable D-318 ladder; M's
+`build_attempts` carries **no** durability obligation. This reconciles the
+apparent INV-16/INV-19 tension explicitly: those invariants' durable "attempt
+count" is U's `units.attempt_count` (the factory-decision ladder), a distinct
+quantity from M's deliberately-volatile transient-fault counter. Verified by
+inspection (AC-11, meta): `lib/tau/factory/unit.ex` arms `awaiting_merge`'s
+`:state_timeout` once on entry and has no `worker_heartbeat`/reset clause in that
+state.
 
 **D-341 — Fair merge progress, no starvation (LIV-2):**
 M serves merge-ready units from a **FIFO + aging** wait-queue;
@@ -679,17 +721,26 @@ Each is expressed against an observable signal. PR groupings are indicative.
   durable row + one broadcast, never requeued. Signal: `:build_retry` point spans
   (count = 3, `backoff_ms = 2000`), one terminal `:reject` span, one Ledger row,
   one PubSub message.
+- **AC-11 (D-395, meta):** The merge-retry bound durability split holds by
+  construction. Verified by inspection (not a new gating test):
+  `lib/tau/factory/unit.ex` arms `awaiting_merge`'s `:state_timeout` once on
+  entry (≈ line 625) and that state has no heartbeat/reset clause (D-377 reset is
+  scoped to `oracle`/`implementing`), so U's durable timeout fires independent of
+  M restarts; D-340 (every accepted unit ◇ terminal) therefore holds even when
+  M's volatile `build_attempts` resets on restart. The existing Unit
+  `:awaiting_merge` timeout/escalation tests cover the enforcer.
 
 ## Appendix B — Source map
 
 Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 
 - `lib/tau/factory/merge_authority.ex` (C1; D-300, D-301, D-302, D-303, D-341,
-  D-355, D-356, D-385, D-394 — the `gen_statem`, `:idle`/`:integrating`/`:committing`;
+  D-355, D-356, D-385, D-394, D-395 — the `gen_statem`, `:idle`/`:integrating`/`:committing`;
   D-356 PubSub broadcast of `{:merge_result, _}` to `"factory:pr:#{id}"` on every
   terminal member outcome; D-385 private-worktree build isolation in `default_build/3`;
-  D-394 bounded backed-off build retry + per-member terminal eject + wedge-at-B=1)
-  — PR-MERGE-1..5/PR#465/PR#477/PR#522/PR#534
+  D-394 bounded backed-off build retry + per-member terminal eject + wedge-at-B=1;
+  D-395 build-retry bound durability split (counter volatile; durable bound at U))
+  — PR-MERGE-1..5/PR#465/PR#477/PR#522/PR#534/PR#538
 - `test/tau/factory/merge_build_clean_tree_test.exs` (D-385 gating test) — PR#522
 - `test/tau/factory/merge_build_retry_test.exs` (D-394 gating test) — PR #534
 - `lib/tau/factory/dogfood/sandbox.ex` (D-385 `.gitignore` hygiene in `seed/1`) — PR#522
