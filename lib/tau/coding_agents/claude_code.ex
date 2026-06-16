@@ -235,6 +235,14 @@ defmodule Tau.CodingAgents.ClaudeCode do
     :ok
   end
 
+  # Idempotent: File.rm_rf on a non-existent dir is a no-op.
+  defp cleanup_config_dir(nil), do: :ok
+
+  defp cleanup_config_dir(path) when is_binary(path) do
+    _ = File.rm_rf(path)
+    :ok
+  end
+
   # ── stream construction (port) ───────────────────────────────────
 
   defp stream_from_port(exe, argv, task, tempfile, ctx) do
@@ -289,14 +297,17 @@ defmodule Tau.CodingAgents.ClaudeCode do
             {:env, port_env}
           ])
 
-        # Janitor: monitors the drainer (this process) and unlinks
-        # the MCP tempfile on :DOWN. Survives `Process.exit(_, :shutdown)`
-        # which would otherwise bypass `Stream.resource`'s after_fun.
-        janitor = spawn_tempfile_janitor(tempfile, self())
+        # Janitor: monitors the drainer (this process) and removes both
+        # the MCP tempfile and the isolated config dir on :DOWN. Survives
+        # `Process.exit(_, :shutdown)` which bypasses `Stream.resource`'s
+        # after_fun — the janitor is the robust cleanup path for both
+        # the config dir (D-388) and the MCP tempfile.
+        janitor = spawn_cleanup_janitor(tempfile, isolated_config_dir, self())
 
         %{
           port: port,
           tempfile: tempfile,
+          config_dir: isolated_config_dir,
           janitor: janitor,
           partial: "",
           parser: StreamJson.new(),
@@ -312,18 +323,20 @@ defmodule Tau.CodingAgents.ClaudeCode do
   end
 
   # The janitor is intentionally unsupervised — it's a single-purpose
-  # `Process.monitor` + `File.rm` helper bound to one stream. It exits
+  # `Process.monitor` + cleanup helper bound to one stream. It exits
   # `:normal` after cleanup. If the BEAM dies before cleanup, OS-level
   # /tmp cleanup is moot.
-  defp spawn_tempfile_janitor(nil, _drain_pid), do: nil
-
-  defp spawn_tempfile_janitor(tempfile, drain_pid) when is_binary(tempfile) do
+  #
+  # Cleans both the MCP tempfile (may be nil) and the isolated config dir
+  # (always present when the janitor is spawned — D-388 cleanup path).
+  defp spawn_cleanup_janitor(tempfile, config_dir, drain_pid) do
     spawn(fn ->
       ref = Process.monitor(drain_pid)
 
       receive do
         {:DOWN, ^ref, :process, ^drain_pid, _reason} ->
-          _ = File.rm(tempfile)
+          cleanup_tempfile(tempfile)
+          cleanup_config_dir(config_dir)
           :ok
 
         {:cleanup_done, ^drain_pid} ->
@@ -448,9 +461,10 @@ defmodule Tau.CodingAgents.ClaudeCode do
   defp terminal_event?(%Event.Error{recoverable: false}), do: true
   defp terminal_event?(_), do: false
 
-  defp port_done(%{port: port, tempfile: tempfile, janitor: janitor}) do
+  defp port_done(%{port: port, tempfile: tempfile, config_dir: config_dir, janitor: janitor}) do
     close_port(port)
     cleanup_tempfile(tempfile)
+    cleanup_config_dir(config_dir)
     notify_janitor(janitor)
     :ok
   end

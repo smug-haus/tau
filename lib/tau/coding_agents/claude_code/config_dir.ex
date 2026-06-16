@@ -47,12 +47,17 @@ defmodule Tau.CodingAgents.ClaudeCode.ConfigDir do
   def seed(target_dir, source_creds_path)
       when is_binary(target_dir) and is_binary(source_creds_path) do
     File.mkdir_p!(target_dir)
+    # Restrict directory to owner-only access so credential copies in /tmp
+    # are not world-readable (defense-in-depth, D-388).
+    File.chmod!(target_dir, 0o700)
 
     # Copy OAuth credentials only if the source file exists.
     # Absence is not an error — unit tests run without real credentials.
     if File.exists?(source_creds_path) do
       dest_creds = Path.join(target_dir, ".credentials.json")
       File.cp!(source_creds_path, dest_creds)
+      # Restrict credential file to owner-read/write only.
+      File.chmod!(dest_creds, 0o600)
     end
 
     # Write a minimal settings.json with no hooks key.
