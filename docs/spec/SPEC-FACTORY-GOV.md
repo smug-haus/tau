@@ -92,6 +92,18 @@ Boundaries (B-N attach contracts in §4):
 | B9 | all governed components ↔ C9 OtelReporter | paired `[:tau,:factory,…]` spans over `:telemetry`; handler is an observer, never control. |
 | B10 | C10 Lineage ↔ L (Ledger.Writer) | the lineage row is written in the **same transaction as the merge record** (WAL-before-ack); audit is a join over its FK edges. *L is writer-of-record (cited, SPEC-FACTORY-CORE).* |
 
+**External destructive-action control — the git-deny tool boundary (D-387,
+cited).** The coding-agent path realises a concrete instance of the
+destructive-action control that C7/B7/B8 (ActionClassifier → E-DESTRUCTIVE)
+generalise: the `ClaudeCode` adapter always appends `--disallowedTools
+"Bash(git:*)"` to its CLI argv (plus a git-excluding `--allowed-tools` whitelist
+on the factory path), denying the untrusted sub-agent the ability to mutate git
+state. This is the first-class external git-deny that the #519 design
+hand-waved toward #494 / the ActionClassifier; it bounds the sub-agent at the
+external tool boundary rather than relying solely on in-band classification. The
+authoritative invariant is **SPEC-CODING-AGENT §6 D-387**; it is cross-referenced
+here as a destructive-action control, not owned by this SPEC.
+
 ## 3. L0 constraints (includes D-374 amendment — PR #510)
 
 ### Amendment: metered-API spend is a fail-closed admission boundary (D-374)

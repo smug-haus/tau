@@ -39,6 +39,18 @@ ran as `claude -p ""`. D-381 pins the delivery seam: the Worker sets a
 `TAU_AGENT_PROMPT` env var at `Port.open` and the shim reads it into
 `task.prompt`. Orthogonal to the #509/D-374 metered-spend scrub (the prompt is
 task data, never a credential).
+#528 amendment (unified agent-boundary model) — **reaffirms D-364** and
+cross-refs **D-388**. D-364 is unchanged: the shim uniformly owns the single
+branch+commit step. Under the #528 model the `ClaudeCode` sub-agent runs with
+git denied at the argv boundary (SPEC-CODING-AGENT D-387 — `--disallowedTools
+"Bash(git:*)"`), so it CANNOT self-commit and always leaves an uncommitted tree
+for the shim's single `git status --porcelain` detection to commit — exactly the
+non-empty-diff branch of D-364. #528 also adds a **worker config-isolation
+requirement** at the D-309/D-365 isolation boundary: the worker spawns the
+`ClaudeCode` agent with an isolated `CLAUDE_CONFIG_DIR` (subscription credential
+only, no operator hooks/plugins/skills/MCP/memory). The authoritative invariant
+text is **SPEC-CODING-AGENT §6 D-388**; this SPEC cross-refs it as a property of
+the worker's isolation boundary, it is not owned here.
 
 ## 0. Why this spec exists
 
@@ -769,6 +781,14 @@ cache is touched. Detection: `coding_agent_shim_isolation_test.exs` — assert t
 shim's effective `workspace`, cwd, and the propagated `XDG_DATA_HOME`/`MIX_HOME`
 all resolve **inside** `ws`, and that no `~/.tau/worktrees/...` nested worktree is
 created.
+
+*Config-isolation cross-ref (#528, D-388):* the worker-side resource isolation
+of D-365 is complemented by **per-worker `CLAUDE_CONFIG_DIR` isolation** — the
+`ClaudeCode` agent is spawned with an isolated config dir holding the
+subscription credential only (no operator hooks/plugins/skills/MCP/memory), so no
+operator host config leaks into the sub-agent. The authoritative invariant is
+**SPEC-CODING-AGENT §6 D-388**; it is cross-referenced here as a property of the
+worker's isolation boundary, not owned by this SPEC.
 
 **D-366 — Worker heartbeats are derived from agent-stream progress, not a
 self-clock (#487, A1):**
