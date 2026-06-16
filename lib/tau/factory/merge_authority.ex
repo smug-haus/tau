@@ -512,8 +512,9 @@ defmodule Tau.Factory.MergeAuthority do
 
     if retryable == [] do
       # All members exhausted — eject was already terminal; transition immediately.
-      # (terminal_eject_members already cleared train/task_ref/task_pid)
-      transition_from_idle(%{data_after_eject | build_attempts: new_attempts})
+      # (terminal_eject_members already cleared train/task_ref/task_pid and dropped
+      # the ejected units from build_attempts — do NOT overwrite with new_attempts.)
+      transition_from_idle(data_after_eject)
     else
       # At least one retryable member: requeue, set backoff_pending, arm timer.
       # Emit per-retryable-member :build_retry point telemetry (D-394).
