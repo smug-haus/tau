@@ -223,6 +223,54 @@ defmodule Tau.Factory.EgressChainTest do
   end
 
   # ---------------------------------------------------------------------------
+  # D-351 / C211 — circuit-open short-circuit emits visible telemetry (#661)
+  #
+  # FR-7.2 (issue #661) finding: the three layers are uncomposed and independent;
+  # no Egress chokepoint exists. D-351 requires that every short-circuit is
+  # VISIBLE — a `[:tau,:circuit_breaker,:open]` event must be emitted, never
+  # silently dropped (C211: "visible telemetry event AND a tagged error to the
+  # caller — never a silent swallow"). This test asserts the telemetry half.
+  # ---------------------------------------------------------------------------
+
+  describe "D-351 / C211 — circuit-open short-circuit emits [:tau,:circuit_breaker,:open] telemetry (#661)" do
+    @tag :d_351
+    test "D-351 / C211 (#661): open-circuit short-circuit emits [:tau,:circuit_breaker,:open] event — not a silent drop" do
+      # Subscribe to the circuit-breaker open event.
+      test_pid = self()
+      handler_id = "egress_c211_test_#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler_id,
+        [:tau, :circuit_breaker, :open],
+        fn _event, _measurements, metadata, _config ->
+          send(test_pid, {:telemetry_cb_open, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      # Trip the breaker for StubProviderOpen.
+      :ok = trip_breaker(StubProviderOpen)
+
+      recorder = start_call_recorder()
+      req = %{messages: [], opts: %{model: "stub-open-model"}}
+
+      # This call raises UndefinedFunctionError on the current branch
+      # (Tau.Factory.Egress is absent) — the expected fail-before.
+      _result = @egress.call(StubProviderOpen, req, ctx(recorder))
+
+      # C211: the open-circuit short-circuit MUST emit a visible
+      # [:tau,:circuit_breaker,:open] telemetry event.
+      assert_received {:telemetry_cb_open, metadata},
+                      "D-351/C211 (#661): open-circuit short-circuit must emit [:tau,:circuit_breaker,:open] telemetry; no event received — silent drop violates C211"
+
+      assert metadata[:provider] == StubProviderOpen,
+             "D-351/C211 (#661): telemetry metadata must carry the provider key; got: #{inspect(metadata)}"
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # D-351 — happy path: all guards pass → provider called
   # ---------------------------------------------------------------------------
 
