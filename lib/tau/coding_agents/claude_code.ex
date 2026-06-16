@@ -78,6 +78,7 @@ defmodule Tau.CodingAgents.ClaudeCode do
 
   alias Tau.CodingAgent.Event
   alias Tau.CodingAgents.ClaudeCode.Argv
+  alias Tau.CodingAgents.ClaudeCode.ConfigDir
   alias Tau.CodingAgents.ClaudeCode.StreamJson
 
   require Logger
@@ -122,6 +123,22 @@ defmodule Tau.CodingAgents.ClaudeCode do
     # `Process.monitor`s the drainer to unlink the MCP tempfile on
     # `:DOWN`. `cancel/1` is informational only.
     :ok
+  end
+
+  @doc """
+  Seed an isolated Claude config directory for D-388 per-worker config isolation.
+
+  Delegates to `ConfigDir.seed/2` with the `:source_creds` option (defaults
+  to `ConfigDir.default_source_creds_path()`). Returns `target_dir`.
+
+  Accepts either 1 argument (target_dir with default source creds) or 2
+  arguments (target_dir plus keyword opts with optional `:source_creds`).
+  """
+  @spec seed_config_dir(String.t(), keyword()) :: String.t()
+  def seed_config_dir(target_dir, opts \\ []) do
+    source = Keyword.get(opts, :source_creds, ConfigDir.default_source_creds_path())
+    :ok = ConfigDir.seed(target_dir, source)
+    target_dir
   end
 
   # ── workspace validation (D-033) ──────────────────────────────────
@@ -243,14 +260,20 @@ defmodule Tau.CodingAgents.ClaudeCode do
         #   ANTHROPIC_API_KEY    — primary API key
         #   ANTHROPIC_AUTH_TOKEN — metered bearer token honoured by the claude CLI
         #   ANTHROPIC_BASE_URL   — proxy endpoint redirect (paid spend vector)
+        # D-388: create a per-invocation isolated config dir so each subprocess
+        # gets its own CLAUDE_CONFIG_DIR (OAuth creds only, no operator hooks).
+        source_creds = Map.get(ctx, :claude_config_source, ConfigDir.default_source_creds_path())
+        isolated_config_dir = ConfigDir.create_isolated(source_creds)
+
         port_env =
           if allow_metered do
-            []
+            [{~c"CLAUDE_CONFIG_DIR", String.to_charlist(isolated_config_dir)}]
           else
             [
               {~c"ANTHROPIC_API_KEY", false},
               {~c"ANTHROPIC_AUTH_TOKEN", false},
-              {~c"ANTHROPIC_BASE_URL", false}
+              {~c"ANTHROPIC_BASE_URL", false},
+              {~c"CLAUDE_CONFIG_DIR", String.to_charlist(isolated_config_dir)}
             ]
           end
 
