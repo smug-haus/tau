@@ -10,7 +10,12 @@ defmodule Tau.CodingAgents.ClaudeCode.Argv do
 
   Base form:
 
-      ["-p", prompt, "--output-format", "stream-json", "--verbose"]
+      ["-p", prompt, "--output-format", "stream-json", "--verbose",
+       "--disallowedTools", "Bash(git:*)"]
+
+  The `--disallowedTools "Bash(git:*)"` flag is ALWAYS appended (D-387).
+  The shim owns the single commit; the agent writes files only. This is
+  the external tool boundary: agents MUST NOT call git directly.
 
   Optional extensions, all opt-in via fields on `Tau.CodingAgent.task()`:
 
@@ -19,10 +24,13 @@ defmodule Tau.CodingAgents.ClaudeCode.Argv do
       mcp-config file (the path is passed in separately because
       the adapter is responsible for the tempfile lifecycle).
     * `--allowed-tools <csv>` when `task.allowed_tools` is a list.
-      `:all` (the default) omits the flag.
+      `:all` (the default) omits the flag. The factory whitelist MUST NOT
+      contain `Bash(git...)` — the git-deny baseline is always present
+      regardless.
     * `--dangerously-skip-permissions` when `task.skip_permissions` is
-      `true` (D-383). Absent or `false` omits the flag — interactive
-      default-deny is retained.
+      `true` (D-383, D-389 escape hatch). Absent or `false` omits the
+      flag — interactive default-deny is retained. The factory path MUST
+      NOT set this unconditionally (D-389).
 
   D-036: no credentials are read or injected here. The CLI inherits
   the host user's auth on its own.
@@ -43,6 +51,7 @@ defmodule Tau.CodingAgents.ClaudeCode.Argv do
     base = ["-p", to_string(prompt), "--output-format", "stream-json", "--verbose"]
 
     base
+    |> append_disallowed_tools()
     |> maybe_append_resume(task)
     |> maybe_append_mcp(Keyword.get(opts, :mcp_config_path))
     |> maybe_append_allowed_tools(task)
@@ -67,6 +76,13 @@ defmodule Tau.CodingAgents.ClaudeCode.Argv do
   end
 
   defp maybe_append_allowed_tools(argv, _), do: argv
+
+  # D-387: always append the git-deny tool boundary. The shim owns the single
+  # commit; the agent writes files only. This is unconditional — no factory
+  # whitelist may grant git access, and the deny is always present.
+  defp append_disallowed_tools(argv) do
+    argv ++ ["--disallowedTools", "Bash(git:*)"]
+  end
 
   defp maybe_append_skip_permissions(argv, %{skip_permissions: true}) do
     argv ++ ["--dangerously-skip-permissions"]

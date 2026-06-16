@@ -78,6 +78,7 @@ defmodule Tau.CodingAgents.ClaudeCode do
 
   alias Tau.CodingAgent.Event
   alias Tau.CodingAgents.ClaudeCode.Argv
+  alias Tau.CodingAgents.ClaudeCode.ConfigDir
   alias Tau.CodingAgents.ClaudeCode.StreamJson
 
   require Logger
@@ -122,6 +123,22 @@ defmodule Tau.CodingAgents.ClaudeCode do
     # `Process.monitor`s the drainer to unlink the MCP tempfile on
     # `:DOWN`. `cancel/1` is informational only.
     :ok
+  end
+
+  @doc """
+  Seed an isolated Claude config directory for D-388 per-worker config isolation.
+
+  Delegates to `ConfigDir.seed/2` with the `:source_creds` option (defaults
+  to `ConfigDir.default_source_creds_path()`). Returns `target_dir`.
+
+  Accepts either 1 argument (target_dir with default source creds) or 2
+  arguments (target_dir plus keyword opts with optional `:source_creds`).
+  """
+  @spec seed_config_dir(String.t(), keyword()) :: String.t()
+  def seed_config_dir(target_dir, opts \\ []) do
+    source = Keyword.get(opts, :source_creds, ConfigDir.default_source_creds_path())
+    :ok = ConfigDir.seed(target_dir, source)
+    target_dir
   end
 
   # ── workspace validation (D-033) ──────────────────────────────────
@@ -218,6 +235,14 @@ defmodule Tau.CodingAgents.ClaudeCode do
     :ok
   end
 
+  # Idempotent: File.rm_rf on a non-existent dir is a no-op.
+  defp cleanup_config_dir(nil), do: :ok
+
+  defp cleanup_config_dir(path) when is_binary(path) do
+    _ = File.rm_rf(path)
+    :ok
+  end
+
   # ── stream construction (port) ───────────────────────────────────
 
   defp stream_from_port(exe, argv, task, tempfile, ctx) do
@@ -243,14 +268,20 @@ defmodule Tau.CodingAgents.ClaudeCode do
         #   ANTHROPIC_API_KEY    — primary API key
         #   ANTHROPIC_AUTH_TOKEN — metered bearer token honoured by the claude CLI
         #   ANTHROPIC_BASE_URL   — proxy endpoint redirect (paid spend vector)
+        # D-388: create a per-invocation isolated config dir so each subprocess
+        # gets its own CLAUDE_CONFIG_DIR (OAuth creds only, no operator hooks).
+        source_creds = Map.get(ctx, :claude_config_source, ConfigDir.default_source_creds_path())
+        isolated_config_dir = ConfigDir.create_isolated(source_creds)
+
         port_env =
           if allow_metered do
-            []
+            [{~c"CLAUDE_CONFIG_DIR", String.to_charlist(isolated_config_dir)}]
           else
             [
               {~c"ANTHROPIC_API_KEY", false},
               {~c"ANTHROPIC_AUTH_TOKEN", false},
-              {~c"ANTHROPIC_BASE_URL", false}
+              {~c"ANTHROPIC_BASE_URL", false},
+              {~c"CLAUDE_CONFIG_DIR", String.to_charlist(isolated_config_dir)}
             ]
           end
 
@@ -266,14 +297,17 @@ defmodule Tau.CodingAgents.ClaudeCode do
             {:env, port_env}
           ])
 
-        # Janitor: monitors the drainer (this process) and unlinks
-        # the MCP tempfile on :DOWN. Survives `Process.exit(_, :shutdown)`
-        # which would otherwise bypass `Stream.resource`'s after_fun.
-        janitor = spawn_tempfile_janitor(tempfile, self())
+        # Janitor: monitors the drainer (this process) and removes both
+        # the MCP tempfile and the isolated config dir on :DOWN. Survives
+        # `Process.exit(_, :shutdown)` which bypasses `Stream.resource`'s
+        # after_fun — the janitor is the robust cleanup path for both
+        # the config dir (D-388) and the MCP tempfile.
+        janitor = spawn_cleanup_janitor(tempfile, isolated_config_dir, self())
 
         %{
           port: port,
           tempfile: tempfile,
+          config_dir: isolated_config_dir,
           janitor: janitor,
           partial: "",
           parser: StreamJson.new(),
@@ -289,18 +323,20 @@ defmodule Tau.CodingAgents.ClaudeCode do
   end
 
   # The janitor is intentionally unsupervised — it's a single-purpose
-  # `Process.monitor` + `File.rm` helper bound to one stream. It exits
+  # `Process.monitor` + cleanup helper bound to one stream. It exits
   # `:normal` after cleanup. If the BEAM dies before cleanup, OS-level
   # /tmp cleanup is moot.
-  defp spawn_tempfile_janitor(nil, _drain_pid), do: nil
-
-  defp spawn_tempfile_janitor(tempfile, drain_pid) when is_binary(tempfile) do
+  #
+  # Cleans both the MCP tempfile (may be nil) and the isolated config dir
+  # (always present when the janitor is spawned — D-388 cleanup path).
+  defp spawn_cleanup_janitor(tempfile, config_dir, drain_pid) do
     spawn(fn ->
       ref = Process.monitor(drain_pid)
 
       receive do
         {:DOWN, ^ref, :process, ^drain_pid, _reason} ->
-          _ = File.rm(tempfile)
+          cleanup_tempfile(tempfile)
+          cleanup_config_dir(config_dir)
           :ok
 
         {:cleanup_done, ^drain_pid} ->
@@ -425,9 +461,10 @@ defmodule Tau.CodingAgents.ClaudeCode do
   defp terminal_event?(%Event.Error{recoverable: false}), do: true
   defp terminal_event?(_), do: false
 
-  defp port_done(%{port: port, tempfile: tempfile, janitor: janitor}) do
+  defp port_done(%{port: port, tempfile: tempfile, config_dir: config_dir, janitor: janitor}) do
     close_port(port)
     cleanup_tempfile(tempfile)
+    cleanup_config_dir(config_dir)
     notify_janitor(janitor)
     :ok
   end

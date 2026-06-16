@@ -89,22 +89,26 @@ defmodule Tau.Factory.SkipPermissionsD383Test do
 
   describe "D-383 factory wiring via AgentBin.resolve/1" do
     @tag :d_383
-    test "D-383 wiring: resolve(agent_mode: :claude_code, skip_permissions: true) bakes skip_permissions: true into shim config" do
+    test "D-389 wiring: resolve(agent_mode: :claude_code, skip_permissions: true) does NOT bake skip_permissions into shim config" do
+      # D-389 supersedes the D-383 AgentBin-level wiring — the skip_permissions escape
+      # hatch now lives only at the Argv/task level (`task.skip_permissions`), so
+      # `AgentBin.resolve` no longer bakes it. Passing skip_permissions: true here is
+      # now IGNORED by the factory path; the shim config will not carry skip_permissions: true.
       opts = [agent_mode: :claude_code, skip_permissions: true, branch: "feat/test-d-383"]
 
       {agent_bin_path, _spawn_opts} = AgentBin.resolve(opts)
 
       assert is_binary(agent_bin_path),
-             "D-383: AgentBin.resolve/1 must return {String.t(), keyword()}"
+             "D-389: AgentBin.resolve/1 must return {String.t(), keyword()}"
 
       assert File.exists?(agent_bin_path),
-             "D-383: agent_bin_path #{agent_bin_path} must exist on disk"
+             "D-389: agent_bin_path #{agent_bin_path} must exist on disk"
 
       script = File.read!(agent_bin_path)
 
       assert [_, encoded_config] =
                Regex.run(~r/encoded = \\"([A-Za-z0-9+\/]+)\\"/, script),
-             "D-383: shim script must contain a baked base64-encoded config; " <>
+             "D-389: shim script must contain a baked base64-encoded config; " <>
                "head=#{String.slice(script, 0, 200)}"
 
       decoded_config =
@@ -112,9 +116,10 @@ defmodule Tau.Factory.SkipPermissionsD383Test do
         |> Base.decode64!(padding: false)
         |> :erlang.binary_to_term()
 
-      assert decoded_config[:skip_permissions] == true,
-             "D-383: decoded shim config must carry skip_permissions: true; " <>
-               "got #{inspect(decoded_config)}"
+      # D-389: AgentBin.resolve ignores skip_permissions — it must NOT be true in the shim config
+      refute decoded_config[:skip_permissions] == true,
+             "D-389: decoded shim config must NOT carry skip_permissions: true " <>
+               "(escape hatch relocated to Argv/task level); got #{inspect(decoded_config)}"
 
       File.rm(agent_bin_path)
     end

@@ -214,8 +214,18 @@ defmodule Tau.CodingAgents.ClaudeCodeTest do
     alias Tau.CodingAgents.ClaudeCode.Argv
 
     test "minimal task → -p prompt --output-format stream-json --verbose" do
+      # D-387: git-deny boundary is always-on, inserted immediately after the base flags
       argv = Argv.build(%{prompt: "hi", workspace: "/tmp"})
-      assert argv == ["-p", "hi", "--output-format", "stream-json", "--verbose"]
+
+      assert argv == [
+               "-p",
+               "hi",
+               "--output-format",
+               "stream-json",
+               "--verbose",
+               "--disallowedTools",
+               "Bash(git:*)"
+             ]
     end
 
     test "resume_id appends --resume" do

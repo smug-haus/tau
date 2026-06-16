@@ -72,12 +72,15 @@ defmodule Tau.Factory.AgentBin do
     dest_path = unique_tmp_path("tau_agentbin_claude_code")
 
     branch = Keyword.get(opts, :branch, "main")
-    skip_permissions = Keyword.get(opts, :skip_permissions, false)
 
+    # D-389: do NOT thread skip_permissions from factory opts into the shim config.
+    # The factory path MUST NOT bake skip_permissions: true unconditionally.
+    # The escape hatch for --dangerously-skip-permissions is retained at the
+    # Argv.build/2 level via task.skip_permissions (set on the task, not the shim
+    # config). The CodingAgentShim.write default of skip_permissions: false is correct.
     CodingAgentShim.write(dest_path,
       adapter: Tau.CodingAgents.ClaudeCode,
-      branch: branch,
-      skip_permissions: skip_permissions
+      branch: branch
     )
 
     {dest_path, [agent_mode: :claude_code]}
