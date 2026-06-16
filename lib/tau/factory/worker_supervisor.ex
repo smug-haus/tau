@@ -120,6 +120,12 @@ defmodule Tau.Factory.WorkerSupervisor do
       {:error, :metered_path_refused} ->
         {:error, :metered_path_refused}
 
+      # D-313: janitor is mandatory; Worker.init stops with :no_janitor when
+      # none is provided (fail-closed). Surface directly so the caller can match
+      # {:error, :no_janitor}.
+      {:error, :no_janitor} ->
+        {:error, :no_janitor}
+
       {:error, reason} ->
         {:error, reason}
     end

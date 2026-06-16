@@ -300,31 +300,38 @@ defmodule Tau.Factory.Worker do
     agent_mode = Map.get(ctx, :agent_mode)
     creds_check_fun = Map.get(ctx, :creds_check_fun, &default_creds_check/0)
 
-    # Step 4: register with the janitor (or arm the death-monitor) BEFORE
-    # opening the Port, so that any raise during Port.open is caught by the
-    # janitor's :DOWN handler — no unmonitored worktree leak (D-314, SPEC B5).
-    # The monitor is also spawned before the D-374 preflight so that a
-    # :metered_path_refused stop delivers a death-cert to report_to (D-374).
-    ns_dirs = Map.values(ns)
-
-    if janitor do
-      WorkspaceJanitor.register(janitor, worker_id, self(), ws, ns_dirs, report_to)
+    # Step 4: register with the janitor BEFORE opening the Port, so that any
+    # raise during Port.open is caught by the janitor's :DOWN handler — no
+    # unmonitored worktree leak (D-314, SPEC B5). The monitor is also set up
+    # before the D-374 preflight so that a :metered_path_refused stop delivers
+    # a death-cert to report_to (D-374).
+    #
+    # D-313 (fail-closed): the janitor is mandatory infrastructure for
+    # capture-before-destroy (INV-14). A nil janitor bypasses the capture path
+    # entirely (spawn_death_monitor sends only {:worker_exit, ...} with zero git
+    # capture). Per the D-374 precedent (infra prerequisites rejected at init),
+    # Worker MUST stop with :no_janitor when no janitor is provided so the
+    # WorkerSupervisor propagates {:error, :no_janitor} to the caller.
+    if is_nil(janitor) do
+      cleanup_worktree(ws, repo_dir)
+      {:stop, :no_janitor}
     else
-      spawn_death_monitor(worker_id, report_to)
-    end
+      ns_dirs = Map.values(ns)
+      WorkspaceJanitor.register(janitor, worker_id, self(), ws, ns_dirs, report_to)
 
-    # D-374: metered-API spend preflight — runs only for agent_mode: :claude_code.
-    # If creds_check_fun returns {:error, _} the worker refuses to open the Port
-    # and stops with :metered_path_refused (fail-closed; NO fallback).
-    # The death-cert monitor (spawned above) delivers
-    # {:worker_exit, worker_id, :metered_path_refused} to report_to.
-    case preflight_metered(agent_mode, creds_check_fun) do
-      :ok ->
-        open_port_final(ctx, ns, extra_env, agent_mode, ws, repo_dir)
+      # D-374: metered-API spend preflight — runs only for agent_mode: :claude_code.
+      # If creds_check_fun returns {:error, _} the worker refuses to open the Port
+      # and stops with :metered_path_refused (fail-closed; NO fallback).
+      # The death-cert monitor (spawned above) delivers
+      # {:worker_exit, worker_id, :metered_path_refused} to report_to.
+      case preflight_metered(agent_mode, creds_check_fun) do
+        :ok ->
+          open_port_final(ctx, ns, extra_env, agent_mode, ws, repo_dir)
 
-      {:stop, :metered_path_refused} ->
-        cleanup_worktree(ws, repo_dir)
-        {:stop, :metered_path_refused}
+        {:stop, :metered_path_refused} ->
+          cleanup_worktree(ws, repo_dir)
+          {:stop, :metered_path_refused}
+      end
     end
   end
 
@@ -433,43 +440,6 @@ defmodule Tau.Factory.Worker do
        # Exit-0 without work_ready is fail-closed → :no_work_product.
        work_ready_seen?: false
      }}
-  end
-
-  # Spawn a lightweight unlinked monitor process that watches this worker and
-  # delivers the death-certificate to report_to on the `:DOWN` event.
-  #
-  # This is the SOLE writer of `{:worker_exit, worker_id, reason}` (C202).
-  # The worker itself does NOT send the certificate — it just stops.
-  #
-  # Reason mapping (D-326 — :no_work_product is a semantic non-completion):
-  #   :normal                       → {:worker_exit, id, :normal}
-  #   {:shutdown, :no_work_product} → {:worker_exit, id, :no_work_product}
-  #   :killed                       → {:worker_exit, id, :kill}
-  #   other                         → {:worker_exit, id, other}
-  defp spawn_death_monitor(_worker_id, nil), do: :ok
-
-  defp spawn_death_monitor(worker_id, report_to) do
-    worker_pid = self()
-
-    Elixir.Process.spawn(
-      fn ->
-        ref = Process.monitor(worker_pid)
-
-        receive do
-          {:DOWN, ^ref, :process, ^worker_pid, reason} ->
-            cert_reason =
-              case reason do
-                :normal -> :normal
-                {:shutdown, :no_work_product} -> :no_work_product
-                :killed -> :kill
-                other -> other
-              end
-
-            send(report_to, {:worker_exit, worker_id, cert_reason})
-        end
-      end,
-      []
-    )
   end
 
   # ---------------------------------------------------------------------------
