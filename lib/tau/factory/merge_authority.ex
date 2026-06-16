@@ -27,6 +27,12 @@ defmodule Tau.Factory.MergeAuthority do
   # How long to wait for a build task before treating it as wedged (C207).
   @build_timeout_ms :timer.minutes(30)
 
+  # D-394: maximum consecutive retryable failures per member before terminal eject.
+  @build_retry_max 3
+
+  # D-394: dwell between retry launches (non-blocking backoff timer).
+  @build_backoff_ms 2_000
+
   # ---------------------------------------------------------------------------
   # Public API
   # ---------------------------------------------------------------------------
@@ -45,6 +51,12 @@ defmodule Tau.Factory.MergeAuthority do
     - `:cas` — the CAS module to use (default `Tau.Factory.Merge.Cas`; injectable for tests).
     - `:pubsub` — the `Phoenix.PubSub` instance to broadcast D-356 merge results on
       (default `Tau.PubSub`; injectable for tests).
+    - `:build_retry_max` — maximum consecutive retryable failures before terminal eject
+      (default #{@build_retry_max}; injectable for tests, D-394).
+    - `:build_backoff_ms` — dwell in ms between retry launches
+      (default #{@build_backoff_ms}; injectable for tests, D-394).
+    - `:build_timeout_ms` — ms before a running build task is killed as wedged
+      (default #{@build_timeout_ms}; injectable for tests, D-394).
   """
   @spec child_spec(keyword()) :: Supervisor.child_spec()
   def child_spec(opts) do
@@ -92,6 +104,11 @@ defmodule Tau.Factory.MergeAuthority do
     cas = Keyword.get(opts, :cas, Cas)
     pubsub = Keyword.get(opts, :pubsub, Tau.PubSub)
 
+    # D-394: resolve retry/backoff/timeout params from opts, falling back to module attrs.
+    build_retry_max = Keyword.get(opts, :build_retry_max, @build_retry_max)
+    build_backoff_ms = Keyword.get(opts, :build_backoff_ms, @build_backoff_ms)
+    build_timeout_ms = Keyword.get(opts, :build_timeout_ms, @build_timeout_ms)
+
     # Start the Task.Supervisor for builds if it is not already running.
     # Linking it to this process ensures it is cleaned up when MA stops.
     case Process.whereis(tasks_name) do
@@ -115,6 +132,10 @@ defmodule Tau.Factory.MergeAuthority do
       cas: cas,
       pubsub: pubsub,
       build_fun: build_fun,
+      # D-394: resolved retry parameters
+      build_retry_max: build_retry_max,
+      build_backoff_ms: build_backoff_ms,
+      build_timeout_ms: build_timeout_ms,
       # wait queue: list of units waiting to be built
       queue: [],
       # task ref for current build (nil when :idle)
@@ -122,7 +143,11 @@ defmodule Tau.Factory.MergeAuthority do
       # task pid for forwarding barrier messages (nil when :idle)
       task_pid: nil,
       # units currently in the integrating train
-      train: []
+      train: [],
+      # D-394: per-member consecutive failure counter (unit_id => non_neg_integer)
+      build_attempts: %{},
+      # D-394: true while the T_backoff timer is armed; blocks start_build
+      backoff_pending: false
     }
 
     {:ok, :idle, data}
@@ -142,6 +167,14 @@ defmodule Tau.Factory.MergeAuthority do
       {:idle, next_data} ->
         {:keep_state, next_data, [{:reply, from, :queued}]}
     end
+  end
+
+  # D-394: backoff timer expired — clear pending flag and attempt next build.
+  # In :state_functions callback mode, a generic timeout {:timeout, T, Name}
+  # arrives as idle(:timeout, Name, data) — event type is :timeout, content is Name.
+  def idle(:timeout, :build_backoff, data) do
+    next_data = %{data | backoff_pending: false}
+    transition_from_idle(next_data)
   end
 
   # Ignore stray barrier messages in idle state.
@@ -182,82 +215,80 @@ defmodule Tau.Factory.MergeAuthority do
 
     telemetry(:committing, %{hash: hd_hash(units)}, %{units: units, tip: tip})
 
-    next_data = %{data | task_ref: nil, task_pid: nil, train: []}
+    # D-394: reset build_attempts for all successfully-built members.
+    next_attempts =
+      Enum.reduce(units, data.build_attempts, fn unit, acc ->
+        Map.delete(acc, unit.id)
+      end)
+
+    next_data = %{data | task_ref: nil, task_pid: nil, train: [], build_attempts: next_attempts}
     commit_action = {:next_event, :internal, {:commit, units, base, tip}}
     {:next_state, :committing, next_data, [commit_action]}
   end
 
   # Task result: build failed — health_red means eject (D-303, B=1); other
-  # failures requeue for the next train attempt.
+  # failures enter D-394 bounded backed-off retry or terminal eject.
   def integrating(:info, {ref, {:build_failed, reason}}, %{task_ref: ref} = data) do
     Process.demonitor(ref, [:flush])
     Logger.warning("[MergeAuthority] build failed: #{inspect(reason)}")
 
     train = data.train
 
-    next_data =
-      case reason do
-        {:health_red, _report} ->
-          # Eject the train; do NOT requeue — health failure is terminal for this tip.
-          # D-355 (symmetric) / WAL-before-ack: write the durable :rejected outcome
-          # row for each ejected member BEFORE the ephemeral telemetry projection
-          # fires. Mirrors the :merged WAL-before-ack path in :committing (D-315,
-          # RPO=0). Only TERMINAL rejections are durable; requeues write nothing.
-          Enum.each(train, fn unit ->
-            LedgerWriter.record_merge_outcome(data.ledger, %{
-              unit_id: unit.id,
-              outcome: :rejected,
-              commit_sha: nil,
-              reason: :build_failed,
-              run: unit.run
-            })
-          end)
+    case reason do
+      {:health_red, _report} ->
+        # Eject the train; do NOT requeue — health failure is terminal for this tip.
+        # D-355 (symmetric) / WAL-before-ack: write the durable :rejected outcome
+        # row for each ejected member BEFORE the ephemeral telemetry projection
+        # fires. Mirrors the :merged WAL-before-ack path in :committing (D-315,
+        # RPO=0). Only TERMINAL rejections are durable; requeues write nothing.
+        Enum.each(train, fn unit ->
+          LedgerWriter.record_merge_outcome(data.ledger, %{
+            unit_id: unit.id,
+            outcome: :rejected,
+            commit_sha: nil,
+            reason: :build_failed,
+            run: unit.run
+          })
+        end)
 
-          telemetry(:reject, %{hash: hd_hash(train)}, %{reason: :build_failed, units: train})
+        telemetry(:reject, %{hash: hd_hash(train)}, %{reason: :build_failed, units: train})
 
-          # D-356: broadcast :rejected to each ejected member (terminal rejection).
-          Enum.each(train, fn unit ->
-            Phoenix.PubSub.broadcast(
-              data.pubsub,
-              "factory:pr:#{unit.id}",
-              {:merge_result, :rejected}
-            )
-          end)
+        # D-356: broadcast :rejected to each ejected member (terminal rejection).
+        Enum.each(train, fn unit ->
+          Phoenix.PubSub.broadcast(
+            data.pubsub,
+            "factory:pr:#{unit.id}",
+            {:merge_result, :rejected}
+          )
+        end)
 
-          eject_train(data)
+        next_data = eject_train(data)
+        transition_from_idle(next_data)
 
-        _other ->
-          # Non-terminal: requeue for the next train attempt; do NOT write a durable
-          # outcome row (only terminal outcomes are durable — D-355 symmetric).
-          telemetry(:reject, %{hash: hd_hash(train)}, %{reason: :build_failed, units: train})
-          requeue_train(data)
-      end
-
-    transition_from_idle(next_data)
+      _other ->
+        # D-394: non-health retryable failure — bounded retry or terminal eject.
+        bounded_retry_or_eject(data, :build_failed)
+    end
   end
 
   # Task crashed (:DOWN without a prior result message).
+  # D-394: task crash joins the bounded backed-off retry climb.
   def integrating(:info, {:DOWN, ref, :process, _pid, reason}, %{task_ref: ref} = data) do
     Logger.warning("[MergeAuthority] build task crashed: #{inspect(reason)}")
-
-    train = data.train
-    telemetry(:reject, %{hash: hd_hash(train)}, %{reason: :task_down, units: train})
-
-    next_data = requeue_train(data)
-    transition_from_idle(next_data)
+    bounded_retry_or_eject(data, :task_down)
   end
 
   # Wedged build guard: state_timeout fires if the build takes too long.
+  # D-394: wedge is terminal at B=1 — kill task, eject, never requeue.
   def integrating(:state_timeout, :build_timeout, data) do
-    Logger.warning("[MergeAuthority] build task wedged; requeuing train")
+    Logger.warning("[MergeAuthority] build task wedged; ejecting train (terminal at B=1)")
 
     if data.task_pid, do: Process.exit(data.task_pid, :kill)
     if data.task_ref, do: Process.demonitor(data.task_ref, [:flush])
 
-    train = data.train
-    telemetry(:reject, %{hash: hd_hash(train)}, %{reason: :build_timeout, units: train})
-
-    next_data = requeue_train(data)
+    # D-394: wedge is terminal at B=1 — does NOT count toward build_attempts.
+    # Write durable row + broadcast then transition.
+    next_data = terminal_eject_members(data, data.train, :build_wedged)
     transition_from_idle(next_data)
   end
 
@@ -347,7 +378,13 @@ defmodule Tau.Factory.MergeAuthority do
               )
             end)
 
-            transition_from_idle(data)
+            # D-394: reset build_attempts for successfully merged members.
+            next_attempts =
+              Enum.reduce(units, data.build_attempts, fn unit, acc ->
+                Map.delete(acc, unit.id)
+              end)
+
+            transition_from_idle(%{data | build_attempts: next_attempts})
 
           {:error, :stale_ref} ->
             Logger.info("[MergeAuthority] stale ref; requeuing train for rebase + re-gate")
@@ -386,8 +423,11 @@ defmodule Tau.Factory.MergeAuthority do
     %{data | queue: queue ++ [unit]}
   end
 
-  # Attempt to start a new build from the queue. Returns a gen_statem reply tuple.
-  # Used from `:idle` to avoid duplicating the transition logic.
+  # D-394: head guard — if a backoff timer is armed, do NOT launch a build.
+  # This is the single chokepoint: every code path that might launch funnels
+  # through start_build/1, so the guard covers all of them.
+  defp start_build(%{backoff_pending: true} = data), do: {:idle, data}
+
   defp start_build(%{queue: []} = data), do: {:idle, data}
 
   defp start_build(%{queue: [unit | rest]} = data) do
@@ -409,7 +449,8 @@ defmodule Tau.Factory.MergeAuthority do
         task_pid: task.pid
     }
 
-    timeout_action = {:state_timeout, @build_timeout_ms, :build_timeout}
+    # D-394: use the resolved build_timeout_ms from data (not the module attribute).
+    timeout_action = {:state_timeout, data.build_timeout_ms, :build_timeout}
     {:integrating, next_data, [timeout_action]}
   end
 
@@ -425,8 +466,123 @@ defmodule Tau.Factory.MergeAuthority do
     end
   end
 
-  defp requeue_train(%{train: train} = data) do
-    requeue_units(%{data | train: []}, train)
+  # D-394: bounded retry or terminal eject for retryable build failures.
+  #
+  # Increments build_attempts for each train member, then:
+  #   - Members at N_build exhaustion → terminal_eject_members (durable row + broadcast).
+  #   - Remaining retryable members → requeue with a T_backoff timer.
+  #   - If ALL exhausted → no timer, transition_from_idle immediately.
+  #   - If ANY retryable → arm {:timeout, T_backoff, :build_backoff}, set backoff_pending.
+  #
+  # Returns a gen_statem action tuple.
+  defp bounded_retry_or_eject(data, failure_reason) do
+    train = data.train
+    retry_max = data.build_retry_max
+    backoff_ms = data.build_backoff_ms
+
+    # Increment attempt counter for each current train member.
+    new_attempts =
+      Enum.reduce(train, data.build_attempts, fn unit, acc ->
+        Map.update(acc, unit.id, 1, &(&1 + 1))
+      end)
+
+    # Partition by exhaustion.
+    {exhausted, retryable} =
+      Enum.split_with(train, fn unit ->
+        Map.get(new_attempts, unit.id, 0) >= retry_max
+      end)
+
+    # Emit a non-terminal telemetry span for ALL train members first.
+    # (Terminal path emits its own telemetry inside terminal_eject_members.)
+    unless retryable == [] do
+      telemetry(:reject, %{hash: hd_hash(train)}, %{reason: failure_reason, units: train})
+    end
+
+    # Terminal eject exhausted members (writes durable rows + broadcasts).
+    data_after_eject =
+      if exhausted == [] do
+        data
+      else
+        terminal_eject_members(
+          %{data | build_attempts: new_attempts},
+          exhausted,
+          :build_retry_exhausted
+        )
+      end
+
+    if retryable == [] do
+      # All members exhausted — eject was already terminal; transition immediately.
+      # (terminal_eject_members already cleared train/task_ref/task_pid and dropped
+      # the ejected units from build_attempts — do NOT overwrite with new_attempts.)
+      transition_from_idle(data_after_eject)
+    else
+      # At least one retryable member: requeue, set backoff_pending, arm timer.
+      # Emit per-retryable-member :build_retry point telemetry (D-394).
+      Enum.each(retryable, fn unit ->
+        attempt_n = Map.get(new_attempts, unit.id, 0)
+
+        :telemetry.execute(
+          [:tau, :factory, :merge, :build_retry],
+          %{},
+          %{unit_id: unit.id, attempt_n: attempt_n, backoff_ms: backoff_ms}
+        )
+      end)
+
+      next_data =
+        data_after_eject
+        |> requeue_units(retryable)
+        |> Map.put(:build_attempts, new_attempts)
+        |> Map.put(:backoff_pending, true)
+
+      {:next_state, :idle, next_data, [{:timeout, backoff_ms, :build_backoff}]}
+    end
+  end
+
+  # D-394: terminal eject for a list of units with a given reason.
+  #
+  # For each unit IN ORDER (D-355/D-356):
+  #   (a) Write durable :rejected row via LedgerWriter (WAL-before-ack).
+  #   (b) Emit :reject telemetry.
+  #   (c) Broadcast {:merge_result, :rejected} on the per-PR PubSub topic.
+  #
+  # Returns updated data with those units removed from train, task_ref/task_pid
+  # cleared, and their build_attempts entries dropped.
+  defp terminal_eject_members(data, units, reason) do
+    # (a) WAL-before-ack: write all durable rows BEFORE any telemetry or broadcast.
+    Enum.each(units, fn unit ->
+      LedgerWriter.record_merge_outcome(data.ledger, %{
+        unit_id: unit.id,
+        outcome: :rejected,
+        commit_sha: nil,
+        reason: reason,
+        run: unit.run
+      })
+    end)
+
+    # (b) Telemetry after WAL writes.
+    telemetry(:reject, %{hash: hd_hash(units)}, %{reason: reason, units: units})
+
+    # (c) D-356: broadcast :rejected per unit after telemetry.
+    Enum.each(units, fn unit ->
+      Phoenix.PubSub.broadcast(
+        data.pubsub,
+        "factory:pr:#{unit.id}",
+        {:merge_result, :rejected}
+      )
+    end)
+
+    # Drop ejected units from train and build_attempts; clear task handles.
+    ejected_ids = MapSet.new(units, & &1.id)
+
+    remaining_train =
+      Enum.reject(data.train, fn unit -> MapSet.member?(ejected_ids, unit.id) end)
+
+    next_attempts =
+      Enum.reduce(units, data.build_attempts, fn unit, acc ->
+        Map.delete(acc, unit.id)
+      end)
+
+    %{data | train: remaining_train, task_ref: nil, task_pid: nil, build_attempts: next_attempts}
   end
 
   # Eject the current train without requeuing its units. Used for D-303 health
