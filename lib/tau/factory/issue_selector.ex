@@ -111,6 +111,14 @@ defmodule Tau.Factory.IssueSelector do
                          the real `gh issue list` shell adapter.
     - `:elaborate_fun` — optional; `(map() -> ConflictCheck.scope())`. Defaults
                          to the pure heuristic elaborator (D-370).
+    - `:fetch_fun`     — optional; `(-> {:ok, String.t()})`. Performs a
+                         `git fetch origin` and resolves the current `origin/main`
+                         HEAD SHA. The resolved SHA is used as the `base_ref`
+                         (branch field) in the returned work_item, establishing a
+                         system-established ref derived from fresh `origin/main`
+                         (INV-WF-9 / [C214-B2], SPEC-FACTORY-FLEET §4 B2).
+                         Defaults to the real `git fetch` + SHA-resolution adapter.
+                         Tests MUST inject a stub via `:fetch_fun`.
 
   Returns a `work_item` 4-tuple or `nil`.
   """
@@ -120,14 +128,16 @@ defmodule Tau.Factory.IssueSelector do
     milestone = Keyword.fetch!(opts, :milestone)
     gh_fun = Keyword.get(opts, :gh_fun, &default_gh_fun/1)
     elaborate_fun = Keyword.get(opts, :elaborate_fun, &elaborate_issue/1)
+    fetch_fun = Keyword.get(opts, :fetch_fun, &default_fetch_fun/0)
 
+    {:ok, origin_main_sha} = fetch_fun.()
     {:ok, issues} = gh_fun.(milestone)
 
     snapshots = LedgerReader.latest_unit_snapshots(ledger)
 
     issues
     |> Enum.reject(&terminal_in_ledger?(&1, snapshots))
-    |> pick_work_item(elaborate_fun)
+    |> pick_work_item(elaborate_fun, origin_main_sha)
   end
 
   # ---------------------------------------------------------------------------
@@ -147,15 +157,17 @@ defmodule Tau.Factory.IssueSelector do
 
   # Pick the smallest shippable increment: first in tracker order.
   # Elaborates the declared scope and derives a deterministic hash and branch name.
-  defp pick_work_item([], _elaborate_fun), do: nil
+  # INV-WF-9: the branch (base_ref) is rooted in the system-established
+  # origin/main SHA resolved by the fetch_fun, not derived from the issue number.
+  defp pick_work_item([], _elaborate_fun, _origin_main_sha), do: nil
 
-  defp pick_work_item([issue | _rest], elaborate_fun) do
+  defp pick_work_item([issue | _rest], elaborate_fun, origin_main_sha) do
     number = Map.fetch!(issue, "number")
     title = Map.get(issue, "title", "")
 
     scope = elaborate_fun.(issue)
     hash = content_hash(number, title)
-    branch = "unit-#{number}"
+    branch = origin_main_sha
 
     {issue, scope, hash, branch}
   end
@@ -274,6 +286,18 @@ defmodule Tau.Factory.IssueSelector do
   defp content_hash(number, title) do
     :crypto.hash(:sha256, "#{number}:#{title}")
     |> Base.encode16(case: :lower)
+  end
+
+  # Default real fetch adapter: runs `git fetch origin` then resolves
+  # the current `origin/main` HEAD SHA (INV-WF-9).
+  # Tests MUST inject a stub via `:fetch_fun` — this path is NOT exercised in tests.
+  defp default_fetch_fun do
+    with {_, 0} <- System.cmd("git", ["fetch", "origin"], stderr_to_stdout: true),
+         {sha, 0} <- System.cmd("git", ["rev-parse", "origin/main"], stderr_to_stdout: true) do
+      {:ok, String.trim(sha)}
+    else
+      {output, code} -> {:error, {:git_exit, code, output}}
+    end
   end
 
   # Default real `gh` adapter: shells out to `gh issue list`.
