@@ -249,11 +249,14 @@ defmodule Tau.Factory.RejectDurableOutcomeTest do
       # WAL-committed (WAL-before-ack) IF the producer records it — mirroring the
       # :merged proof.
       handler_id = "reject-outcome-durable-#{System.unique_integer([:positive])}"
+      this_hash = unit.hash
 
       :telemetry.attach(
         handler_id,
         [:tau, :factory, :merge, :reject],
-        fn _event, _measurements, _metadata, _config -> send(test_pid, :reject_fired) end,
+        fn _event, measurements, _metadata, _config ->
+          if measurements[:hash] == this_hash, do: send(test_pid, :reject_fired)
+        end,
         nil
       )
 
@@ -301,11 +304,14 @@ defmodule Tau.Factory.RejectDurableOutcomeTest do
         )
 
       handler_id = "reject-outcome-crash-#{System.unique_integer([:positive])}"
+      this_hash = unit.hash
 
       :telemetry.attach(
         handler_id,
         [:tau, :factory, :merge, :reject],
-        fn _event, _measurements, _metadata, _config -> send(test_pid, :reject_fired) end,
+        fn _event, measurements, _metadata, _config ->
+          if measurements[:hash] == this_hash, do: send(test_pid, :reject_fired)
+        end,
         nil
       )
 
@@ -454,12 +460,15 @@ defmodule Tau.Factory.RejectDurableOutcomeTest do
       ma = start_merge_authority(ledger, work_path, built_build_fun(tip), StaleRefCas)
 
       handler_id = "reject-outcome-requeue-#{System.unique_integer([:positive])}"
+      this_hash = unit.hash
 
       :telemetry.attach(
         handler_id,
         [:tau, :factory, :merge, :reject],
-        fn _event, _measurements, metadata, _config ->
-          send(test_pid, {:reject_fired, Map.get(metadata, :reason)})
+        fn _event, measurements, metadata, _config ->
+          if measurements[:hash] == this_hash do
+            send(test_pid, {:reject_fired, Map.get(metadata, :reason)})
+          end
         end,
         nil
       )
