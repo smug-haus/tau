@@ -42,6 +42,23 @@ Updates §5 `:committing` exit line, adds D-356 to §6, and cross-references
 SPEC-FACTORY-CORE D-356 (the U subscribe-before-request consume half). Resolves
 #478 (telemetry-vs-PubSub mismatch).
 
+**Amendment (2026-06-16, PR #534):** Introduces **D-394** (bounded, backed-off
+build-retry with per-member terminal eject). The non-health build-failure paths
+in `:integrating` (`{:build_failed, reason}` for `reason ≠ {:health_red, _}`, and
+build-`Task` `:DOWN`) requeued the train **instantly, with no attempt bound and
+no backoff** — a single deterministic `{:git_error, _}` drove ~6000
+requeue/rebuild cycles in ~5 min until the Unit's fixed 30 s `:awaiting_merge`
+state-timeout escalated `:E_MERGE_STALLED` (run #4). Adds a per-member
+`build_attempts` bound (`N_build = 3`) with a `T_backoff = 2_000 ms` non-blocking
+generic-timeout, enforced by a single head-guard clause on `start_build/1`
+(`backoff_pending`). On exhaustion the member is terminally ejected (per-member,
+never max-based) through the D-355/D-356 reject machinery
+(`reason: :build_retry_exhausted`). A **wedged** build (`:state_timeout`) is now
+terminal at B=1 (`reason: :build_wedged`), same class as health-red, never folded
+into the retry climb. Adds §3 `[C207-B2a]`, the `:build_retry` point span to §4
+B8, §5 table/prose edits, §6 D-394, §7 AC-10. `{:health_red,_}` stays terminal at
+first failure (D-303). Resolves #523.
+
 ## 0. Why this spec exists
 
 M is the **crux** of the autonomous factory: it is the one component where the
@@ -163,10 +180,29 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
 
 - **★ [C207-B2]** A **wedged build** (the `Task` neither completes nor crashes)
   would hang M in `:integrating` forever, silently starving the whole merge
-  stage. `:integrating` MUST arm a mandatory `:state_timeout`; on expiry M
-  abandons the build (requeues the train) rather than waiting indefinitely. A
-  `Task` *crash* surfaces as `:DOWN` and is handled (requeue), but a wedge emits
-  no message — the timeout is the only signal.
+  stage. `:integrating` MUST arm a mandatory `:state_timeout`; a wedge emits no
+  message — the timeout is the only signal. On expiry M does **not** requeue: a
+  wedge is **terminal at B=1** — the member is ejected (its 30-min build budget
+  cannot fit the Unit's 30 s window, so a retry climb is pointless), same class
+  as a health-red eject (`[C207-B2a]`, D-394). A `Task` *crash* surfaces as
+  `:DOWN`; rather than an unbounded instant requeue it joins the **bounded,
+  backed-off** retry climb of `[C207-B2a]`.
+- **★ [C207-B2a] (D-394)** A **retryable** build failure (`{:build_failed, _}`
+  other than `:health_red`; or a build-`Task` `:DOWN` crash) MUST be bounded: at
+  most `N_build = 3` consecutive retries per M-lifetime, each separated from the
+  previous build launch by ≥ `T_backoff = 2_000 ms` of dwell in `:idle` with no
+  build running (a `backoff_pending` flag + a generic
+  `{:timeout, T_backoff, :build_backoff}`; the single head-guard clause on
+  `start_build/1` makes every launch path refuse while pending — INV-3 preserved,
+  a mid-backoff `request_merge` only enqueues). An unbounded zero-delay requeue
+  silently storms M and trips the Unit's 30 s `:awaiting_merge` stall timer with a
+  spurious `:E_MERGE_STALLED` (#523). On the `N_build`-th consecutive failure the
+  member is **terminally ejected** (durable `:rejected` row + telemetry +
+  `{:merge_result, :rejected}` broadcast), per-member, not `max`-based. A
+  **wedge** (`:state_timeout`) is terminal at B=1 — never folded into the climb
+  (its 30-min budget cannot fit the Unit's 30 s window). Sizing:
+  `N_build·T_build_worst + (N_build−1)·T_backoff + T_eject < 30_000 ms` MUST hold;
+  breakeven ≈ 8_600 ms/attempt.
 - **★ [C208-B5]** A buggy or adversarial Toolchain adapter MUST NOT be able to
   fake `:green`. The adapter supplies only the *recipe* (data); M **executes and
   judges** the structured artifact itself (HR-3, FC-5). The judgement is the
@@ -334,6 +370,11 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
   falsification test for LIV-2** (an unbounded climb is starvation surfacing).
   Spans also feed the `T_int` model the §sizing rule depends on — measurement is
   a binding input, not optional instrumentation.
+- `:build_retry` (D-394) is a **point event** — a single `:telemetry.execute`
+  (like the module's existing `:reject` / `:integrating` point emissions), **not**
+  a `*.start`/`*.stop` pair, so it inherits no pairing obligation — emitted once
+  per bounded retry launch, carrying `unit_id`, `attempt_n`, `backoff_ms`. Its
+  count (= `N_build` on a deterministic failure) is the live anti-storm watch.
 
 ### B9: Merge Authority COMMIT (C1) ↔ Ledger merge-outcome write (*D-355, PR #465*)
 
@@ -360,8 +401,8 @@ Format: `[Cn-Bm]` = constraint number + boundary. **★** marks non-obvious.
 
 | State | Meaning | Entry | Exit |
 |-------|---------|-------|------|
-| `:idle` | Accept submissions; assemble the next train; handle revocation notices | start (rebuild train+queue from L); commit/requeue done | non-empty green batch → `:integrating` |
-| `:integrating` | Monitored `Task` runs `rebase → gate → health` **off the mailbox** in a **private ephemeral worktree** (`.merge-wt-<nonce>`, D-385); M still accepts submissions for the *next* train but starts no second train (INV-3) | a green batch assembled, `base` captured | `Task {:built,…}` → `:committing`; `{:build_failed, :health_red}` → `:idle` (bisect/eject); `:DOWN` → `:idle` (requeue); `:state_timeout` → `:idle` (requeue wedged build) |
+| `:idle` | Accept submissions; assemble the next train; handle revocation notices; while `backoff_pending`, a `{:timeout, :build_backoff}` defers the next build — `request_merge` during backoff only enqueues (INV-3) | start (rebuild train+queue from L); commit/requeue done | non-empty green batch → `:integrating` |
+| `:integrating` | Monitored `Task` runs `rebase → gate → health` **off the mailbox** in a **private ephemeral worktree** (`.merge-wt-<nonce>`, D-385); M still accepts submissions for the *next* train but starts no second train (INV-3) | a green batch assembled, `base` captured | `Task {:built,…}` → `:committing`; `{:build_failed, :health_red}` → `:idle` (bisect/eject); non-health `{:build_failed,_}` and `:DOWN` → `:idle` with `backoff_pending` + `{:timeout, T_backoff, :build_backoff}` (D-394 bounded retry); on the `N_build`-th failure → terminal per-member eject; `:state_timeout` (wedge) → terminal eject at B=1 (D-394) |
 | `:committing` | **Short** critical section: `assert_all_verdicts_live` (re-read latest, HR-2) then `cas_push` (`--force-with-lease`, HR-1) | `Task` returned `:built` | push `:ok` → `:idle` (commit, broadcast `:merged`); `{:error, :stale_ref}` → `:idle` (requeue all); `{:revoked, u}` → `:idle` (eject `u`, retry rest) |
 
 ```
@@ -395,12 +436,17 @@ submitted(green) ─enqueue→ wait-queue (FIFO + aging by restale_count)
   post-merge main re-check RED → E-RED-MAIN (global halt; main left red, named)
 ```
 
-On every **terminal rejection** of a train member (verdict-revoked, build-failed
-health-RED eject, task-down/wedged requeue exhausted to an eject, stale-ref) M
-likewise broadcasts `{:merge_result, :rejected}` to `"factory:pr:#{id}"` for the
-affected member(s) (D-356). A `:rejected` re-gates at U (INV-2); a member only
-*requeued* (e.g. `:stale_ref` for a later rebase attempt) is **not** a terminal
-rejection and is not yet published — U keeps awaiting. The broadcast is the
+On every **terminal rejection** of a train member M likewise broadcasts
+`{:merge_result, :rejected}` to `"factory:pr:#{id}"` for the affected member(s)
+(D-356). The terminal reasons are: verdict-revoked; build-failed health-RED
+eject; **build-retry exhausted** (`:build_retry_exhausted`, after `N_build`
+consecutive retryable failures, D-394); **wedge eject** (`:build_wedged`, B=1, a
+`:state_timeout`, D-394). A `:rejected` re-gates at U (INV-2). A member still
+**within** the D-394 bound (a retryable `{:build_failed,_}`/`:DOWN` with
+`build_attempts < N_build`) is only **requeued** — backed off, not terminally
+rejected — and is **not** published; likewise a member only *requeued* for
+`:stale_ref` (a later rebase attempt) is **not** a terminal rejection and is not
+yet published — U keeps awaiting. The broadcast is the
 authoritative async result the arch's `control-plane.md` §5 names; the
 `[:tau, :factory, :merge, …]` telemetry remains a *derived observer projection*
 (§4 B8), never the control-path delivery.
@@ -420,6 +466,11 @@ ahead of newcomers (LIV-2).
 
 `E-CONFLICT` (unresolvable rebase) is raised by U on a rejected/looping rebase,
 not by M; M's `:stale_ref` path is an ordinary requeue, not an escalation.
+
+D-394's build-retry exhaustion and wedge eject are **terminal rejections**
+(`{:merge_result, :rejected}` + durable `:rejected` row), **not** escalations —
+they yield a deterministic answer at U (re-gate, INV-2) within the Unit's stall
+budget, which is why no `:E_MERGE_STALLED` is raised.
 
 ## 6. D-NNN invariants
 
@@ -481,8 +532,11 @@ only terminal outcomes are durable. `Ledger.Reader.merge_outcome_for/2` returns
 reconcile on resume without re-submitting an already-landed or
 already-terminally-rejected merge (D-344 / PR #465, #466). Terminal rejection
 paths covered: health-red eject (`:integrating` → `{:build_failed, {:health_red,
-_}}`); verdict-revoked eject (`:committing` → `{:revoked, _}`). Owned by this
-SPEC (§4 B9); cited by SPEC-FACTORY-CORE (Unit `:awaiting_merge` reconcile,
+_}}`); verdict-revoked eject (`:committing` → `{:revoked, _}`); build-retry
+exhausted (`:integrating`, `N_build` consecutive retryable
+`{:build_failed,_}`/`:DOWN`, `reason: :build_retry_exhausted`, D-394); wedge
+eject (`:integrating` `:state_timeout`, `reason: :build_wedged`, B=1, D-394).
+Owned by this SPEC (§4 B9); cited by SPEC-FACTORY-CORE (Unit `:awaiting_merge` reconcile,
 D-344 amendment). Enforced by `merge_outcome_durability_test.exs` (`:merged`
 side, PR #465) and `reject_durable_outcome_test.exs` (`:rejected` side, PR #466;
 oracle-separated).
@@ -526,6 +580,37 @@ Enforced by `merge_build_clean_tree_test.exs` (oracle-separated gating test;
 PR #522): a concurrent worktree holding the unit branch does not cause a
 collision, the outcome is `:merged`, and `repo_dir`'s HEAD remains on `main`
 with a clean index after the build.
+
+**D-394 — Bounded, backed-off build-retry with per-member terminal eject
+(anti-storm):** A train member's *retryable* build failure (`{:build_failed, _}`
+other than `{:health_red, _}`, or a build-`Task` `:DOWN`) is retried at most
+`N_build = 3` consecutive times per M-lifetime; every retry launch is separated
+from the previous build by ≥ `T_backoff = 2_000 ms` of dwell in `:idle` with
+`backoff_pending = true`. A single head-guard clause
+`start_build(%{backoff_pending: true})` makes **every** launch path refuse while
+pending (every build funnels through `start_build/1`), so a `request_merge`
+arriving mid-backoff only enqueues and replies `:queued` (INV-3/D-302: never two
+concurrent builds); the backoff uses a **generic** `{:timeout, T_backoff,
+:build_backoff}` (not a `:state_timeout`), which survives the intervening
+`:keep_state` enqueue. On the `N_build`-th consecutive failure the member — and
+only that member (per-member, never `max`-based; forward-compatible with D-341
+batch trains) — is terminally ejected: a durable `merge_outcomes` `:rejected` row
+is written (`reason: :build_retry_exhausted`, D-355 WAL-before-ack, BEFORE the
+telemetry projection), `:reject` telemetry fires, then `{:merge_result,
+:rejected}` is broadcast to `"factory:pr:#{id}"` (D-356); the member is dropped,
+not requeued. `build_attempts` is per-M-lifetime in-memory (NOT WAL-persisted —
+D-355 forbids non-terminal durable rows; an M restart resets it, which is safe —
+re-climbing from 0 is bounded) and is reset to 0 on a member's successful merge
+and dropped on terminal eject. A **wedged** build (`:state_timeout`) is terminal
+at the first occurrence (B=1, same class as health-red, D-303): immediate
+terminal eject (`reason: :build_wedged`) with durable row + telemetry +
+broadcast, never requeued. Sizing inequality `N_build·T_build_worst +
+(N_build−1)·T_backoff + T_eject < 30_000 ms` (the Unit's `:awaiting_merge`
+budget, SPEC-FACTORY-CORE) MUST hold; breakeven ≈ 8_600 ms/attempt, so the bound
+holds even at a pessimistic 3 s/attempt. `{:health_red, _}` is exempt (terminal
+at first failure, D-303). Enforced by
+`test/tau/factory/merge_build_retry_test.exs` (oracle-separated). Owned by
+SPEC-FACTORY-MERGE (§3 `[C207-B2a]`, §6).
 
 **D-341 — Fair merge progress, no starvation (LIV-2):**
 M serves merge-ready units from a **FIFO + aging** wait-queue;
@@ -581,17 +666,32 @@ Each is expressed against an observable signal. PR groupings are indicative.
   `[:tau, :factory, :merge, :health]` span (the dogfood proof). *This AC depends
   on SPEC-FACTORY-{CORE,GATE} landing; it is the integration gate, not a
   MERGE-only unit.*
+- **AC-10 (D-394, build-retry storm bound):** `mix test
+  test/tau/factory/merge_build_retry_test.exs` passes. With a `build_fun`
+  injected to fail deterministically (`{:build_failed, {:git_error, 1, "boom"}}`),
+  a single `request_merge` is retried **exactly `N_build = 3`** times; consecutive
+  build launches are spaced **≥ `T_backoff` (2_000 ms)**; a `request_merge`
+  arriving during a backoff window replies `:queued` and launches **no** build
+  until the timer fires (INV-3); on the 3rd failure exactly **one** durable
+  `merge_outcomes` `:rejected` row (`reason: :build_retry_exhausted`) and **one**
+  `{:merge_result, :rejected}` broadcast occur; **no** `:E_MERGE_STALLED`; a
+  **wedged** build ejects terminally at B=1 (`reason: :build_wedged`) with one
+  durable row + one broadcast, never requeued. Signal: `:build_retry` point spans
+  (count = 3, `backoff_ms = 2000`), one terminal `:reject` span, one Ledger row,
+  one PubSub message.
 
 ## Appendix B — Source map
 
 Files that bring a PR into scope of this SPEC (`D-NNN`/`C-N` → file:symbol):
 
 - `lib/tau/factory/merge_authority.ex` (C1; D-300, D-301, D-302, D-303, D-341,
-  D-355, D-356, D-385 — the `gen_statem`, `:idle`/`:integrating`/`:committing`;
+  D-355, D-356, D-385, D-394 — the `gen_statem`, `:idle`/`:integrating`/`:committing`;
   D-356 PubSub broadcast of `{:merge_result, _}` to `"factory:pr:#{id}"` on every
-  terminal member outcome; D-385 private-worktree build isolation in `default_build/3`)
-  — PR-MERGE-1..5/PR#465/PR#477/PR#522
+  terminal member outcome; D-385 private-worktree build isolation in `default_build/3`;
+  D-394 bounded backed-off build retry + per-member terminal eject + wedge-at-B=1)
+  — PR-MERGE-1..5/PR#465/PR#477/PR#522/PR#534
 - `test/tau/factory/merge_build_clean_tree_test.exs` (D-385 gating test) — PR#522
+- `test/tau/factory/merge_build_retry_test.exs` (D-394 gating test) — PR #534
 - `lib/tau/factory/dogfood/sandbox.ex` (D-385 `.gitignore` hygiene in `seed/1`) — PR#522
 - `test/tau/factory/merge_result_pubsub_test.exs` (D-356 emission gating test) — PR#477
 - `lib/tau/factory/ledger/migrations.ex` (D-355 migration `20260612_010_merge_outcomes`) — PR#465
