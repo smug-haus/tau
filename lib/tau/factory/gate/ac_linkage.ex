@@ -94,14 +94,22 @@ defmodule Tau.Factory.Gate.AcLinkage do
   # Token parsing
   # ---------------------------------------------------------------------------
 
-  # Parse AC-N tokens marked as meta (exempt from the linkage gate).
+  # Parse AC-N and D-NNN tokens marked as meta (exempt from the linkage gate).
   defp parse_meta_ac_tokens(section_text) do
-    meta_pattern = ~r/\bAC-(\d+)\s*\(meta\)/
+    ac_meta_pattern = ~r/\bAC-(\d+)\s*\(meta\)/
+    d_meta_pattern = ~r/\bD-(\d+)\s*\(meta\)/
 
-    Regex.scan(meta_pattern, section_text, capture: :all_but_first)
-    |> List.flatten()
-    |> Enum.map(&"AC-#{&1}")
-    |> MapSet.new()
+    ac_meta =
+      Regex.scan(ac_meta_pattern, section_text, capture: :all_but_first)
+      |> List.flatten()
+      |> Enum.map(&"AC-#{&1}")
+
+    d_meta =
+      Regex.scan(d_meta_pattern, section_text, capture: :all_but_first)
+      |> List.flatten()
+      |> Enum.map(&"D-#{&1}")
+
+    MapSet.new(ac_meta ++ d_meta)
   end
 
   # Parse all AC-N and D-NNN tokens from the given text.
