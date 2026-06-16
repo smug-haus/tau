@@ -409,6 +409,141 @@ defmodule Tau.Factory.MergeBuildRetryTest do
   end
 
   # ---------------------------------------------------------------------------
+  # Test 6 — build_attempts reset on terminal eject: re-submit after exhaustion
+  # gets the FULL N_build retries (D-394, AC-10)
+  #
+  # The latent bug (pre-fix): terminal_eject_members/3 drops unit.id from
+  # build_attempts, but the all-exhausted branch at merge_authority.ex:516 then
+  # overwrites data_after_eject.build_attempts with new_attempts, which still
+  # contains unit.id => N_build. A re-submitted unit_id therefore begins its
+  # second episode with a stale attempt count and is instantly ejected after
+  # only ONE build invocation (N_build + 1 >= retry_max fires immediately).
+  #
+  # Expected (D-394 §6 — "dropped on terminal eject"): after a terminal eject,
+  # build_attempts[unit_id] MUST be absent, so a re-submitted unit_id begins
+  # fresh and receives the full N_build=3 attempts.
+  # ---------------------------------------------------------------------------
+
+  describe "D-394 / AC-10 — build_attempts reset on terminal eject: re-submit after exhaustion gets full N_build" do
+    @tag :"D-394"
+    @tag :"AC-10"
+    test "D-394 AC-10 (reset-on-eject): re-submitted unit_id after exhaustion eject gets full N_build=3 attempts, not instant re-eject" do
+      ledger = start_ledger()
+      test_pid = self()
+
+      # Episode 1 unit: a fixed id so we can re-submit it.
+      unit_id = "u-reset-eject-#{System.unique_integer([:positive])}"
+
+      unit_ep1 = %{
+        id: unit_id,
+        hash: "hash-ep1-#{System.unique_integer([:positive])}",
+        run: "run-ep1-#{System.unique_integer([:positive])}",
+        branch: "feat/reset-eject-ep1-#{System.unique_integer([:positive])}"
+      }
+
+      {work_path, _tip} = setup_git_repo(unit_ep1)
+
+      # Episode 2 unit: SAME id, fresh hash/run/branch so git setup is distinct.
+      unit_ep2 = %{
+        id: unit_id,
+        hash: "hash-ep2-#{System.unique_integer([:positive])}",
+        run: "run-ep2-#{System.unique_integer([:positive])}",
+        branch: "feat/reset-eject-ep2-#{System.unique_integer([:positive])}"
+      }
+
+      # Set up the ep2 branch in the same work_path repo so the build can fetch it.
+      git_work = fn args -> System.cmd("git", args, cd: work_path) end
+      git_work.(["checkout", "-b", unit_ep2.branch])
+      File.write!(Path.join(work_path, "feature_ep2"), "ep2 work")
+      git_work.(["add", "."])
+      git_work.(["commit", "-m", "ep2 commit"])
+      git_work.(["push", "origin", unit_ep2.branch])
+      git_work.(["checkout", "main"])
+
+      # Track which episode each invocation belongs to by counting total
+      # invocations: first N_build belong to ep1, next N_build should belong to ep2.
+      build_fun = fn _units, _base ->
+        send(test_pid, {:build_invoked, unit_id})
+        {:build_failed, {:git_error, 1, "boom"}}
+      end
+
+      ma =
+        start_merge_authority(ledger, work_path, build_fun,
+          build_retry_max: 3,
+          build_backoff_ms: 50
+        )
+
+      :ok = Phoenix.PubSub.subscribe(Tau.PubSub, pr_topic(unit_id))
+
+      # --- Episode 1: submit and drain to terminal eject ---
+      assert :queued = MergeAuthority.request_merge(ma, unit_ep1)
+
+      # Drain the 3 ep1 invocations.
+      assert_receive {:build_invoked, ^unit_id},
+                     2_000,
+                     "D-394 AC-10 (reset-on-eject): ep1 build invocation 1 never arrived"
+
+      assert_receive {:build_invoked, ^unit_id},
+                     2_000,
+                     "D-394 AC-10 (reset-on-eject): ep1 build invocation 2 never arrived"
+
+      assert_receive {:build_invoked, ^unit_id},
+                     2_000,
+                     "D-394 AC-10 (reset-on-eject): ep1 build invocation 3 never arrived"
+
+      # Wait for the terminal eject broadcast confirming ep1 is done.
+      assert_receive {:merge_result, :rejected},
+                     2_000,
+                     "D-394 AC-10 (reset-on-eject): no {:merge_result, :rejected} broadcast " <>
+                       "after N_build=3 ep1 exhaustion — ep1 terminal eject did not fire"
+
+      # Flush any additional messages that might have arrived (defensive).
+      receive do
+        {:build_invoked, _} -> flunk("unexpected build_invoked after ep1 terminal eject")
+      after
+        50 -> :ok
+      end
+
+      # --- Episode 2: re-submit the SAME unit_id ---
+      # At this point, if the bug is present, build_attempts[unit_id] == 3 (N_build).
+      # The next failure increments to 4 >= 3, firing an instant terminal eject
+      # after only 1 invocation. With the fix, build_attempts[unit_id] is absent (nil),
+      # so the counter starts from 1 and the unit gets 3 full attempts.
+
+      assert :queued = MergeAuthority.request_merge(ma, unit_ep2),
+             "D-394 AC-10 (reset-on-eject): request_merge for re-submitted unit_id must return :queued"
+
+      # Collect ep2 invocations. Assert we get 3 before any second terminal eject.
+      # With the bug, only 1 arrives before the instant eject.
+      assert_receive {:build_invoked, ^unit_id},
+                     2_000,
+                     "D-394 AC-10 (reset-on-eject): ep2 build invocation 1 never arrived — " <>
+                       "re-submitted unit_id was not scheduled for a new build episode"
+
+      assert_receive {:build_invoked, ^unit_id},
+                     2_000,
+                     "D-394 AC-10 (reset-on-eject): ep2 build invocation 2 never arrived — " <>
+                       "build_attempts was NOT reset on terminal eject: the unit was ejected " <>
+                       "after only 1 attempt (stale N_build counter from ep1 was reused). " <>
+                       "D-394 §6 requires build_attempts be dropped on terminal eject so a " <>
+                       "re-submitted unit_id receives the FULL N_build retry budget."
+
+      assert_receive {:build_invoked, ^unit_id},
+                     2_000,
+                     "D-394 AC-10 (reset-on-eject): ep2 build invocation 3 never arrived — " <>
+                       "build_attempts was NOT reset on terminal eject: the unit was ejected " <>
+                       "prematurely (only 2 ep2 attempts observed instead of 3). " <>
+                       "D-394 §6 requires the full N_build=3 budget for a fresh submission."
+
+      # The ep2 terminal eject broadcast must eventually arrive (ep2 always fails).
+      assert_receive {:merge_result, :rejected},
+                     2_000,
+                     "D-394 AC-10 (reset-on-eject): no second {:merge_result, :rejected} " <>
+                       "broadcast after ep2 N_build=3 exhaustion"
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # Test 5 — Wedge terminal at B=1 (D-394, AC-10)
   #
   # A build task that blocks past build_timeout_ms must be killed and the unit
