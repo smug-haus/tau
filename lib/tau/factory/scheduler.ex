@@ -237,6 +237,9 @@ defmodule Tau.Factory.Scheduler do
           :ok | {:conflict, ConflictCheck.clause()}
   defp check_policy_conflict_predicate(_declared_scope, _f, nil), do: :ok
 
+  defp check_policy_conflict_predicate(_declared_scope, _f, %Policy{conflict_predicate: nil}),
+    do: :ok
+
   defp check_policy_conflict_predicate(declared_scope, f, %Policy{conflict_predicate: pred})
        when is_function(pred, 2) do
     conflict =
