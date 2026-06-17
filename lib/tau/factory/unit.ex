@@ -7,7 +7,8 @@ defmodule Tau.Factory.Unit do
       planned → oracle → implementing → gating → awaiting_merge → merged
       gating {:fail,_} → retry ladder → implementing | escalated
       worker_exit (semantic) → retry ladder → implementing | escalated (D-326)
-      awaiting_merge :rejected → gating (re-gate, INV-2)
+      awaiting_merge :rejected → gating (re-gate, INV-2) up to N_MERGE_REJECT times
+      awaiting_merge :rejected × N_MERGE_REJECT → escalated (D-340/LIV-1)
       any non-terminal + :state_timeout → escalated (C107)
       worker :DOWN (infra, no prior semantic exit) → escalated (B8/C105)
 
@@ -58,6 +59,9 @@ defmodule Tau.Factory.Unit do
   require Logger
 
   @default_state_timeout_ms 30_000
+  # D-340/LIV-1: maximum consecutive merge rejections before escalating
+  # E_MERGE_REJECT_EXCEEDED. Bounds the gating→awaiting_merge re-gate cycle.
+  @n_merge_reject 3
 
   # ---------------------------------------------------------------------------
   # Types
@@ -214,7 +218,11 @@ defmodule Tau.Factory.Unit do
       gating_test_paths: nil,
       # INV-SAFE-CP-5: ref of the in-flight gate Task (set on :gating entry,
       # cleared when the {:gate_result, _} arrives). Nil when not in :gating state.
-      gate_task_ref: nil
+      gate_task_ref: nil,
+      # D-340/LIV-1: counts consecutive merge rejections in the
+      # gating→awaiting_merge cycle. Reset to 0 on successful merge. Escalates
+      # E_MERGE_REJECT_EXCEEDED after N_MERGE_REJECT consecutive rejections.
+      merge_reject_count: 0
     }
 
     # Transition immediately to planned state, which triggers admission.
@@ -737,14 +745,26 @@ defmodule Tau.Factory.Unit do
   def awaiting_merge(:info, {:merge_result, :merged}, data) do
     # D-356: unsubscribe on exit from awaiting_merge (terminal :merged path).
     Phoenix.PubSub.unsubscribe(data.pubsub, "factory:pr:#{data.unit_id}")
-    terminal(data, :merged, nil, nil)
+    # D-340/LIV-1: reset merge_reject_count on successful merge.
+    terminal(%{data | merge_reject_count: 0}, :merged, nil, nil)
   end
 
   def awaiting_merge(:info, {:merge_result, :rejected}, data) do
-    # D-356: unsubscribe on exit from awaiting_merge (re-gate path, INV-2).
+    # D-356: unsubscribe on exit from awaiting_merge (re-gate path or escalation).
     Phoenix.PubSub.unsubscribe(data.pubsub, "factory:pr:#{data.unit_id}")
-    # INV-2: merge reject → re-gate.
-    {:next_state, :gating, data, [{:next_event, :internal, :on_enter}]}
+    # D-340/LIV-1: bound the gating→awaiting_merge re-gate cycle. Increment
+    # merge_reject_count; escalate E_MERGE_REJECT_EXCEEDED once the ceiling is
+    # reached. Without this counter the cycle repeats without bound when
+    # merge_fun always returns :rejected before any :state_timeout fires.
+    new_count = data.merge_reject_count + 1
+
+    if new_count > @n_merge_reject do
+      escalate(%{data | merge_reject_count: new_count}, :E_MERGE_REJECT_EXCEEDED)
+    else
+      # INV-2: merge reject → re-gate (bounded by N_MERGE_REJECT).
+      {:next_state, :gating, %{data | merge_reject_count: new_count},
+       [{:next_event, :internal, :on_enter}]}
+    end
   end
 
   def awaiting_merge(:state_timeout, :merge_stalled, data) do
