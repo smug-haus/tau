@@ -117,23 +117,26 @@ defmodule Tau.Factory.Egress do
     end
   end
 
-  # Layer 3 — Budget (ETS read; cited from SPEC-FACTORY-CORE D-320 / B4)
+  # Layer 3 — Budget (ETS read + reserve; SPEC-FACTORY-GOV §4 B4 / D-351)
   # `ctx[:budget_owner]` carries the Budget.Owner registered name (ETS table
   # atom). When absent, the check passes silently — Budget.Owner may not be
   # running in all contexts (e.g. plain session plane).
-  # Reads the ETS snapshot DIRECTLY via `Budget.Owner.budget_precheck/2`
-  # (no GenServer.call on the hot path; B4 / D-320 mailbox-bypass contract).
+  # Uses `Budget.Owner.admit/2` which performs an atomic ETS `update_counter`
+  # reservation — NOT the read-only `budget_precheck/2`. This satisfies
+  # NFR-BUDGET-PRECISION (D-351): concurrent callers cannot all pass
+  # simultaneously and collectively exceed the budget ceiling.
+  @admit_est_cost 1
   defp check_budget(ctx) do
     case Map.get(ctx, :budget_owner) do
       nil ->
         :ok
 
       owner ->
-        case BudgetOwner.budget_precheck(owner, :tokens) do
+        case BudgetOwner.admit(owner, @admit_est_cost) do
           :ok ->
             :ok
 
-          {:exhausted, _dimension} ->
+          {:error, :budget_exhausted} ->
             :telemetry.execute(
               [:tau, :factory, :egress, :budget_exhausted],
               %{system_time: System.system_time()},
