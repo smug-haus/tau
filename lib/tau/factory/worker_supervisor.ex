@@ -22,7 +22,10 @@ defmodule Tau.Factory.WorkerSupervisor do
   Start the WorkerSupervisor and register it under `:name`.
 
   Options:
-    - `:name` — atom; registered name for this DynamicSupervisor (required).
+    - `:name`  — atom; registered name for this DynamicSupervisor (required).
+    - `:w_cap` — non-negative integer; maximum concurrent live worker processes
+                  admitted by the DynamicSupervisor (`max_children`).
+                  Defaults to `128` (NFR-AGENT-FLEET: |agents alive| <= A_max = 128).
   """
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts) do
@@ -47,8 +50,9 @@ defmodule Tau.Factory.WorkerSupervisor do
   end
 
   @impl DynamicSupervisor
-  def init(_opts) do
-    DynamicSupervisor.init(strategy: :one_for_one)
+  def init(opts) do
+    w_cap = Keyword.get(opts, :w_cap, 128)
+    DynamicSupervisor.init(strategy: :one_for_one, max_children: w_cap)
   end
 
   @doc """
