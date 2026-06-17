@@ -116,8 +116,7 @@ defmodule Tau.Factory.InvDistNoFullmeshTest do
        "Node.spawn_link (remote linked process spawn over full-mesh TCP)"},
       {~r/:rpc\.call\b/, ":rpc.call (synchronous distributed RPC, large payload over wire)"},
       {~r/:rpc\.cast\b/, ":rpc.cast (asynchronous distributed RPC over wire)"},
-      {~r/:erpc\.call\b/,
-       ":erpc.call (enhanced RPC, same full-mesh concern as :rpc.call)"},
+      {~r/:erpc\.call\b/, ":erpc.call (enhanced RPC, same full-mesh concern as :rpc.call)"},
       {~r/:erpc\.cast\b/, ":erpc.cast (enhanced RPC cast over wire)"},
       {~r/:net_kernel\.connect_node\b/, ":net_kernel.connect_node (explicit cluster join)"}
     ]
@@ -151,8 +150,7 @@ defmodule Tau.Factory.InvDistNoFullmeshTest do
        "Node.spawn_link (remote linked process spawn over full-mesh TCP)"},
       {~r/:rpc\.call\b/, ":rpc.call (synchronous distributed RPC, large payload over wire)"},
       {~r/:rpc\.cast\b/, ":rpc.cast (asynchronous distributed RPC over wire)"},
-      {~r/:erpc\.call\b/,
-       ":erpc.call (enhanced RPC, same full-mesh concern as :rpc.call)"},
+      {~r/:erpc\.call\b/, ":erpc.call (enhanced RPC, same full-mesh concern as :rpc.call)"},
       {~r/:erpc\.cast\b/, ":erpc.cast (enhanced RPC cast over wire)"}
     ]
 

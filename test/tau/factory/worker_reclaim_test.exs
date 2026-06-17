@@ -477,7 +477,6 @@ defmodule Tau.Factory.WorkerReclaimTest do
     end
   end
 
-
   # ---------------------------------------------------------------------------
   # D-314 x HR-7 -- registry metadata: Worker registers with %{role, author_id}
   # so WorkerSupervisor.any_test_author_registered?/1 (D-304) can select by role.
