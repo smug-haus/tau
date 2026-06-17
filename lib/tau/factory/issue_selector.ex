@@ -51,11 +51,13 @@ defmodule Tau.Factory.IssueSelector do
   admission path. It harvests scope signals from machine-readable issue fields:
 
   - `files`      — `lib/`, `test/`, `web/`, `docs/` path patterns cited anywhere
-                   in the issue title or body (without a `:NN` line reference).
+                   in the issue title or body (with or without a `:NN` line reference).
+                   D-369 over-declaration: a file cited as `file:line` appears in
+                   BOTH `:files` AND `:codepoints` — uncertain file membership is
+                   always included ([C127-B10] / [C128-B10]).
   - `codepoints` — `file:line` patterns where a file path is followed by `:NN`.
-                   Only explicit `file:line` citations produce codepoints; a file
-                   cited without a line produces a whole-`files` entry instead
-                   (over-declaration, [C127-B10] / [C128-B10]).
+                   Explicit `file:line` citations produce codepoints in addition to
+                   the `:files` entry (over-declaration, not exclusion).
   - `specs`      — `SPEC-<NAME>.md` citations → `:spec_<NAME>` atoms.
   - `resources`  — reserved; label-derived resources (empty in this PR).
   - `deps`       — `blocked-by: #NN` / `blocked by #NN` → `"unit-NN"`.
@@ -171,16 +173,19 @@ defmodule Tau.Factory.IssueSelector do
     body = Map.get(issue_map, "body", "") || ""
     text = title <> "\n" <> body
 
-    # Extract file:line codepoints first (these are NARROWER citations).
-    # A file:line citation goes into :codepoints ONLY, not into :files.
+    # Extract file:line codepoints (NARROWER citations — also over-declared into :files).
+    # D-369: over-declaration — a file cited with a line number is included in
+    # BOTH :files AND :codepoints. "Uncertain file membership → include."
     file_line_pairs = extract_file_line_pairs(text)
-    codepointed_files = MapSet.new(file_line_pairs, fn {path, _line} -> path end)
 
-    # Extract whole-file citations: files cited WITHOUT an explicit :line.
-    # Over-declaration: if any match lacks a line, put it in :files, never in
-    # :codepoints. A file cited WITH a line does NOT produce a :files entry.
-    all_files = extract_files(text)
-    whole_files = MapSet.difference(all_files, codepointed_files)
+    # Extract all file citations (with or without a line number).
+    # extract_files/1 matches file paths; extract_file_line_pairs/1 also
+    # yields the file component of each file:line citation.  Union them so
+    # that a file cited only as file:NN (and therefore absent from the plain
+    # @file_path_re scan) is still included in :files.
+    plain_files = extract_files(text)
+    codepointed_files = MapSet.new(file_line_pairs, fn {path, _line} -> path end)
+    all_files = MapSet.union(plain_files, codepointed_files)
 
     # SPEC citations → :specs atoms
     specs = extract_specs(text)
@@ -192,13 +197,12 @@ defmodule Tau.Factory.IssueSelector do
     codepoints = MapSet.new(file_line_pairs, fn {path, line} -> {path, :"line_#{line}"} end)
 
     # D-371: no files AND no specs → universal-conflict sentinel
-    if MapSet.size(whole_files) == 0 and MapSet.size(specs) == 0 and
-         MapSet.size(codepoints) == 0 do
+    if MapSet.size(all_files) == 0 and MapSet.size(specs) == 0 do
       sentinel_scope()
     else
       %{
         deps: deps,
-        files: whole_files,
+        files: all_files,
         codepoints: codepoints,
         specs: specs,
         resources: MapSet.new()
