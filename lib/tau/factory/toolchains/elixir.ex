@@ -15,7 +15,7 @@ defmodule Tau.Factory.Toolchain.Elixir do
     * `XDG_DATA_HOME` — Burrito unpack cache (`~/.local/share/.burrito/`).
     * `MIX_HOME`      — Mix global configuration and dependencies.
     * `HEX_HOME`      — Hex package cache.
-    * `~/.cache/rebar3` — Rebar3 build cache (`:dir` kind).
+    * `REBAR_CACHE_HOME` — Rebar3 build cache (`~/.cache/rebar3`, `:dir` kind).
   """
 
   @behaviour Tau.Factory.Toolchain
@@ -67,7 +67,7 @@ defmodule Tau.Factory.Toolchain.Elixir do
       %Tau.Toolchain.ResourceNS{kind: :xdg_data, var: "XDG_DATA_HOME"},
       %Tau.Toolchain.ResourceNS{kind: :env, var: "MIX_HOME"},
       %Tau.Toolchain.ResourceNS{kind: :env, var: "HEX_HOME"},
-      %Tau.Toolchain.ResourceNS{kind: :dir, var: "REBAR3_CACHE", path: "~/.cache/rebar3"}
+      %Tau.Toolchain.ResourceNS{kind: :dir, var: "REBAR_CACHE_HOME", path: "~/.cache/rebar3"}
     ]
   end
 end
