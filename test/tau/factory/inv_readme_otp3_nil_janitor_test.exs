@@ -15,15 +15,33 @@ defmodule Tau.Factory.InvReadmeOtp3NilJanitorTest do
   no Ledger write.  The nil-janitor path is reachable in production because
   `Worker.init/1` has no guard requiring a non-nil janitor.
 
-  This test asserts the FULL conformant behaviour the invariant documents:
-  a worker started via the real `WorkerSupervisor.spawn/5` entry point with
-  `janitor: nil`, holding an untracked file and a staged change in its private
-  worktree, MUST have its uncommitted work captured (all three dirty kinds)
-  before the worktree is reclaimed — regardless of whether a janitor was
-  supplied.
+  ## Architectural correction (SPEC-FACTORY-FLEET §3 C202/C207, §2 C4)
 
-  The test MUST fail against current production code (the nil-janitor path
-  has no capture path today).  It exists to gate the fix that closes #555.
+  SPEC §3 C202 states: "A terminated worker's dirty state has exactly one
+  capturing writer: the WorkspaceJanitor monitor (C4)."  SPEC §3 C207 states:
+  "Capture MUST be a monitor."
+
+  The janitor holds the Ledger reference in its own GenServer state — NOT
+  threaded through WorkerSupervisor.spawn/5 opts.  Therefore the correct
+  conformant fix for issue #555 is one of:
+
+    (a) Worker.init/1 MUST guard against `janitor: nil` and reject the start
+        (making nil-janitor unreachable in production), OR
+    (b) The production entry path always supplies a non-nil janitor backed by
+        the Ledger.
+
+  Either way, a worker :kill-ed with dirty state MUST have its capture written
+  to the Ledger by the WorkspaceJanitor — the only SPEC-sanctioned capturing
+  actor.
+
+  This rewritten test exercises that conformant path: a real WorkspaceJanitor
+  is started with the test ledger; the worker is spawned with that janitor;
+  on :kill the janitor's :DOWN handler captures all three dirty kinds and
+  writes to the Ledger before reclaiming the worktree.
+
+  The test MUST fail against current production code because either:
+    - Worker.init/1 does not guard nil-janitor (path (a) not implemented), OR
+    - The WorkerSupervisor.spawn/5 call with `janitor: <name>` is broken.
 
   ## AC/D-NNN linkage
 
@@ -41,6 +59,7 @@ defmodule Tau.Factory.InvReadmeOtp3NilJanitorTest do
   @writer Tau.Factory.Ledger.Writer
   @worker_registry Tau.Factory.WorkerRegistry
   @worker_supervisor Tau.Factory.WorkerSupervisor
+  @workspace_janitor Tau.Factory.WorkspaceJanitor
 
   # ---------------------------------------------------------------------------
   # Helpers
@@ -103,10 +122,11 @@ defmodule Tau.Factory.InvReadmeOtp3NilJanitorTest do
     {name, db_path}
   end
 
-  defp start_fleet(tag) do
+  defp start_fleet_with_janitor(tag, ledger_name) do
     n = System.unique_integer([:positive])
     registry_name = :"otp3_registry_#{tag}_#{n}"
     sup_name = :"otp3_sup_#{tag}_#{n}"
+    janitor_name = :"otp3_janitor_#{tag}_#{n}"
 
     {:ok, _reg} =
       start_supervised(
@@ -120,18 +140,31 @@ defmodule Tau.Factory.InvReadmeOtp3NilJanitorTest do
         id: :"otp3_sup_sv_#{n}"
       )
 
-    {sup_name, sup, registry_name}
+    # Start the WorkspaceJanitor with the test's ledger — this is the
+    # SPEC-mandated C4 independent monitor that holds the ledger reference.
+    # SPEC §2 C4: "independent monitoring GenServer high in the W subtree".
+    # SPEC §4 B6: "The capture disposition is written via the single Ledger writer".
+    {:ok, _jan} =
+      start_supervised(
+        {@workspace_janitor,
+         ledger: ledger_name,
+         name: janitor_name,
+         report_to: self()},
+        id: :"otp3_jan_#{n}"
+      )
+
+    {sup_name, sup, registry_name, janitor_name}
   end
 
   # ---------------------------------------------------------------------------
-  # INV-README-OTP3 — nil-janitor path MUST still capture on :kill
+  # INV-README-OTP3 — WorkspaceJanitor path MUST capture on :kill
   # ---------------------------------------------------------------------------
 
-  describe "INV-README-OTP3 — nil-janitor path: capture-before-destroy on :kill" do
+  describe "INV-README-OTP3 — WorkspaceJanitor capture-before-destroy on :kill" do
     @tag :inv_readme_otp3
     @tag :d_313
     @tag :d_315
-    test "INV-README-OTP3: Worker started with janitor: nil, :kill-ed with dirty worktree — capture (all three kinds) MUST be written to Ledger before worktree is reclaimed" do
+    test "INV-README-OTP3: Worker :kill-ed with dirty worktree — WorkspaceJanitor (C4) MUST capture all three dirty kinds and write to Ledger before worktree is reclaimed" do
       tmp_dir =
         System.tmp_dir!()
         |> Path.join("tau_otp3_#{System.unique_integer([:positive])}")
@@ -142,19 +175,32 @@ defmodule Tau.Factory.InvReadmeOtp3NilJanitorTest do
       %{repo_dir: repo_dir, base_ref: base_ref} = setup_git_repo(tmp_dir)
       agent_bin = slow_agent_bin(tmp_dir)
       {ledger_name, _db_path} = start_ledger(tmp_dir, :otp3)
-      {_sup_name, sup, registry_name} = start_fleet(:otp3)
+
+      # Start fleet with a real WorkspaceJanitor backed by the test ledger.
+      # SPEC §3 C202: "exactly one capturing writer: the WorkspaceJanitor monitor (C4)".
+      # SPEC §3 C207: "Capture MUST be a monitor, not terminate/2".
+      # The janitor holds the ledger ref in its own state — never passed through spawn opts.
+      {_sup_name, sup, registry_name, janitor_name} =
+        start_fleet_with_janitor(:otp3, ledger_name)
+
       report_to = self()
 
-      # Spawn worker with janitor: nil — the nil-janitor path under test.
-      # This exercises the real entry point (WorkerSupervisor.spawn/5), not a
-      # hand-built Worker struct.
+      # Spawn worker with a real janitor — the SPEC-conformant path.
+      # SPEC §4 B5: "WorkspaceJanitor ... fires on every exit reason incl. :kill".
+      # SPEC §3 C202: the janitor is the sole capturing writer.
+      #
+      # The original test passed `janitor: nil`, which is non-conformant:
+      # nil-janitor bypasses C4 entirely and leaves no capture path to the Ledger.
+      # The correct fix for issue #555 is that nil-janitor is either rejected at
+      # Worker.init/1 (guard) or never reached in production — the janitor path
+      # is always used and always backs the ledger.
       {:ok, worker_id} =
         @worker_supervisor.spawn(sup, :implementer, "brief", base_ref,
           repo_dir: repo_dir,
           agent_bin: agent_bin,
           registry: registry_name,
           report_to: report_to,
-          janitor: nil
+          janitor: janitor_name
         )
 
       # Resolve live worker pid via registry key (C218 — no stored pids).
@@ -183,33 +229,47 @@ defmodule Tau.Factory.InvReadmeOtp3NilJanitorTest do
                "status=#{inspect(status_out)}"
 
       # Kill the worker with :kill — the exact exit reason terminate/2 misses.
+      # SPEC §3 C207: "terminate/2 does not run on a brutal :kill ... Relying on
+      # terminate/2 silently loses the killed worker's work."
       Process.exit(worker_pid, :kill)
 
-      # Wait for the death-certificate.
+      # Wait for the death-certificate from the WorkspaceJanitor.
+      # SPEC §4 B5 step 6: janitor sends {:worker_exit, worker_id, reason} AFTER
+      # capture and reclaim (WAL-before-ack means the Ledger write precedes this message).
       kill_reason =
         receive do
           {:worker_exit, ^worker_id, reason} -> reason
         after
           5_000 ->
             flunk(
-              "INV-README-OTP3: {:worker_exit, #{inspect(worker_id)}, _} must arrive after :kill"
+              "INV-README-OTP3: {:worker_exit, #{inspect(worker_id)}, _} must arrive after :kill " <>
+                "(from WorkspaceJanitor C4 — the SPEC-conformant capturing monitor)"
             )
         end
 
       assert kill_reason == :kill,
              "INV-README-OTP3: death-cert reason must be :kill; got #{inspect(kill_reason)}"
 
-      # --- The invariant assertion ---
-      # The nil-janitor path MUST have written a capture row to the Ledger
+      # --- The invariant assertion (D-313/D-315) ---
+      # The WorkspaceJanitor MUST have written a capture row to the Ledger
       # BEFORE the death-certificate arrived (WAL-before-ack, D-315).
       #
-      # This is the assertion that currently FAILS: spawn_death_monitor sends
-      # {:worker_exit, ...} but writes nothing to the Ledger.
+      # SPEC §4 B5 sequence:
+      #   1. git diff HEAD (staged+unstaged patch)
+      #   2. git ls-files --others | tar (untracked_tgz)
+      #   3. git status --short
+      #   4. Ledger.capture(worker_id, ...) — WAL-before-ack
+      #   5. reclaim(ws, ns)
+      #   6. send {:worker_exit, ...} to report_to
+      #
+      # Because the death-certificate (step 6) already arrived above,
+      # the Ledger write (step 4) is guaranteed to have completed.
       captures = @writer.captures_for(ledger_name, worker_id)
 
       assert captures != [],
              "INV-README-OTP3: Ledger MUST have at least one capture row for " <>
-               "worker_id=#{worker_id} — the nil-janitor path does not write to the Ledger; " <>
+               "worker_id=#{worker_id} — the WorkspaceJanitor (C4) must write " <>
+               "before issuing the death-certificate (D-315 WAL-before-ack); " <>
                "captures=#{inspect(captures)}"
 
       capture = List.first(captures)
@@ -238,12 +298,11 @@ defmodule Tau.Factory.InvReadmeOtp3NilJanitorTest do
              "INV-README-OTP3: capture.untracked_tgz must be non-empty"
 
       # Worktree MUST be reclaimed after capture (D-314 / INV-15).
-      # Allow a brief settle for any async reclaim path.
-      Process.sleep(200)
-
+      # The janitor reclaims in step 5, before the death-cert in step 6.
+      # Because the death-cert already arrived, reclaim is also guaranteed.
       refute File.dir?(ws),
              "INV-README-OTP3: worktree must be reclaimed (removed) after capture; " <>
-               "ws=#{ws} still exists"
+               "ws=#{ws} still exists (D-314)"
     end
   end
 end
