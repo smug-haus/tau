@@ -164,7 +164,7 @@ defmodule Tau.Factory.Scheduler do
     # never conflicts with its own in-flight entry (idempotent upsert).
     f_prime = Map.delete(state.f, unit_id)
 
-    case evaluate_admission(unit_id, declared_scope, %{state | f: f_prime}) do
+    case evaluate_admission(unit_id, declared_scope, policy, %{state | f: f_prime}) do
       :admit ->
         new_f = Map.put(state.f, unit_id, declared_scope)
         # INV-POLICY-PIN: pin the policy at admission when supplied;
@@ -204,16 +204,50 @@ defmodule Tau.Factory.Scheduler do
 
   # Evaluate all three admission conditions in precedence order.
   # Returns :admit or {:defer, reason}. Never mutates state.
-  @spec evaluate_admission(unit_id(), declared_scope(), state()) ::
+  #
+  # INV-CLAMP-CONFLICT-PRED: when a policy is supplied, the policy's clamped
+  # conflict_predicate is consulted pairwise against each in-flight scope AFTER
+  # the structural ConflictCheck.clear? gate. The effective predicate is always
+  # (engine_floor AND policy_pred) — guaranteed by Policy.clamp/1 (HR-8). A
+  # policy_pred can only tighten (narrow) the admissible set; ConflictCheck.clear?
+  # remains the mandatory floor for the dep/spec/resource clauses.
+  @spec evaluate_admission(unit_id(), declared_scope(), Policy.t() | nil, state()) ::
           :admit | {:defer, defer_reason()}
-  defp evaluate_admission(unit_id, declared_scope, %{f: f, w_cap: w_cap, budget: budget}) do
+  defp evaluate_admission(unit_id, declared_scope, policy, %{f: f, w_cap: w_cap, budget: budget}) do
     with :clear <- ConflictCheck.clear?(unit_id, declared_scope, f),
+         :ok <- check_policy_conflict_predicate(declared_scope, f, policy),
          :ok <- check_capacity(f, w_cap),
          :ok <- check_budget(budget) do
       :admit
     else
       {:conflict, clause} -> {:defer, {:conflict, clause}}
       {:defer, reason} -> {:defer, reason}
+    end
+  end
+
+  # INV-CLAMP-CONFLICT-PRED: check the policy's clamped conflict_predicate pairwise
+  # against every in-flight scope. Returns :ok when no conflict is found or when
+  # no policy is supplied. Returns {:conflict, :disjoint_files} when the predicate
+  # denies a pair (the predicate subsumes the file+codepoint floor via Policy.clamp/1).
+  @spec check_policy_conflict_predicate(
+          declared_scope(),
+          %{unit_id() => declared_scope()},
+          Policy.t() | nil
+        ) ::
+          :ok | {:conflict, ConflictCheck.clause()}
+  defp check_policy_conflict_predicate(_declared_scope, _f, nil), do: :ok
+
+  defp check_policy_conflict_predicate(declared_scope, f, %Policy{conflict_predicate: pred})
+       when is_function(pred, 2) do
+    conflict =
+      Enum.any?(Map.values(f), fn in_flight_scope ->
+        not pred.(declared_scope, in_flight_scope)
+      end)
+
+    if conflict do
+      {:conflict, :disjoint_files}
+    else
+      :ok
     end
   end
 
