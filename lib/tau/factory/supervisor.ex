@@ -78,6 +78,13 @@ defmodule Tau.Factory.Supervisor do
 
   @impl true
   def init(opts) do
+    # INV-DS-KILL-SWITCH: ensure StepJob is loaded at supervisor boot so
+    # runtime checks (e.g. function_exported?/3) can inspect it without
+    # first calling into the module. BEAM modules are lazy-loaded; explicit
+    # ensure_loaded here guarantees the module is in the code server before
+    # any factory component queries it.
+    Code.ensure_loaded!(Tau.Factory.StepJob)
+
     # Resolve :enabled from opts, falling back to the application config gate.
     enabled =
       Keyword.get_lazy(opts, :enabled, fn ->

@@ -34,6 +34,9 @@ defmodule Tau.Factory.Coordinator do
 
   @terminal_states [:merged, :escalated]
 
+  # Default retry interval (ms) for re-probing main_synced_fun when it returns false.
+  @default_main_sync_retry_ms 250
+
   # ---------------------------------------------------------------------------
   # Public API
   # ---------------------------------------------------------------------------
@@ -275,14 +278,20 @@ defmodule Tau.Factory.Coordinator do
 
   # Drain: if no in-flight unit, check main-sync then transition to halted.
   # D-321 main-sync clause: call main_synced_fun before notifying :on_halted.
-  # If it returns false, stay in :halting (do not proceed to :halted).
+  # If it returns false, stay in :halting and schedule a retry drain (D-321 retry path).
   def halting(:internal, :drain, %{in_flight: nil} = data) do
     if main_synced?(data) do
       do_halt(data)
     else
-      Logger.debug("[Coordinator] halting: main not synced, staying in :halting")
-      {:keep_state, data}
+      Logger.debug("[Coordinator] halting: main not synced, scheduling retry drain")
+      retry_ms = Map.get(data, :main_sync_retry_ms, @default_main_sync_retry_ms)
+      {:keep_state, data, [{{:timeout, :main_sync_retry}, retry_ms, :drain}]}
     end
+  end
+
+  # D-321 retry path: re-probe main_synced_fun after the retry interval.
+  def halting({:timeout, :main_sync_retry}, :drain, data) do
+    {:keep_state, data, [{:next_event, :internal, :drain}]}
   end
 
   # In-flight unit exists: arm the absolute-ceiling timer if configured
@@ -300,8 +309,9 @@ defmodule Tau.Factory.Coordinator do
     if main_synced?(data) do
       do_halt(data)
     else
-      Logger.debug("[Coordinator] halting: unit terminal, but main not synced; staying")
-      {:keep_state, data}
+      Logger.debug("[Coordinator] halting: unit terminal, but main not synced; scheduling retry")
+      retry_ms = Map.get(data, :main_sync_retry_ms, @default_main_sync_retry_ms)
+      {:keep_state, data, [{{:timeout, :main_sync_retry}, retry_ms, :drain}]}
     end
   end
 
@@ -313,8 +323,12 @@ defmodule Tau.Factory.Coordinator do
     if main_synced?(data) do
       do_halt(data)
     else
-      Logger.debug("[Coordinator] halting: unit terminal (4-arg), but main not synced; staying")
-      {:keep_state, data}
+      Logger.debug(
+        "[Coordinator] halting: unit terminal (4-arg), but main not synced; scheduling retry"
+      )
+
+      retry_ms = Map.get(data, :main_sync_retry_ms, @default_main_sync_retry_ms)
+      {:keep_state, data, [{{:timeout, :main_sync_retry}, retry_ms, :drain}]}
     end
   end
 
