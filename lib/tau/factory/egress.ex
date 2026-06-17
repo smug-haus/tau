@@ -26,6 +26,7 @@ defmodule Tau.Factory.Egress do
   """
 
   alias Tau.CircuitBreaker.Store
+  alias Tau.Factory.Budget.Owner, as: BudgetOwner
   alias Tau.Providers.RateLimiter
 
   @doc """
@@ -42,7 +43,7 @@ defmodule Tau.Factory.Egress do
   def call(provider, req, ctx) do
     with :ok <- acquire_rate_limit(provider),
          :ok <- check_circuit_breaker(provider),
-         :ok <- check_budget(provider, req) do
+         :ok <- check_budget(ctx) do
       invoke_provider(provider, req, ctx)
     end
   end
@@ -98,11 +99,32 @@ defmodule Tau.Factory.Egress do
     end
   end
 
-  # Layer 3 — Budget (ETS read; cited from SPEC-FACTORY-CORE D-320)
-  # Budget.Owner may not be running in all contexts (e.g. plain session plane).
-  # When not configured, skip silently (pass through).
-  defp check_budget(_provider, _req) do
-    :ok
+  # Layer 3 — Budget (ETS read; cited from SPEC-FACTORY-CORE D-320 / B4)
+  # `ctx[:budget_owner]` carries the Budget.Owner registered name (ETS table
+  # atom). When absent, the check passes silently — Budget.Owner may not be
+  # running in all contexts (e.g. plain session plane).
+  # Reads the ETS snapshot DIRECTLY via `Budget.Owner.budget_precheck/2`
+  # (no GenServer.call on the hot path; B4 / D-320 mailbox-bypass contract).
+  defp check_budget(ctx) do
+    case Map.get(ctx, :budget_owner) do
+      nil ->
+        :ok
+
+      owner ->
+        case BudgetOwner.budget_precheck(owner, :tokens) do
+          :ok ->
+            :ok
+
+          {:exhausted, _dimension} ->
+            :telemetry.execute(
+              [:tau, :factory, :egress, :budget_exhausted],
+              %{system_time: System.system_time()},
+              %{owner: owner}
+            )
+
+            {:error, :budget_exhausted}
+        end
+    end
   end
 
   # ---------------------------------------------------------------------------
