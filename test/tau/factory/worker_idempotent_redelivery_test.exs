@@ -175,7 +175,16 @@ defmodule Tau.Factory.WorkerIdempotentRedeliveryTest do
 
       # Assert 1c: Oban.insert/2 must be exported — a real Oban installation
       # (not a minimal stub module) is required for the queue dispatch.
-      assert function_exported?(Oban, :insert, 2),
+      #
+      # IMPORTANT: `function_exported?/3` (i.e. `:erlang.function_exported/3`) returns
+      # false for *unloaded* modules even when the module exists on disk. Call
+      # `Code.ensure_loaded/1` first to force the module into the VM, then check the
+      # export. A stub lib/oban.ex that does not define insert/2 will still fail this
+      # assertion because ensure_loaded returns {:module, Oban} but function_exported?
+      # returns false. The real {:oban, ~> 2.x} Hex package defines insert/2, so both
+      # halves pass only with the real package installed.
+      assert match?({:module, Oban}, Code.ensure_loaded(Oban)) and
+               function_exported?(Oban, :insert, 2),
              "INV-DIST-WORKER-IDEMPOTENT: Oban.insert/2 must be exported by the Oban " <>
                "module. The current lib/oban.ex is a minimal stub with no insert/2 — " <>
                "replace it with the real {:oban, ~> 2.x} Hex dependency so the " <>
