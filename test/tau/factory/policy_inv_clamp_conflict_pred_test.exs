@@ -92,6 +92,7 @@ defmodule Tau.Factory.PolicyInvClampConflictPredTest do
              "pre-condition: engine_floor must deny overlapping-file scopes"
 
       permissive = @permissive_pred
+
       assert permissive.(scope_a, scope_b),
              "pre-condition: permissive policy_pred must return true"
 
