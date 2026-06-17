@@ -82,29 +82,56 @@ defmodule Tau.Factory.Budget.Owner do
   `writer` is the `Ledger.Writer` server reference (atom or pid). This
   function:
 
-  1. Calls `Ledger.Writer.debit_budget/4` first (WAL-before-ack; Ledger is
-     truth). Only after the durable WAL commit does this function proceed.
-  2. Looks up the ETS table associated with `writer` via `:persistent_term`
-     and decrements the snapshot: `remaining' = max(0, remaining - cost)`.
+  1. Reads the current ETS remaining for `dimension` to compute the
+     effective debit: `effective_cost = min(cost, remaining)`. This clamps
+     the recorded Ledger cost to the amount actually consumable, preserving
+     the D-332 conservation identity `spent + remaining = total` even when
+     `cost` exceeds the remaining budget (overshoot).
+  2. Calls `Ledger.Writer.debit_budget/4` with the effective cost first
+     (WAL-before-ack; Ledger is truth). Only after the durable WAL commit
+     does this function proceed.
+  3. Looks up the ETS table associated with `writer` via `:persistent_term`
+     and decrements the snapshot by the effective cost:
+     `remaining' = remaining - effective_cost` (exact, no clamping needed
+     since `effective_cost <= remaining`).
+
+  D-332 invariant: `spent + remaining == total` holds at every observable
+  point because `Σ effective_costs = total - remaining` by construction.
 
   Returns `:ok`.
   """
   @spec debit(GenServer.server(), String.t(), atom(), non_neg_integer()) :: :ok
   def debit(writer, unit_id, dimension, cost) do
-    # Step 1: persist to Ledger (truth, WAL-before-ack; D-315 / D-320).
-    {:ok, _ref} = Writer.debit_budget(writer, unit_id, dimension, cost)
+    # Step 1: determine the ETS table and compute the effective debit cost.
+    #
+    # D-332 (CON-3 budget conservation): clamp cost to the current remaining
+    # so the Ledger only records what is actually consumed.  This preserves
+    # spent + remaining = total even on overshoot.
+    {ets_table, effective_cost} =
+      case :persistent_term.get({@pt_prefix, writer}, nil) do
+        nil ->
+          # No ETS owner registered — use the full cost (no projection to keep
+          # consistent; Ledger-only path).
+          {nil, cost}
 
-    # Step 2: update ETS snapshot (projection follows truth).
-    # Look up the ETS table name registered by this writer's Budget.Owner.
-    case :persistent_term.get({@pt_prefix, writer}, nil) do
-      nil ->
-        # No owner registered for this writer — nothing to update.
-        :ok
+        table ->
+          remaining = ets_remaining_for(table, dimension)
+          {table, min(cost, remaining)}
+      end
 
-      ets_table ->
-        update_ets_remaining(ets_table, dimension, cost)
-        :ok
+    # Step 2: persist the effective cost to Ledger (truth, WAL-before-ack;
+    # D-315 / D-320).  Skipped when effective_cost is 0 (already exhausted).
+    if effective_cost > 0 do
+      {:ok, _ref} = Writer.debit_budget(writer, unit_id, dimension, effective_cost)
     end
+
+    # Step 3: update ETS snapshot by the same effective cost (projection
+    # follows truth).
+    if ets_table != nil and effective_cost > 0 do
+      update_ets_remaining(ets_table, dimension, effective_cost)
+    end
+
+    :ok
   end
 
   # ---------------------------------------------------------------------------
@@ -181,16 +208,29 @@ defmodule Tau.Factory.Budget.Owner do
   # Private helpers
   # ---------------------------------------------------------------------------
 
-  # Decrement the ETS remaining counter by `cost`, flooring at 0.
+  # Return the current remaining value for `dimension` from the ETS table, or
+  # 0 if the dimension has no row.  Used by `debit/4` to compute the effective
+  # debit cost before writing to the Ledger (D-332 conservation clamp).
+  defp ets_remaining_for(table, dimension) do
+    case :ets.lookup(table, dimension) do
+      [{^dimension, remaining}] -> remaining
+      [] -> 0
+    end
+  end
+
+  # Decrement the ETS remaining counter by `cost`.
+  #
+  # By the time this is called from `debit/4`, `cost` has already been clamped
+  # to `min(requested_cost, remaining)`, so `cost <= remaining` is guaranteed —
+  # the floor guard `{2, -cost, 0, 0}` is kept for safety but should never
+  # fire under normal operation.
   #
   # Uses `:ets.update_counter/3` with a threshold guard so the decrement is
   # atomic — no read-modify-write window. Tuple layout: {dimension, remaining},
-  # so remaining is at position 2. The op `{2, -cost, 0, 0}` means:
-  # decrement position 2 by `cost`; if the result would go below 0, set to 0.
+  # so remaining is at position 2.
   #
   # Guards with `:ets.member/2` first so that a debit on an unconfigured
-  # dimension (no ETS row) is a silent no-op rather than a raised error — the
-  # same graceful behaviour as the previous `[]` branch.
+  # dimension (no ETS row) is a silent no-op rather than a raised error.
   defp update_ets_remaining(table, dimension, cost) do
     if :ets.member(table, dimension) do
       :ets.update_counter(table, dimension, {2, -cost, 0, 0})
