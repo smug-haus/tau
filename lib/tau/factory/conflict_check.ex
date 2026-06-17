@@ -116,7 +116,13 @@ defmodule Tau.Factory.ConflictCheck do
   # list contains candidate_id, i.e. an in-flight unit is waiting for us.
   @spec check_reverse_dependency(unit_id() | nil, in_flight()) ::
           :ok | {:conflict, :no_dependency}
-  defp check_reverse_dependency(nil, _in_flight), do: :ok
+  defp check_reverse_dependency(nil, in_flight) do
+    if Enum.any?(Map.values(in_flight), fn m -> m.deps != [] end) do
+      {:conflict, :no_dependency}
+    else
+      :ok
+    end
+  end
 
   defp check_reverse_dependency(candidate_id, in_flight) do
     reverse_blocked =
