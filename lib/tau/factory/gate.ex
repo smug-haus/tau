@@ -377,33 +377,28 @@ defmodule Tau.Factory.Gate do
   # Toolchain.ReportParser.parse/2 to produce a real %TestReport{} with stable,
   # non-positional test ids. Never falls back to text-scraping or positional ids.
   #
-  # D-S2: the descriptor is obtained from adapter.mutation_descriptor(ctx) — the
-  # adapter supplies the argv, env, report format, and artifact path. The engine
-  # executes the descriptor verbatim and parses the artifact itself (HR-3).
+  # D-S2 / FR-3.3 conformance: the descriptor is obtained from
+  # adapter.mutation_descriptor(ctx) WITHOUT enriching ctx with engine-generated
+  # paths. The adapter supplies a self-sufficient argv (e.g. `mix test --only
+  # gating`). The engine prepares the test environment (writes
+  # test/test_helper.exs with an inline JUnit formatter) using the artifact path
+  # declared by the descriptor, then executes the descriptor verbatim.
   #
-  # The engine generates a temporary runner script in the workspace before
-  # requesting the descriptor. The adapter is passed the script and artifact
-  # paths via ctx so it can reference them in the descriptor without hard-coding
-  # workspace-specific details. The engine cleans up both temp files afterward.
-  defp run_via_engine(adapter, gating_paths, workspace, ctx) do
-    nonce = :erlang.unique_integer([:positive])
-    script_rel = "_gate_runner_#{nonce}.exs"
-    artifact_rel = "_gate_report_#{nonce}.xml"
-    script_abs = Path.join(workspace, script_rel)
-    artifact_abs = Path.join(workspace, artifact_rel)
+  # The engine cleans up the test_helper and artifact files in the `after` block
+  # so the workspace is left clean. No runner scripts named `_gate_runner_*` are
+  # written; Elixir source-layout scanning (find_lib_ex_files) is removed.
+  defp run_via_engine(adapter, _gating_paths, workspace, ctx) do
+    descriptor = adapter.mutation_descriptor(ctx)
+    artifact_abs = Path.join(workspace, descriptor.artifact)
+    test_helper_abs = Path.join(workspace, "test/test_helper.exs")
 
-    # Build the runner script and write it to the workspace.
-    # The script is an ExUnit runner with an inline JUnit formatter — no
-    # external deps required. The engine (not the adapter) authors the script
-    # content; the adapter only declares how to invoke it (argv, report format).
-    script_content = build_junit_runner(gating_paths, artifact_abs, workspace)
-    File.write!(script_abs, script_content)
-
-    # The engine passes ctx with the script/artifact paths so the adapter can
-    # reference them in the descriptor. Adapters that don't need these fields
-    # (non-Elixir adapters) ignore them per the Toolchain ctx contract.
-    enriched_ctx = Map.merge(ctx, %{script_rel: script_rel, artifact_rel: artifact_rel})
-    descriptor = adapter.mutation_descriptor(enriched_ctx)
+    # Write test/test_helper.exs with an inline JUnit formatter so that
+    # `mix test` produces a machine-readable JUnit artifact at `artifact_abs`.
+    # The formatter is engine-owned (trusted); the adapter supplies only the
+    # invocation recipe (argv). Mix requires test_helper.exs to exist.
+    helper_content = build_test_helper(artifact_abs)
+    File.mkdir_p!(Path.join(workspace, "test"))
+    File.write!(test_helper_abs, helper_content)
 
     try do
       case TestRun.execute(descriptor, workspace) do
@@ -414,39 +409,22 @@ defmodule Tau.Factory.Gate do
           {:error, reason}
       end
     after
-      _ = File.rm(script_abs)
+      _ = File.rm(test_helper_abs)
       _ = File.rm(artifact_abs)
     end
   end
 
-  # Build a self-contained ExUnit runner script that writes JUnit XML to
-  # `artifact_abs`. The script:
-  #   1. Defines an inline JUnit formatter (no external deps required).
-  #   2. Starts ExUnit with the inline formatter (autorun: false).
-  #   3. Compiles lib source files so production modules are available.
-  #   4. Requires the gating test files (registers test cases with ExUnit).
-  #   5. Runs ExUnit; the inline formatter writes JUnit XML to `artifact_abs`.
+  # Build a test/test_helper.exs that starts ExUnit with an inline JUnit
+  # formatter writing to `artifact_abs`. The formatter is self-contained
+  # (no external deps). Mix's standard test runner picks this up automatically.
   #
   # The JUnit XML format produces stable, meaningful test ids:
   #   classname="ModuleName" name="test description"
   # — the same classname+name pair the cross-check uses to bind reverted-run
   # failures to real-run passes (§C203-B3 anti-forgery).
-  defp build_junit_runner(gating_paths, artifact_abs, workspace) do
-    lib_files = find_lib_ex_files(workspace)
-
-    lib_compiles =
-      Enum.map_join(lib_files, "\n", fn f ->
-        ~s[Code.compile_file("#{f}")]
-      end)
-
-    test_requires =
-      Enum.map_join(gating_paths, "\n", fn f ->
-        ~s[Code.require_file("#{f}")]
-      end)
-
-    # JUnit formatter module: inline GenServer — uses ~S to suppress interpolation.
-    # The nested xml string uses explicit concatenation (no heredoc) to avoid
-    # conflicting with the outer ~S sigil's """ terminator.
+  defp build_test_helper(artifact_abs) do
+    # Use ~S to suppress interpolation inside the formatter module source, then
+    # splice `artifact_abs` explicitly into the ExUnit.start call at the end.
     junit_formatter = ~S"""
     defmodule Gate.JUnitFormatter do
       use GenServer
@@ -511,41 +489,8 @@ defmodule Tau.Factory.Gate do
 
     """
     #{junit_formatter}
-    ExUnit.start(autorun: false, formatters: [Gate.JUnitFormatter], artifact: "#{artifact_abs}")
-    #{lib_compiles}
-    #{test_requires}
-    ExUnit.run()
+    ExUnit.start(formatters: [Gate.JUnitFormatter], artifact: "#{artifact_abs}")
     """
-  end
-
-  # Collect all .ex source files under `workspace/lib/`.
-  defp find_lib_ex_files(workspace) do
-    lib_dir = Path.join(workspace, "lib")
-
-    if File.dir?(lib_dir) do
-      do_find_ex_files(lib_dir, workspace)
-    else
-      []
-    end
-  end
-
-  defp do_find_ex_files(dir, workspace) do
-    case File.ls(dir) do
-      {:error, _} ->
-        []
-
-      {:ok, entries} ->
-        Enum.flat_map(entries, fn entry ->
-          abs = Path.join(dir, entry)
-          rel = Path.relative_to(abs, workspace)
-
-          cond do
-            File.regular?(abs) and String.ends_with?(entry, ".ex") -> [rel]
-            File.dir?(abs) -> do_find_ex_files(abs, workspace)
-            true -> []
-          end
-        end)
-    end
   end
 
   # ---------------------------------------------------------------------------
