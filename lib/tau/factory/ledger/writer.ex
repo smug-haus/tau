@@ -67,11 +67,30 @@ defmodule Tau.Factory.Ledger.Writer do
   Options:
     - `:db_path` (required) — path to the SQLite database file.
     - `:name` — registered name for the process (defaults to `__MODULE__`).
+    - `:node_list_fun` — `(-> [node()])` returns the list of connected BEAM
+      nodes (default: `&Node.list/0`; injectable for tests). If non-empty on
+      startup, `start_link/1` returns `{:error, {:multi_node_detected, nodes}}`
+      and the process is NOT started (INV-README-OTP5: control plane MUST stay
+      single-node — two Ledger.Writer processes on different BEAM nodes would
+      write divergent solution trees, violating D-315 and CON-1..7).
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
     name = Keyword.get(opts, :name, __MODULE__)
-    GenServer.start_link(__MODULE__, opts, name: name)
+    node_list_fun = Keyword.get(opts, :node_list_fun, &Node.list/0)
+
+    # INV-README-OTP5: single-node guard. L (Ledger.Writer) is the durable
+    # consistency core. Two instances on different BEAM nodes diverge silently
+    # — a split-brain on the solution tree (D-315, INV-16, CON-1..7).
+    # Refuse to start when connected nodes are visible. node_list_fun is
+    # injectable for test isolation (default: &Node.list/0).
+    case node_list_fun.() do
+      [] ->
+        GenServer.start_link(__MODULE__, opts, name: name)
+
+      nodes ->
+        {:error, {:multi_node_detected, nodes}}
+    end
   end
 
   @doc """
