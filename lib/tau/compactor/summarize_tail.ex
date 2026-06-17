@@ -18,6 +18,7 @@ defmodule Tau.Compactor.SummarizeTail do
 
   @behaviour Tau.Compactor
 
+  alias Tau.Factory.Egress
   alias Tau.Message
   alias Tau.Provider.Event
 
@@ -96,7 +97,7 @@ defmodule Tau.Compactor.SummarizeTail do
       #{Enum.map_join(old_messages, "\n", &one_line/1)}
       """)
 
-    case provider.stream([prompt], %{}, %{}) do
+    case Egress.call(provider, %{messages: [prompt], opts: %{}}, %{}) do
       {:ok, stream} ->
         text =
           stream
