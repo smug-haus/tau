@@ -148,7 +148,7 @@ defmodule Tau.Factory.Supervisor do
       |> maybe_add_kill_switch(kill_switch_opts, ks_name, sup_name)
       |> maybe_add_coordinator(coordinator_opts, coord_name, ks_name, sup_name)
 
-    Supervisor.init(children, strategy: :one_for_one)
+    Supervisor.init(children, strategy: :rest_for_one)
   end
 
   # ---------------------------------------------------------------------------
