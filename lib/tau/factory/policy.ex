@@ -52,4 +52,41 @@ defmodule Tau.Factory.Policy do
           gate_manifest: [atom()] | nil,
           escalation_thresholds: map() | nil
         }
+
+  @doc """
+  Engine clamp (HR-8): validate and tighten an unsafe policy.
+
+  Returns `{:ok, policy}` when the policy is valid. The `model_per_role` field
+  is NEVER overridden with a hardcoded value — it is the caller's sole
+  responsibility to supply it. Falsifying `model_per_role` inside `clamp/1`
+  would violate INV-MODEL-POLICY (issue #552).
+
+  Returns `{:error, reason}` when the policy fails a mandatory invariant.
+  """
+  @spec clamp(t()) :: {:ok, t()} | {:error, term()}
+  def clamp(%__MODULE__{} = policy) do
+    with :ok <- validate_version(policy),
+         :ok <- validate_model_per_role(policy) do
+      {:ok, policy}
+    end
+  end
+
+  # version must be a positive integer
+  defp validate_version(%{version: v}) when is_integer(v) and v > 0, do: :ok
+  defp validate_version(%{version: v}), do: {:error, {:invalid_version, v}}
+
+  # model_per_role must be a map with non-empty string values
+  defp validate_model_per_role(%{model_per_role: mpr}) when is_map(mpr) do
+    invalid =
+      Enum.find(mpr, fn {_role, model} ->
+        not (is_binary(model) and model != "")
+      end)
+
+    case invalid do
+      nil -> :ok
+      {role, model} -> {:error, {:invalid_model, role, model}}
+    end
+  end
+
+  defp validate_model_per_role(_), do: {:error, :model_per_role_missing}
 end
