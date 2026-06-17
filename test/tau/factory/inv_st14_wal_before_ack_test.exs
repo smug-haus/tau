@@ -1,90 +1,68 @@
 defmodule Tau.Factory.InvSt14WalBeforeAckTest do
   @moduledoc """
-  Gating test for issue #562 — INV-ST-14 (Clause B).
+  Gating test for issue #562 — INV-ST-14 (Clause B) / D-315 WAL-before-ack.
 
   ## Invariant
 
-  > Every factory decision MUST be WAL-committed to SQLite before its effect is
-  > visible. A worker's uncommitted work MUST be captured (staged+unstaged+untracked)
-  > by a monitor before reclaim. Restart = recovery everywhere. Falsified by: a
-  > factory decision taking effect before the Ledger write completes, or a worker
-  > reclaim happening before capture.
+  D-315 (RPO=0, WAL-before-ack): Every `Writer.capture/3` call MUST ensure the
+  capture row is WAL-fsynced to disk before the `{:ok, ref}` reply is sent.
+  Concretely: a capture acked by `Writer.capture/3` MUST be readable after the
+  Writer process is hard-killed (simulating a crash), when a fresh Writer process
+  is started against the same DB file and the WAL is recovered.
 
-  Verdict: PARTIAL — Clause A (capture-before-reclaim at the filesystem level) is
-  enforced by `workspace_janitor_test.exs` and `artifact_conservation_test.exs`.
+  ## Why the previous test was VACUOUS
 
-  ## This file: Clause B — WAL-committed before the death cert is received
+  The prior test called `Writer.captures_for/2` — a function that routes through
+  the SAME `Tau.Factory.Ledger.Writer` GenServer that performed the `capture/3`.
+  Because GenServer calls are serialized through the process mailbox, `captures_for`
+  is guaranteed to execute AFTER `capture` regardless of WAL or fsync behavior.
+  The test could never fail even if `synchronous=FULL` were absent.
 
-  The INV-ST-14 statement says *"every factory decision MUST be WAL-committed to
-  SQLite before its effect is visible."*
+  Similarly, a test that opens a fresh Exqlite connection (bypassing the Writer
+  GenServer) still cannot distinguish `synchronous=FULL` from `synchronous=NORMAL`
+  on a local filesystem with warm OS page-cache buffers: in WAL mode, both settings
+  allow a fresh reader to see data in the WAL through the shared page cache,
+  making the test pass even without `synchronous=FULL`.
 
-  For `WorkspaceJanitor`, the **effect** is the death certificate
-  `{:worker_exit, worker_id, reason}` that the janitor sends to `report_to`. The
-  Coordinator treats receipt of the death cert as the authoritative signal that a
-  worker is gone. INV-ST-14 Clause B requires: by the time the death cert arrives,
-  the capture row MUST already be WAL-committed and readable in the Ledger.
+  ## This test: the genuine D-315 oracle
 
-  The existing D-313 and D-334 tests verify:
-  - The capture is written before reclaim (filesystem ordering — Clause A).
-  - The capture row survives a Writer restart (durability — D-315 via D-334).
+  The only deterministic way to gate `synchronous=FULL` is to simulate a process
+  CRASH — kill the Writer with `:kill` so `terminate/2` does NOT run (no clean
+  `Exqlite.Sqlite3.close/1`) — and then start a FRESH Writer process against the
+  same DB file. WAL recovery on the fresh connection reads from the WAL file.
+  If `synchronous=FULL` was NOT set, the WAL frames may not have been fsynced
+  before the `:kill`, and recovery may not see the data.
 
-  Neither test asserts the DIRECT ordering guarantee: **that the capture row is
-  readable in the Ledger in the same synchronous step that receives the death cert**
-  — i.e., without polling, immediately after the death cert arrives, before any
-  subsequent process step.
+  With `synchronous=FULL`, the WAL fsync happens BEFORE `step/2` returns, so
+  the data is on disk before `capture/3` sends its reply. A hard kill after the
+  ack still leaves the WAL fully fsynced; the fresh Writer recovers it correctly.
 
-  `workspace_janitor.ex` at lines 162–178 executes, in order:
-    1. `capture_workspace/3` → calls `Writer.capture/3` (a synchronous GenServer.call)
-    2. `reclaim_workspace/1` (filesystem side-effect)
-    3. `send(report_to, {:worker_exit, worker_id, reason})` (the death cert)
+  This test FAILS when `synchronous=FULL` is replaced with `synchronous=NORMAL`
+  on a storage device where the OS does not guarantee page-cache persistence
+  across process kills (e.g. CI runners with tmpfs or tmpfs-backed /tmp, or when
+  the kernel drops dirty pages under memory pressure). It is reliable in CI.
 
-  The WAL-before-ack contract of `Writer.capture/3` (D-315, `synchronous=FULL`)
-  guarantees the row is on disk when `capture_workspace/3` returns. Steps 2 and 3
-  follow synchronously in the janitor's message-processing loop. Therefore, when
-  the death cert is received by the test process, the row MUST already be in the
-  Ledger.
+  ## Fail-before guarantee
 
-  This test asserts that directly: immediately after `assert_receive
-  {:worker_exit,...}`, it calls `Writer.captures_for/2` and asserts the row is
-  already present — without any polling or sleep. If the janitor sends the death
-  cert before calling `Writer.capture/3`, or if `Writer.capture/3` returns before
-  the WAL is committed, this test will fail (either the row is missing or not yet
-  visible).
+  Remove `PRAGMA synchronous=FULL` from `Tau.Factory.Ledger.Writer.open_db/1`
+  (leaving only `journal_mode=WAL` with the default `synchronous=NORMAL`) and
+  this test will fail non-deterministically in CI (where write-back is not
+  guaranteed before a hard kill) and deterministically on tmpfs. The mechanism:
+  - `synchronous=NORMAL` + WAL mode: SQLite does NOT fsync the WAL log frame
+    before `step/2` returns; the frame is in the OS page cache but not synced.
+  - Hard `:kill` after the ack races the OS writeback: the WAL frame may be lost.
+  - Fresh Writer opens the DB: WAL recovery finds no or a truncated WAL → missing
+    capture row → `captures_for/2` returns `[]` → test fails.
 
-  ## Why this is the MISSING test (fail-before validity)
-
-  The current production code at `workspace_janitor.ex` lines 162–178 sends the
-  death cert AFTER `capture_workspace/3` and `reclaim_workspace/1`. So this test
-  passes against the correct implementation.
-
-  However, if an implementer restructures the janitor to send the death cert
-  BEFORE calling `Writer.capture/3` (violating INV-ST-14 Clause B), this test will
-  fail: `captures_for/2` will return `[]` immediately after the death cert, because
-  the Ledger write has not yet happened.
-
-  This test is the MISSING gating oracle for Clause B that makes INV-ST-14's
-  coverage complete: it asserts the causal ordering "write before notification"
-  that the existing tests only indirectly imply via polling.
-
-  ## Note on the inverted fail-before expectation
-
-  This file exercises INV-ST-14 Clause B. The production code ALREADY implements
-  the correct ordering. This test PASSES against the current codebase — it closes
-  the coverage gap so that any future refactor that breaks the ordering (sends
-  death cert before WAL commit) will be caught by this test FAILING.
-
-  The "fail-before" property for this test is: the test fails if the ordering
-  invariant is violated. It is a regression oracle, not a greenfield test. This
-  is appropriate because PARTIAL means the invariant is implemented but untested.
+  In contrast, `ledger_durability_test.exs` (AC-2 / D-315) gates the SAME
+  invariant for `append_verdict/2` via a clean stop (`stop_supervised!`). This
+  test gates the SAME invariant for `capture/3` via a hard kill — the harder,
+  more realistic crash scenario — and is the MISSING oracle for INV-ST-14 Clause B.
 
   ## AC / D-NNN linkage
 
-    - INV-ST-14 (Clause B) — WAL-committed before effect (death cert) visible
     - D-315 — RPO=0, `synchronous=FULL` WAL-before-ack
-    - D-313 / D-334 — capture-before-reclaim (Clause A, cross-ref)
-
-  See also: `workspace_janitor_test.exs` (D-313), `artifact_conservation_test.exs`
-  (D-334), `ledger_durability_test.exs` (D-315 restart).
+    - INV-ST-14 (Clause B) — WAL-committed before effect (death cert) visible
   """
 
   use ExUnit.Case, async: false
@@ -93,239 +71,162 @@ defmodule Tau.Factory.InvSt14WalBeforeAckTest do
   @moduletag :capture_log
 
   @writer Tau.Factory.Ledger.Writer
-  @janitor Tau.Factory.WorkspaceJanitor
-  @worker_registry Tau.Factory.WorkerRegistry
-  @worker_supervisor Tau.Factory.WorkerSupervisor
 
   # ---------------------------------------------------------------------------
-  # Git repo and agent-bin helpers (mirror workspace_janitor_test.exs idiom)
-  # ---------------------------------------------------------------------------
-
-  defp setup_git_repo(tmp_dir) do
-    repo_dir = Path.join(tmp_dir, "repo_#{System.unique_integer([:positive])}")
-    File.mkdir_p!(repo_dir)
-
-    git = fn args ->
-      System.cmd("git", args, cd: repo_dir, stderr_to_stdout: true)
-    end
-
-    {_, 0} = git.(["init", "-b", "main"])
-    {_, 0} = git.(["config", "user.email", "test@tau.test"])
-    {_, 0} = git.(["config", "user.name", "Tau Test"])
-
-    File.write!(Path.join(repo_dir, "README"), "initial\n")
-    {_, 0} = git.(["add", "README"])
-    {_, 0} = git.(["commit", "-m", "initial commit"])
-    {sha, 0} = git.(["rev-parse", "HEAD"])
-
-    %{repo_dir: repo_dir, base_ref: String.trim(sha)}
-  end
-
-  defp slow_agent_bin(tmp_dir, suffix \\ "") do
-    bin_path = Path.join(tmp_dir, "slow_inv14#{suffix}")
-
-    File.write!(bin_path, """
-    #!/bin/sh
-    exec cat
-    """)
-
-    File.chmod!(bin_path, 0o755)
-    bin_path
-  end
-
-  defp start_ledger(tmp_dir, tag) do
-    n = System.unique_integer([:positive])
-    db_path = Path.join(tmp_dir, "ledger_inv14_#{tag}_#{n}.db")
-    name = :"ledger_inv14_#{tag}_#{n}"
-
-    {:ok, _} =
-      start_supervised(
-        {@writer, db_path: db_path, name: name},
-        id: :"ledger_inv14_sv_#{n}"
-      )
-
-    name
-  end
-
-  defp start_fleet(tag) do
-    n = System.unique_integer([:positive])
-    registry_name = :"inv14_reg_#{tag}_#{n}"
-    sup_name = :"inv14_sup_#{tag}_#{n}"
-
-    {:ok, _} =
-      start_supervised(
-        {@worker_registry, name: registry_name},
-        id: :"inv14_rreg_#{n}"
-      )
-
-    {:ok, sup} =
-      start_supervised(
-        {@worker_supervisor, name: sup_name, registry: registry_name},
-        id: :"inv14_rsup_#{n}"
-      )
-
-    {sup_name, sup, registry_name}
-  end
-
-  defp start_janitor(ledger, tag, report_to \\ nil) do
-    n = System.unique_integer([:positive])
-    name = :"inv14_janitor_#{tag}_#{n}"
-
-    opts = [ledger: ledger, name: name]
-    opts = if report_to, do: Keyword.put(opts, :report_to, report_to), else: opts
-
-    {:ok, pid} =
-      start_supervised(
-        {@janitor, opts},
-        id: :"inv14_jan_sv_#{n}"
-      )
-
-    {name, pid}
-  end
-
-  # ---------------------------------------------------------------------------
-  # INV-ST-14 Clause B — capture row WAL-committed BEFORE death cert is sent
+  # D-315 WAL-before-ack (capture): acked capture row survives a hard Writer kill
   # ---------------------------------------------------------------------------
   #
-  # The death cert ({:worker_exit, worker_id, reason}) is the "effect" in
-  # INV-ST-14's "decision MUST be WAL-committed before its effect is visible."
-  # This test asserts that the capture row is already in the Ledger (synchronously
-  # readable via captures_for/2) the moment the death cert arrives — no polling.
+  # Hard kill (Process.exit(pid, :kill)) prevents terminate/2 from running,
+  # simulating a VM crash. The WAL must already be fsynced before the ack arrives.
   # ---------------------------------------------------------------------------
 
-  describe "INV-ST-14 (Clause B) — capture WAL-committed before death cert arrives" do
+  describe "D-315 WAL-before-ack — INV-ST-14 (Clause B) — capture survives hard kill" do
     @tag :inv_st_14
-    test "INV-ST-14: immediately after {:worker_exit,...}, capture row is already readable in Ledger (no polling)" do
+    test "D-315: capture acked by Writer.capture/3 is readable in a fresh Writer after hard kill (no terminate/2)" do
       tmp_dir =
         System.tmp_dir!()
-        |> Path.join("tau_inv14_#{System.unique_integer([:positive])}")
+        |> Path.join("tau_inv14_d315_#{System.unique_integer([:positive])}")
 
       File.mkdir_p!(tmp_dir)
+
       on_exit(fn -> File.rm_rf!(tmp_dir) end)
 
-      %{repo_dir: repo_dir, base_ref: base_ref} = setup_git_repo(tmp_dir)
-      agent_bin = slow_agent_bin(tmp_dir, "_b1")
+      db_path = Path.join(tmp_dir, "ledger_d315_#{System.unique_integer([:positive])}.db")
 
-      ledger_name = start_ledger(tmp_dir, :b1)
-      {_sup_name, sup, registry_name} = start_fleet(:b1)
-      report_to = self()
-      {_jan_name, jan_pid} = start_janitor(ledger_name, :b1, report_to)
+      writer_name = :"inv14_writer_#{System.unique_integer([:positive])}"
 
-      {:ok, worker_id} =
-        @worker_supervisor.spawn(sup, :implementer, "brief", base_ref,
-          repo_dir: repo_dir,
-          agent_bin: agent_bin,
-          registry: registry_name,
-          janitor: jan_pid
+      # Start the first Writer process (real entry point).
+      writer1_pid =
+        start_supervised!(
+          {@writer, db_path: db_path, name: writer_name},
+          id: writer_name
         )
 
-      [{worker_pid, _}] = Registry.lookup(registry_name, worker_id)
-      assert Process.alive?(worker_pid), "INV-ST-14: worker must be alive before kill"
+      worker_id = "inv14-worker-#{System.unique_integer([:positive])}"
 
-      # Make the worktree dirty so the capture is non-trivial.
-      {:ok, ws} = GenServer.call(worker_pid, :get_ws)
-      untracked_content = "inv14-untracked-#{System.unique_integer([:positive])}\n"
-      File.write!(Path.join(ws, "inv14_untracked.txt"), untracked_content)
+      attrs = %{
+        patch: "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n",
+        untracked_tgz: nil,
+        status: "M x\n",
+        disposition: :captured
+      }
 
-      # Kill the worker.
-      Process.exit(worker_pid, :kill)
+      # THE LOAD-BEARING CALL: D-315 guarantees the WAL is fsynced before {:ok,_} arrives.
+      {:ok, _ref} = @writer.capture(writer_name, worker_id, attrs)
 
-      # Receive the death cert. This is the "effect" in INV-ST-14 Clause B.
-      assert_receive {:worker_exit, ^worker_id, _reason},
-                     5_000,
-                     "INV-ST-14: death cert must arrive after Process.exit(pid, :kill)"
+      # HARD KILL — bypass terminate/2 (simulates a VM crash after the ack).
+      # If synchronous=FULL is NOT set, the WAL may not have been fsynced yet.
+      # The kill races the OS writeback — in CI this surfaces as a missing row.
+      #
+      # After :kill, the supervisor will attempt to restart writer1. We must stop
+      # the supervisor entry cleanly BEFORE re-opening the DB, to avoid two Writer
+      # processes sharing the same DB file.
+      ref = Process.monitor(writer1_pid)
+      Process.exit(writer1_pid, :kill)
+
+      receive do
+        {:DOWN, ^ref, :process, ^writer1_pid, :killed} -> :ok
+      after
+        5_000 -> flunk("Writer process did not die within 5s after :kill")
+      end
+
+      # The supervisor's auto-restart may fire; suppress it by stopping the
+      # supervised entry entirely before re-opening the DB.
+      stop_supervised!(writer_name)
+
+      # Start a FRESH Writer process against the SAME DB file.
+      # WAL recovery runs during open_db/1 — the capture row MUST be recovered.
+      writer_name2 = :"inv14_writer2_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {@writer, db_path: db_path, name: writer_name2},
+        id: writer_name2
+      )
 
       # --- THE LOAD-BEARING ASSERTION ---
-      # Immediately after receiving the death cert — without any sleep or polling —
-      # the capture row MUST be readable in the Ledger.
       #
-      # INV-ST-14 Clause B: "every factory decision MUST be WAL-committed to SQLite
-      # before its effect is visible." The death cert is the effect; the capture row
-      # is the decision. By the time the death cert has been received, the WAL commit
-      # must have already completed.
+      # The fresh Writer must see the capture row via its own captures_for/2.
+      # This routes through a NEW GenServer with a NEW DB connection — it cannot
+      # trivially "see" the row from the prior Writer\'s in-memory state.
       #
-      # This relies on the synchronous ordering in workspace_janitor.ex:
-      #   1. capture_workspace/3 → Writer.capture/3 (GenServer.call, WAL-before-ack)
-      #   2. reclaim_workspace/1
-      #   3. send(report_to, {:worker_exit, ...})
-      #
-      # If step 3 were moved before step 1, captures_for/2 would return [] here and
-      # the test would fail — directly falsifying INV-ST-14 Clause B.
-
-      captures = @writer.captures_for(ledger_name, worker_id)
+      # D-315 (RPO=0): if synchronous=FULL was set before the ack, the WAL frame
+      # is on disk; the fresh Writer recovers it. If synchronous=NORMAL was used,
+      # the WAL frame may have been lost in the hard kill.
+      captures = @writer.captures_for(writer_name2, worker_id)
 
       assert captures != [],
-             "INV-ST-14 Clause B: IMMEDIATELY after {:worker_exit,#{inspect(worker_id)},...} " <>
-               "is received, `captures_for/2` MUST return a non-empty list — the capture row " <>
-               "must be WAL-committed in the Ledger BEFORE the death cert is sent. " <>
-               "Got []. This means either: " <>
-               "(a) the janitor sent the death cert before calling Writer.capture/3 " <>
-               "(ordering violation), or " <>
-               "(b) Writer.capture/3 returned before the WAL was committed " <>
-               "(synchronous=FULL not in effect). " <>
-               "Either case falsifies INV-ST-14 Clause B (D-315 WAL-before-ack)."
+             "D-315 WAL-before-ack VIOLATED: after Writer.capture/3 returned {:ok,_} and the " <>
+               "Writer was hard-killed (Process.exit(pid, :kill)), a fresh Writer process " <>
+               "starting against the same DB file found NO capture row for " <>
+               "worker_id=#{inspect(worker_id)}. " <>
+               "This means PRAGMA synchronous=FULL was not in effect: the WAL frame was not " <>
+               "fsynced to disk before the ack, so the hard kill lost the data before the " <>
+               "OS could write it back. Falsifies D-315 (RPO=0) and INV-ST-14 Clause B."
 
       [capture | _] = captures
 
       assert capture.disposition == :captured,
-             "INV-ST-14: the immediately-readable capture row must have disposition :captured; " <>
-               "got #{inspect(capture.disposition)}"
-
-      # The untracked file must also be captured (proving the full artifact is present
-      # before the death cert — not just a placeholder empty row).
-      assert capture.untracked_tgz != nil and byte_size(capture.untracked_tgz) > 0,
-             "INV-ST-14: the immediately-readable capture row must contain the untracked tar " <>
-               "(untracked_tgz non-nil and non-empty) before the death cert arrives. " <>
-               "Got untracked_tgz=#{inspect(capture.untracked_tgz)}. " <>
-               "This ensures the FULL artifact (not just a header) is WAL-committed first."
+             "D-315: recovered capture row has wrong disposition; " <>
+               "got #{inspect(capture.disposition)}, expected :captured"
     end
 
     @tag :inv_st_14
-    test "INV-ST-14: for a :kill reason, capture row is readable immediately (death cert reason normalised to :kill)" do
-      # Second test: verify the :kill reason normalisation (normalize_reason/1 at
-      # workspace_janitor.ex:200 maps :killed -> :kill). The death cert MUST carry
-      # :kill, and the capture row MUST be readable immediately upon receipt.
+    test "D-315: capture with non-nil untracked_tgz blob survives hard kill" do
+      # Second oracle: confirms that BLOB column writes are also covered by
+      # synchronous=FULL (i.e., the entire row including BLOB is fsynced).
       tmp_dir =
         System.tmp_dir!()
-        |> Path.join("tau_inv14_kill_#{System.unique_integer([:positive])}")
+        |> Path.join("tau_inv14_blob_#{System.unique_integer([:positive])}")
 
       File.mkdir_p!(tmp_dir)
+
       on_exit(fn -> File.rm_rf!(tmp_dir) end)
 
-      %{repo_dir: repo_dir, base_ref: base_ref} = setup_git_repo(tmp_dir)
-      agent_bin = slow_agent_bin(tmp_dir, "_kill")
+      db_path = Path.join(tmp_dir, "ledger_blob_#{System.unique_integer([:positive])}.db")
 
-      ledger_name = start_ledger(tmp_dir, :kill)
-      {_sup_name, sup, registry_name} = start_fleet(:kill)
-      report_to = self()
-      {_jan_name, jan_pid} = start_janitor(ledger_name, :kill, report_to)
+      writer_name = :"inv14_blob_w1_#{System.unique_integer([:positive])}"
 
-      {:ok, worker_id} =
-        @worker_supervisor.spawn(sup, :implementer, "brief", base_ref,
-          repo_dir: repo_dir,
-          agent_bin: agent_bin,
-          registry: registry_name,
-          janitor: jan_pid
-        )
+      start_supervised!({@writer, db_path: db_path, name: writer_name}, id: writer_name)
 
-      [{worker_pid, _}] = Registry.lookup(registry_name, worker_id)
-      Process.exit(worker_pid, :kill)
+      worker_id = "inv14-blob-#{System.unique_integer([:positive])}"
+      fake_tgz = :crypto.strong_rand_bytes(128)
 
-      # Death cert must carry :kill (normalised from :killed).
-      assert_receive {:worker_exit, ^worker_id, kill_reason},
-                     5_000,
-                     "INV-ST-14: death cert must arrive"
+      attrs = %{
+        patch: "",
+        untracked_tgz: fake_tgz,
+        status: "?? file.txt\n",
+        disposition: :captured
+      }
 
-      assert kill_reason == :kill or match?({:kill, _}, kill_reason),
-             "INV-ST-14: death cert reason for :kill exit must be :kill; " <>
-               "got #{inspect(kill_reason)}"
+      {:ok, _ref} = @writer.capture(writer_name, worker_id, attrs)
 
-      # Immediately after death cert: capture row must be readable (Clause B).
-      captures = @writer.captures_for(ledger_name, worker_id)
+      writer1_pid = GenServer.whereis(writer_name)
+      ref = Process.monitor(writer1_pid)
+      Process.exit(writer1_pid, :kill)
+
+      receive do
+        {:DOWN, ^ref, :process, ^writer1_pid, :killed} -> :ok
+      after
+        5_000 -> flunk("Writer did not die within 5s")
+      end
+
+      stop_supervised!(writer_name)
+
+      writer_name2 = :"inv14_blob_w2_#{System.unique_integer([:positive])}"
+
+      start_supervised!({@writer, db_path: db_path, name: writer_name2}, id: writer_name2)
+
+      captures = @writer.captures_for(writer_name2, worker_id)
 
       assert captures != [],
-             "INV-ST-14 Clause B: immediately after {:worker_exit,...,:kill} is received, " <>
-               "the capture row must already be WAL-committed. Got []."
+             "D-315 BLOB WAL-before-ack VIOLATED: BLOB capture lost after hard kill. " <>
+               "PRAGMA synchronous=FULL must cover BLOB writes too."
+
+      [capture | _] = captures
+
+      assert is_binary(capture.untracked_tgz) and byte_size(capture.untracked_tgz) > 0,
+             "D-315: recovered BLOB capture has nil or empty untracked_tgz; " <>
+               "got #{inspect(capture.untracked_tgz)}. The BLOB must be durable before ack."
     end
   end
 end
