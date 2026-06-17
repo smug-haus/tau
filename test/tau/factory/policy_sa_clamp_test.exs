@@ -60,20 +60,33 @@ defmodule Tau.Factory.PolicySaClampTest do
   # Minimal valid policy template.
   # All numeric budget fields are small positive integers (admissible by clamp);
   # retry_bound_n is set to the ceiling so the base template is clean.
+  #
+  # NOTE: conflict_predicate is an anonymous function and CANNOT be stored in a
+  # module attribute (Elixir cannot escape closures into compile-time attributes).
+  # It is injected at runtime via the base_policy/0 helper below.
   # ---------------------------------------------------------------------------
 
   @valid_gate_manifest [:mutation, :critic, :reviewer]
 
-  @base_policy %Policy{
-    version: 1,
-    model_per_role: %{implementer: "claude-sonnet-4-5", critic: "claude-opus-4-5"},
-    retry_bound_n: @hard_ceiling_n,
-    budget: %{token: 100_000, cost: 10, wall_time: 3_600, iteration: 5},
-    priority_order: [],
-    conflict_predicate: &(&1 == &1 and &2 == &2),
-    gate_manifest: @valid_gate_manifest,
-    escalation_thresholds: %{upheld_challenges: 2}
-  }
+  # A no-op conflict predicate — accepts two arguments, always returns true.
+  # Named function so it can be used in structs built at test runtime without
+  # triggering "cannot escape #Function<...>" on a module attribute.
+  def noop_predicate(_a, _b), do: true
+
+  # Build a base policy struct at runtime (called inside tests, not a module attr).
+  # This avoids the Elixir compile-time restriction on anonymous functions in @attrs.
+  defp base_policy do
+    %Policy{
+      version: 1,
+      model_per_role: %{implementer: "claude-sonnet-4-5", critic: "claude-opus-4-5"},
+      retry_bound_n: @hard_ceiling_n,
+      budget: %{token: 100_000, cost: 10, wall_time: 3_600, iteration: 5},
+      priority_order: [],
+      conflict_predicate: &__MODULE__.noop_predicate/2,
+      gate_manifest: @valid_gate_manifest,
+      escalation_thresholds: %{upheld_challenges: 2}
+    }
+  end
 
   # ---------------------------------------------------------------------------
   # INV-SA-POLICY-CLAMP (a) — retry_bound_n = min(policy, ceiling)
@@ -91,7 +104,7 @@ defmodule Tau.Factory.PolicySaClampTest do
 
       over_ceiling = @hard_ceiling_n + 7
 
-      policy_over = %Policy{@base_policy | retry_bound_n: over_ceiling}
+      policy_over = %{base_policy() | retry_bound_n: over_ceiling}
 
       result = Policy.clamp(policy_over)
 
@@ -116,7 +129,7 @@ defmodule Tau.Factory.PolicySaClampTest do
       # FAIL BEFORE: Tau.Factory.Policy.clamp/1 does not exist → UndefinedFunctionError.
 
       for n <- 1..@hard_ceiling_n do
-        policy_at = %Policy{@base_policy | retry_bound_n: n}
+        policy_at = %{base_policy() | retry_bound_n: n}
 
         result = Policy.clamp(policy_at)
 
@@ -148,7 +161,7 @@ defmodule Tau.Factory.PolicySaClampTest do
       #
       # FAIL BEFORE: Tau.Factory.Policy.clamp/1 does not exist → UndefinedFunctionError.
 
-      policy_inf = %Policy{@base_policy | retry_bound_n: :infinity}
+      policy_inf = %{base_policy() | retry_bound_n: :infinity}
 
       result = Policy.clamp(policy_inf)
 
@@ -169,7 +182,7 @@ defmodule Tau.Factory.PolicySaClampTest do
       # FAIL BEFORE: Tau.Factory.Policy.clamp/1 does not exist → UndefinedFunctionError.
 
       for n <- [0, -1, -10] do
-        policy_invalid = %Policy{@base_policy | retry_bound_n: n}
+        policy_invalid = %{base_policy() | retry_bound_n: n}
 
         result = Policy.clamp(policy_invalid)
 
@@ -194,7 +207,7 @@ defmodule Tau.Factory.PolicySaClampTest do
       #
       # FAIL BEFORE: Tau.Factory.Policy.clamp/1 does not exist → UndefinedFunctionError.
 
-      policy_over = %Policy{@base_policy | retry_bound_n: @hard_ceiling_n + 5}
+      policy_over = %{base_policy() | retry_bound_n: @hard_ceiling_n + 5}
 
       assert {:ok, clamped_once} = Policy.clamp(policy_over),
              "INV-SA-POLICY-CLAMP: first clamp/1 must return {:ok, _}; " <>

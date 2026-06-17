@@ -54,6 +54,8 @@ defmodule Tau.Factory.ChallengeEscalationTest do
   @moduletag :fr_4_4
   @moduletag :e_challenge
 
+  alias Tau.Factory.Escalation
+
   @unit_supervisor Tau.Factory.UnitSupervisor
   @scheduler Tau.Factory.Scheduler
 
@@ -207,7 +209,7 @@ defmodule Tau.Factory.ChallengeEscalationTest do
       # → {:"E-CHALLENGE", :unit}).  The implementer may encode the reason atom
       # directly or as the trigger term — both forms are acceptable as long as
       # the classifier maps it to E-CHALLENGE.
-      {e_class, scope} = Tau.Factory.Escalation.classify(reason)
+      {e_class, scope} = Escalation.classify(reason)
 
       assert e_class == :"E-CHALLENGE",
              "FR-4.4: escalation reason #{inspect(reason)} must classify to E-CHALLENGE; got #{inspect(e_class)}"
