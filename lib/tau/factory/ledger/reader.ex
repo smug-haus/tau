@@ -77,4 +77,15 @@ defmodule Tau.Factory.Ledger.Reader do
   def frozen_scope_for(server, unit_id) do
     Writer.frozen_scope_for(server, unit_id)
   end
+
+  @doc """
+  Return the lineage record for `unit_id` (D-353 / NFR-AUDIT).
+
+  Returns `{:ok, %Tau.Factory.Lineage{}}` or `:none` when no lineage row exists.
+  """
+  @spec lineage_for(GenServer.server(), String.t()) ::
+          {:ok, Tau.Factory.Lineage.t()} | :none
+  def lineage_for(server, unit_id) do
+    Writer.lineage_for(server, unit_id)
+  end
 end

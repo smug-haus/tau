@@ -134,7 +134,25 @@ defmodule Tau.Factory.Ledger.Migrations do
     # ALTER TABLE ADD COLUMN is idempotent in SQLite when paired with IF NOT EXISTS
     # semantics — we guard idempotency via the ledger_schema_migrations version key.
     {"20260616_011_unit_snapshots_add_frozen_scope",
-     "ALTER TABLE unit_snapshots ADD COLUMN frozen_scope TEXT"}
+     "ALTER TABLE unit_snapshots ADD COLUMN frozen_scope TEXT"},
+    # D-353 (issue #668): Audit lineage table. Written in the same transaction as
+    # the merge_outcomes row (WAL-before-ack, D-315 / RPO=0). All link columns are
+    # NOT NULL — a null edge violates NFR-AUDIT and is rejected at the schema level.
+    # gate_verdicts, gating_test_paths, claims, specs, issues are JSON arrays.
+    {"20260617_012_lineage",
+     """
+     CREATE TABLE IF NOT EXISTS lineage (
+       id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+       unit_id            TEXT    NOT NULL,
+       main_commit        TEXT    NOT NULL,
+       gate_verdicts      TEXT    NOT NULL,
+       gating_test_paths  TEXT    NOT NULL,
+       claims             TEXT    NOT NULL,
+       specs              TEXT    NOT NULL,
+       issues             TEXT    NOT NULL,
+       inserted_at        TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+     )
+     """}
   ]
 
   @doc "Expose the migration list. Used by tests to verify idempotency."

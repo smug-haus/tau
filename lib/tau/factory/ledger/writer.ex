@@ -245,6 +245,56 @@ defmodule Tau.Factory.Ledger.Writer do
     GenServer.call(server, {:merge_outcome_for, unit_id})
   end
 
+  @type lineage_attrs :: %{
+          main_commit: String.t(),
+          unit_id: String.t(),
+          gate_verdicts: [map()],
+          gating_test_paths: [String.t()] | nil,
+          claims: [String.t()] | nil,
+          specs: [String.t()] | nil,
+          issues: [String.t()] | nil
+        }
+
+  @doc """
+  Write a merge-outcome row AND a lineage row in a single SQLite transaction.
+
+  Both rows are committed atomically (D-353 / NFR-AUDIT): an audit can never
+  observe a merge without its lineage. WAL-before-ack (D-315): the
+  `{:ok, %{merge_ref:, lineage_ref:}}` reply arrives only after the transaction
+  WAL commit is durable.
+
+  Returns `{:ok, %{merge_ref: integer(), lineage_ref: integer()}}` on success.
+  Returns `{:error, reason}` when any lineage link is nil (null-edge rejection
+  enforced by the schema's NOT NULL constraints) or on any SQLite error. When
+  an error occurs the entire transaction is rolled back — no orphan merge record.
+
+  `merge_attrs` fields: same as `record_merge_outcome/2`.
+  `lineage_attrs` fields:
+    - `:main_commit`        — `String.t()`; the merge commit SHA.
+    - `:unit_id`            — `String.t()`; the unit/PR identifier.
+    - `:gate_verdicts`      — `[map()]` with `:half`, `:verdict`, `:diff_hash`.
+    - `:gating_test_paths`  — `[String.t()]`; NOT NULL (null → `{:error, _}`).
+    - `:claims`             — `[String.t()]`; NOT NULL (null → `{:error, _}`).
+    - `:specs`              — `[String.t()]`; NOT NULL (null → `{:error, _}`).
+    - `:issues`             — `[String.t()]`; NOT NULL (null → `{:error, _}`).
+  """
+  @spec record_merge_with_lineage(GenServer.server(), merge_outcome_attrs(), lineage_attrs()) ::
+          {:ok, %{merge_ref: ref(), lineage_ref: ref()}} | {:error, term()}
+  def record_merge_with_lineage(server, merge_attrs, lineage_attrs) do
+    GenServer.call(server, {:record_merge_with_lineage, merge_attrs, lineage_attrs})
+  end
+
+  @doc """
+  Return the lineage record for `unit_id` (D-353 / NFR-AUDIT).
+
+  Returns `{:ok, %Tau.Factory.Lineage{}}` or `:none`.
+  """
+  @spec lineage_for(GenServer.server(), String.t()) ::
+          {:ok, Tau.Factory.Lineage.t()} | :none
+  def lineage_for(server, unit_id) do
+    GenServer.call(server, {:lineage_for, unit_id})
+  end
+
   @doc """
   Return the frozen scope for `unit_id` (HR-4, issue #584).
 
@@ -339,6 +389,20 @@ defmodule Tau.Factory.Ledger.Writer do
 
   def handle_call({:frozen_scope_for, unit_id}, _from, %{db: db} = state) do
     result = do_frozen_scope_for(db, unit_id)
+    {:reply, result, state}
+  end
+
+  def handle_call(
+        {:record_merge_with_lineage, merge_attrs, lineage_attrs},
+        _from,
+        %{db: db} = state
+      ) do
+    result = do_record_merge_with_lineage(db, merge_attrs, lineage_attrs)
+    {:reply, result, state}
+  end
+
+  def handle_call({:lineage_for, unit_id}, _from, %{db: db} = state) do
+    result = do_lineage_for(db, unit_id)
     {:reply, result, state}
   end
 
@@ -847,6 +911,226 @@ defmodule Tau.Factory.Ledger.Writer do
 
       _ ->
         %{files: MapSet.new(), gating_test_paths: []}
+    end
+  end
+
+  # D-353 (issue #668): write merge_outcomes + lineage in a single SQLite transaction.
+  # All lineage link columns are NOT NULL — a nil value returns {:error, :null_edge}
+  # before even opening the transaction, so the merge row is never written.
+  # WAL-before-ack (D-315): COMMIT flushes WAL to disk before returning; the
+  # GenServer.call reply is sent only after this function returns.
+  defp do_record_merge_with_lineage(db, merge_attrs, lineage_attrs) do
+    # Validate all required non-null lineage fields before opening a transaction.
+    with :ok <- validate_lineage_links(lineage_attrs),
+         {:ok, gate_verdicts_json} <- encode_json_field(lineage_attrs.gate_verdicts),
+         {:ok, paths_json} <- encode_json_field(lineage_attrs.gating_test_paths),
+         {:ok, claims_json} <- encode_json_field(lineage_attrs.claims),
+         {:ok, specs_json} <- encode_json_field(lineage_attrs.specs),
+         {:ok, issues_json} <- encode_json_field(lineage_attrs.issues) do
+      do_transact_merge_and_lineage(
+        db,
+        merge_attrs,
+        lineage_attrs,
+        gate_verdicts_json,
+        paths_json,
+        claims_json,
+        specs_json,
+        issues_json
+      )
+    end
+  end
+
+  # Validate that all required lineage link fields are non-nil.
+  defp validate_lineage_links(attrs) do
+    required = [:gating_test_paths, :claims, :specs, :issues]
+
+    null_fields =
+      Enum.filter(required, fn field -> Map.get(attrs, field) == nil end)
+
+    case null_fields do
+      [] -> :ok
+      [field | _] -> {:error, {:null_edge, field}}
+    end
+  end
+
+  # Encode a value to a JSON string; returns {:ok, json} or {:error, reason}.
+  defp encode_json_field(value) do
+    case Jason.encode(value) do
+      {:ok, json} -> {:ok, json}
+      {:error, reason} -> {:error, {:json_encode_failed, reason}}
+    end
+  end
+
+  # Execute the two-row transaction. On any error, ROLLBACK and return {:error, reason}.
+  # On success, COMMIT and return {:ok, %{merge_ref:, lineage_ref:}}.
+  defp do_transact_merge_and_lineage(
+         db,
+         merge_attrs,
+         lineage_attrs,
+         gate_verdicts_json,
+         paths_json,
+         claims_json,
+         specs_json,
+         issues_json
+       ) do
+    :ok = Exqlite.Sqlite3.execute(db, "BEGIN")
+
+    result =
+      with {:ok, merge_ref} <- insert_merge_row(db, merge_attrs),
+           {:ok, lineage_ref} <-
+             insert_lineage_row(
+               db,
+               lineage_attrs,
+               gate_verdicts_json,
+               paths_json,
+               claims_json,
+               specs_json,
+               issues_json
+             ) do
+        {:ok, %{merge_ref: merge_ref, lineage_ref: lineage_ref}}
+      end
+
+    case result do
+      {:ok, _} = ok ->
+        :ok = Exqlite.Sqlite3.execute(db, "COMMIT")
+        ok
+
+      {:error, _} = err ->
+        Exqlite.Sqlite3.execute(db, "ROLLBACK")
+        err
+    end
+  end
+
+  # Insert a single merge_outcomes row inside an open transaction.
+  defp insert_merge_row(db, %{
+         unit_id: unit_id,
+         outcome: outcome,
+         commit_sha: commit_sha,
+         reason: reason,
+         run: run
+       }) do
+    outcome_text = atom_to_outcome(outcome)
+    reason_text = if reason == nil, do: nil, else: inspect(reason)
+
+    sql = """
+    INSERT INTO merge_outcomes (unit_id, outcome, commit_sha, reason, run)
+    VALUES (?1, ?2, ?3, ?4, ?5)
+    """
+
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, String.trim(sql)),
+         :ok <- Exqlite.Sqlite3.bind(stmt, [unit_id, outcome_text, commit_sha, reason_text, run]),
+         step_result <- Exqlite.Sqlite3.step(db, stmt),
+         :ok <- Exqlite.Sqlite3.release(db, stmt) do
+      case step_result do
+        :done -> {:ok, fetch_last_rowid(db)}
+        {:error, reason_err} -> {:error, reason_err}
+      end
+    end
+  end
+
+  # Insert a single lineage row inside an open transaction.
+  defp insert_lineage_row(
+         db,
+         %{unit_id: unit_id, main_commit: main_commit},
+         gate_verdicts_json,
+         paths_json,
+         claims_json,
+         specs_json,
+         issues_json
+       ) do
+    sql = """
+    INSERT INTO lineage (unit_id, main_commit, gate_verdicts, gating_test_paths, claims, specs, issues)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+    """
+
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, String.trim(sql)),
+         :ok <-
+           Exqlite.Sqlite3.bind(stmt, [
+             unit_id,
+             main_commit,
+             gate_verdicts_json,
+             paths_json,
+             claims_json,
+             specs_json,
+             issues_json
+           ]),
+         step_result <- Exqlite.Sqlite3.step(db, stmt),
+         :ok <- Exqlite.Sqlite3.release(db, stmt) do
+      case step_result do
+        :done -> {:ok, fetch_last_rowid(db)}
+        {:error, reason_err} -> {:error, reason_err}
+      end
+    end
+  end
+
+  # Read the lineage row for unit_id and return a %Tau.Factory.Lineage{} struct.
+  # Returns {:ok, %Lineage{}} or :none.
+  defp do_lineage_for(db, unit_id) do
+    sql = """
+    SELECT main_commit, gate_verdicts, gating_test_paths, claims, specs, issues
+    FROM lineage
+    WHERE unit_id = ?1
+    ORDER BY id DESC
+    LIMIT 1
+    """
+
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, String.trim(sql)),
+         :ok <- Exqlite.Sqlite3.bind(stmt, [unit_id]),
+         {:ok, rows} <- Exqlite.Sqlite3.fetch_all(db, stmt),
+         :ok <- Exqlite.Sqlite3.release(db, stmt) do
+      case rows do
+        [[main_commit, verdicts_json, paths_json, claims_json, specs_json, issues_json]] ->
+          lineage = %Tau.Factory.Lineage{
+            main_commit: main_commit,
+            unit_id: unit_id,
+            gate_verdicts: decode_gate_verdicts(verdicts_json),
+            gating_test_paths: decode_json_list(paths_json),
+            claims: decode_json_list(claims_json),
+            specs: decode_json_list(specs_json),
+            issues: decode_json_list(issues_json)
+          }
+
+          {:ok, lineage}
+
+        [] ->
+          :none
+      end
+    end
+  end
+
+  # Decode a JSON array of gate verdict maps into a list with atom keys.
+  defp decode_gate_verdicts(json_text) do
+    case Jason.decode(json_text) do
+      {:ok, list} when is_list(list) ->
+        Enum.map(list, fn verdict ->
+          half =
+            case Map.get(verdict, "half") do
+              "critic" -> :critic
+              "reviewer" -> :reviewer
+              "mutation" -> :mutation
+              other -> String.to_existing_atom(other)
+            end
+
+          v =
+            case Map.get(verdict, "verdict") do
+              "pass" -> :pass
+              "fail" -> :fail
+              other -> String.to_existing_atom(other)
+            end
+
+          %{half: half, verdict: v, diff_hash: Map.get(verdict, "diff_hash")}
+        end)
+
+      _ ->
+        []
+    end
+  end
+
+  # Decode a JSON array of strings. Returns [] on error.
+  defp decode_json_list(json_text) do
+    case Jason.decode(json_text) do
+      {:ok, list} when is_list(list) -> list
+      _ -> []
     end
   end
 
