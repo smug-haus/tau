@@ -7,7 +7,8 @@ defmodule Tau.Factory.Unit do
       planned → oracle → implementing → gating → awaiting_merge → merged
       gating {:fail,_} → retry ladder → implementing | escalated
       worker_exit (semantic) → retry ladder → implementing | escalated (D-326)
-      awaiting_merge :rejected → gating (re-gate, INV-2)
+      awaiting_merge :rejected → gating (re-gate, INV-2) up to N_MERGE_REJECT times
+      awaiting_merge :rejected × N_MERGE_REJECT → escalated (D-340/LIV-1)
       any non-terminal + :state_timeout → escalated (C107)
       worker :DOWN (infra, no prior semantic exit) → escalated (B8/C105)
 
@@ -58,6 +59,9 @@ defmodule Tau.Factory.Unit do
   require Logger
 
   @default_state_timeout_ms 30_000
+  # D-340/LIV-1: maximum consecutive merge rejections before escalating
+  # E_MERGE_REJECT_EXCEEDED. Bounds the gating→awaiting_merge re-gate cycle.
+  @n_merge_reject 3
 
   # ---------------------------------------------------------------------------
   # Types
@@ -149,6 +153,21 @@ defmodule Tau.Factory.Unit do
       Registry.register(registry_name, unit_id, self())
     end
 
+    # D-318 counter-durability: restore retry counters from the Ledger when a
+    # snapshot exists for this unit_id (D-344 resume pattern). On fresh start
+    # (no prior snapshot), all counters default to 0.
+    {refine_count, pivot_count, stall_count} =
+      case ledger do
+        nil ->
+          {0, 0, 0}
+
+        _ ->
+          case LedgerReader.unit_counters_for(ledger, unit_id) do
+            {:ok, %{refine_count: rc, pivot_count: pc, stall_count: sc}} -> {rc, pc, sc}
+            :none -> {0, 0, 0}
+          end
+      end
+
     data = %{
       unit_id: unit_id,
       declared_scope: declared_scope,
@@ -169,18 +188,19 @@ defmodule Tau.Factory.Unit do
       worker_id: nil,
       # Monitor ref for the current worker.
       worker_mref: nil,
-      # Retry counters.
-      refine_count: 0,
-      pivot_count: 0,
+      # Retry counters (D-318 counter-durability: restored from Ledger on restart).
+      refine_count: refine_count,
+      pivot_count: pivot_count,
       # Total times oracle/implementing state was entered (non-terminal attempts).
       # Also used as an observability metric; see stall_count for the ladder counter.
       attempt_count: 0,
-      # D-378 bounded stall ladder counter. Starts at 0; incremented exclusively
-      # by advance_retry_ladder/2 (worker-outcome events). Distinct from attempt_count
-      # which includes initial spawns. Used as the position counter for Retry.next/3
-      # on the worker-outcome path so the budget of N_REFINE + N_PIVOT stall advances
-      # is not pre-consumed by the initial oracle/implementing spawns.
-      stall_count: 0,
+      # D-378 bounded stall ladder counter (D-318 counter-durability: restored from
+      # Ledger on restart). Incremented exclusively by advance_retry_ladder/2
+      # (worker-outcome events). Distinct from attempt_count which includes initial
+      # spawns. Used as the position counter for Retry.next/3 on the worker-outcome
+      # path so the budget of N_REFINE + N_PIVOT stall advances is not pre-consumed
+      # by the initial oracle/implementing spawns.
+      stall_count: stall_count,
       # Last gate findings (nil until a gate failure occurs).
       last_findings: nil,
       # Monotonic per-entry counter for idempotency-key uniqueness (D-318 / §4 B3).
@@ -191,7 +211,18 @@ defmodule Tau.Factory.Unit do
       # D-362: captured from {:work_ready, worker_id, branch, head_sha} (3-tuple seam).
       # Initialised to nil; stays nil when the legacy 2-tuple seam is used (D-363).
       head_sha: nil,
-      branch: nil
+      branch: nil,
+      # INV-WF-13: gating_test_paths captured from the 5-tuple work_ready form.
+      # Nil until the :test_author worker reports its path set; the oracle →
+      # implementing transition REQUIRES a non-empty list (Clause 2 guard).
+      gating_test_paths: nil,
+      # INV-SAFE-CP-5: ref of the in-flight gate Task (set on :gating entry,
+      # cleared when the {:gate_result, _} arrives). Nil when not in :gating state.
+      gate_task_ref: nil,
+      # D-340/LIV-1: counts consecutive merge rejections in the
+      # gating→awaiting_merge cycle. Reset to 0 on successful merge. Escalates
+      # E_MERGE_REJECT_EXCEEDED after N_MERGE_REJECT consecutive rejections.
+      merge_reject_count: 0
     }
 
     # Transition immediately to planned state, which triggers admission.
@@ -252,8 +283,54 @@ defmodule Tau.Factory.Unit do
     end
   end
 
-  # D-326: gate on work_ready keyed by the CURRENT worker_id (3-tuple seam).
-  # D-362: capture branch and head_sha into data on transition.
+  # INV-WF-13 Clause 1: 5-tuple work_ready WITH gating_test_paths — capture paths and advance.
+  # The conformant oracle-separation contract requires the :test_author worker to carry
+  # a non-empty gating_test_paths list. This clause matches the extended form and captures
+  # the path set into data.gating_test_paths before transitioning to :implementing.
+  def oracle(
+        :info,
+        {:work_ready, worker_id, branch, head_sha, paths},
+        %{worker_id: worker_id} = data
+      )
+      when not is_nil(worker_id) and is_list(paths) and paths != [] do
+    Process.demonitor(data.worker_mref, [:flush])
+
+    new_data = %{
+      data
+      | worker_pid: nil,
+        worker_id: nil,
+        worker_mref: nil,
+        branch: branch,
+        head_sha: head_sha,
+        gating_test_paths: paths
+    }
+
+    {:next_state, :implementing, new_data, [{:next_event, :internal, :on_enter}]}
+  end
+
+  # INV-WF-13 Clause 2 guard: 5-tuple work_ready with an empty or missing path set —
+  # REFUSE the transition. Log a warning; the Unit stays in :oracle.
+  def oracle(
+        :info,
+        {:work_ready, worker_id, _branch, _head_sha, paths},
+        %{worker_id: worker_id} = data
+      )
+      when not is_nil(worker_id) do
+    Logger.warning(
+      "[Unit #{data.unit_id}] oracle work_ready from worker #{worker_id} carries " <>
+        "empty or invalid gating_test_paths #{inspect(paths)} — " <>
+        "refusing oracle→implementing transition (INV-WF-13 Clause 2)"
+    )
+
+    {:keep_state, data}
+  end
+
+  # D-326 / D-362: 4-tuple work_ready (no gating_test_paths) from the current oracle
+  # worker — advance to :implementing without capturing a path set. INV-WF-13 Clause 1
+  # (5-tuple with non-empty paths) takes priority above; this clause handles legacy oracle
+  # workers (e.g. test helpers and any caller not yet migrated to the 5-tuple seam) that
+  # send the 4-tuple form. The arch contract (control-plane.md §3.2.1) specifies
+  # work_ready(w, branch, head_sha) → :implementing; the 5-tuple extension is additive.
   def oracle(:info, {:work_ready, worker_id, branch, head_sha}, %{worker_id: worker_id} = data)
       when not is_nil(worker_id) do
     Process.demonitor(data.worker_mref, [:flush])
@@ -275,6 +352,11 @@ defmodule Tau.Factory.Unit do
     {:keep_state, data}
   end
 
+  # Discard 5-tuple work_ready from a superseded worker_id.
+  def oracle(:info, {:work_ready, _other_id, _branch, _head_sha, _paths}, data) do
+    {:keep_state, data}
+  end
+
   def oracle(:info, {:worker_done, worker_pid}, %{worker_pid: worker_pid} = data)
       when not is_nil(worker_pid) do
     Process.demonitor(data.worker_mref, [:flush])
@@ -291,6 +373,15 @@ defmodule Tau.Factory.Unit do
   # A progressing worker never trips the fixed cap. Stale-worker heartbeats → discard.
   def oracle(:info, {:worker_heartbeat, worker_id}, %{worker_id: worker_id} = data)
       when not is_nil(worker_id) do
+    timeout_ms = data.state_timeout_ms
+    {:keep_state, data, [{:state_timeout, timeout_ms, :worker_stalled}]}
+  end
+
+  # D-377 (2-tuple seam): worker_fun returned {:ok, pid} so worker_id is nil.
+  # {:worker_heartbeat, nil} IS the current-worker heartbeat — re-arm :state_timeout.
+  # Guard: worker_pid must be set (a live 2-tuple worker is active).
+  def oracle(:info, {:worker_heartbeat, nil}, %{worker_id: nil, worker_pid: worker_pid} = data)
+      when not is_nil(worker_pid) do
     timeout_ms = data.state_timeout_ms
     {:keep_state, data, [{:state_timeout, timeout_ms, :worker_stalled}]}
   end
@@ -475,6 +566,19 @@ defmodule Tau.Factory.Unit do
     {:keep_state, data, [{:state_timeout, timeout_ms, :worker_stalled}]}
   end
 
+  # D-377 (2-tuple seam): worker_fun returned {:ok, pid} so worker_id is nil.
+  # {:worker_heartbeat, nil} IS the current-worker heartbeat — re-arm :state_timeout.
+  # Guard: worker_pid must be set (a live 2-tuple worker is active).
+  def implementing(
+        :info,
+        {:worker_heartbeat, nil},
+        %{worker_id: nil, worker_pid: worker_pid} = data
+      )
+      when not is_nil(worker_pid) do
+    timeout_ms = data.state_timeout_ms
+    {:keep_state, data, [{:state_timeout, timeout_ms, :worker_stalled}]}
+  end
+
   # Stale-worker heartbeat — discard.
   def implementing(:info, {:worker_heartbeat, _stale_id}, data) do
     {:keep_state, data}
@@ -533,8 +637,14 @@ defmodule Tau.Factory.Unit do
 
   # ---------------------------------------------------------------------------
   # State: :gating
-  # Calls gate_fun(coordinate) synchronously on entry via an internal event.
+  # Spawns gate_fun(coordinate) in a Task on entry (INV-SAFE-CP-5 — non-blocking).
   # ALWAYS calls gate_fun — for refine attempts AND the pivot attempt alike.
+  #
+  # INV-SAFE-CP-5: the :on_enter callback MUST NOT block. gate_fun is spawned in
+  # a Task.async/1 so the gen_statem callback returns immediately and the FSM
+  # remains responsive to state_timeout, worker_exit, and worker_stalled messages
+  # while the gate runs. The result arrives as {:gate_result, :pass} or
+  # {:gate_result, {:fail, findings}} via an info message from the Task.
   #
   # D-361: coordinate = data.head_sha || data.hash (symmetric with awaiting_merge).
   # When head_sha was captured from work_ready (3-tuple seam), it is used as the
@@ -565,15 +675,61 @@ defmodule Tau.Factory.Unit do
     # Symmetric with the merge coordinate in awaiting_merge.
     coordinate = data.head_sha || data.hash
 
-    case data.gate_fun.(coordinate) do
-      :pass ->
-        {:next_state, :awaiting_merge, data, [{:next_event, :internal, :on_enter}]}
+    # INV-SAFE-CP-5: spawn gate_fun in a Task so the callback returns immediately.
+    # Task.async/1 links and monitors the task; the result arrives as
+    # {task.ref, result} in the gen_statem's mailbox (info message). We wrap it in
+    # {:gate_result, result} via the Task reply — handled below.
+    unit_pid = self()
+    gate_fun = data.gate_fun
 
-      {:fail, findings} ->
-        new_data = %{data | last_findings: findings}
-        # D-318: gate failure — advance the refine→pivot→exhausted ladder.
-        advance_gate_ladder(new_data)
-    end
+    task =
+      Task.async(fn ->
+        result = gate_fun.(coordinate)
+        send(unit_pid, {:gate_result, result})
+        result
+      end)
+
+    # INV-LIVE-CP-1: arm a per-state timeout so a permanently-wedged gate Task
+    # (crash, hang, or deadlock) cannot strand the Unit forever in :gating.
+    # The timeout fires if no {:gate_result, _} arrives within state_timeout_ms;
+    # the handler below escalates the Unit with :E_GATE_STALLED.
+    timeout_ms = data.state_timeout_ms
+    {:keep_state, %{data | gate_task_ref: task.ref}, [{:state_timeout, timeout_ms, :gate_stalled}]}
+  end
+
+  # INV-LIVE-CP-1: gate Task blocked/wedged — escalate. Symmetric with
+  # awaiting_merge(:state_timeout, :merge_stalled, data).
+  def gating(:state_timeout, :gate_stalled, data) do
+    Logger.warning("[Unit \#{data.unit_id}] gating :state_timeout — gate task stalled")
+    escalate(data, :E_GATE_STALLED)
+  end
+
+  # INV-SAFE-CP-5: handle the gate result delivered asynchronously from the Task.
+  # The gate_fun sends {:gate_result, result} to this process; we consume it here.
+  def gating(:info, {:gate_result, :pass}, data) do
+    new_data = %{data | gate_task_ref: nil}
+    {:next_state, :awaiting_merge, new_data, [{:next_event, :internal, :on_enter}]}
+  end
+
+  def gating(:info, {:gate_result, {:fail, findings}}, data) do
+    new_data = %{data | last_findings: findings, gate_task_ref: nil}
+    # D-318: gate failure — advance the refine→pivot→exhausted ladder.
+    advance_gate_ladder(new_data)
+  end
+
+  # INV-SAFE-CP-5: discard the raw Task reply tuple {ref, result} that Task.async
+  # also delivers to the caller's mailbox (in addition to the {:gate_result, _} we
+  # send explicitly). Matching on gate_task_ref ensures we only swallow our own
+  # Task's reply, not unrelated task results.
+  def gating(:info, {ref, _result}, %{gate_task_ref: ref} = data) when not is_nil(ref) do
+    {:keep_state, data}
+  end
+
+  # INV-SAFE-CP-5: discard the :DOWN from the completed Task (Task.async monitors
+  # the spawned task; a normal exit sends :DOWN with reason :normal after the reply).
+  def gating(:info, {:DOWN, ref, :process, _pid, _reason}, %{gate_task_ref: ref} = data)
+      when not is_nil(ref) do
+    {:keep_state, data}
   end
 
   def gating(event_type, event, data) do
@@ -629,14 +785,26 @@ defmodule Tau.Factory.Unit do
   def awaiting_merge(:info, {:merge_result, :merged}, data) do
     # D-356: unsubscribe on exit from awaiting_merge (terminal :merged path).
     Phoenix.PubSub.unsubscribe(data.pubsub, "factory:pr:#{data.unit_id}")
-    terminal(data, :merged, nil, nil)
+    # D-340/LIV-1: reset merge_reject_count on successful merge.
+    terminal(%{data | merge_reject_count: 0}, :merged, nil, nil)
   end
 
   def awaiting_merge(:info, {:merge_result, :rejected}, data) do
-    # D-356: unsubscribe on exit from awaiting_merge (re-gate path, INV-2).
+    # D-356: unsubscribe on exit from awaiting_merge (re-gate path or escalation).
     Phoenix.PubSub.unsubscribe(data.pubsub, "factory:pr:#{data.unit_id}")
-    # INV-2: merge reject → re-gate.
-    {:next_state, :gating, data, [{:next_event, :internal, :on_enter}]}
+    # D-340/LIV-1: bound the gating→awaiting_merge re-gate cycle. Increment
+    # merge_reject_count; escalate E_MERGE_REJECT_EXCEEDED once the ceiling is
+    # reached. Without this counter the cycle repeats without bound when
+    # merge_fun always returns :rejected before any :state_timeout fires.
+    new_count = data.merge_reject_count + 1
+
+    if new_count > @n_merge_reject do
+      escalate(%{data | merge_reject_count: new_count}, :E_MERGE_REJECT_EXCEEDED)
+    else
+      # INV-2: merge reject → re-gate (bounded by N_MERGE_REJECT).
+      {:next_state, :gating, %{data | merge_reject_count: new_count},
+       [{:next_event, :internal, :on_enter}]}
+    end
   end
 
   def awaiting_merge(:state_timeout, :merge_stalled, data) do
@@ -817,7 +985,10 @@ defmodule Tau.Factory.Unit do
     LedgerWriter.snapshot_unit(data.ledger, %{
       unit_id: data.unit_id,
       state: state,
-      idempotency_key: idempotency_key
+      idempotency_key: idempotency_key,
+      refine_count: data.refine_count,
+      pivot_count: data.pivot_count,
+      stall_count: data.stall_count
     })
 
     %{data | entry_seq: seq + 1}
