@@ -66,6 +66,8 @@ defmodule Tau.Factory.EgressChainTest do
 
   use ExUnit.Case, async: true
 
+  alias Tau.CircuitBreaker.Store
+
   @moduletag :inv_egress_chokepoint
   @moduletag :d_351
   @moduletag :capture_log
@@ -147,7 +149,7 @@ defmodule Tau.Factory.EgressChainTest do
     end
 
     # Sanity: confirm the breaker is now :open via CircuitBreaker.Store.
-    :open = Tau.CircuitBreaker.Store.state_for(provider)
+    :open = Store.state_for(provider)
     :ok
   end
 

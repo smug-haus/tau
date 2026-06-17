@@ -63,6 +63,8 @@ defmodule Tau.Factory.EgressOrderTest do
 
   use ExUnit.Case, async: true
 
+  alias Tau.CircuitBreaker.Store
+
   @moduletag :inv_egress_order
   @moduletag :d_351
   @moduletag :capture_log
@@ -142,7 +144,7 @@ defmodule Tau.Factory.EgressOrderTest do
       Tau.CircuitBreaker.call(provider, [], fn -> {:error, :stub_failure} end)
     end
 
-    :open = Tau.CircuitBreaker.Store.state_for(provider)
+    :open = Store.state_for(provider)
     :ok
   end
 
