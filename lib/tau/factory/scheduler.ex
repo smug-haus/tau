@@ -39,6 +39,7 @@ defmodule Tau.Factory.Scheduler do
   alias Tau.Factory.Budget.Owner, as: BudgetOwner
   alias Tau.Factory.ConflictCheck
   alias Tau.Factory.Policy
+  alias Tau.Factory.Policy.Owner, as: PolicyOwner
 
   # ---------------------------------------------------------------------------
   # Types
@@ -55,7 +56,8 @@ defmodule Tau.Factory.Scheduler do
           f: %{unit_id() => declared_scope()},
           pins: %{unit_id() => Policy.t()},
           w_cap: pos_integer(),
-          budget: {atom(), [atom()]} | nil
+          budget: {atom(), [atom()]} | nil,
+          policy_owner: atom() | nil
         }
 
   # ---------------------------------------------------------------------------
@@ -73,6 +75,8 @@ defmodule Tau.Factory.Scheduler do
     - `:budget` — `{owner_name :: atom(), dimensions :: [atom()]}`;
                   if present, `admit/3` gates on `Budget.Owner.budget_precheck/2`
                   for each listed dimension.
+    - `:policy_owner` — `atom()`; if present, `admit/4` calls `Policy.Owner.pin/3`
+                         to populate the named ETS snapshot (INV-ST-7 Clause 3).
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -147,12 +151,14 @@ defmodule Tau.Factory.Scheduler do
   def init(opts) do
     w_cap = Keyword.fetch!(opts, :w_cap)
     budget = Keyword.get(opts, :budget, nil)
+    policy_owner = Keyword.get(opts, :policy_owner, nil)
 
     state = %{
       f: %{},
       pins: %{},
       w_cap: w_cap,
-      budget: budget
+      budget: budget,
+      policy_owner: policy_owner
     }
 
     {:ok, state}
@@ -174,6 +180,12 @@ defmodule Tau.Factory.Scheduler do
           else
             Map.put(state.pins, unit_id, policy)
           end
+
+        # INV-ST-7/C3: populate the Policy.Owner ETS snapshot so downstream
+        # callers can read policy fields directly (no Scheduler mailbox hop).
+        if not is_nil(policy) and not is_nil(state.policy_owner) do
+          PolicyOwner.pin(state.policy_owner, unit_id, policy)
+        end
 
         {:reply, :admit, %{state | f: new_f, pins: new_pins}}
 
