@@ -29,6 +29,9 @@ defmodule Tau.Factory.D335MutationRequiredHalfTest do
 
   use ExUnit.Case, async: true
 
+  alias Tau.Factory.Ledger.Writer
+  alias Tau.Factory.MergeAuthority
+
   @moduletag :capture_log
 
   @tag :d_335
@@ -48,7 +51,7 @@ defmodule Tau.Factory.D335MutationRequiredHalfTest do
 
     writer =
       start_supervised!(
-        {Tau.Factory.Ledger.Writer, db_path: db_path, name: writer_name},
+        {Writer, db_path: db_path, name: writer_name},
         id: writer_name
       )
 
@@ -57,7 +60,7 @@ defmodule Tau.Factory.D335MutationRequiredHalfTest do
     # the two default required halves but NOT the gate-floor-required :mutation half.
     for half <- [:critic, :reviewer] do
       {:ok, _} =
-        Tau.Factory.Ledger.Writer.append_verdict(writer, %{
+        Writer.append_verdict(writer, %{
           hash: unit.hash,
           run: unit.run,
           half: half,
@@ -167,7 +170,7 @@ defmodule Tau.Factory.D335MutationRequiredHalfTest do
     _ma_pid =
       start_supervised!(
         {
-          Tau.Factory.MergeAuthority,
+          MergeAuthority,
           # Inject an instant build_fun — we test verdict gating, not build mechanics.
           # Inject the observing CAS that performs the real verdict check.
           name: ma_name,
@@ -181,7 +184,7 @@ defmodule Tau.Factory.D335MutationRequiredHalfTest do
       )
 
     # Submit the unit for merging. Non-blocking; returns :queued immediately.
-    assert :queued = Tau.Factory.MergeAuthority.request_merge(ma_name, unit)
+    assert :queued = MergeAuthority.request_merge(ma_name, unit)
 
     # Allow MergeAuthority time to complete the full cycle (instant build_fun).
     :timer.sleep(300)
