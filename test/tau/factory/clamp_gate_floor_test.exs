@@ -58,6 +58,8 @@ defmodule Tau.Factory.ClampGateFloorTest do
 
   use ExUnit.Case, async: true
 
+  alias Tau.Factory.Policy
+
   @moduletag :inv_clamp_gate_floor
 
   @owner Tau.Factory.Policy.Owner
@@ -271,7 +273,8 @@ defmodule Tau.Factory.ClampGateFloorTest do
       unit_id = "test-unit-superset-#{System.unique_integer([:positive])}"
 
       # A superset manifest — has all floor members plus additional ones
-      policy_superset = Map.put(valid_policy(), :gate_manifest, [:mutation, :critic, :reviewer, :extra_check])
+      policy_superset =
+        Map.put(valid_policy(), :gate_manifest, [:mutation, :critic, :reviewer, :extra_check])
 
       result = @owner.pin(owner, unit_id, policy_superset)
 
@@ -297,7 +300,7 @@ defmodule Tau.Factory.ClampGateFloorTest do
         iteration: 10
       }
 
-      result = Tau.Factory.Policy.clamp(policy_no_manifest)
+      result = Policy.clamp(policy_no_manifest)
 
       assert match?({:error, {:gate_floor_violation, _}}, result),
              "INV-CLAMP-GATE-FLOOR: Policy.clamp/1 MUST return " <>
@@ -317,7 +320,7 @@ defmodule Tau.Factory.ClampGateFloorTest do
         iteration: 10
       }
 
-      result = Tau.Factory.Policy.clamp(policy_empty_manifest)
+      result = Policy.clamp(policy_empty_manifest)
 
       assert match?({:error, {:gate_floor_violation, _}}, result),
              "INV-CLAMP-GATE-FLOOR: Policy.clamp/1 MUST return " <>
