@@ -124,40 +124,49 @@ defmodule Tau.Factory.Worker do
     agent_mode = Keyword.get(opts, :agent_mode)
     creds_check_fun = Keyword.get(opts, :creds_check_fun, &default_creds_check/0)
 
-    # Unique private worktree path under the parent repo's parent dir.
-    ws = Path.join([Path.dirname(repo_dir), ".worker-wt-#{worker_id}"])
+    # D-313 fail-closed: the WorkspaceJanitor is mandatory infrastructure for
+    # capture-before-destroy (INV-14). A Worker without a janitor has no
+    # conformant monitor path and MUST NOT start. Return {:stop, :no_janitor}
+    # so DynamicSupervisor propagates {:error, :no_janitor} to the caller.
+    # Mirrors the D-374 precedent (:metered_path_refused).
+    if is_nil(janitor) do
+      {:stop, :no_janitor}
+    else
+      # Unique private worktree path under the parent repo's parent dir.
+      ws = Path.join([Path.dirname(repo_dir), ".worker-wt-#{worker_id}"])
 
-    # Step 1: git worktree add
-    case System.cmd("git", ["worktree", "add", ws, base_ref],
-           cd: repo_dir,
-           stderr_to_stdout: true
-         ) do
-      {_out, 0} ->
-        init_ctx = %{
-          worker_id: worker_id,
-          role: role,
-          brief: brief,
-          base_ref: base_ref,
-          repo_dir: repo_dir,
-          agent_bin: agent_bin,
-          registry: registry,
-          toolchain_key: toolchain_key,
-          report_to: report_to,
-          heartbeat_interval: heartbeat_interval,
-          expected_head_override: expected_head_override,
-          janitor: janitor,
-          extra_env: extra_env,
-          agent_mode: agent_mode,
-          creds_check_fun: creds_check_fun,
-          ws: ws
-        }
+      # Step 1: git worktree add
+      case System.cmd("git", ["worktree", "add", ws, base_ref],
+             cd: repo_dir,
+             stderr_to_stdout: true
+           ) do
+        {_out, 0} ->
+          init_ctx = %{
+            worker_id: worker_id,
+            role: role,
+            brief: brief,
+            base_ref: base_ref,
+            repo_dir: repo_dir,
+            agent_bin: agent_bin,
+            registry: registry,
+            toolchain_key: toolchain_key,
+            report_to: report_to,
+            heartbeat_interval: heartbeat_interval,
+            expected_head_override: expected_head_override,
+            janitor: janitor,
+            extra_env: extra_env,
+            agent_mode: agent_mode,
+            creds_check_fun: creds_check_fun,
+            ws: ws
+          }
 
-        init_after_worktree(init_ctx)
+          init_after_worktree(init_ctx)
 
-      {_out, _nonzero} ->
-        # git worktree add failed — base_ref unresolvable or other git error.
-        # Surface as position_unverified (D-311).
-        {:stop, {:position_unverified, ws, base_ref}}
+        {_out, _nonzero} ->
+          # git worktree add failed — base_ref unresolvable or other git error.
+          # Surface as position_unverified (D-311).
+          {:stop, {:position_unverified, ws, base_ref}}
+      end
     end
   end
 
