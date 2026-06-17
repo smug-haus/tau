@@ -545,7 +545,11 @@ defmodule Tau.Factory.MergeAuthority do
   defp start_build(%{queue: []} = data), do: {:idle, data}
 
   defp start_build(%{queue: [unit | rest]} = data) do
-    train = [unit]
+    # [C213-B4] / HR-5: assemble a batch (B ≥ 1; when ≥ 2 units are already
+    # waiting at transition time, consume the whole queue so B ≥ 2).
+    # The serial regime (B = 1) is stable only when the queue is empty at the
+    # moment of assembly; if ≥ 2 units wait, taking them all avoids ρ_g → 1.
+    train = [unit | rest]
     base = fetch_main_oid(data.repo_dir)
 
     build_fun = data.build_fun
@@ -557,7 +561,7 @@ defmodule Tau.Factory.MergeAuthority do
 
     next_data = %{
       data
-      | queue: rest,
+      | queue: [],
         train: train,
         task_ref: task.ref,
         task_pid: task.pid
