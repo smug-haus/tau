@@ -40,16 +40,6 @@ defmodule Tau.Factory.ActionClassifierTest do
   alias Tau.Factory.ActionClassifier.Action
   alias Tau.Factory.Escalation
 
-  # The five destructive kinds enumerated in the @destructive denylist
-  # (SPEC-FACTORY-GOV §4 B7, docs/arch/04-software-architecture/governance.md §4).
-  @destructive_kinds [
-    :force_push,
-    :history_rewrite,
-    :release,
-    :external_publish,
-    :data_migration
-  ]
-
   # ---------------------------------------------------------------------------
   # B7 — every @destructive kind is denied (D-319 / INV-20)
   # ---------------------------------------------------------------------------

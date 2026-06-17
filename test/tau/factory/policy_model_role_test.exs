@@ -59,6 +59,18 @@ defmodule Tau.Factory.PolicyModelRoleTest do
   # Minimal valid policy for testing.
   # Every field uses the smallest admissible positive integer for numeric
   # dimensions; model_per_role uses two representative roles.
+  #
+  # IMPORTANT: @valid_policy is NOT stored as a module attribute because Elixir
+  # cannot escape anonymous functions into module attributes — attempting to do
+  # so causes a compile error. The fixture is constructed in a private helper
+  # `valid_policy/0` and accessed via the ExUnit test context (setup/0).
+  #
+  # The `conflict_predicate` field uses `nil` as a safe, compile-time-escapable
+  # sentinel value. The real Policy struct is expected to accept nil to mean
+  # "no conflict check". If the implementer requires a callable, they must
+  # expose a remote default (e.g. &Policy.no_conflict/2) — a named remote
+  # function reference CAN be stored in a module attribute, unlike an anonymous
+  # function.
   # ---------------------------------------------------------------------------
 
   @model_per_role %{
@@ -66,16 +78,22 @@ defmodule Tau.Factory.PolicyModelRoleTest do
     critic: "claude-opus-4-5"
   }
 
-  @valid_policy %Policy{
-    version: 1,
-    model_per_role: @model_per_role,
-    retry_bound_n: 3,
-    budget: %{token: 100_000, cost: 10, wall_time: 3_600, iteration: 5},
-    priority_order: [],
-    conflict_predicate: &(&1 == &1 and &2 == &2),
-    gate_manifest: [:mutation, :critic, :reviewer],
-    escalation_thresholds: %{upheld_challenges: 2}
-  }
+  defp valid_policy do
+    %Policy{
+      version: 1,
+      model_per_role: @model_per_role,
+      retry_bound_n: 3,
+      budget: %{token: 100_000, cost: 10, wall_time: 3_600, iteration: 5},
+      priority_order: [],
+      conflict_predicate: nil,
+      gate_manifest: [:mutation, :critic, :reviewer],
+      escalation_thresholds: %{upheld_challenges: 2}
+    }
+  end
+
+  setup do
+    %{valid_policy: valid_policy(), model_per_role: @model_per_role}
+  end
 
   # ---------------------------------------------------------------------------
   # INV-MODEL-POLICY assertion 1 — struct field presence
@@ -83,14 +101,12 @@ defmodule Tau.Factory.PolicyModelRoleTest do
 
   describe "INV-MODEL-POLICY struct field" do
     @tag :inv_model_policy
-    test "INV-MODEL-POLICY: %Policy{} struct has a :model_per_role field" do
+    test "INV-MODEL-POLICY: %Policy{} struct has a :model_per_role field", %{valid_policy: policy} do
       # The invariant cannot hold if there is no model_per_role field in the
       # Policy struct — the engine cannot resolve the policy-driven model for a
       # role if the field does not exist.
       #
       # FAIL BEFORE: Tau.Factory.Policy does not exist → compile error.
-
-      policy = @valid_policy
 
       assert Map.has_key?(policy, :model_per_role),
              "INV-MODEL-POLICY: %Policy{} must carry a :model_per_role field " <>
@@ -117,7 +133,8 @@ defmodule Tau.Factory.PolicyModelRoleTest do
 
   describe "INV-MODEL-POLICY clamp/1 preserves model_per_role" do
     @tag :inv_model_policy
-    test "INV-MODEL-POLICY: clamp/1 returns {:ok, policy} with model_per_role intact on a valid policy" do
+    test "INV-MODEL-POLICY: clamp/1 returns {:ok, policy} with model_per_role intact on a valid policy",
+         %{valid_policy: valid_policy, model_per_role: model_per_role} do
       # clamp/1 is the engine-clamp (HR-8): it rejects or tightens unsafe
       # policy values, but MUST NOT override model_per_role with a hardcoded
       # model string.  If clamp/1 substituted a hardcoded model it would
@@ -125,15 +142,15 @@ defmodule Tau.Factory.PolicyModelRoleTest do
       #
       # FAIL BEFORE: Tau.Factory.Policy.clamp/1 does not exist → UndefinedFunctionError.
 
-      assert {:ok, clamped} = Policy.clamp(@valid_policy),
+      assert {:ok, clamped} = Policy.clamp(valid_policy),
              "INV-MODEL-POLICY: Policy.clamp/1 must return {:ok, policy} for a " <>
                "valid policy; got error instead"
 
-      assert clamped.model_per_role == @model_per_role,
+      assert clamped.model_per_role == model_per_role,
              "INV-MODEL-POLICY: clamp/1 must NOT overwrite model_per_role with a " <>
                "hardcoded value.  The caller-supplied map must survive the clamp " <>
                "unchanged (FR-7.4). " <>
-               "expected=#{inspect(@model_per_role)}, " <>
+               "expected=#{inspect(model_per_role)}, " <>
                "got=#{inspect(clamped.model_per_role)}"
     end
   end
@@ -144,7 +161,8 @@ defmodule Tau.Factory.PolicyModelRoleTest do
 
   describe "INV-MODEL-POLICY pin/resolve round-trip at admission" do
     @tag :inv_model_policy
-    test "INV-MODEL-POLICY: Policy.Owner pin/2 then resolve/2 for :model_per_role returns the policy-driven map, not a hardcoded constant" do
+    test "INV-MODEL-POLICY: Policy.Owner pin/2 then resolve/2 for :model_per_role returns the policy-driven map, not a hardcoded constant",
+         %{valid_policy: valid_policy, model_per_role: model_per_role} do
       # This test exercises the full B6 boundary (SPEC-FACTORY-GOV §4):
       #   Policy.Owner.pin(unit_id, clamped_policy)  — called at admission
       #   Policy.Owner.resolve(unit_id, :model_per_role)  — called by engine/cost
@@ -162,17 +180,17 @@ defmodule Tau.Factory.PolicyModelRoleTest do
 
       {:ok, _owner} = PolicyOwner.start_link(name: owner_name)
 
-      {:ok, clamped} = Policy.clamp(@valid_policy)
+      {:ok, clamped} = Policy.clamp(valid_policy)
 
       :ok = PolicyOwner.pin(owner_name, unit_id, clamped)
 
       resolved = PolicyOwner.resolve(owner_name, unit_id, :model_per_role)
 
-      assert resolved == @model_per_role,
+      assert resolved == model_per_role,
              "INV-MODEL-POLICY: Policy.Owner.resolve/3 for :model_per_role after " <>
                "pin/3 must return the policy-driven map; a hardcoded constant " <>
                "would make the engine the model source and falsify INV-MODEL-POLICY. " <>
-               "expected=#{inspect(@model_per_role)}, " <>
+               "expected=#{inspect(model_per_role)}, " <>
                "got=#{inspect(resolved)}"
 
       # Extra: verify that a *different* policy value for a second unit produces
