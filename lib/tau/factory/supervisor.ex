@@ -31,8 +31,13 @@ defmodule Tau.Factory.Supervisor do
     - `:milestone` — the assigned milestone string (→ IssueSelector).
     - `:gh_fun`    — `(String.t() -> {:ok, [issue_map()]})`; stubbable issue
                      source (NO network in tests).
-    - `:select_fun` — `&IssueSelector.select/1`; arity-1 opts-taking seam.
-    - `:drive_fun`  — `&UnitDriver.drive/2`; arity-2 seam.
+    - `:select_fun`     — `&IssueSelector.select/1`; arity-1 opts-taking seam.
+    - `:drive_fun`      — `&UnitDriver.drive/2`; arity-2 seam.
+    - `:budget_totals`  — `%{atom() => non_neg_integer()}`; per-dimension budget
+                          ceilings threaded to `Budget.Owner` on the enabled path.
+                          Default: `%{}` (no configured ceiling — identical to
+                          prior behaviour). Required to exercise NFR-BUDGET-PRECISION
+                          through the production entry point (D-320).
 
   See `docs/spec/SPEC-FACTORY-CORE.md` §4 B11, D-357; and
   `docs/arch/04-software-architecture/supervision-tree.md` §3.
@@ -67,8 +72,12 @@ defmodule Tau.Factory.Supervisor do
                      MergeAuthority and WorkerSupervisor).
     - `:milestone` — the assigned milestone (full subtree only).
     - `:gh_fun`    — issue-source adapter (full subtree only; stubbable).
-    - `:select_fun` — `&IssueSelector.select/1` (full subtree only).
-    - `:drive_fun`  — `&UnitDriver.drive/2` (full subtree only).
+    - `:select_fun`    — `&IssueSelector.select/1` (full subtree only).
+    - `:drive_fun`     — `&UnitDriver.drive/2` (full subtree only).
+    - `:budget_totals` — `%{atom() => non_neg_integer()}`; per-dimension budget
+                         ceilings (full subtree only). Default `%{}`. Threads to
+                         `Budget.Owner` so a real ceiling can be configured through
+                         the production entry point (NFR-BUDGET-PRECISION, D-320).
   """
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts \\ []) do
@@ -174,6 +183,10 @@ defmodule Tau.Factory.Supervisor do
     # threaded via supervisor_opts → deps so UnitDriver passes them to WorkerSupervisor.
     agent_mode = Keyword.get(opts, :agent_mode)
     creds_check_fun = Keyword.get(opts, :creds_check_fun)
+    # NFR-BUDGET-PRECISION (D-320): thread the caller-supplied budget ceiling to
+    # BudgetOwner so a real ceiling can be configured through the production entry
+    # point. Defaults to %{} to preserve existing no-ceiling behaviour.
+    budget_totals = Keyword.get(opts, :budget_totals, %{})
 
     # Derive per-supervisor child names for isolation (tests / multiple instances).
     writer_name = derive_name(sup_name, __MODULE__, LedgerWriter)
@@ -260,7 +273,9 @@ defmodule Tau.Factory.Supervisor do
       # 1. Ledger.Writer — durable-decision writer; root of all dependence.
       {LedgerWriter, db_path: db_path, name: writer_name},
       # 2. Budget.Owner — ETS snapshot of per-dimension budget limits.
-      {BudgetOwner, ledger: writer_name, totals: %{}, name: budget_owner_name},
+      # NFR-BUDGET-PRECISION (D-320): budget_totals threaded from supervisor opts
+      # so callers can configure a real ceiling through the production entry point.
+      {BudgetOwner, ledger: writer_name, totals: budget_totals, name: budget_owner_name},
       # 3. Scheduler — admission authority (D-320: wired to Budget.Owner so
       #    budget ceiling is enforced on the enabled production path).
       {Scheduler, name: scheduler_name, w_cap: 5, budget: {budget_owner_name, [:tokens]}},
