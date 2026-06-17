@@ -211,7 +211,10 @@ defmodule Tau.Factory.Unit do
       # INV-WF-13: gating_test_paths captured from the 5-tuple work_ready form.
       # Nil until the :test_author worker reports its path set; the oracle →
       # implementing transition REQUIRES a non-empty list (Clause 2 guard).
-      gating_test_paths: nil
+      gating_test_paths: nil,
+      # INV-SAFE-CP-5: ref of the in-flight gate Task (set on :gating entry,
+      # cleared when the {:gate_result, _} arrives). Nil when not in :gating state.
+      gate_task_ref: nil
     }
 
     # Transition immediately to planned state, which triggers admission.
@@ -597,8 +600,14 @@ defmodule Tau.Factory.Unit do
 
   # ---------------------------------------------------------------------------
   # State: :gating
-  # Calls gate_fun(coordinate) synchronously on entry via an internal event.
+  # Spawns gate_fun(coordinate) in a Task on entry (INV-SAFE-CP-5 — non-blocking).
   # ALWAYS calls gate_fun — for refine attempts AND the pivot attempt alike.
+  #
+  # INV-SAFE-CP-5: the :on_enter callback MUST NOT block. gate_fun is spawned in
+  # a Task.async/1 so the gen_statem callback returns immediately and the FSM
+  # remains responsive to state_timeout, worker_exit, and worker_stalled messages
+  # while the gate runs. The result arrives as {:gate_result, :pass} or
+  # {:gate_result, {:fail, findings}} via an info message from the Task.
   #
   # D-361: coordinate = data.head_sha || data.hash (symmetric with awaiting_merge).
   # When head_sha was captured from work_ready (3-tuple seam), it is used as the
@@ -629,15 +638,49 @@ defmodule Tau.Factory.Unit do
     # Symmetric with the merge coordinate in awaiting_merge.
     coordinate = data.head_sha || data.hash
 
-    case data.gate_fun.(coordinate) do
-      :pass ->
-        {:next_state, :awaiting_merge, data, [{:next_event, :internal, :on_enter}]}
+    # INV-SAFE-CP-5: spawn gate_fun in a Task so the callback returns immediately.
+    # Task.async/1 links and monitors the task; the result arrives as
+    # {task.ref, result} in the gen_statem's mailbox (info message). We wrap it in
+    # {:gate_result, result} via the Task reply — handled below.
+    unit_pid = self()
+    gate_fun = data.gate_fun
 
-      {:fail, findings} ->
-        new_data = %{data | last_findings: findings}
-        # D-318: gate failure — advance the refine→pivot→exhausted ladder.
-        advance_gate_ladder(new_data)
-    end
+    task =
+      Task.async(fn ->
+        result = gate_fun.(coordinate)
+        send(unit_pid, {:gate_result, result})
+        result
+      end)
+
+    {:keep_state, %{data | gate_task_ref: task.ref}}
+  end
+
+  # INV-SAFE-CP-5: handle the gate result delivered asynchronously from the Task.
+  # The gate_fun sends {:gate_result, result} to this process; we consume it here.
+  def gating(:info, {:gate_result, :pass}, data) do
+    new_data = %{data | gate_task_ref: nil}
+    {:next_state, :awaiting_merge, new_data, [{:next_event, :internal, :on_enter}]}
+  end
+
+  def gating(:info, {:gate_result, {:fail, findings}}, data) do
+    new_data = %{data | last_findings: findings, gate_task_ref: nil}
+    # D-318: gate failure — advance the refine→pivot→exhausted ladder.
+    advance_gate_ladder(new_data)
+  end
+
+  # INV-SAFE-CP-5: discard the raw Task reply tuple {ref, result} that Task.async
+  # also delivers to the caller's mailbox (in addition to the {:gate_result, _} we
+  # send explicitly). Matching on gate_task_ref ensures we only swallow our own
+  # Task's reply, not unrelated task results.
+  def gating(:info, {ref, _result}, %{gate_task_ref: ref} = data) when not is_nil(ref) do
+    {:keep_state, data}
+  end
+
+  # INV-SAFE-CP-5: discard the :DOWN from the completed Task (Task.async monitors
+  # the spawned task; a normal exit sends :DOWN with reason :normal after the reply).
+  def gating(:info, {:DOWN, ref, :process, _pid, _reason}, %{gate_task_ref: ref} = data)
+      when not is_nil(ref) do
+    {:keep_state, data}
   end
 
   def gating(event_type, event, data) do
