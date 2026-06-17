@@ -152,12 +152,20 @@ defmodule Tau.Factory.Egress do
   # Private: provider invocation
   # ---------------------------------------------------------------------------
 
+  # Dispatch to the provider: prefer the native `chat/3` non-streaming callback
+  # when the provider exports it, otherwise fall back to `stream/3`.  Both paths
+  # are routed through this function so the guards above apply to ALL provider
+  # calls (D-351 no-bypass contract / INV-EGRESS-CHOKEPOINT).
   defp invoke_provider(provider, req, ctx) do
     messages = Map.get(req, :messages, [])
     opts = Map.get(req, :opts, %{})
 
     try do
-      provider.stream(messages, opts, ctx)
+      if function_exported?(provider, :chat, 3) do
+        provider.chat(messages, opts, ctx)
+      else
+        provider.stream(messages, opts, ctx)
+      end
     rescue
       e -> {:error, {:provider_exception, e}}
     end

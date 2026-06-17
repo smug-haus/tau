@@ -139,6 +139,8 @@ defmodule Tau.Provider do
   ]
 
   alias Tau.Factory.Egress
+  alias Tau.Message.Assembler
+  alias Tau.Message.Assistant
 
   @doc "Look up the configured default provider."
   @spec default() :: module()
@@ -167,26 +169,35 @@ defmodule Tau.Provider do
   """
   @spec chat(module(), messages(), stream_opts(), ctx()) ::
           {:ok, Tau.Message.Assistant.t()} | {:error, term()}
+  # All provider calls MUST route through Egress.call/3 (D-351 / INV-EGRESS-CHOKEPOINT).
+  # The prior fast path that bypassed Egress when the provider exported chat/3 violated
+  # the no-bypass contract (SPEC-FACTORY-GOV §4 B1).  Egress.invoke_provider/3 now
+  # dispatches to chat/3 when available, so the three fail-closed guards still apply.
   def chat(provider, messages, opts \\ %{}, ctx \\ %{}) do
-    if function_exported?(provider, :chat, 3) do
-      provider.chat(messages, opts, ctx)
-    else
-      drain_stream(provider, messages, opts, ctx)
-    end
+    drain_stream(provider, messages, opts, ctx)
   end
 
+  # Route through Egress.call/3 (D-351 chokepoint).  When the provider's
+  # invoke_provider returned a pre-assembled %Message.Assistant{} (via chat/3),
+  # return it directly; otherwise reduce the stream through the Assembler.
   defp drain_stream(provider, messages, opts, ctx) do
-    with {:ok, stream} <- Egress.call(provider, %{messages: messages, opts: opts}, ctx) do
-      assembler =
-        Enum.reduce(
-          stream,
-          Tau.Message.Assembler.new(provider: provider, model: opts[:model]),
-          fn ev, acc -> Tau.Message.Assembler.step(acc, ev) end
-        )
+    with {:ok, result} <- Egress.call(provider, %{messages: messages, opts: opts}, ctx) do
+      case result do
+        %Assistant{} = assistant ->
+          {:ok, assistant}
 
-      case assembler do
-        %{error: nil} = a -> {:ok, Tau.Message.Assembler.assistant(a)}
-        %{error: reason} -> {:error, reason}
+        stream ->
+          assembler =
+            Enum.reduce(
+              stream,
+              Assembler.new(provider: provider, model: opts[:model]),
+              fn ev, acc -> Assembler.step(acc, ev) end
+            )
+
+          case assembler do
+            %{error: nil} = a -> {:ok, Assembler.assistant(a)}
+            %{error: reason} -> {:error, reason}
+          end
       end
     end
   end
