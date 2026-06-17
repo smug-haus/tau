@@ -232,14 +232,16 @@ defmodule Tau.Factory.OracleSeparationTest do
 
       # The Unit MUST call worker_fun(:test_author) first (oracle state entry,
       # unit.ex lines 245-268).
-      assert_receive {:role_called, :test_author}, 2_000,
+      assert_receive {:role_called, :test_author},
+                     2_000,
                      "FR-4.2: Unit FSM MUST call worker_fun(:test_author) first — " <>
                        "the :oracle state is the first worker-spawning state " <>
                        "(unit.ex lines 245-268). No :test_author call received within 2s."
 
       # :implementing state is UNREACHABLE until the oracle work_ready event fires.
       # Before we send work_ready, :implementer MUST NOT be called.
-      refute_receive {:role_called, :implementer}, 200,
+      refute_receive {:role_called, :implementer},
+                     200,
                      "FR-4.2: worker_fun(:implementer) MUST NOT be called before the " <>
                        "oracle worker emits {:work_ready, ...}. The :implementing state is " <>
                        "structurally unreachable until oracle transitions on work_ready " <>
@@ -267,7 +269,8 @@ defmodule Tau.Factory.OracleSeparationTest do
       end
 
       # NOW :implementer must be called (implementing state entry, unit.ex lines 385-408).
-      assert_receive {:role_called, :implementer}, 2_000,
+      assert_receive {:role_called, :implementer},
+                     2_000,
                      "FR-4.2: Unit FSM MUST call worker_fun(:implementer) after oracle " <>
                        "work_ready. The :implementing state entry spawns the implementer " <>
                        "worker (unit.ex lines 385-408). No :implementer call within 2s " <>
