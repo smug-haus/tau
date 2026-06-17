@@ -1,0 +1,300 @@
+ * [new branch]      main -> main
+Switched to a new branch 'feat/reject-outcome-durable-115234'
+To /tmp/briefly--576460676102846242-i84KV28zLJKy82b1O9ZW/briefly-576460676090667427-j51zQ01JfaN1FvQmLByf/origin.git
+ * [new branch]      feat/reject-outcome-durable-115234 -> feat/reject-outcome-durable-115234
+Switched to branch 'main'
+.............................................................................................[tau] session 019ed7a1 starting (provider=Tau.CLI.HeadlessRunToolExposureTest.RecordingProvider, model=<default>)
+[tau] Tau.CLI.HeadlessRunToolExposureTest.RecordingProvider requesting…
+[tau] Tau.CLI.HeadlessRunToolExposureTest.RecordingProvider done (stop_reason=:end_turn)
+(replay) hello
+.[tau] session 019ed7a1 starting (provider=Tau.CLI.HeadlessRunToolExposureTest.RecordingProvider, model=<default>)
+[tau] Tau.CLI.HeadlessRunToolExposureTest.RecordingProvider requesting…
+[tau] Tau.CLI.HeadlessRunToolExposureTest.RecordingProvider done (stop_reason=:end_turn)
+(replay) hello
+.[tau] session 019ed7a1 starting (provider=Tau.CLI.HeadlessRunToolExposureTest.RecordingProvider, model=<default>)
+[tau] Tau.CLI.HeadlessRunToolExposureTest.RecordingProvider requesting…
+[tau] Tau.CLI.HeadlessRunToolExposureTest.RecordingProvider done (stop_reason=:end_turn)
+(replay) hello
+..................................................................................................................................................................hint: Using 'master' as the name for the initial branch. This default branch name
+hint: will change to "main" in Git 3.0. To configure the initial branch name
+hint: to use in all of your new repositories, which will suppress this warning,
+hint: call:
+hint:
+hint: 	git config --global init.defaultBranch <name>
+hint:
+hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+hint: 'development'. The just-created branch can be renamed via this command:
+hint:
+hint: 	git branch -m <name>
+hint:
+hint: Disable this message with "git config set advice.defaultBranchName false"
+Cloning into '/tmp/briefly--576460639823658385-pZQFZpDvyImgtARQ9fQ/briefly-576460639823470618-n9MirV1677KlG77aHcuR/work'...
+warning: You appear to have cloned an empty repository.
+done.
+.................................................22:09:20.495 [error] Task #PID<0.24141.0> started from #PID<0.24138.0> terminating
+** (RuntimeError) CrashCompactor intentional crash
+    test/tau/session/compaction_test.exs:113: Tau.Session.CompactionTest.CrashCompactor.compact/2
+    (elixir 1.18.1) lib/task/supervised.ex:101: Task.Supervised.invoke_mfa/2
+    (elixir 1.18.1) lib/task/supervised.ex:36: Task.Supervised.reply/4
+Function: #Function<2.73217733/0 in Tau.Session.SlashCommand.handle_builtin_command/4>
+    Args: []
+..
+Finished in 129.3 seconds (13.3s async, 115.9s sync)
+208 properties, 1718 tests, 1 failure, 16 excluded, 2 skipped
+----------------
+COV    FILE                                        LINES RELEVANT   MISSED
+ 71.4% lib/mix/gate/ac_linkage.ex                     97       28        8
+ 34.6% lib/mix/gate/common.ex                        105       26       17
+100.0% lib/mix/gate/masking.ex                        45        4        0
+ 85.0% lib/mix/gate/mutation.ex                      317       87       13
+  0.0% lib/mix/tasks/tau.factory.dogfood.ex          398      103      103
+  0.0% lib/mix/tasks/tau.gate.ac_linkage.ex           56        9        9
+  0.0% lib/mix/tasks/tau.gate.masking.ex              64       12       12
+  0.0% lib/mix/tasks/tau.gate.mutation.ex             75       11       11
+  0.0% lib/mix/tasks/tau.hello.ex                     80       27       27
+  0.0% lib/mix/tasks/tau.qa.ex                       351       97       97
+  0.0% lib/mix/tasks/tau.smoke.ex                    194       47       47
+  0.0% lib/mix/tasks/tau.tui_ux.ex                   221       53       53
+ 88.8% lib/tau.ex                                    231       18        2
+ 71.8% lib/tau/application.ex                        217       32        9
+100.0% lib/tau/build.ex                               71        4        0
+  6.3% lib/tau/burrito_steps/relink_sqlite_nif.      205       47       44
+  0.0% lib/tau/burrito_steps/relink_termbox.ex       185       48       48
+  0.0% lib/tau/burrito_steps/relink_vec0_nif.ex      240       56       56
+ 91.4% lib/tau/circuit_breaker.ex                    201       35        3
+ 95.4% lib/tau/circuit_breaker/state.ex              158       22        1
+ 92.8% lib/tau/circuit_breaker/store.ex              272       28        2
+ 40.8% lib/tau/cli.ex                                818      213      126
+ 81.3% lib/tau/cli/config.ex                         172       59       11
+ 43.7% lib/tau/cli/extensions.ex                      96       32       18
+ 81.7% lib/tau/cli/init.ex                           514      175       32
+  0.0% lib/tau/cli/init/io.ex                         22        3        3
+ 37.7% lib/tau/cli/mcp.ex                            148       53       33
+ 91.6% lib/tau/coding_agent.ex                       141       12        1
+ 86.2% lib/tau/coding_agent/cost.ex                  264       51        7
+ 70.9% lib/tau/coding_agent/dispatcher.ex            524      131       38
+  0.0% lib/tau/coding_agent/event.ex                 138        0        0
+100.0% lib/tau/coding_agent/supervisor.ex             50        6        0
+ 76.0% lib/tau/coding_agent/tau_context.ex           330       71       17
+100.0% lib/tau/coding_agent/tau_context/auth.ex       97       15        0
+ 71.0% lib/tau/coding_agent/tau_context/router.      346       83       24
+ 64.2% lib/tau/coding_agent/tau_context/tools.e      404       70       25
+ 57.8% lib/tau/coding_agent/workspace.ex             151       19        8
+ 88.8% lib/tau/coding_agent/workspace/cwd.ex          49        9        1
+ 93.6% lib/tau/coding_agent/workspace/git.ex         215       47        3
+ 51.2% lib/tau/coding_agents/claude_code.ex          550      123       60
+ 92.3% lib/tau/coding_agents/claude_code/argv.e       92       13        1
+100.0% lib/tau/coding_agents/claude_code/config       88       14        0
+ 89.4% lib/tau/coding_agents/claude_code/stream      269       57        6
+ 79.6% lib/tau/coding_agents/replay.ex               223       59       12
+ 81.2% lib/tau/command.ex                            155       16        3
+100.0% lib/tau/command/context.ex                     53        4        0
+ 91.6% lib/tau/command/spec.ex                       283       72        6
+100.0% lib/tau/commands/builtin.ex                    83        1        0
+ 70.5% lib/tau/commands/builtin/clone.ex              77       17        5
+100.0% lib/tau/commands/builtin/compact.ex            53        9        0
+ 61.5% lib/tau/commands/builtin/copy.ex              105       26       10
+ 78.0% lib/tau/commands/builtin/export.ex            161       41        9
+ 84.2% lib/tau/commands/builtin/fork.ex               72       19        3
+ 87.5% lib/tau/commands/builtin/help.ex               43        8        1
+ 66.6% lib/tau/commands/builtin/logout.ex             89       21        7
+ 90.0% lib/tau/commands/builtin/new.ex                42       10        1
+100.0% lib/tau/commands/builtin/ping.ex               19        3        0
+100.0% lib/tau/commands/builtin/reload.ex             80       11        0
+ 71.4% lib/tau/commands/builtin/tree.ex              124       42       12
+ 91.4% lib/tau/commands/catalog.ex                   140       35        3
+100.0% lib/tau/commands/parser.ex                     68       12        0
+100.0% lib/tau/compactor.ex                           34        1        0
+ 88.2% lib/tau/compactor/summarize_tail.ex           129       34        4
+ 94.1% lib/tau/cost.ex                               110       17        1
+ 86.2% lib/tau/cost/tracker.ex                       178       29        4
+100.0% lib/tau/extension.ex                          118        9        0
+ 82.8% lib/tau/extensions/loader.ex                  502      140       24
+100.0% lib/tau/factory/agent_bin.ex                   98        9        0
+ 95.0% lib/tau/factory/brief_assembler.ex            356       80        4
+ 86.9% lib/tau/factory/budget/owner.ex               176       23        3
+  9.3% lib/tau/factory/coding_agent_shim.ex          490      128      116
+100.0% lib/tau/factory/conflict_check.ex             110       17        0
+ 85.7% lib/tau/factory/coordinator.ex                318       70       10
+100.0% lib/tau/factory/dogfood/agent.ex              144        4        0
+  0.0% lib/tau/factory/dogfood/gate_fun.ex           193       34       34
+ 96.5% lib/tau/factory/dogfood/sandbox.ex            184       29        1
+ 81.2% lib/tau/factory/engine/test_run.ex             98       16        3
+100.0% lib/tau/factory/escalation.ex                  47        8        0
+ 86.8% lib/tau/factory/fleet/watchdog.ex             216       38        5
+ 85.8% lib/tau/factory/gate.ex                       596      155       22
+ 97.2% lib/tau/factory/gate/ac_linkage.ex            147       36        1
+ 90.9% lib/tau/factory/gate/masking.ex               143       33        3
+100.0% lib/tau/factory/gate/mutation.ex              143       11        0
+ 37.5% lib/tau/factory/gate/oracle.ex                112        8        5
+  0.0% lib/tau/factory/gate/request.ex                72        0        0
+ 83.3% lib/tau/factory/gate/verdict.ex                57        6        1
+ 78.4% lib/tau/factory/issue_selector.ex             295       51       11
+ 52.3% lib/tau/factory/kill_switch.ex                125       21       10
+ 74.1% lib/tau/factory/ledger/migrations.ex          233       31        8
+100.0% lib/tau/factory/ledger/reader.ex               86        3        0
+ 88.5% lib/tau/factory/ledger/writer.ex              859      210       24
+ 95.8% lib/tau/factory/merge/cas.ex                  108       24        1
+ 88.2% lib/tau/factory/merge/health.ex               105       17        2
+ 93.0% lib/tau/factory/merge_authority.ex            684      187       13
+ 90.9% lib/tau/factory/policy.ex                     136       11        1
+ 90.9% lib/tau/factory/policy/owner.ex               112       11        1
+100.0% lib/tau/factory/retry.ex                       55        5        0
+ 96.2% lib/tau/factory/scheduler.ex                  181       27        1
+ 81.3% lib/tau/factory/supervisor.ex                 539      107       20
+100.0% lib/tau/factory/toolchain.ex                  121        2        0
+100.0% lib/tau/factory/toolchains/elixir.ex           73        7        0
+ 87.0% lib/tau/factory/unit.ex                      1028      209       27
+ 87.8% lib/tau/factory/unit_driver.ex                334       41        5
+ 80.0% lib/tau/factory/unit_registry.ex               51        5        1
+100.0% lib/tau/factory/unit_supervisor.ex             49        6        0
+ 84.3% lib/tau/factory/worker.ex                     628      128       20
+100.0% lib/tau/factory/worker/isolation.ex           123        8        0
+100.0% lib/tau/factory/worker_registry.ex             45        4        0
+ 88.8% lib/tau/factory/worker_supervisor.ex          143       18        2
+ 90.5% lib/tau/factory/workspace_janitor.ex          277       53        5
+  0.0% lib/tau/hook.ex                                67        0        0
+ 71.4% lib/tau/hooks/dispatcher.ex                    81       21        6
+  0.0% lib/tau/hooks/shell.ex                        165       35       35
+ 56.7% lib/tau/markdown.ex                           277       74       32
+ 50.0% lib/tau/mcp/reconciler.ex                     131       32       16
+  0.0% lib/tau/mcp/server.ex                         277       77       77
+100.0% lib/tau/mcp/supervisor.ex                      25        3        0
+  0.0% lib/tau/mcp/tool_adapter.ex                    80       12       12
+  0.0% lib/tau/mcp/transport.ex                       24        0        0
+  0.0% lib/tau/mcp/transport/http.ex                  50       12       12
+  0.0% lib/tau/mcp/transport/sse.ex                   93       28       28
+  0.0% lib/tau/mcp/transport/stdio.ex                 94       19       19
+  0.0% lib/tau/memory/embedder.ex                     39        0        0
+  0.0% lib/tau/memory/embedding_worker.ex            147       38       38
+ 64.7% lib/tau/memory/loader.ex                      104       34       12
+ 80.6% lib/tau/memory/migrations.ex                  171       31        6
+  0.0% lib/tau/memory/store.ex                        77        1        1
+ 87.7% lib/tau/memory/store/sqlite.ex                708      171       21
+100.0% lib/tau/memory/supervisor.ex                   34        3        0
+ 50.0% lib/tau/message.ex                            151        6        3
+ 88.8% lib/tau/message/assembler.ex                  222       54        6
+ 32.4% lib/tau/otel_reporter.ex                      327       74       50
+ 87.5% lib/tau/otel_reporter/config.ex                81        8        1
+ 25.8% lib/tau/otel_reporter/handler.ex              289       93       69
+100.0% lib/tau/permissions/evaluator.ex              120       22        0
+ 87.5% lib/tau/permissions/heuristics.ex              61        8        1
+  0.0% lib/tau/permissions/matcher.ex                 22        0        0
+ 63.1% lib/tau/permissions/matchers.ex               132       38       14
+100.0% lib/tau/permissions/mode.ex                   107       14        0
+ 71.4% lib/tau/permissions/parser.ex                  68       14        4
+100.0% lib/tau/permissions/rule_set.ex                54       10        0
+100.0% lib/tau/persistence.ex                         49        1        0
+ 83.7% lib/tau/persistence/jsonl.ex                  175       37        6
+100.0% lib/tau/prompt_template.ex                     43        1        0
+ 97.6% lib/tau/prompt_templates.ex                   220       43        1
+100.0% lib/tau/provider.ex                           183       10        0
+100.0% lib/tau/provider/context_windows.ex           105        1        0
+  0.0% lib/tau/provider/event.ex                     156        0        0
+ 64.7% lib/tau/providers/anthropic.ex                603      170       60
+ 89.1% lib/tau/providers/anthropic/auth.ex           175       37        4
+ 85.7% lib/tau/providers/azure_openai.ex             157       28        4
+  1.8% lib/tau/providers/bedrock.ex                  209       54       53
+ 84.3% lib/tau/providers/copilot/auth.ex             327       64       10
+ 90.0% lib/tau/providers/copilot/token_store.ex      128       20        2
+ 90.3% lib/tau/providers/custom.ex                   161       31        3
+ 76.4% lib/tau/providers/deepseek.ex                 112       17        4
+  1.7% lib/tau/providers/gemini.ex                   181       58       57
+ 76.4% lib/tau/providers/groq.ex                     105       17        4
+ 76.4% lib/tau/providers/mistral.ex                  105       17        4
+  0.0% lib/tau/providers/openai/chat.ex               86       16       16
+  0.0% lib/tau/providers/openai/responses.ex         165       44       44
+ 61.8% lib/tau/providers/rate_limiter.ex             351      110       42
+ 62.5% lib/tau/providers/rate_limiter/superviso      151       32       12
+ 86.3% lib/tau/providers/rate_limiter/token_buc      139       22        3
+ 46.5% lib/tau/providers/replay.ex                   192       43       23
+  0.0% lib/tau/providers/shared/aws_event_strea       70       21       21
+ 82.6% lib/tau/providers/shared/content_transfo      129       23        4
+ 73.7% lib/tau/providers/shared/finch_stream.ex      265       61       16
+ 89.4% lib/tau/providers/shared/id_sanitizer.ex       86       19        2
+ 69.4% lib/tau/providers/shared/openai_chat_wir      301       85       26
+ 82.6% lib/tau/providers/shared/ordering_check.      122       23        4
+ 96.5% lib/tau/providers/shared/sigv4.ex             100       29        1
+ 86.2% lib/tau/providers/shared/sse.ex               105       29        4
+ 23.5% lib/tau/providers/shared/token_estimate.       61       17       13
+ 75.0% lib/tau/providers/shared/tool_spec.ex         125       20        5
+100.0% lib/tau/providers/shared/tool_spec/gemin       71       14        0
+100.0% lib/tau/registries.ex                          68        3        0
+ 84.5% lib/tau/session.ex                           1438      266       41
+ 75.7% lib/tau/session/coding_agent_turn.ex          752      206       50
+ 91.7% lib/tau/session/compaction.ex                 284       73        6
+ 96.1% lib/tau/session/data.ex                       369       52        2
+  0.0% lib/tau/session/events.ex                     263        0        0
+  0.0% lib/tau/session/events/provider_fallback       28        0        0
+ 66.6% lib/tau/session/journal.ex                    203       51       17
+ 90.9% lib/tau/session/model_swap.ex                 191       33        3
+ 83.6% lib/tau/session/provider_turn.ex              872      232       38
+ 67.7% lib/tau/session/queue.ex                      180       31       10
+ 90.4% lib/tau/session/skill_activation.ex           374       84        8
+ 74.5% lib/tau/session/slash_command.ex              373      102       26
+ 83.6% lib/tau/session/tool_dispatch.ex             1060      245       40
+100.0% lib/tau/sessions/supervisor.ex                 24        3        0
+ 80.0% lib/tau/settings.ex                            31        5        1
+100.0% lib/tau/settings/cache.ex                      58       10        0
+ 76.9% lib/tau/settings/loader.ex                     99       26        6
+ 88.4% lib/tau/settings/schema.ex                    306       26        3
+ 76.0% lib/tau/settings/vault.ex                     214       46       11
+100.0% lib/tau/settings/vault/env.ex                  40        7        0
+  0.0% lib/tau/settings/vault/keychain/linux.ex      117       25       25
+  0.0% lib/tau/settings/vault/keychain/mac.ex         90       18       18
+ 75.0% lib/tau/settings/vault/keychain/windows.       36        4        1
+ 50.0% lib/tau/settings/watcher.ex                   116       32       16
+  0.0% lib/tau/skill.ex                               30        0        0
+ 77.7% lib/tau/skills/frontmatter.ex                  83       27        6
+ 90.6% lib/tau/skills/loader.ex                      139       32        3
+ 66.6% lib/tau/telemetry/handlers.ex                 103        6        2
+100.0% lib/tau/telemetry/supervisor.ex                24        3        0
+100.0% lib/tau/tool.ex                                72        5        0
+100.0% lib/tau/tool/context.ex                        52        5        0
+100.0% lib/tau/tool/result.ex                         37        1        0
+ 91.3% lib/tau/tool/validator.ex                     125       23        2
+  0.0% lib/tau/toolchain/lint_descriptor.ex           27        0        0
+ 80.5% lib/tau/toolchain/report_parser.ex            208       67       13
+  0.0% lib/tau/toolchain/resource_ns.ex               35        0        0
+  0.0% lib/tau/toolchain/test_descriptor.ex           34        0        0
+  0.0% lib/tau/toolchain/test_report.ex               33        0        0
+ 68.3% lib/tau/tools/builtin/agent.ex                645      155       49
+ 48.7% lib/tau/tools/builtin/bash.ex                 142       39       20
+ 74.6% lib/tau/tools/builtin/delegate.ex             709      154       39
+ 81.6% lib/tau/tools/builtin/edit.ex                 166       49        9
+ 63.4% lib/tau/tools/builtin/read.ex                 153       41       15
+ 80.0% lib/tau/tools/builtin/write.ex                 49       10        2
+ 78.5% lib/tau/tools/operations/local.ex             173       42        9
+  0.0% lib/tau/tui.ex                                 53        3        3
+ 50.0% lib/tau/tui/app.ex                             42        6        3
+ 20.0% lib/tau/tui/app/bootstrap.ex                  113       25       20
+ 87.8% lib/tau/tui/app/completion.ex                 123       33        4
+ 70.3% lib/tau/tui/app/events.ex                     459      108       32
+ 68.7% lib/tau/tui/app/history.ex                    134       32       10
+ 95.1% lib/tau/tui/app/input.ex                      203       62        3
+ 82.4% lib/tau/tui/app/keymap.ex                     327       74       13
+ 84.6% lib/tau/tui/app/model.ex                      171       13        2
+ 88.8% lib/tau/tui/app/permission.ex                  91       18        2
+ 64.7% lib/tau/tui/app/view.ex                       218       51       18
+ 83.2% lib/tau/tui/editor.ex                         396      137       23
+  0.0% lib/tau/tui/event_bridge.ex                    73       11       11
+ 95.2% lib/tau/tui/fuzzy.ex                          100       21        1
+ 86.9% lib/tau/tui/history.ex                        126       23        3
+100.0% lib/tau/tui/history/store.ex                   74       13        0
+ 87.8% lib/tau/tui/render/highlight.ex               202       33        4
+ 30.1% lib/tau/tui/render/markdown.ex                279       63       44
+ 19.8% lib/tau/tui/render/width.ex                   209      136      109
+ 88.1% lib/tau/tui/render/wrap.ex                    212       59        7
+  0.0% lib/tau/tui/runtime_opts.ex                    46        4        4
+ 88.1% lib/tau/tui/status_bar.ex                     258       76        9
+ 86.5% lib/tau/tui/subagent_tree.ex                  285       67        9
+100.0% lib/tau/tui/supervisor.ex                      31        4        0
+ 61.5% test/support/blocking_tool.ex                 111       13        5
+ 69.2% test/support/capturing_provider.ex            103       13        4
+ 69.2% test/support/extensions/hello_world_ext/       90       13        4
+ 80.9% test/support/multi_fixture_provider.ex         87       21        4
+ 80.0% test/support/session_helper.ex                 53        5        1
+100.0% test/support/stub_embedder.ex                  57        8        0
+  0.0% test/support/tui_pty_helper.ex                316       93       93
+[TOTAL]  67.7%
+----------------
