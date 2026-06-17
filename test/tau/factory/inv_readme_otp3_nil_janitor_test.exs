@@ -207,7 +207,7 @@ defmodule Tau.Factory.InvReadmeOtp3NilJanitorTest do
       # {:worker_exit, ...} but writes nothing to the Ledger.
       captures = @writer.captures_for(ledger_name, worker_id)
 
-      assert length(captures) >= 1,
+      assert captures != [],
              "INV-README-OTP3: Ledger MUST have at least one capture row for " <>
                "worker_id=#{worker_id} — the nil-janitor path does not write to the Ledger; " <>
                "captures=#{inspect(captures)}"

@@ -168,7 +168,7 @@ defmodule Tau.Factory.LineageAuditTest do
       assert lineage.unit_id == unit_id,
              "D-353: lineage.unit_id must match the unit for which the merge was recorded."
 
-      assert is_list(lineage.gate_verdicts) and length(lineage.gate_verdicts) > 0,
+      assert is_list(lineage.gate_verdicts) and lineage.gate_verdicts != [],
              "D-353 (NFR-AUDIT): gate_verdicts link is empty or nil — null edge on the " <>
                "commit→verdicts step."
 
@@ -181,19 +181,19 @@ defmodule Tau.Factory.LineageAuditTest do
       assert :reviewer in verdict_halves,
              "D-353 (NFR-AUDIT): gate_verdicts missing :reviewer half — incomplete verdict coverage."
 
-      assert is_list(lineage.gating_test_paths) and length(lineage.gating_test_paths) > 0,
+      assert is_list(lineage.gating_test_paths) and lineage.gating_test_paths != [],
              "D-353 (NFR-AUDIT): gating_test_paths link is empty or nil — null edge on the " <>
                "verdicts→paths step."
 
-      assert is_list(lineage.claims) and length(lineage.claims) > 0,
+      assert is_list(lineage.claims) and lineage.claims != [],
              "D-353 (NFR-AUDIT): claims link is empty or nil — null edge on the " <>
                "paths→AC/D-NNN step."
 
-      assert is_list(lineage.specs) and length(lineage.specs) > 0,
+      assert is_list(lineage.specs) and lineage.specs != [],
              "D-353 (NFR-AUDIT): specs link is empty or nil — null edge on the " <>
                "AC/D-NNN→SPEC step."
 
-      assert is_list(lineage.issues) and length(lineage.issues) > 0,
+      assert is_list(lineage.issues) and lineage.issues != [],
              "D-353 (NFR-AUDIT): issues link is empty or nil — null edge on the " <>
                "SPEC→issue step."
     end
