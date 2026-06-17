@@ -19,6 +19,7 @@ defmodule Tau.Factory.Coordinator do
 
   @behaviour :gen_statem
 
+  alias Tau.Factory.Escalation
   alias Tau.Factory.Ledger.Reader, as: LedgerReader
 
   require Logger
@@ -340,6 +341,23 @@ defmodule Tau.Factory.Coordinator do
 
   def running(event_type, event, data) do
     Logger.debug("[Coordinator] running: unhandled #{inspect(event_type)} #{inspect(event)}")
+
+    # D-317(b): every reachable non-progress state MUST emit a trigger into E.
+    # Classify the unrecognised event via Escalation.classify/1 (which is total
+    # over term() — unknown inputs return {:"E-UNCLASSIFIED", :global}) and
+    # broadcast to "factory:escalation" so the control plane observes it.
+    {e, scope} = Escalation.classify(event)
+
+    duration_ms = System.monotonic_time(:millisecond) - data.start_mono_ms
+    measurements = %{total_tokens: data.accumulated_tokens, duration_ms: duration_ms}
+
+    :ok =
+      Phoenix.PubSub.broadcast(
+        data.pubsub,
+        "factory:escalation",
+        {:escalation, Map.merge(%{reason: e, scope: scope}, measurements)}
+      )
+
     {:keep_state, data}
   end
 
