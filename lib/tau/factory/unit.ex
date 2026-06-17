@@ -98,6 +98,11 @@ defmodule Tau.Factory.Unit do
     - `:merge_fun`      — `(unit_id, hash -> :queued | {:error, reason})`.
 
   Optional options:
+    - `:gating_test_paths` — `[String.t()]`; the test-author's declared gating-test
+                          paths (factory-loop cycle 4b). When present, persisted
+                          alongside `:declared_scope` in the Ledger at the first
+                          `:planned` snapshot (HR-4, issue #584). Defaults to `[]`
+                          when not supplied.
     - `:ledger`         — `GenServer.server()` | `nil`; when present and non-nil,
                           the Unit calls `Ledger.Writer.snapshot_unit/2` on each
                           state entry (WAL-before-ack, D-318). The idempotency key
@@ -143,6 +148,10 @@ defmodule Tau.Factory.Unit do
     registry_name = Keyword.get(opts, :registry_name, nil)
     timeouts = Keyword.get(opts, :timeouts, [])
     state_timeout_ms = Keyword.get(timeouts, :state_timeout_ms, @default_state_timeout_ms)
+    # HR-4 (issue #584): gating_test_paths declared by the test-author (factory-loop
+    # cycle 4b). Persisted alongside declared_scope in the Ledger at the first
+    # :planned snapshot so the frozen scope survives a crash (RPO=0, D-315).
+    gating_test_paths = Keyword.get(opts, :gating_test_paths, [])
 
     # f-6: register in UnitRegistry when a registry_name was provided.
     if registry_name do
@@ -152,6 +161,8 @@ defmodule Tau.Factory.Unit do
     data = %{
       unit_id: unit_id,
       declared_scope: declared_scope,
+      # HR-4 (issue #584): gating-test paths persisted in the Ledger at admission.
+      gating_test_paths: gating_test_paths,
       hash: hash,
       scheduler: scheduler,
       report_to: report_to,
@@ -803,6 +814,11 @@ defmodule Tau.Factory.Unit do
   # returns the genuinely-latest FSM state. A genuine replay of the same entry
   # (same `entry_seq`) remains a no-op via INSERT OR IGNORE (D-315).
   #
+  # HR-4 (issue #584): at the first :planned snapshot (admission), the declared
+  # scope and gating-test paths are embedded as `frozen_scope` so the Gate mutation
+  # check's oracle boundary survives a crash (RPO=0, D-315). All other snapshots
+  # omit frozen_scope (nil → no column write) to keep rows lean.
+  #
   # Returns updated data with incremented entry_seq so the counter is threaded
   # through all state functions correctly.
   #
@@ -814,10 +830,24 @@ defmodule Tau.Factory.Unit do
     seq = data.entry_seq
     idempotency_key = "#{data.unit_id}:snapshot:#{seq}"
 
+    # HR-4: include frozen_scope only at the :planned entry (seq == 0, first snapshot).
+    # At admission the declared_scope and gating_test_paths are durably persisted so
+    # the Coordinator can reconstruct the conflict-check boundary after a crash.
+    frozen_scope =
+      if state == :planned and seq == 0 do
+        %{
+          files: data.declared_scope.files,
+          gating_test_paths: data.gating_test_paths
+        }
+      else
+        nil
+      end
+
     LedgerWriter.snapshot_unit(data.ledger, %{
       unit_id: data.unit_id,
       state: state,
-      idempotency_key: idempotency_key
+      idempotency_key: idempotency_key,
+      frozen_scope: frozen_scope
     })
 
     %{data | entry_seq: seq + 1}
