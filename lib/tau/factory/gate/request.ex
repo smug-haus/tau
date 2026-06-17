@@ -33,6 +33,10 @@ defmodule Tau.Factory.Gate.Request do
   - `:ledger`      — `GenServer.server()` reference to the active
                      `Tau.Factory.Ledger.Writer` (the gate appends its verdict
                      to L via WAL-before-ack; D-335).
+  - `:language`    — the language atom for `Tau.Factory.Toolchain` dispatch
+                     (D-S2 polyglot seam). Defaults to `:elixir`. Must be a
+                     registered language atom (`Toolchain.for/1`); unknown atoms
+                     fail the mutation half closed.
   """
 
   @type t :: %__MODULE__{
@@ -44,7 +48,8 @@ defmodule Tau.Factory.Gate.Request do
           merge_base: String.t(),
           hash: String.t(),
           run: String.t(),
-          ledger: GenServer.server()
+          ledger: GenServer.server(),
+          language: atom()
         }
 
   @enforce_keys [
@@ -67,6 +72,7 @@ defmodule Tau.Factory.Gate.Request do
     :merge_base,
     :hash,
     :run,
-    :ledger
+    :ledger,
+    language: :elixir
   ]
 end

@@ -7,6 +7,23 @@ defmodule Tau.Factory.Toolchain.Elixir do
   declarative data describing the mix recipe. No subprocess is launched, no
   filesystem is touched, no verdict is returned (HR-3).
 
+  ## mutation_descriptor/1 and FR-3.3 conformance
+
+  The mutation descriptor is self-sufficient: it selects gating tests by the
+  `:gating` tag via `mix test --only gating`. The engine executes the adapter-
+  supplied argv verbatim — it does NOT generate runner scripts, scan workspace
+  source files, or inject language-specific ctx keys.
+
+  The engine prepares the test environment (writes `test/test_helper.exs` with
+  an inline JUnit formatter pointed at the descriptor's artifact path) before
+  executing the descriptor. This preparation is engine-owned; the adapter
+  declares only the invocation recipe.
+
+  The artifact path `"_gate_report.xml"` is the engine-agreed rendezvous: the
+  engine's JUnit formatter setup uses this static relative path, and the adapter
+  declares it as the artifact for the engine's parser to read. Both sides agree
+  on the path without ctx injection.
+
   ## Resource namespaces
 
   The Elixir toolchain uses the following HOME-namespace caches that must be
@@ -19,6 +36,11 @@ defmodule Tau.Factory.Toolchain.Elixir do
   """
 
   @behaviour Tau.Factory.Toolchain
+
+  # Static artifact path agreed between the adapter and the engine's JUnit
+  # formatter setup. The engine writes a test_helper.exs that points the JUnit
+  # formatter at Path.join(workspace, @mutation_artifact_rel).
+  @mutation_artifact_rel "_gate_report.xml"
 
   @impl Tau.Factory.Toolchain
   def install_deps(_ctx), do: %{argv: ~w(mix deps.get), env: %{}}
@@ -45,8 +67,17 @@ defmodule Tau.Factory.Toolchain.Elixir do
   end
 
   @impl Tau.Factory.Toolchain
-  def mutation_descriptor(ctx) do
-    test_descriptor(ctx)
+  def mutation_descriptor(_ctx) do
+    # Self-sufficient descriptor: selects gating tests by the :gating tag.
+    # Does NOT depend on engine-injected ctx keys (FR-3.3 conformance).
+    # The engine prepares the JUnit formatter setup in test/test_helper.exs
+    # before executing this descriptor (see Tau.Factory.Gate.run_via_engine/4).
+    %Tau.Toolchain.TestDescriptor{
+      argv: ~w(mix test --only gating),
+      env: %{"MIX_ENV" => "test"},
+      report: :junit,
+      artifact: @mutation_artifact_rel
+    }
   end
 
   @impl Tau.Factory.Toolchain

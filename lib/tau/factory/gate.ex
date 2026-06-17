@@ -54,7 +54,7 @@ defmodule Tau.Factory.Gate do
   alias Tau.Factory.Engine.TestRun
   alias Tau.Factory.Gate.{Mutation, Oracle, Request, Verdict}
   alias Tau.Factory.Ledger.Writer
-  alias Tau.Toolchain.TestDescriptor
+  alias Tau.Factory.Toolchain
 
   require Logger
 
@@ -214,63 +214,92 @@ defmodule Tau.Factory.Gate do
   #   5. PASS iff judge={:pass,_} ∧ cross-check=:pass.
   #
   # Fail-closed (D-306 / HR-3): a reverted-tree runner crash → :fail, never :pass.
+  # D-S2: dispatch through Toolchain.for(req.language); fail closed on unknown lang.
   defp run_mutation_half(%Request{} = req) do
-    gating_paths = MapSet.to_list(req.frozen_paths)
-    workspace = req.workspace
-    merge_base = req.merge_base
+    language = Map.get(req, :language, :elixir)
 
-    # plan/2 produces the pure data record for the engine seam (used below).
-    plan = Mutation.plan(merge_base, req.frozen_paths)
+    case Toolchain.for(language) do
+      {:error, {:unsupported_language, lang}} ->
+        Logger.warning("Mutation half: unsupported language #{inspect(lang)} — fail closed (D-S2)")
 
-    if project_creation_na?(gating_paths, merge_base, workspace) do
-      :pass
-    else
-      execute_mutation_check(plan, gating_paths, workspace)
+        {:error, {:unsupported_language, lang}}
+
+      adapter when is_atom(adapter) ->
+        gating_paths = MapSet.to_list(req.frozen_paths)
+        workspace = req.workspace
+        merge_base = req.merge_base
+        ctx = %{}
+
+        # plan/2 produces the pure data record for the engine seam (used below).
+        plan = Mutation.plan(merge_base, req.frozen_paths)
+
+        if project_creation_na?(language, gating_paths, merge_base, workspace) do
+          :pass
+        else
+          execute_mutation_check(adapter, plan, gating_paths, workspace, ctx)
+        end
     end
   end
 
-  # Returns true iff every gating-test path's enclosing mix.exs is absent at
-  # merge_base (PR-created sub-project; no production to revert → N/A → pass).
-  defp project_creation_na?([], _merge_base, _workspace), do: false
+  # Returns true iff every gating-test path's enclosing build manifest is absent
+  # at merge_base (PR-created sub-project; no production to revert → N/A → pass).
+  #
+  # The manifest filename is determined by the language atom via
+  # language_manifest_file/1 — an engine-internal auxiliary, not a Toolchain
+  # callback (the behaviour seam covers test execution only; D-S2 / SPEC §4 B4).
+  defp project_creation_na?(_language, [], _merge_base, _workspace), do: false
 
-  defp project_creation_na?(gating_paths, merge_base, workspace) do
-    Enum.all?(gating_paths, fn test_path ->
-      case find_enclosing_mix_exs(test_path, workspace) do
-        nil -> false
-        mix_exs_relpath -> not path_exists_at_ref?(mix_exs_relpath, merge_base, workspace)
-      end
-    end)
+  defp project_creation_na?(language, gating_paths, merge_base, workspace) do
+    manifest_file = language_manifest_file(language)
+
+    if is_nil(manifest_file) do
+      false
+    else
+      Enum.all?(gating_paths, fn test_path ->
+        case find_enclosing_manifest(test_path, manifest_file, workspace) do
+          nil -> false
+          manifest_relpath -> not path_exists_at_ref?(manifest_relpath, merge_base, workspace)
+        end
+      end)
+    end
   end
 
-  defp find_enclosing_mix_exs(test_path, workspace) do
+  # Maps a language atom to its conventional single-file build manifest name.
+  # Used only for the project-creation N/A pre-check (Gate 5.3). Returns nil
+  # when the language has no conventional single-file manifest (the check is
+  # then skipped and the mutation check runs unconditionally).
+  defp language_manifest_file(:elixir), do: "mix.exs"
+  defp language_manifest_file(_), do: nil
+
+  defp find_enclosing_manifest(test_path, manifest_file, workspace) do
     start_dir = Path.dirname(test_path)
-    do_find_mix_exs(start_dir, workspace)
+    do_find_manifest(start_dir, manifest_file, workspace)
   end
 
-  defp do_find_mix_exs(rel_dir, workspace) do
-    mix_exs_relpath =
+  defp do_find_manifest(rel_dir, manifest_file, workspace) do
+    manifest_relpath =
       if rel_dir == "." do
-        "mix.exs"
+        manifest_file
       else
-        Path.join(rel_dir, "mix.exs")
+        Path.join(rel_dir, manifest_file)
       end
 
-    abs_mix_exs = Path.join(workspace, mix_exs_relpath)
+    abs_manifest = Path.join(workspace, manifest_relpath)
 
-    if File.exists?(abs_mix_exs) do
-      mix_exs_relpath
+    if File.exists?(abs_manifest) do
+      manifest_relpath
     else
       parent = Path.dirname(rel_dir)
 
       if parent == rel_dir do
         nil
       else
-        do_find_mix_exs(parent, workspace)
+        do_find_manifest(parent, manifest_file, workspace)
       end
     end
   end
 
-  defp execute_mutation_check(plan, gating_paths, workspace) do
+  defp execute_mutation_check(adapter, plan, gating_paths, workspace, ctx) do
     # Snapshots preserve the gating-test file contents across the revert.
     {all_files_str, 0} = System.cmd("git", ["ls-files"], cd: workspace)
     all_files = all_files_str |> String.split("\n", trim: true)
@@ -284,7 +313,7 @@ defmodule Tau.Factory.Gate do
       revert_to_base(paths_to_revert, plan.merge_base, workspace)
       restore_snapshots(gating_snapshots, workspace)
 
-      case run_via_engine(gating_paths, workspace) do
+      case run_via_engine(adapter, gating_paths, workspace, ctx) do
         {:error, reason} ->
           # Reverted-tree crash → fail-closed (D-306 / HR-3). A crash is
           # indistinguishable from an infrastructure failure: MUST NOT be :pass.
@@ -302,7 +331,7 @@ defmodule Tau.Factory.Gate do
           restore_head(all_files, workspace)
           restore_snapshots(gating_snapshots, workspace)
 
-          case run_via_engine(gating_paths, workspace) do
+          case run_via_engine(adapter, gating_paths, workspace, ctx) do
             {:error, reason} ->
               # Real-tree crash: infrastructure failure → fail-closed.
               Logger.warning(
@@ -357,28 +386,28 @@ defmodule Tau.Factory.Gate do
   # Toolchain.ReportParser.parse/2 to produce a real %TestReport{} with stable,
   # non-positional test ids. Never falls back to text-scraping or positional ids.
   #
-  # Writes a TAP-producing elixir script to the workspace, builds a TestDescriptor
-  # pointing to it and the artifact file, calls Engine.TestRun.execute/2, then
-  # cleans up the temp files. The TAP formatter produces stable test ids of the
-  # form "ModuleName.test name" (to_string(module) <> "." <> to_string(test.name)).
-  defp run_via_engine(gating_paths, workspace) do
-    nonce = :erlang.unique_integer([:positive])
-    script_rel = "_gate_runner_#{nonce}.exs"
-    artifact_rel = "_gate_report_#{nonce}.tap"
-    script_abs = Path.join(workspace, script_rel)
-    artifact_abs = Path.join(workspace, artifact_rel)
+  # D-S2 / FR-3.3 conformance: the descriptor is obtained from
+  # adapter.mutation_descriptor(ctx) WITHOUT enriching ctx with engine-generated
+  # paths. The adapter supplies a self-sufficient argv (e.g. `mix test --only
+  # gating`). The engine prepares the test environment (writes
+  # test/test_helper.exs with an inline JUnit formatter) using the artifact path
+  # declared by the descriptor, then executes the descriptor verbatim.
+  #
+  # The engine cleans up the test_helper and artifact files in the `after` block
+  # so the workspace is left clean. No runner scripts named `_gate_runner_*` are
+  # written; Elixir source-layout scanning (find_lib_ex_files) is removed.
+  defp run_via_engine(adapter, _gating_paths, workspace, ctx) do
+    descriptor = adapter.mutation_descriptor(ctx)
+    artifact_abs = Path.join(workspace, descriptor.artifact)
+    test_helper_abs = Path.join(workspace, "test/test_helper.exs")
 
-    lib_files = find_lib_ex_files(workspace)
-
-    script = build_tap_runner(lib_files, gating_paths, artifact_abs)
-    File.write!(script_abs, script)
-
-    descriptor = %TestDescriptor{
-      argv: ["elixir", script_rel],
-      env: %{},
-      report: :tap,
-      artifact: artifact_rel
-    }
+    # Write test/test_helper.exs with an inline JUnit formatter so that
+    # `mix test` produces a machine-readable JUnit artifact at `artifact_abs`.
+    # The formatter is engine-owned (trusted); the adapter supplies only the
+    # invocation recipe (argv). Mix requires test_helper.exs to exist.
+    helper_content = build_test_helper(artifact_abs)
+    File.mkdir_p!(Path.join(workspace, "test"))
+    File.write!(test_helper_abs, helper_content)
 
     try do
       case TestRun.execute(descriptor, workspace) do
@@ -389,36 +418,24 @@ defmodule Tau.Factory.Gate do
           {:error, reason}
       end
     after
-      _ = File.rm(script_abs)
+      _ = File.rm(test_helper_abs)
       _ = File.rm(artifact_abs)
     end
   end
 
-  # Build a TAP-producing elixir script that runs the gating tests and writes
-  # TAP output to `artifact_abs`. The script:
-  #   1. Defines an inline GenServer TAP formatter that captures test events.
-  #   2. Starts ExUnit with the custom formatter (autorun: false).
-  #   3. Compiles lib source files so production modules are available.
-  #   4. Requires the gating test files (registers test cases with ExUnit).
-  #   5. Runs ExUnit; the formatter writes TAP to the artifact file.
+  # Build a test/test_helper.exs that starts ExUnit with an inline JUnit
+  # formatter writing to `artifact_abs`. The formatter is self-contained
+  # (no external deps). Mix's standard test runner picks this up automatically.
   #
-  # Uses ~S sigil for the formatter module body to avoid Elixir interpolation of
-  # the module's own string literals when building the script string.
-  defp build_tap_runner(lib_files, gating_paths, artifact_abs) do
-    lib_compiles =
-      Enum.map_join(lib_files, "\n", fn f ->
-        ~s[Code.compile_file("#{f}")]
-      end)
-
-    test_requires =
-      Enum.map_join(gating_paths, "\n", fn f ->
-        ~s[Code.require_file("#{f}")]
-      end)
-
-    # Formatter module: uses ~S to avoid #{} interpolation in this compile unit.
-    # The formatter collects test events and writes TAP on suite_finished.
-    formatter_mod = ~S"""
-    defmodule Gate.TapFormatter do
+  # The JUnit XML format produces stable, meaningful test ids:
+  #   classname="ModuleName" name="test description"
+  # — the same classname+name pair the cross-check uses to bind reverted-run
+  # failures to real-run passes (§C203-B3 anti-forgery).
+  defp build_test_helper(artifact_abs) do
+    # Use ~S to suppress interpolation inside the formatter module source, then
+    # splice `artifact_abs` explicitly into the ExUnit.start call at the end.
+    junit_formatter = ~S"""
+    defmodule Gate.JUnitFormatter do
       use GenServer
 
       def init(opts) do
@@ -435,25 +452,43 @@ defmodule Tau.Factory.Gate do
             true -> :passed
           end
 
-        id = to_string(test.module) <> "." <> to_string(test.name)
-        {:noreply, %{state | cases: [{id, status} | state.cases]}}
+        entry = %{
+          classname: to_string(test.module),
+          name: to_string(test.name),
+          status: status
+        }
+
+        {:noreply, %{state | cases: [entry | state.cases]}}
       end
 
       def handle_cast({:suite_finished, _}, state) do
         cases = Enum.reverse(state.cases)
-        total = length(cases)
-        header = "TAP version 13\n1.." <> Integer.to_string(total)
 
-        tap_lines =
-          cases
-          |> Enum.with_index(1)
-          |> Enum.map(fn {{id, status}, n} ->
-            prefix = if status == :failed, do: "not ok", else: "ok"
-            prefix <> " " <> Integer.to_string(n) <> " " <> id
+        testcase_xml =
+          Enum.map_join(cases, "\n", fn %{classname: cls, name: nm, status: st} ->
+            body =
+              if st == :failed do
+                "  <failure message=\"test failed\" />"
+              else
+                ""
+              end
+
+            if body == "" do
+              ~s[  <testcase classname="#{cls}" name="#{nm}" />]
+            else
+              ~s[  <testcase classname="#{cls}" name="#{nm}">\n#{body}\n  </testcase>]
+            end
           end)
 
-        content = Enum.join([header | tap_lines], "\n") <> "\n"
-        File.write!(state.artifact, content)
+        count = length(cases)
+
+        xml =
+          "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" <>
+            "<testsuite tests=\"#{count}\" failures=\"0\" name=\"gate\">\n" <>
+            testcase_xml <>
+            "\n</testsuite>\n"
+
+        File.write!(state.artifact, xml)
         {:noreply, state}
       end
 
@@ -462,42 +497,9 @@ defmodule Tau.Factory.Gate do
     """
 
     """
-    #{formatter_mod}
-    ExUnit.start(autorun: false, formatters: [Gate.TapFormatter], artifact: "#{artifact_abs}")
-    #{lib_compiles}
-    #{test_requires}
-    ExUnit.run()
+    #{junit_formatter}
+    ExUnit.start(formatters: [Gate.JUnitFormatter], artifact: "#{artifact_abs}")
     """
-  end
-
-  # Collect all .ex source files under `workspace/lib/`.
-  defp find_lib_ex_files(workspace) do
-    lib_dir = Path.join(workspace, "lib")
-
-    if File.dir?(lib_dir) do
-      do_find_ex_files(lib_dir, workspace)
-    else
-      []
-    end
-  end
-
-  defp do_find_ex_files(dir, workspace) do
-    case File.ls(dir) do
-      {:error, _} ->
-        []
-
-      {:ok, entries} ->
-        Enum.flat_map(entries, fn entry ->
-          abs = Path.join(dir, entry)
-          rel = Path.relative_to(abs, workspace)
-
-          cond do
-            File.regular?(abs) and String.ends_with?(entry, ".ex") -> [rel]
-            File.dir?(abs) -> do_find_ex_files(abs, workspace)
-            true -> []
-          end
-        end)
-    end
   end
 
   # ---------------------------------------------------------------------------
