@@ -167,9 +167,10 @@ defmodule Tau.Factory.Scheduler do
     case evaluate_admission(unit_id, declared_scope, %{state | f: f_prime}) do
       :admit ->
         new_f = Map.put(state.f, unit_id, declared_scope)
-        # INV-POLICY-PIN: pin the policy at admission when supplied.
+        # INV-POLICY-PIN: pin the policy at admission when supplied;
+        # re-admit MUST NOT overwrite an existing pin.
         new_pins =
-          if is_nil(policy) do
+          if is_nil(policy) or Map.has_key?(state.pins, unit_id) do
             state.pins
           else
             Map.put(state.pins, unit_id, policy)
