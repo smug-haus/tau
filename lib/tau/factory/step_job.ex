@@ -29,24 +29,43 @@ defmodule Tau.Factory.StepJob do
   @doc """
   Perform one factory step.
 
-  Checks the kill-switch sentinel first. Returns `{:cancel, :kill_switch_armed}`
-  if the sentinel is armed. Otherwise performs the factory step and returns `:ok`.
+  Checks the kill-switch sentinel at job start (INV-DS-KILL-SWITCH):
+
+  1. If a `"sentinel_path"` arg is present and the file EXISTS, returns
+     `{:cancel, :kill_switch_armed}` immediately — independent of any Store.
+  2. If a `"store"` arg is present and `Store.armed?/1` returns `true`, returns
+     `{:cancel, :kill_switch_armed}`.
+  3. Otherwise performs the factory step and returns `:ok`.
   """
   @impl Oban.Worker
   @spec perform(Oban.Job.t()) :: :ok | {:cancel, :kill_switch_armed}
   def perform(%Oban.Job{args: args}) do
-    store = resolve_store(args)
-
-    if store && Store.armed?(store) do
+    if sentinel_armed?(args) do
       {:cancel, :kill_switch_armed}
     else
-      :ok
+      store = resolve_store(args)
+
+      if store && Store.armed?(store) do
+        {:cancel, :kill_switch_armed}
+      else
+        :ok
+      end
     end
   end
 
   # ---------------------------------------------------------------------------
   # Private helpers
   # ---------------------------------------------------------------------------
+
+  # INV-DS-KILL-SWITCH: check the filesystem sentinel from job args.
+  # Returns true when the file at "sentinel_path" exists at job start.
+  # This is the primary kill-switch check, independent of any Store process.
+  @default_sentinel_path ".claude/STOP-FACTORY"
+
+  defp sentinel_armed?(args) do
+    path = Map.get(args, "sentinel_path", @default_sentinel_path)
+    File.exists?(path)
+  end
 
   # Resolve the KillSwitch.Store reference from job args.
   # Args carry the store name as a string (JSON serialisation) or atom.
