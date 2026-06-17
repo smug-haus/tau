@@ -248,6 +248,26 @@ defmodule Tau.Factory.LineageAuditTest do
              "D-353 (NFR-AUDIT): a lineage row with null issues MUST be refused. " <>
                "The SPEC→issue final link would be severed."
     end
+
+    @tag :d_353
+    test "D-353: record_merge_with_lineage/3 returns {:error, _} when gate_verdicts is nil" do
+      # SPEC-FACTORY-GOV §4 B10 / §6 D-353: "no null edge" applies to ALL six
+      # links, including gate_verdicts (the commit→verdicts step).
+      # Current gap (pre-implementer): validate_lineage_links/1 in writer.ex only
+      # checks [:gating_test_paths, :claims, :specs, :issues] — gate_verdicts is
+      # absent from the required list, so a nil gate_verdicts is silently accepted.
+      # This test asserts the full contract and fails against the current code.
+      ledger = start_ledger()
+      {merge_attrs, lineage_attrs} = full_lineage_attrs()
+
+      null_verdicts_lineage = Map.put(lineage_attrs, :gate_verdicts, nil)
+
+      assert {:error, _reason} =
+               LedgerWriter.record_merge_with_lineage(ledger, merge_attrs, null_verdicts_lineage),
+             "D-353 (NFR-AUDIT): a lineage row with null gate_verdicts MUST be refused " <>
+               "({:error, _}). A null commit→verdicts edge makes the merge untraceable. " <>
+               "SPEC-FACTORY-GOV §4 B10 requires no null edge on any of the six lineage links."
+    end
   end
 
   # ---------------------------------------------------------------------------
