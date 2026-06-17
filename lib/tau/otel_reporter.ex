@@ -245,7 +245,12 @@ defmodule Tau.OtelReporter do
       [:tau, :hook, :run, :stop],
       [:tau, :hook, :run, :exception],
       [:tau, :session, :stop],
-      [:tau, :circuit_breaker, :transition]
+      [:tau, :circuit_breaker, :transition],
+      # FR-9.1: factory gate run paired events (issue #664).
+      # gate.ex emits :start/:stop with {unit, hash, run} metadata;
+      # Handler correlates them via {:factory_gate_run, unit, hash, run} key.
+      [:tau, :factory, :gate, :run, :start],
+      [:tau, :factory, :gate, :run, :stop]
     ]
 
     # Optional events (SPEC §4 B1: configurable, default off).

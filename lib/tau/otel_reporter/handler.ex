@@ -201,6 +201,42 @@ defmodule Tau.OtelReporter.Handler do
   end
 
   # ---------------------------------------------------------------------------
+  # Factory gate run (FR-9.1 / issue #664)
+  # ---------------------------------------------------------------------------
+
+  defp do_handle([:tau, :factory, :gate, :run, :start], _measurements, metadata, %{
+         reporter: reporter
+       }) do
+    unit = Map.get(metadata, :unit)
+    hash = Map.get(metadata, :hash)
+    run = Map.get(metadata, :run)
+    key = {:factory_gate_run, unit, hash, run}
+
+    attrs =
+      primitive_map(%{
+        "tau.factory.unit" => unit,
+        "tau.factory.gate.hash" => hash,
+        "tau.factory.gate.run" => run
+      })
+
+    GenServer.cast(reporter, {:span_open, key, "tau.factory.gate.run", attrs})
+  end
+
+  defp do_handle([:tau, :factory, :gate, :run, :stop], measurements, metadata, %{
+         reporter: reporter
+       }) do
+    unit = Map.get(metadata, :unit)
+    hash = Map.get(metadata, :hash)
+    run = Map.get(metadata, :run)
+    key = {:factory_gate_run, unit, hash, run}
+
+    duration = Map.get(measurements, :duration, 0)
+    status = Map.get(metadata, :status)
+    outcome = if status == :pass, do: :ok, else: :error
+    GenServer.cast(reporter, {:span_close, key, duration, outcome})
+  end
+
+  # ---------------------------------------------------------------------------
   # Optional events (configurable; default off — no-op here)
   # ---------------------------------------------------------------------------
 
