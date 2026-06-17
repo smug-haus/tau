@@ -128,7 +128,15 @@ defmodule Tau.Provider do
   """
   @callback context_window(model :: String.t()) :: pos_integer() | nil
 
-  @optional_callbacks [configure: 1, chat: 3, cache_regions: 2, context_window: 1]
+  # capabilities/0 and default_model/0 are optional: test stubs may omit them.
+  @optional_callbacks [
+    configure: 1,
+    chat: 3,
+    cache_regions: 2,
+    context_window: 1,
+    capabilities: 0,
+    default_model: 0
+  ]
 
   alias Tau.Factory.Egress
 
