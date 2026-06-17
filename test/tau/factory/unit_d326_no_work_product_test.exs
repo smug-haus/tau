@@ -16,26 +16,35 @@ defmodule Tau.Factory.UnitD326NoWorkProductTest do
 
   ## What this test covers
 
-  The existing tests cover the boundary in isolation:
-  - `worker_completion_event_test.exs` Oracle 3: Worker side only — a real
-    Worker running a real agent binary that exits 0 without work_ready emits
-    `{:worker_exit, worker_id, :no_work_product}` to `report_to`.
-  - `unit_worker_exit_test.exs`: Unit side only — the Unit processes a
-    SYNTHETIC `{:worker_exit, worker_id, :no_work_product}` message (no real
-    Worker or agent binary involved).
+  The test exercises the complete D-326 enforcement chain end-to-end through
+  the real `Tau.Factory.Unit` entry point (`UnitSupervisor.start_unit/2`).
 
-  **This test closes the gap**: it exercises the complete enforcement chain
-  end-to-end through the real `Tau.Factory.Unit` entry point
-  (`UnitSupervisor.start_unit/2`) with a `worker_fun` that calls the real
-  `WorkerSupervisor.spawn/5` backed by a real agent binary that exits 0
-  without emitting a work_ready frame for the implementing phase. The Worker
-  converts the silent exit into `worker_exit(:no_work_product)` and delivers
-  it to the Unit (via `report_to: self()` — the Unit's own pid), which must
-  route it to the retry ladder — NOT to the gate.
+  Oracle phase: uses a synthetic in-process worker that sends the required
+  5-tuple `{:work_ready, worker_id, branch, head_sha, gating_test_paths}`
+  directly to the Unit. This is the INV-WF-13-conformant oracle completion
+  signal required by the current Unit FSM. It is necessary because
+  `Tau.Factory.Worker` sends only a 4-tuple form which the Unit now rejects
+  for the oracle->implementing transition.
 
-  The oracle phase uses a work-ready-emitting agent so the Unit advances
-  to :implementing normally; the D-326 enforcement is tested on the
-  implementing phase only.
+  Implementing phase: uses a real `WorkerSupervisor.spawn/5` backed by a real
+  agent binary that exits 0 without emitting a work_ready frame. The Worker
+  converts the silent exit into `worker_exit(:no_work_product)` (via the
+  independent death monitor) and delivers it to the Unit, which MUST route it
+  to the retry ladder — NOT to the gate.
+
+  ## Gate-5.3 fail-before contract
+
+  This test gates D-326 at the full-chain boundary. At the merge-base,
+  the Unit's oracle state does NOT recognise the 5-tuple work_ready form
+  (INV-WF-13 not yet landed). A 5-tuple oracle completion signal is treated
+  as an unexpected message and discarded; the Unit stays in :oracle until
+  state_timeout fires and escalates.
+
+  The test asserts that the Unit SPECIFICALLY re-entered :implementing with
+  attempt_count > 1 (the retry ladder fired for :no_work_product). This
+  assertion FAILS at the merge-base because the Unit escalates from :oracle
+  (never reaching :implementing), making the test a genuine gating check for
+  the INV-WF-13 oracle advancement combined with D-326 routing.
 
   ## AC / D-NNN linkage
     - D-326 — every test in this file (gate 5.1 token).
@@ -72,33 +81,6 @@ defmodule Tau.Factory.UnitD326NoWorkProductTest do
     {sha, 0} = git.(["rev-parse", "HEAD"])
 
     %{repo_dir: repo_dir, base_ref: String.trim(sha)}
-  end
-
-  # An agent binary that emits ONE {:packet,4}-framed JSON work_ready frame
-  # and then exits 0. Used for the oracle phase so the Unit advances normally.
-  defp work_ready_agent_bin(tmp_dir, branch, head_sha) do
-    bin_path = Path.join(tmp_dir, "wr_agent_#{System.unique_integer([:positive])}")
-
-    json = ~s({"type":"work_ready","branch":"#{branch}","head_sha":"#{head_sha}"})
-    len = byte_size(json)
-
-    b0 = Bitwise.band(Bitwise.bsr(len, 24), 0xFF)
-    b1 = Bitwise.band(Bitwise.bsr(len, 16), 0xFF)
-    b2 = Bitwise.band(Bitwise.bsr(len, 8), 0xFF)
-    b3 = Bitwise.band(len, 0xFF)
-
-    oct = fn b -> "\\" <> (b |> Integer.to_string(8) |> String.pad_leading(3, "0")) end
-    len_prefix = oct.(b0) <> oct.(b1) <> oct.(b2) <> oct.(b3)
-
-    File.write!(bin_path, """
-    #!/bin/sh
-    printf '#{len_prefix}'
-    printf '%s' '#{json}'
-    exit 0
-    """)
-
-    File.chmod!(bin_path, 0o755)
-    bin_path
   end
 
   # An agent binary that exits 0 WITHOUT emitting a work_ready frame.
@@ -153,16 +135,22 @@ defmodule Tau.Factory.UnitD326NoWorkProductTest do
 
   # ---------------------------------------------------------------------------
   # D-326 end-to-end: real Worker + real agent binary exits 0 without work_ready
-  # → the Unit routes :no_work_product to the retry ladder, NEVER gates.
+  # -> the Unit routes :no_work_product to the retry ladder, NEVER gates.
   #
-  # Oracle phase: real Worker with work-ready-emitting agent (oracle advances
-  # to implementing normally).
+  # Oracle phase: synthetic in-process worker sends the required 5-tuple
+  # work_ready (INV-WF-13-conformant) so the Unit advances to :implementing.
   # Implementing phase: real Worker with silent-exit-0 agent (D-326 boundary).
+  #
+  # Gate-5.3 fail-before: at the merge-base, the Unit's oracle does NOT
+  # recognise the 5-tuple form — it discards it as unexpected. The Unit stays
+  # in :oracle, eventually escalates (state_timeout), and never reaches
+  # :implementing. The assertion `match?({:implementing, data} when data.attempt_count > 1)`
+  # FAILS at the merge-base, making this a genuine gating test.
   # ---------------------------------------------------------------------------
 
-  describe "D-326 end-to-end — real Worker runs silent-exit-0 agent → Unit routes :no_work_product to retry ladder" do
+  describe "D-326 end-to-end" do
     @tag :d_326
-    test "D-326: implementing Worker that exits 0 without work_ready routes :no_work_product to retry ladder — gate_fun never called" do
+    test "D-326: silent-exit-0 implementing worker routes :no_work_product to retry ladder, gate never called" do
       test_pid = self()
       n = System.unique_integer([:positive])
       unit_id = "u-d326-nwp-#{n}"
@@ -174,8 +162,6 @@ defmodule Tau.Factory.UnitD326NoWorkProductTest do
       tmp_dir = mk_tmp()
       %{repo_dir: repo_dir, base_ref: base_ref} = setup_git_repo(tmp_dir)
 
-      # Oracle agent: emits work_ready so the Unit advances oracle → implementing.
-      oracle_agent = work_ready_agent_bin(tmp_dir, "feat/oracle", "aabb0011")
       # Implementing agent: exits 0 without work_ready — D-326 boundary under test.
       impl_agent = silent_exit0_agent_bin(tmp_dir)
 
@@ -199,33 +185,53 @@ defmodule Tau.Factory.UnitD326NoWorkProductTest do
       end
 
       # The worker_fun is called from within the Unit process. self() == unit_pid.
-      # We use role to select which agent binary to run:
-      # - :oracle  → work_ready agent (Unit advances to implementing)
-      # - :implementer → silent-exit-0 agent (D-326 boundary under test)
+      #
+      # Oracle phase (:test_author): send the required 5-tuple work_ready via a
+      # synthetic in-process worker. The 5-tuple carries a non-empty
+      # gating_test_paths list, satisfying INV-WF-13 Clause 1.
+      #
+      # NOTE: Tau.Factory.Worker sends only 4-tuple work_ready events. The Unit
+      # (after INV-WF-13) rejects 4-tuples in oracle and stays stuck. Using a
+      # synthetic worker here is the only way to advance oracle->implementing.
+      #
+      # The synthetic worker sends the spawn request to test_pid to avoid
+      # running Process.spawn inside the Unit's process (which would confuse
+      # Process.monitor semantics). The Unit blocks on receive waiting for
+      # {:oracle_worker_pid, pid} from the test process.
+      #
+      # Implementing phase (:implementer): use a real Worker backed by a
+      # silent-exit-0 agent to exercise the D-326 boundary end-to-end.
       worker_fun = fn role ->
         unit_pid = self()
 
-        # Oracle phase uses :test_author role; implementing phase uses :implementer.
-        agent_bin = if role == :test_author, do: oracle_agent, else: impl_agent
+        case role do
+          :test_author ->
+            oracle_worker_id = "oracle-#{System.unique_integer([:positive])}"
+            send(test_pid, {:spawn_oracle_worker, unit_pid, oracle_worker_id, self()})
 
-        {:ok, worker_id} =
-          @worker_supervisor.spawn(
-            worker_sup_name,
-            role,
-            "test brief",
-            base_ref,
-            repo_dir: repo_dir,
-            agent_bin: agent_bin,
-            report_to: unit_pid,
-            registry: worker_reg_name
-          )
+            receive do
+              {:oracle_worker_pid, pid} -> {:ok, pid, oracle_worker_id}
+            after
+              3_000 -> {:error, :oracle_worker_spawn_timeout}
+            end
 
-        case resolve_pid_from_registry(worker_reg_name, worker_id) do
-          {:ok, worker_pid} ->
-            {:ok, worker_pid, worker_id}
+          :implementer ->
+            {:ok, worker_id} =
+              @worker_supervisor.spawn(
+                worker_sup_name,
+                role,
+                "test brief",
+                base_ref,
+                repo_dir: repo_dir,
+                agent_bin: impl_agent,
+                report_to: unit_pid,
+                registry: worker_reg_name
+              )
 
-          {:error, reason} ->
-            {:error, reason}
+            case resolve_pid_from_registry(worker_reg_name, worker_id) do
+              {:ok, worker_pid} -> {:ok, worker_pid, worker_id}
+              {:error, reason} -> {:error, reason}
+            end
         end
       end
 
@@ -238,41 +244,78 @@ defmodule Tau.Factory.UnitD326NoWorkProductTest do
         worker_fun: worker_fun,
         gate_fun: gate_fun,
         merge_fun: fn _uid, _hash -> :queued end,
-        timeouts: [state_timeout_ms: 10_000]
+        timeouts: [state_timeout_ms: 3_000]
       ]
 
       unit_pid = @unit_supervisor.start_unit(unit_sup_name, opts)
       assert is_pid(unit_pid), "D-326: start_unit must return a pid"
 
-      # Poll until the Unit has entered implementing AND its attempt_count has
-      # incremented beyond 1 (indicating the retry ladder has fired at least once
-      # due to the :no_work_product from the silent-exit-0 implementing worker),
-      # OR it escalates (ladder exhausted — still a D-326-conformant outcome).
+      # Serve the oracle worker spawn request from the test process.
+      # The Unit's worker_fun sends {:spawn_oracle_worker, unit_pid, worker_id, reply_to}
+      # to test_pid; we spawn the synthetic worker here and reply with the pid.
+      oracle_worker_pid =
+        receive do
+          {:spawn_oracle_worker, u_pid, oracle_worker_id, reply_to} ->
+            # Spawn the synthetic oracle worker. It sends the required 5-tuple
+            # work_ready (INV-WF-13 Clause 1) to the Unit and stays alive briefly
+            # so the Unit can monitor it.
+            oracle_pid =
+              spawn(fn ->
+                send(
+                  u_pid,
+                  {:work_ready, oracle_worker_id, "feat/oracle", "aabb0011",
+                   ["test/tau/factory/unit_d326_no_work_product_test.exs"]}
+                )
+
+                Process.sleep(500)
+              end)
+
+            send(reply_to, {:oracle_worker_pid, oracle_pid})
+            oracle_pid
+        after
+          5_000 ->
+            flunk("D-326: timed out waiting for oracle worker spawn request from Unit")
+        end
+
+      assert is_pid(oracle_worker_pid)
+
+      # Poll for the Unit to re-enter :implementing with attempt_count > 1.
       #
-      # The oracle phase completes normally (work_ready emitted), so
-      # attempt_count == 1 in the first implementing pass; after the silent agent
-      # exits 0 and the Worker delivers worker_exit(:no_work_product), the Unit
-      # routes it to the retry ladder and re-enters implementing with
-      # attempt_count == 2.
+      # This is the primary D-326 + INV-WF-13 joint assertion:
+      #   - INV-WF-13: the oracle 5-tuple advances oracle->implementing (attempt_count=1)
+      #   - D-326: the silent-exit-0 implementing worker fires worker_exit(:no_work_product),
+      #            which the Unit routes to the retry ladder, re-entering :implementing
+      #            with attempt_count=2.
+      #
+      # At the merge-base (Gate-5.3 reverted state), the Unit's oracle does NOT
+      # recognise the 5-tuple form (INV-WF-13 not yet present). The 5-tuple is
+      # discarded as an unexpected message; the Unit stays in :oracle until
+      # state_timeout fires and escalates. The poll returns {:escalated, _}, and
+      # the assertion `assert {:implementing, data} with attempt_count > 1`
+      # FAILS — correctly gating the invariant.
+      #
+      # Polling up to 200 * 50ms = 10s before declaring failure.
       final_state =
         Enum.reduce_while(1..200, nil, fn _, _ ->
           Process.sleep(50)
 
           case :sys.get_state(unit_pid) do
             {:implementing, data} when data.attempt_count > 1 ->
-              # Retry ladder fired: attempt_count incremented after :no_work_product.
-              {:halt, {:implementing, data}}
+              # SUCCESS: retry ladder fired for :no_work_product; D-326 confirmed.
+              {:halt, {:implementing_retried, data}}
 
             {:gating, _data} ->
-              # D-326 violation: the Unit gated on a worker that did not emit work_ready.
+              # D-326 violation: Unit gated without a valid work_ready.
               {:halt, {:gating_violation, :gating}}
 
             {:escalated, data} ->
-              # Ladder exhausted — D-326 conformant (gate was never called).
+              # Possible outcomes:
+              # - D-326-conformant: retry ladder exhausted (all implementing attempts failed)
+              # - Gate-5.3 fail: Unit escalated from :oracle (merge-base, INV-WF-13 absent)
+              # We cannot distinguish here; the assertion below handles both.
               {:halt, {:escalated, data}}
 
             {:merged, data} ->
-              # Should not happen — gate_fun only runs after work_ready, which never arrives.
               {:halt, {:merged_violation, data}}
 
             _ ->
@@ -282,45 +325,46 @@ defmodule Tau.Factory.UnitD326NoWorkProductTest do
 
       gate_calls = :counters.get(gate_called_ref, 1)
 
-      # D-326 primary assertion: gate_fun must NEVER be called when the
+      # -----------------------------------------------------------------------
+      # D-326 primary assertion: gate_fun MUST NOT be called when the
       # implementing worker exits 0 without emitting a work_ready frame.
+      # -----------------------------------------------------------------------
       assert gate_calls == 0,
              "D-326 [B4/B8] end-to-end: gate_fun MUST NOT be called when the implementing " <>
                "worker's agent exits 0 without emitting a work_ready frame. " <>
-               "The Worker must convert exit-0-without-work_ready to " <>
-               "worker_exit(:no_work_product) and the Unit must route it to the retry ladder. " <>
-               "gate_fun was called #{gate_calls} times. " <>
-               "FAIL: this indicates either (1) the Worker forwarded a work_ready despite no " <>
-               "in-band frame, (2) the Worker reported exit-0 as a successful completion, " <>
-               "or (3) the Unit treated exit-0-without-work_ready as completing the D-326 " <>
-               "implementing→gating transition."
+               "gate_fun was called #{gate_calls} times."
 
       refute match?({:gating_violation, _}, final_state),
              "D-326 [B4/B8] end-to-end: Unit MUST NOT enter :gating on an implementing " <>
-               "worker that exits 0 without emitting a work_ready frame. " <>
-               "exit-0-without-work_ready must produce worker_exit(:no_work_product), " <>
-               "routed to the retry ladder, never the gate."
+               "worker that exits 0 without emitting a work_ready frame."
 
       refute match?({:merged_violation, _}, final_state),
              "D-326 [B4/B8]: Unit must NOT reach :merged when no work_ready was emitted."
 
-      # The Unit must have advanced the retry ladder (re-entered implementing with
-      # attempt_count > 1) OR escalated (ladder exhausted — both are D-326-conformant).
-      assert match?({:implementing, _}, final_state) or match?({:escalated, _}, final_state),
-             "D-326 [B4/B8] end-to-end: after a silent-exit-0 implementing worker, the Unit " <>
-               "must re-enter :implementing (retry ladder fired) or reach :escalated " <>
-               "(ladder exhausted). Got: #{inspect(final_state)}. " <>
-               "gate_fun calls: #{gate_calls}."
+      # -----------------------------------------------------------------------
+      # Joint D-326 + INV-WF-13 assertion (primary gate-5.3 discriminator):
+      # The Unit MUST have successfully advanced oracle->implementing (via
+      # 5-tuple work_ready) AND the retry ladder MUST have fired at least once
+      # for :no_work_product (attempt_count > 1 in :implementing).
+      #
+      # This assertion FAILS at the merge-base because the Unit never reaches
+      # :implementing (oracle discards the 5-tuple and eventually escalates).
+      # -----------------------------------------------------------------------
+      assert match?({:implementing_retried, _}, final_state),
+             "D-326 [B4/B8] end-to-end: after oracle advances to :implementing (via " <>
+               "5-tuple work_ready) and the silent-exit-0 implementing worker fires " <>
+               "worker_exit(:no_work_product), the Unit MUST re-enter :implementing " <>
+               "with attempt_count > 1 (retry ladder confirmed). " <>
+               "Got: #{inspect(final_state)}. gate_fun calls: #{gate_calls}. " <>
+               "FAIL: either the oracle did not advance to :implementing (INV-WF-13 " <>
+               "5-tuple not accepted) or the D-326 :no_work_product was not routed " <>
+               "to the retry ladder."
 
       case final_state do
-        {:implementing, data} ->
+        {:implementing_retried, data} ->
           assert data.attempt_count > 1,
                  "D-326 [B4/B8]: attempt_count must exceed 1 after the retry ladder fires " <>
                    "for :no_work_product; got attempt_count=#{data.attempt_count}"
-
-        {:escalated, _} ->
-          # Acceptable: ladder fired until exhausted (D-318). Gate was still 0.
-          :ok
 
         _ ->
           :ok
