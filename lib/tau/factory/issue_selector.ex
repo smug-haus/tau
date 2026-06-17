@@ -16,10 +16,17 @@ defmodule Tau.Factory.IssueSelector do
        The projection is READ-ONLY — L is the authority for *what is done* and is
        NEVER written by the selector (D-331, §4 [C112-B10]).
 
-    3. Picks the smallest shippable increment (first admittable open issue in
+    3. **Enforces dependency ordering (FR-2.1)** — rejects any issue whose
+       declared `blocked-by: #N` deps are not yet satisfied (i.e. the dep unit
+       is not `:merged` in L). An escalated dep can never be satisfied; an
+       open-but-not-yet-started dep must land first. Issues with unsatisfied
+       deps are skipped; the selector returns the first issue whose deps are
+       all `:merged` in L (or has no deps), or `nil` if none exists.
+
+    4. Picks the smallest shippable increment (first admittable open issue in
        tracker order) and freezes a declared scope.
 
-    4. Returns a `work_item` `{issue, scope, hash, branch}`, or `nil` when no
+    5. Returns a `work_item` `{issue, scope, hash, branch}`, or `nil` when no
        admittable open issue remains (D-342 — milestone termination signal).
 
   ## Pinned contract (§4 B10 amendment, PR #470, updated PR #505)
@@ -128,7 +135,7 @@ defmodule Tau.Factory.IssueSelector do
     snapshots = LedgerReader.latest_unit_snapshots(ledger)
 
     issues
-    |> Enum.reject(&terminal_in_ledger?(&1, snapshots))
+    |> Enum.reject(&(terminal_in_ledger?(&1, snapshots) or unsatisfied_deps?(&1, snapshots)))
     |> pick_work_item(elaborate_fun)
   end
 
@@ -145,6 +152,31 @@ defmodule Tau.Factory.IssueSelector do
   defp terminal_in_ledger?(issue, snapshots) do
     uid = unit_id_for(issue)
     Map.get(snapshots, uid) in @terminal_states
+  end
+
+  # FR-2.1 dependency conjunct enforcer.
+  #
+  # True when the issue has at least one declared dep that is NOT `:merged` in L.
+  # A dep is satisfied only when its unit_id maps to `:merged` in snapshots.
+  # Any other state — absent (not yet started), escalated (terminal-failed), or
+  # any non-terminal in-progress state — means the dep is unsatisfied and the
+  # issue must be skipped by the selector.
+  #
+  # Note: ConflictCheck separately handles in-flight deps (units currently being
+  # worked). This guard handles the complementary cases:
+  #   • open-but-not-yet-started: dep unit not in L at all (snapshots returns nil)
+  #   • terminal-failed: dep unit is :escalated in L (can never be satisfied)
+  defp unsatisfied_deps?(issue, snapshots) do
+    issue
+    |> issue_deps()
+    |> Enum.any?(fn dep_uid -> Map.get(snapshots, dep_uid) != :merged end)
+  end
+
+  # Extract declared dep unit ids from an issue's body text.
+  # Returns a list of "unit-N" strings (may be empty).
+  defp issue_deps(issue) do
+    body = Map.get(issue, "body", "") || ""
+    extract_deps(body)
   end
 
   # Pick the smallest shippable increment: first in tracker order.
