@@ -21,6 +21,7 @@ defmodule Tau.Factory.MergeAuthority do
   alias Tau.Factory.Ledger.Writer, as: LedgerWriter
   alias Tau.Factory.Merge.Cas
   alias Tau.Factory.Merge.Health
+  alias Tau.Factory.Merge.RepoDirRegistry
 
   require Logger
 
@@ -64,6 +65,11 @@ defmodule Tau.Factory.MergeAuthority do
       (default: `&Node.list/0`; injectable for tests). If non-empty on startup,
       `start_link/1` returns `{:error, {:multi_node_detected, nodes}}` and the
       process is NOT started (INV-ST-11: control plane MUST stay single-node).
+    - `:repo_dir_registry` — module that provides `ensure_started/0` and
+      `register/1` (default `Tau.Factory.Merge.RepoDirRegistry`; injectable
+      for tests). Used to enforce INV-DIST-R5: at most one MA per repo_dir on
+      this node. A second `start_link/1` for the same `repo_dir` returns
+      `{:error, {:already_registered, repo_dir}}`.
   """
   @spec child_spec(keyword()) :: Supervisor.child_spec()
   def child_spec(opts) do
@@ -89,12 +95,31 @@ defmodule Tau.Factory.MergeAuthority do
     # from un-supervised callers (including tests).
     node_list_fun = Keyword.get(opts, :node_list_fun, &Node.list/0)
 
-    case node_list_fun.() do
-      [] ->
-        :gen_statem.start_link({:local, name}, __MODULE__, opts, [])
+    # INV-DIST-R5: Ensure the per-repo_dir registry is running before spawning.
+    # The registry is started lazily so no external supervisor is required —
+    # in production it is pre-started by Tau.Factory.Supervisor; in tests it
+    # starts on demand. The actual registration (with self() as the MA pid)
+    # happens inside init/1 to avoid a race between reserve and spawn.
+    repo_dir_registry = Keyword.get(opts, :repo_dir_registry, RepoDirRegistry)
+    {:ok, _registry_pid} = repo_dir_registry.ensure_started()
 
-      nodes ->
-        {:error, {:multi_node_detected, nodes}}
+    # Pre-spawn early-return guard (non-atomic; init/1 is the authoritative gate).
+    # Avoids spawning a process that would immediately stop — which would
+    # propagate an EXIT signal to the caller even though gen_statem.start_link
+    # internally handles it. The pre-spawn check is safe for the sequential
+    # production use-case; the init/1 gate handles concurrent races.
+    repo_dir = Keyword.fetch!(opts, :repo_dir)
+
+    if repo_dir_registry.registered?(repo_dir) do
+      {:error, {:already_registered, repo_dir}}
+    else
+      case node_list_fun.() do
+        [] ->
+          :gen_statem.start_link({:local, name}, __MODULE__, opts, [])
+
+        nodes ->
+          {:error, {:multi_node_detected, nodes}}
+      end
     end
   end
 
@@ -138,13 +163,32 @@ defmodule Tau.Factory.MergeAuthority do
     node_list_fun = Keyword.get(opts, :node_list_fun, &Node.list/0)
 
     case node_list_fun.() do
-      [] ->
-        init_state(opts)
-
-      nodes ->
+      nodes when nodes != [] ->
         # Defence-in-depth: if start_link's pre-spawn guard was bypassed
         # (e.g. direct :gen_statem.start_link call), stop the process here.
         {:stop, {:multi_node_detected, nodes}}
+
+      [] ->
+        # INV-DIST-R5: per-repo_dir single-instance guard. Register this process
+        # (self()) with the RepoDirRegistry. The registration is atomic: if
+        # another live MergeAuthority is already registered for this repo_dir,
+        # init/1 stops with {:already_registered, repo_dir} and start_link
+        # returns {:error, {:already_registered, repo_dir}} to the caller.
+        # The registry monitors self() and cleans up the entry on process exit.
+        repo_dir = Keyword.fetch!(opts, :repo_dir)
+        repo_dir_registry = Keyword.get(opts, :repo_dir_registry, RepoDirRegistry)
+
+        # Ensure the registry is running (idempotent — no-op if already started
+        # by start_link/1 or Tau.Factory.Supervisor).
+        {:ok, _} = repo_dir_registry.ensure_started()
+
+        case repo_dir_registry.register(repo_dir) do
+          :ok ->
+            init_state(opts)
+
+          {:error, {:already_registered, ^repo_dir}} ->
+            {:stop, {:already_registered, repo_dir}}
+        end
     end
   end
 

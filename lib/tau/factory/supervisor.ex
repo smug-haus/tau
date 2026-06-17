@@ -45,6 +45,7 @@ defmodule Tau.Factory.Supervisor do
   alias Tau.Factory.Fleet.Watchdog
   alias Tau.Factory.KillSwitch
   alias Tau.Factory.Ledger.Writer, as: LedgerWriter
+  alias Tau.Factory.Merge.RepoDirRegistry
   alias Tau.Factory.MergeAuthority
   alias Tau.Factory.Scheduler
   alias Tau.Factory.UnitRegistry
@@ -265,6 +266,9 @@ defmodule Tau.Factory.Supervisor do
       {Scheduler, name: scheduler_name, w_cap: 5},
       # 4. Task.Supervisor for MergeAuthority's async integration tasks.
       {Task.Supervisor, name: tasks_name},
+      # 4b. RepoDirRegistry — per-repo_dir single-instance guard (INV-DIST-R5).
+      #     Must start before MergeAuthority so ensure_started/0 is a no-op there.
+      RepoDirRegistry,
       # 5. MergeAuthority — sole writer of origin/main; gen_statem.
       {MergeAuthority,
        name: ma_name,
