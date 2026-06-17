@@ -160,46 +160,57 @@ defmodule Tau.Factory.Scheduler do
 
   @impl GenServer
   def handle_call({:admit, unit_id, declared_scope, policy}, {caller_pid, _tag} = _from, state) do
-    # D-380 self-exclusion: evaluate admission over F ∖ {unit_id} so a unit
-    # never conflicts with its own in-flight entry (idempotent upsert).
-    f_prime = Map.delete(state.f, unit_id)
+    # C206-B6: engine-clamp/1 runs at admission, BEFORE the pin.  Clamp the
+    # policy first; a value that could falsify a protected invariant is
+    # rejected here so an un-clamped value never reaches the pin store.
+    case clamp_policy(policy) do
+      {:error, reason} ->
+        # C206-B6: policy rejected by engine-clamp — defer rather than admit
+        # with an unsafe value.  D-343: F and pins MUST NOT be mutated.
+        {:reply, {:defer, {:policy_clamp_rejected, reason}}, state}
 
-    t0 = System.monotonic_time(:microsecond)
+      {:ok, clamped_policy} ->
+        # D-380 self-exclusion: evaluate admission over F ∖ {unit_id} so a unit
+        # never conflicts with its own in-flight entry (idempotent upsert).
+        f_prime = Map.delete(state.f, unit_id)
 
-    result =
-      case evaluate_admission(unit_id, declared_scope, policy, %{state | f: f_prime}) do
-        :admit -> :admit
-        {:defer, reason} -> {:defer, reason}
-      end
+        t0 = System.monotonic_time(:microsecond)
 
-    latency_us = System.monotonic_time(:microsecond) - t0
-
-    # OTP non-negotiable §5 / D-380 single-authority auditability:
-    # emit [:tau, :factory, :scheduler, :admit] so the caller_pid can be
-    # audited to verify only the Unit FSM planned state calls admit.
-    :telemetry.execute(
-      [:tau, :factory, :scheduler, :admit],
-      %{latency_us: latency_us},
-      %{unit_id: unit_id, result: result, caller_pid: caller_pid}
-    )
-
-    case result do
-      :admit ->
-        new_f = Map.put(state.f, unit_id, declared_scope)
-        # INV-POLICY-PIN: pin the policy at admission when supplied;
-        # re-admit MUST NOT overwrite an existing pin.
-        new_pins =
-          if is_nil(policy) or Map.has_key?(state.pins, unit_id) do
-            state.pins
-          else
-            Map.put(state.pins, unit_id, policy)
+        result =
+          case evaluate_admission(unit_id, declared_scope, clamped_policy, %{state | f: f_prime}) do
+            :admit -> :admit
+            {:defer, reason} -> {:defer, reason}
           end
 
-        {:reply, :admit, %{state | f: new_f, pins: new_pins}}
+        latency_us = System.monotonic_time(:microsecond) - t0
 
-      {:defer, reason} ->
-        # D-343: F and pins MUST NOT be mutated on a defer path.
-        {:reply, {:defer, reason}, state}
+        # OTP non-negotiable §5 / D-380 single-authority auditability:
+        # emit [:tau, :factory, :scheduler, :admit] so the caller_pid can be
+        # audited to verify only the Unit FSM planned state calls admit.
+        :telemetry.execute(
+          [:tau, :factory, :scheduler, :admit],
+          %{latency_us: latency_us},
+          %{unit_id: unit_id, result: result, caller_pid: caller_pid}
+        )
+
+        case result do
+          :admit ->
+            new_f = Map.put(state.f, unit_id, declared_scope)
+            # INV-POLICY-PIN: pin the CLAMPED policy at admission when supplied;
+            # re-admit MUST NOT overwrite an existing pin.
+            new_pins =
+              if is_nil(clamped_policy) or Map.has_key?(state.pins, unit_id) do
+                state.pins
+              else
+                Map.put(state.pins, unit_id, clamped_policy)
+              end
+
+            {:reply, :admit, %{state | f: new_f, pins: new_pins}}
+
+          {:defer, reason} ->
+            # D-343: F and pins MUST NOT be mutated on a defer path.
+            {:reply, {:defer, reason}, state}
+        end
     end
   end
 
@@ -220,6 +231,16 @@ defmodule Tau.Factory.Scheduler do
   # ---------------------------------------------------------------------------
   # Private helpers
   # ---------------------------------------------------------------------------
+
+  # C206-B6: clamp the policy before pinning.  Returns {:ok, clamped} for a
+  # valid (possibly clamped) policy, {:ok, nil} when no policy is supplied, or
+  # {:error, reason} when the policy value is rejected by Policy.clamp/1.
+  @spec clamp_policy(Policy.t() | nil) :: {:ok, Policy.t() | nil} | {:error, term()}
+  defp clamp_policy(nil), do: {:ok, nil}
+
+  defp clamp_policy(%Policy{} = p) do
+    Policy.clamp(p)
+  end
 
   # Evaluate all three admission conditions in precedence order.
   # Returns :admit or {:defer, reason}. Never mutates state.
