@@ -227,7 +227,7 @@ defmodule Mix.Tasks.Tau.Factory.Dogfood do
   end
 
   # Hard-refuse a non-local origin (D-359 / [C122-B11]).
-  # Network schemes: https://, git@...: (SCP syntax), ssh://.
+  # Network schemes: https://, http://, git://, ssh://, git@...: (SCP syntax).
   # Exits non-zero with an explicit refusal message naming the non-local origin.
   defp check_local_origin!(origin_url) do
     if non_local_origin?(origin_url) do
@@ -248,6 +248,7 @@ defmodule Mix.Tasks.Tau.Factory.Dogfood do
   defp non_local_origin?(url) do
     String.starts_with?(url, "https://") or
       String.starts_with?(url, "http://") or
+      String.starts_with?(url, "git://") or
       String.starts_with?(url, "ssh://") or
       Regex.match?(~r/\Agit@[^:]+:/, url)
   end
