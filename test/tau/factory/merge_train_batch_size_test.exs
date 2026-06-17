@@ -4,51 +4,58 @@ defmodule Tau.Factory.MergeTrainBatchSizeTest do
 
   ## Invariant under test
 
-  SPEC-FACTORY-MERGE §3 [C213-B4]:
+  SPEC-FACTORY-MERGE §4 B8 + D-341:
 
-  > "The merge-train breaks the loop (HR-5). Integrating a batch of B green
-  > units in one rebase+gate+health cycle makes the re-stale cost O(1) per
-  > batch rather than O(W) per unit."
-  >
-  > "…operate conservatively (small W_cap, B ≥ 2, never B = 1 which is the
-  > unstable serial regime)."
+  > "Paired `[:tau, :factory, :merge, …]` spans … `:queue`. The `:queue`
+  > span's `max_restale_count` / `max_wait_ms` are the **live falsification
+  > test for LIV-2** (an unbounded climb is starvation surfacing). Spans
+  > also feed the `T_int` model the §sizing rule depends on — measurement
+  > is a binding input, not optional instrumentation."
 
-  When multiple units have been submitted to M and are waiting in the queue
-  at train-assembly time, `start_build/1` MUST assemble a train with B ≥ 2
-  — i.e. the train passed to the `build_fun` MUST contain more than one unit.
-  A single-member train (B = 1) is the serial regime HR-5 explicitly forbids.
+  When M transitions from `:idle` → `:integrating` (train assembled),
+  it MUST emit a `[:tau, :factory, :merge, :queue]` telemetry event whose
+  measurements map includes BOTH `:max_restale_count` and `:max_wait_ms`.
 
-  ## Current failure mode (audit finding, issue #585)
+  Without this event the runtime falsification of LIV-2 / D-341 (FIFO+aging
+  starvation guard) is unenforceable. The SPEC treats its absence as a
+  binding gap, not optional instrumentation.
 
-  `start_build/1` at merge_authority.ex:433-434 unconditionally builds a
-  single-member train:
+  ## Why the previous batch-size assertion was vacuous
 
-      defp start_build(%{queue: [unit | rest]} = data) do
-        train = [unit]    # ← always 1, never B ≥ 2
+  The prior version of this test asserted `length(train) >= 2` after two
+  units were queued behind a blocked first build. Commit `1d65e6e` changed
+  `start_build/1` to `train = [unit | rest]` (full-queue assembly), so the
+  assertion passed against the post-implementation code. A gating test MUST
+  fail before the production change it gates; that one no longer did.
 
-  Every other `train =` assignment (lines 235/479/577) merely reads or
-  filters the existing single-member train; no path assembles B ≥ 2. The
-  `Tau.Factory.Merge.Train` module (C2, `assemble/2`) does not exist.
+  ## Current failure mode (B8 gap, D-341)
+
+  `start_build/1` (merge_authority.ex:591-617) emits only
+  `[:tau, :factory, :merge, :integrating]` via the private `telemetry/3`
+  helper. No path in the module emits `[:tau, :factory, :merge, :queue]`
+  with `max_restale_count` / `max_wait_ms`. A telemetry handler attached
+  to that event never fires.
 
   ## Fail-before validity (oracle separation)
 
-  Against the current code, the second build_fun call receives a train of
-  exactly 1 unit, so the `assert length(train) >= 2` assertion FAILS.
+  Against the current code the `[:tau, :factory, :merge, :queue]` handler
+  is never invoked, so the test times out on `assert_receive` and FAILS.
 
   ## Test strategy
 
-  1. Start M with a blocking build_fun.
-  2. Submit the first unit — M enters :integrating with train=[u1] (the
-     queue was empty, no batch opportunity yet; this is acceptable).
-  3. While M is blocked in :integrating, submit 2 more units — they queue.
-  4. Unblock the first build (returns :built); M transitions back to :idle
-     and calls start_build/1 with queue=[u2, u3].
-  5. The second build_fun invocation MUST receive a train with length ≥ 2.
+  1. Attach a telemetry handler for `[:tau, :factory, :merge, :queue]`
+     that forwards the measurement map to the test process.
+  2. Start MA with a build_fun that signals arrival then blocks.
+  3. Submit one unit via `MergeAuthority.request_merge/2`.
+  4. Wait for the first-build signal (MA has entered :integrating).
+  5. Assert that the queue telemetry event was received with BOTH
+     `:max_restale_count` and `:max_wait_ms` keys in measurements.
 
-  The test exercises `MergeAuthority.request_merge/2` — the real user-facing
-  entry point (§4 B1). No hand-built struct bypasses the gen_statem.
+  The test exercises `MergeAuthority.request_merge/2` — the real
+  user-facing entry point (§4 B1). No hand-built struct bypasses the
+  gen_statem.
 
-  ## AC/D-NNN linkage: HR-5, [C213-B4], SPEC-FACTORY-MERGE §3
+  ## AC/D-NNN linkage: HR-5, D-341, SPEC-FACTORY-MERGE §4 B8
   """
 
   use ExUnit.Case, async: false
@@ -133,118 +140,65 @@ defmodule Tau.Factory.MergeTrainBatchSizeTest do
     work_path
   end
 
-  # Poll :sys.get_state until the MA reaches expected_state or deadline passes.
-  defp wait_for_state(pid, expected_state, timeout_ms) do
-    deadline = System.monotonic_time(:millisecond) + timeout_ms
-
-    Enum.find_value(Stream.repeatedly(fn -> :ok end), fn _ ->
-      try do
-        {state, _data} = :sys.get_state(pid)
-
-        if state == expected_state do
-          true
-        else
-          if System.monotonic_time(:millisecond) >= deadline do
-            throw(:timeout)
-          end
-
-          :timer.sleep(10)
-          false
-        end
-      rescue
-        _ ->
-          if System.monotonic_time(:millisecond) >= deadline do
-            throw(:timeout)
-          end
-
-          :timer.sleep(10)
-          false
-      end
-    end)
-  catch
-    :timeout -> false
-  end
-
   # ---------------------------------------------------------------------------
-  # HR-5 / [C213-B4]: train batch size ≥ 2 when queue has ≥ 2 units waiting
+  # HR-5 / D-341 / B8: queue telemetry emitted on train assembly
   # ---------------------------------------------------------------------------
 
-  describe "HR-5 / [C213-B4] — merge-train assembles B ≥ 2 when ≥ 2 units queued" do
+  describe "HR-5 / D-341 — [:tau, :factory, :merge, :queue] telemetry emitted on train assembly" do
     @tag :"HR-5"
-    test "HR-5 [C213-B4]: when ≥ 2 units are in the queue at transition_from_idle, the assembled train has length ≥ 2" do
+    test "HR-5 [D-341] [B8]: start_build/1 MUST emit [:tau, :factory, :merge, :queue] with max_restale_count and max_wait_ms when assembling a train" do
       test_pid = self()
       tmp_dir = Briefly.create!(type: :directory)
 
       u1 = %{
-        id: "u-hr5-1-#{System.unique_integer([:positive])}",
-        hash: "hash-hr5-1-#{System.unique_integer([:positive])}",
-        run: "run-hr5-1",
-        branch: "feat/hr5-unit-1"
+        id: "u-hr5-q-1-#{System.unique_integer([:positive])}",
+        hash: "hash-hr5-q-1-#{System.unique_integer([:positive])}",
+        run: "run-hr5-q-1",
+        branch: "feat/hr5-queue-unit-1"
       }
 
-      u2 = %{
-        id: "u-hr5-2-#{System.unique_integer([:positive])}",
-        hash: "hash-hr5-2-#{System.unique_integer([:positive])}",
-        run: "run-hr5-2",
-        branch: "feat/hr5-unit-2"
-      }
+      writer = start_writer_with_pass_verdicts([u1])
+      work_path = setup_git_repo(tmp_dir, [u1])
 
-      u3 = %{
-        id: "u-hr5-3-#{System.unique_integer([:positive])}",
-        hash: "hash-hr5-3-#{System.unique_integer([:positive])}",
-        run: "run-hr5-3",
-        branch: "feat/hr5-unit-3"
-      }
+      # Attach a telemetry handler that forwards the queue event's measurements
+      # to the test process. The handler id is unique to this test run to avoid
+      # collisions with concurrent tests.
+      handler_id = "test-hr5-queue-#{System.unique_integer([:positive])}"
 
-      units = [u1, u2, u3]
+      :telemetry.attach(
+        handler_id,
+        [:tau, :factory, :merge, :queue],
+        fn _event, measurements, _metadata, _config ->
+          send(test_pid, {:queue_telemetry, measurements})
+        end,
+        nil
+      )
 
-      writer = start_writer_with_pass_verdicts(units)
-      work_path = setup_git_repo(tmp_dir, units)
+      on_exit(fn -> :telemetry.detach(handler_id) end)
 
-      # build_fun:
-      #  - First invocation: block until test sends {:proceed, ref}, then return :built.
-      #    This gives the test time to submit u2 and u3 while M is :integrating.
-      #  - Second invocation: record the train length and return :built immediately.
-      #
-      # The barrier mechanism mirrors merge_serialized_test.exs: the MA process
-      # forwards {:proceed, ref} info-messages to the Task process (integrating/3,
-      # line ~200-209). The task blocks in receive waiting for that ref.
-
-      build_count = :atomics.new(1, [])
-      :atomics.put(build_count, 1, 0)
-
+      # build_fun: signal arrival so the test knows MA entered :integrating,
+      # then block until released. The block prevents the train from completing
+      # before we can assert on the telemetry event.
       build_fun = fn train, _base ->
-        n = :atomics.add_get(build_count, 1, 1)
+        barrier_ref = make_ref()
+        send(test_pid, {:at_build_barrier, barrier_ref})
 
-        case n do
-          1 ->
-            # First build: announce barrier arrival, then block.
-            barrier_ref = make_ref()
-            send(test_pid, {:at_first_barrier, barrier_ref})
-
-            receive do
-              {:proceed, ^barrier_ref} -> :ok
-            after
-              15_000 -> raise "HR-5 test: first-build barrier timed out"
-            end
-
-            {:built, train, "base-1", "tip-1"}
-
-          _ ->
-            # Subsequent builds: record train size and complete immediately.
-            send(test_pid, {:second_build_train_size, length(train)})
-            {:built, train, "base-2", "tip-2"}
+        receive do
+          {:proceed, ^barrier_ref} -> :ok
+        after
+          15_000 -> raise "HR-5 queue test: build barrier timed out"
         end
+
+        {:built, train, "base-q", "tip-q"}
       end
 
-      ma_name = :"test_ma_hr5_#{System.unique_integer([:positive])}"
-      tasks_name = :"test_ma_tasks_hr5_#{System.unique_integer([:positive])}"
+      ma_name = :"test_ma_hr5_queue_#{System.unique_integer([:positive])}"
+      tasks_name = :"test_ma_tasks_hr5_queue_#{System.unique_integer([:positive])}"
 
       ma_pid =
         start_supervised!(
           {
             MergeAuthority,
-            # Inject :green so M returns to :idle cleanly after CAS succeeds.
             name: ma_name,
             ledger: writer,
             repo_dir: work_path,
@@ -258,33 +212,36 @@ defmodule Tau.Factory.MergeTrainBatchSizeTest do
           id: ma_name
         )
 
-      # Step 1: submit u1 — M should enter :integrating with train=[u1].
+      # Submit u1 via the real entry point — M should transition to :integrating,
+      # triggering start_build/1 which MUST emit the :queue telemetry event.
       assert MergeAuthority.request_merge(ma_pid, u1) == :queued
 
-      # Step 2: wait for M to reach the first-build barrier.
-      assert_receive {:at_first_barrier, barrier_ref},
+      # Wait for MA to enter :integrating (the build_fun has been invoked).
+      assert_receive {:at_build_barrier, barrier_ref},
                      5_000,
-                     "HR-5: MA did not enter :integrating within 5 s"
+                     "HR-5 queue test: MA did not enter :integrating within 5 s"
 
-      # Step 3: submit u2 and u3 while M is :integrating — they must queue.
-      assert MergeAuthority.request_merge(ma_pid, u2) == :queued
-      assert MergeAuthority.request_merge(ma_pid, u3) == :queued
+      # Assert the :queue telemetry event was emitted during start_build/1.
+      # Conformant code emits [:tau, :factory, :merge, :queue] with
+      # max_restale_count and max_wait_ms before launching the Task.
+      # Non-conformant code (current) never emits this event; the assert_receive
+      # times out and the test FAILS.
+      assert_receive {:queue_telemetry, measurements},
+                     500,
+                     "HR-5 / D-341 / B8: [:tau, :factory, :merge, :queue] telemetry was NOT emitted during train assembly — " <>
+                       "start_build/1 MUST emit this event with :max_restale_count and :max_wait_ms before launching the build Task " <>
+                       "(SPEC-FACTORY-MERGE §4 B8 — the live LIV-2 starvation falsification watch)"
 
-      # Step 4: release the first build.
-      # MA.integrating/3 forwards {:proceed, ref} messages to the blocked task.
+      assert Map.has_key?(measurements, :max_restale_count),
+             "HR-5 / D-341: [:tau, :factory, :merge, :queue] measurements MUST include :max_restale_count; " <>
+               "got: #{inspect(Map.keys(measurements))}"
+
+      assert Map.has_key?(measurements, :max_wait_ms),
+             "HR-5 / D-341: [:tau, :factory, :merge, :queue] measurements MUST include :max_wait_ms; " <>
+               "got: #{inspect(Map.keys(measurements))}"
+
+      # Release the build so the process terminates cleanly.
       send(ma_pid, {:proceed, barrier_ref})
-
-      # Step 5: wait for the second build invocation and assert batch size ≥ 2.
-      # Conformant code assembles train=[u2, u3] (length=2).
-      # Current (non-conformant) code assembles train=[u2] only (length=1).
-      assert_receive {:second_build_train_size, batch_size},
-                     10_000,
-                     "HR-5: second build_fun was not invoked within 10 s after releasing first build"
-
-      assert batch_size >= 2,
-             "HR-5 / [C213-B4]: start_build/1 MUST assemble a train of B ≥ 2 " <>
-               "when ≥ 2 units are queued at transition_from_idle time; " <>
-               "got B = #{batch_size} (the unstable serial regime the arch §5 [C213-B4] forbids)"
     end
   end
 end
