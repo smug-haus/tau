@@ -19,6 +19,36 @@ defmodule Tau.Factory.MergeRedMainEscalationTest do
 
   AC linkage: @tag :d_303 covers the D-303 token required by Gate 5.1.
 
+  ## Design intent: why post_merge_health_fun injection is required
+
+  The SPEC (§4 B6, [C209-B6]) states E-RED-MAIN fires on a POST-MERGE
+  origin/main re-check, not a pre-push tip health check.  The pre-push check
+  handles a red batch tip (ejected before push); E-RED-MAIN is for the
+  scenario where the push SUCCEEDS (cas_push returns :ok) but origin/main
+  is thereafter observed red — e.g., the merged tip, while itself green,
+  interacts with concurrent changes already on main that produce a red result.
+
+  To test this:
+  1. `build_fun` is injected to return {:built, units, base, tip} directly,
+     bypassing the real pre-push health subprocess (simulating a merge that
+     passed all pre-push gates and whose cas_push would succeed).
+  2. A `PassingCas` module is injected so cas_push returns :ok without
+     touching real git.
+  3. `post_merge_health_fun` is injected to return {:red, report}, simulating
+     the origin/main re-check finding a red state after the push.
+
+  Without injection (2) and (3), a real CAS push against a green git topology
+  succeeds and a real post-merge health check on the green origin/main returns
+  :green — E-RED-MAIN never fires.  The test would time out, asserting a
+  condition that can never be true in a green topology.
+
+  The original test (commit 58ece18) was written with this design intent
+  (see the comment at lines 96-100 of that commit) but omitted the
+  `post_merge_health_fun` key from the `start_supervised!` opts and omitted
+  the PassingCas injection.  Without those, the test asserts E-RED-MAIN on a
+  green post-merge main, which contradicts [C209-B6] and cannot pass against
+  any correct implementation.  This rewrite corrects the omission.
+
   Failure mode before implementation:
     The test asserts {:escalate, {:"E-RED-MAIN", :global}} arrives on
     "factory:control" within 5_000 ms.  Because MergeAuthority has NO
@@ -32,80 +62,29 @@ defmodule Tau.Factory.MergeRedMainEscalationTest do
   use ExUnit.Case, async: false
 
   @moduletag :capture_log
-  # Real git + mix subprocesses can be slow on CI.
+  # Real git subprocesses can be slow on CI.
   @moduletag timeout: 120_000
 
   @merge_authority Tau.Factory.MergeAuthority
   @writer Tau.Factory.Ledger.Writer
 
   # ---------------------------------------------------------------------------
-  # Git topology helpers (adapted from merge_health_test.exs)
+  # Injected CAS seam — identical to merge_build_retry_test.exs / reject_durable_outcome_test.exs
   # ---------------------------------------------------------------------------
 
-  # Minimal self-contained mix project — starts green so the pre-push tip
-  # health passes, allowing the CAS push to land.
-  defp write_green_mix_project(dir) do
-    File.mkdir_p!(Path.join(dir, "lib"))
-    File.mkdir_p!(Path.join(dir, "test"))
-
-    File.write!(Path.join(dir, "mix.exs"), """
-    defmodule RedMainFixture.MixProject do
-      use Mix.Project
-
-      def project do
-        [
-          app: :red_main_fixture,
-          version: "0.1.0",
-          elixir: "~> 1.14",
-          start_permanent: Mix.env() == :prod,
-          deps: []
-        ]
-      end
-    end
-    """)
-
-    File.write!(Path.join(dir, "lib/red_main_fixture.ex"), """
-    defmodule RedMainFixture do
-      @moduledoc "Minimal fixture for post-merge red-main test."
-      def hello, do: :world
-    end
-    """)
-
-    File.write!(Path.join(dir, "test/test_helper.exs"), "ExUnit.start()\n")
-
-    File.write!(Path.join(dir, "test/red_main_fixture_test.exs"), """
-    defmodule RedMainFixtureTest do
-      use ExUnit.Case
-
-      test "passes on feature branch (green pre-push tip)" do
-        assert RedMainFixture.hello() == :world
-      end
-    end
-    """)
+  defmodule PassingCas do
+    @moduledoc false
+    def assert_all_verdicts_live(_ledger, _units, _required_halves), do: :all_pass
+    def cas_push(_repo_dir, _tip, _base), do: :ok
   end
 
-  # Set up:
-  #   origin.git — bare; contains a RED main (failing test on main itself)
-  #   work/      — clone; feature branch has a GREEN tip (so pre-push tip
-  #                health passes and CAS push succeeds)
-  #
-  # After the CAS push fast-forwards main to the green feature tip, the
-  # post-merge health check WOULD see a green origin/main — so we cannot use
-  # a trivially failing test on the feature branch.
-  #
-  # Instead we inject build_fun to bypass the pre-push health step (returning
-  # {:built, units, base, tip} directly) and set up a separate
-  # post_merge_health_fun that the MA SHOULD call — which returns {:red, report}.
-  # Since MA has no such injection point or post-merge check today, the
-  # escalation never fires.
-  #
-  # The git topology still needs a real repo so request_merge goes through
-  # the real start_link / request_merge / gen_statem path.
+  # ---------------------------------------------------------------------------
+  # Git topology helper — minimal real repo so start_build's fetch_main_oid succeeds
+  # ---------------------------------------------------------------------------
+
   defp setup_repo(tmp_dir, unit_branch) do
     origin_path = Path.join(tmp_dir, "origin.git")
     work_path = Path.join(tmp_dir, "work")
-
-    write_green_mix_project(work_path)
 
     {_, 0} = System.cmd("git", ["init", "-b", "main", work_path])
 
@@ -115,7 +94,8 @@ defmodule Tau.Factory.MergeRedMainEscalationTest do
 
     git.(["config", "user.email", "test@tau.test"])
     git.(["config", "user.name", "Tau Test"])
-    {_, 0} = git.(["add", "."])
+    File.write!(Path.join(work_path, "README"), "initial\n")
+    {_, 0} = git.(["add", "README"])
     {_, 0} = git.(["commit", "-m", "initial: green main"])
 
     {_, 0} = System.cmd("git", ["init", "--bare", origin_path])
@@ -126,39 +106,17 @@ defmodule Tau.Factory.MergeRedMainEscalationTest do
     {main_oid_raw, 0} = git.(["rev-parse", "HEAD"])
     main_oid = String.trim(main_oid_raw)
 
-    # Create a GREEN feature branch (so a real pre-push tip health passes).
+    # Create a feature branch so request_merge has a real branch to submit.
     {_, 0} = git.(["checkout", "-b", unit_branch])
-
-    File.write!(Path.join(work_path, "lib/red_main_fixture.ex"), """
-    defmodule RedMainFixture do
-      @moduledoc "Green feature addition."
-      def hello, do: :world
-      def feature, do: :ok
-    end
-    """)
-
-    File.write!(Path.join(work_path, "test/red_main_fixture_test.exs"), """
-    defmodule RedMainFixtureTest do
-      use ExUnit.Case
-
-      test "passes on feature branch (green pre-push tip)" do
-        assert RedMainFixture.hello() == :world
-      end
-
-      test "feature function passes" do
-        assert RedMainFixture.feature() == :ok
-      end
-    end
-    """)
-
+    File.write!(Path.join(work_path, "feature.txt"), "feature work\n")
     {_, 0} = git.(["add", "."])
-    {_, 0} = git.(["commit", "-m", "feat: green addition"])
+    {_, 0} = git.(["commit", "-m", "feat: feature work"])
     {tip_raw, 0} = git.(["rev-parse", "HEAD"])
     tip = String.trim(tip_raw)
     {_, 0} = git.(["push", "origin", unit_branch])
     {_, 0} = git.(["checkout", "main"])
 
-    {origin_path, work_path, main_oid, tip}
+    {work_path, main_oid, tip}
   end
 
   defp seed_pass_verdicts(writer, %{hash: hash, run: run}) do
@@ -212,7 +170,7 @@ defmodule Tau.Factory.MergeRedMainEscalationTest do
         branch: unit_branch
       }
 
-      {_origin_path, work_path, _main_oid, tip} = setup_repo(tmp_dir, unit_branch)
+      {work_path, _main_oid, tip} = setup_repo(tmp_dir, unit_branch)
 
       db_path = Briefly.create!(extname: ".db")
       writer_name = :"test_writer_d303_#{System.unique_integer([:positive])}"
@@ -225,8 +183,8 @@ defmodule Tau.Factory.MergeRedMainEscalationTest do
 
       seed_pass_verdicts(writer, unit)
 
-      # Start a real isolated PubSub for this test so we can observe the
-      # "factory:control" escalation broadcast without noise from other tests.
+      # Isolated PubSub so we can observe the "factory:control" escalation
+      # broadcast without noise from other tests.
       pubsub_name = :"test_pubsub_d303_#{System.unique_integer([:positive])}"
 
       start_supervised!(
@@ -236,30 +194,27 @@ defmodule Tau.Factory.MergeRedMainEscalationTest do
 
       :ok = Phoenix.PubSub.subscribe(pubsub_name, "factory:control")
 
-      # Inject a build_fun that:
-      #   (a) bypasses pre-push tip health (returns {:built, ...} directly), so
-      #       the CAS push proceeds and lands on origin/main — simulating a
-      #       merge that succeeded at the pre-push gate but produced a red main.
-      #   (b) DOES NOT include any post-merge health logic — that is solely M's
-      #       responsibility per [C209-B6].
-      #
-      # A real post-merge red main would arise when the batch tip, while itself
-      # green, integrates with concurrent changes already on main that together
-      # produce a red result.  For test purposes, we use a build_fun that
-      # returns the tip directly; the SPEC requires M to independently re-check
-      # origin/main AFTER the push, which is what we are asserting here.
       ma_name = :"test_ma_d303_#{System.unique_integer([:positive])}"
       tasks_name = :"test_tasks_d303_#{System.unique_integer([:positive])}"
 
-      # This build_fun simulates a merge that passes the pre-push gate.
-      # It does NOT perform the post-merge re-check — that is M's job.
-      # The CAS module here is the default Tau.Factory.Merge.Cas, operating on
-      # the real git work_path / origin.git topology.
+      # build_fun: simulates a merge that passes all pre-push gates.
+      # Returns {:built, units, base, tip} immediately — the pre-push health
+      # step is bypassed so the CAS step proceeds.
+      #
+      # This simulates the scenario documented in [C209-B6]: the batch tip
+      # was itself green (pre-push health passed), but after the push,
+      # origin/main is observed red (e.g. due to interaction with concurrent
+      # changes already on main that were not in the batch tip's test suite).
       build_fun = fn units, base ->
-        # Simulate: rebase + pre-push gate all pass.  Return the feature tip
-        # as the merged tip.  This causes cas_push to attempt to advance
-        # origin/main to `tip`.
         {:built, units, base, tip}
+      end
+
+      # post_merge_health_fun: injected to simulate a red post-merge main.
+      # This is the function MergeAuthority SHOULD call after cas_push succeeds
+      # ([C209-B6] / §4 B6 / §5 batch lifecycle diagram "post-merge main re-check").
+      # Returns {:red, report} — the condition under which E-RED-MAIN fires.
+      post_merge_health_fun = fn _repo_dir, _lang, _ctx ->
+        {:red, %{phase: :post_merge_check, output: "simulated red post-merge main"}}
       end
 
       ma_pid =
@@ -271,31 +226,34 @@ defmodule Tau.Factory.MergeRedMainEscalationTest do
            required_halves: [:critic, :reviewer],
            tasks_name: tasks_name,
            pubsub: pubsub_name,
-           build_fun: build_fun},
+           cas: PassingCas,
+           build_fun: build_fun,
+           post_merge_health_fun: post_merge_health_fun},
           id: ma_name
         )
 
       # Submit the unit via the real entry point (B1 / D-302).
       assert :queued = @merge_authority.request_merge(ma_pid, unit)
 
-      # Wait for MergeAuthority to complete the CAS push and return to :idle.
-      # At this point, origin/main has been advanced (or the push failed — but
-      # given the green topology and a fresh base, it should succeed).
+      # Wait for MergeAuthority to complete the CAS (which returns :ok via
+      # PassingCas) and process the post-merge health check.
+      # M should detect red and broadcast {:escalate, {:"E-RED-MAIN", :global}}
+      # on "factory:control" before returning to :idle.
       :ok = wait_for_idle(ma_pid, 15_000)
 
       # ASSERTION (D-303 / [C209-B6]):
       # MergeAuthority MUST broadcast {:escalate, {:"E-RED-MAIN", :global}} on
       # "factory:control" after detecting a red post-merge origin/main.
       #
-      # This assertion fails today because transition_from_idle (line 459) calls
-      # start_build unconditionally with NO post-merge health check of origin/main.
+      # This assertion fails today because transition_from_idle (or its successor)
+      # calls start_build unconditionally with NO post-merge health check.
       # Escalation.classify({:red_main, _}) exists (escalation.ex:44) but is
-      # NEVER called from merge_authority.ex — confirmed by grep (issue #569
-      # rationale: "grep for Escalation. across lib/ returns ZERO runtime callers").
+      # NEVER called from merge_authority.ex — grep for Escalation. across lib/
+      # returns ZERO runtime callers (issue #569 rationale).
       #
       # The test correctly fails (assert_receive timeout) until the implementer
-      # adds a post-merge health check in transition_from_idle (or equivalent)
-      # that calls Health.check on origin/main post-push and broadcasts
+      # adds a post-merge health check (using the injected post_merge_health_fun
+      # or the real Health.check when not injected) that broadcasts
       # {:escalate, {:"E-RED-MAIN", :global}} when the result is {:red, _}.
       assert_receive {:escalate, {:"E-RED-MAIN", :global}},
                      5_000,
@@ -303,10 +261,136 @@ defmodule Tau.Factory.MergeRedMainEscalationTest do
                        "{:escalate, {:\"E-RED-MAIN\", :global}} on \"factory:control\" " <>
                        "after detecting a red post-merge origin/main. " <>
                        "No such message received within 5000ms. " <>
-                       "Violation: transition_from_idle admits the next train unconditionally " <>
-                       "with no post-merge health re-check of origin/main (merge_authority.ex:459-467). " <>
-                       "SPEC-FACTORY-MERGE §4 B6 / [C209-B6] requires this re-check and the " <>
-                       "escalation broadcast to K before any subsequent merge is admitted."
+                       "The post_merge_health_fun was injected to return {:red, _}, " <>
+                       "simulating a red origin/main after a successful cas_push. " <>
+                       "Violation: merge_authority.ex has no post-merge health re-check " <>
+                       "of origin/main (SPEC-FACTORY-MERGE §4 B6 / [C209-B6]). " <>
+                       "The SPEC requires this re-check and the escalation broadcast to K " <>
+                       "before any subsequent merge is admitted."
+    end
+
+    @tag :d_303
+    test "D-303: after E-RED-MAIN escalation, next queued unit is not built (merge precondition closed)" do
+      # SPEC §4 B6 post: □ red(main) → ¬∃ d. merge(d) until operator clears.
+      # After a red post-merge main is detected, M MUST gate the merge precondition
+      # closed — the next queued unit MUST NOT be built while main is red.
+      tmp_dir = Briefly.create!(type: :directory)
+      unit_branch_1 = "feat/d303-gated-a-#{System.unique_integer([:positive])}"
+      unit_branch_2 = "feat/d303-gated-b-#{System.unique_integer([:positive])}"
+
+      unit1 = %{
+        id: "u-d303-a-#{System.unique_integer([:positive])}",
+        hash: "hash-d303-a-#{System.unique_integer([:positive])}",
+        run: "run-d303-a-001",
+        branch: unit_branch_1
+      }
+
+      unit2 = %{
+        id: "u-d303-b-#{System.unique_integer([:positive])}",
+        hash: "hash-d303-b-#{System.unique_integer([:positive])}",
+        run: "run-d303-b-001",
+        branch: unit_branch_2
+      }
+
+      {work_path, _main_oid, tip1} = setup_repo(tmp_dir, unit_branch_1)
+
+      # Add a second branch for unit2.
+      git = fn args ->
+        System.cmd("git", args, cd: work_path, stderr_to_stdout: true)
+      end
+
+      {_, 0} = git.(["checkout", "-b", unit_branch_2])
+      File.write!(Path.join(work_path, "feature2.txt"), "feature 2 work\n")
+      {_, 0} = git.(["add", "."])
+      {_, 0} = git.(["commit", "-m", "feat: feature 2 work"])
+      {_, 0} = git.(["push", "origin", unit_branch_2])
+      {_, 0} = git.(["checkout", "main"])
+
+      db_path = Briefly.create!(extname: ".db")
+      writer_name = :"test_writer_d303_gated_#{System.unique_integer([:positive])}"
+
+      writer =
+        start_supervised!(
+          {@writer, db_path: db_path, name: writer_name},
+          id: writer_name
+        )
+
+      seed_pass_verdicts(writer, unit1)
+      seed_pass_verdicts(writer, unit2)
+
+      pubsub_name = :"test_pubsub_d303_gated_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {Phoenix.PubSub, name: pubsub_name},
+        id: pubsub_name
+      )
+
+      :ok = Phoenix.PubSub.subscribe(pubsub_name, "factory:control")
+
+      test_pid = self()
+
+      build_invocations =
+        :ets.new(:"build_invocations_#{System.unique_integer([:positive])}", [
+          :public,
+          :ordered_set
+        ])
+
+      ma_name = :"test_ma_d303_gated_#{System.unique_integer([:positive])}"
+      tasks_name = :"test_tasks_d303_gated_#{System.unique_integer([:positive])}"
+
+      # build_fun: records every invocation; returns :built for unit1's tip.
+      # If M starts a build for unit2 AFTER detecting red main, that is a violation.
+      build_fun = fn units, base ->
+        unit_ids = Enum.map(units, & &1.id)
+        send(test_pid, {:build_invoked, unit_ids})
+        :ets.insert(build_invocations, {System.monotonic_time(), unit_ids})
+        {:built, units, base, tip1}
+      end
+
+      # post_merge_health_fun always returns red — simulates the red post-merge main.
+      post_merge_health_fun = fn _repo_dir, _lang, _ctx ->
+        {:red, %{phase: :post_merge_check, output: "simulated red post-merge main"}}
+      end
+
+      ma_pid =
+        start_supervised!(
+          {@merge_authority,
+           name: ma_name,
+           ledger: writer,
+           repo_dir: work_path,
+           required_halves: [:critic, :reviewer],
+           tasks_name: tasks_name,
+           pubsub: pubsub_name,
+           cas: PassingCas,
+           build_fun: build_fun,
+           post_merge_health_fun: post_merge_health_fun},
+          id: ma_name
+        )
+
+      # Submit both units: unit1 is in the first train; unit2 queued behind.
+      assert :queued = @merge_authority.request_merge(ma_pid, unit1)
+      assert :queued = @merge_authority.request_merge(ma_pid, unit2)
+
+      # Wait for unit1's merge to complete (build + CAS + post-merge red check).
+      :ok = wait_for_idle(ma_pid, 15_000)
+
+      # ASSERTION 1: E-RED-MAIN was broadcast.
+      assert_receive {:escalate, {:"E-RED-MAIN", :global}},
+                     5_000,
+                     "D-303 ([C209-B6]): E-RED-MAIN must be broadcast after " <>
+                       "the post-merge health check returns {:red, _}."
+
+      # ASSERTION 2: unit2's build was NOT invoked after the red main was detected.
+      # Give a generous window: if M admits unit2 to a build while main is red,
+      # a {:build_invoked, [unit2.id]} message arrives within ~200 ms.
+      unit2_id = unit2.id
+
+      refute_receive {:build_invoked, [^unit2_id | _]},
+                     500,
+                     "D-303 ([C209-B6] post): □ red(main) → ¬∃ d. merge(d) — " <>
+                       "MergeAuthority MUST NOT admit unit2 to a build while " <>
+                       "origin/main is red. The merge precondition must be closed " <>
+                       "after E-RED-MAIN fires."
     end
   end
 end
