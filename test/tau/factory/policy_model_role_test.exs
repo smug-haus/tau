@@ -59,6 +59,12 @@ defmodule Tau.Factory.PolicyModelRoleTest do
   # Minimal valid policy for testing.
   # Every field uses the smallest admissible positive integer for numeric
   # dimensions; model_per_role uses two representative roles.
+  #
+  # NOTE: conflict_predicate is a function value — Elixir cannot escape
+  # anonymous functions into module attribute literals (ArgumentError at
+  # compile time).  We use a named remote function reference &__MODULE__.always_true/2
+  # and build the Policy struct at runtime via valid_policy/0 rather than
+  # storing it in @valid_policy.
   # ---------------------------------------------------------------------------
 
   @model_per_role %{
@@ -66,16 +72,21 @@ defmodule Tau.Factory.PolicyModelRoleTest do
     critic: "claude-opus-4-5"
   }
 
-  @valid_policy %Policy{
-    version: 1,
-    model_per_role: @model_per_role,
-    retry_bound_n: 3,
-    budget: %{token: 100_000, cost: 10, wall_time: 3_600, iteration: 5},
-    priority_order: [],
-    conflict_predicate: &(&1 == &1 and &2 == &2),
-    gate_manifest: [:mutation, :critic, :reviewer],
-    escalation_thresholds: %{upheld_challenges: 2}
-  }
+  @doc false
+  def always_true(_a, _b), do: true
+
+  defp valid_policy do
+    %Policy{
+      version: 1,
+      model_per_role: @model_per_role,
+      retry_bound_n: 3,
+      budget: %{token: 100_000, cost: 10, wall_time: 3_600, iteration: 5},
+      priority_order: [],
+      conflict_predicate: &__MODULE__.always_true/2,
+      gate_manifest: [:mutation, :critic, :reviewer],
+      escalation_thresholds: %{upheld_challenges: 2}
+    }
+  end
 
   # ---------------------------------------------------------------------------
   # INV-MODEL-POLICY assertion 1 — struct field presence
@@ -90,7 +101,7 @@ defmodule Tau.Factory.PolicyModelRoleTest do
       #
       # FAIL BEFORE: Tau.Factory.Policy does not exist → compile error.
 
-      policy = @valid_policy
+      policy = valid_policy()
 
       assert Map.has_key?(policy, :model_per_role),
              "INV-MODEL-POLICY: %Policy{} must carry a :model_per_role field " <>
@@ -125,7 +136,7 @@ defmodule Tau.Factory.PolicyModelRoleTest do
       #
       # FAIL BEFORE: Tau.Factory.Policy.clamp/1 does not exist → UndefinedFunctionError.
 
-      assert {:ok, clamped} = Policy.clamp(@valid_policy),
+      assert {:ok, clamped} = Policy.clamp(valid_policy()),
              "INV-MODEL-POLICY: Policy.clamp/1 must return {:ok, policy} for a " <>
                "valid policy; got error instead"
 
@@ -162,7 +173,7 @@ defmodule Tau.Factory.PolicyModelRoleTest do
 
       {:ok, _owner} = PolicyOwner.start_link(name: owner_name)
 
-      {:ok, clamped} = Policy.clamp(@valid_policy)
+      {:ok, clamped} = Policy.clamp(valid_policy())
 
       :ok = PolicyOwner.pin(owner_name, unit_id, clamped)
 
@@ -179,7 +190,7 @@ defmodule Tau.Factory.PolicyModelRoleTest do
       # a different resolved model_per_role — ruling out a global hardcoded default.
       alt_model_per_role = %{implementer: "claude-haiku-3-5", critic: "claude-haiku-3-5"}
 
-      alt_policy = %Policy{clamped | model_per_role: alt_model_per_role}
+      alt_policy = %Policy{valid_policy() | model_per_role: alt_model_per_role}
       {:ok, clamped_alt} = Policy.clamp(alt_policy)
 
       unit_id_2 = "test-unit-alt-#{System.unique_integer([:positive])}"

@@ -40,10 +40,13 @@ defmodule Tau.Factory.InvWf1RebarCacheIsolationTest do
 
   use ExUnit.Case, async: true
 
+  alias Tau.Factory.Toolchain
+  alias Tau.Factory.Worker.Isolation
+
   @tag :inv_wf_1
   test "INV-WF-1: Elixir adapter's resolved namespace map contains REBAR_CACHE_HOME (the env var rebar3 actually reads)" do
     # Step 1 — atom dispatch to the Elixir adapter (the real entry point).
-    adapter = Tau.Factory.Toolchain.for(:elixir)
+    adapter = Toolchain.for(:elixir)
 
     # Guard: dispatch must succeed.
     refute match?({:error, _}, adapter),
@@ -52,12 +55,12 @@ defmodule Tau.Factory.InvWf1RebarCacheIsolationTest do
     # Step 2 — extract the resource namespace declarations.
     decls = adapter.declare_resource_namespace(%{})
 
-    assert is_list(decls) and length(decls) > 0,
+    assert is_list(decls) and decls != [],
            "declare_resource_namespace/1 must return a non-empty list; got: #{inspect(decls)}"
 
     # Step 3 — resolve the namespace map through the real isolation helper.
     worktree = "/tmp/inv_wf_1_test_worker"
-    ns_map = Tau.Factory.Worker.Isolation.resolve_namespace(worktree, decls)
+    ns_map = Isolation.resolve_namespace(worktree, decls)
 
     # The resolved map MUST contain "REBAR_CACHE_HOME" — the env var rebar3
     # actually reads (https://www.rebar3.org/docs/configuration/global-configuration/).
