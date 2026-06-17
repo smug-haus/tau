@@ -187,6 +187,11 @@ defmodule Tau.Factory.Gate do
           run_halves(req, manifest)
       end
 
+    # D-307 mechanizable narrowing: when policy_pin.entry_symbol is declared,
+    # assert the symbol appears in at least one gating test source file.
+    # If absent from all gating test sources, fold :fail into the verdict.
+    verdict = apply_entry_symbol_check(req, verdict)
+
     append_to_ledger(req, verdict)
 
     duration = System.monotonic_time() - start_time
@@ -791,6 +796,54 @@ defmodule Tau.Factory.Gate do
   defp restore_head(paths, workspace) do
     {_, _} = System.cmd("git", ["checkout", "HEAD", "--" | paths], cd: workspace)
     :ok
+  end
+
+  # ---------------------------------------------------------------------------
+  # Entry-symbol-presence check (D-307 ◐ mechanizable narrowing)
+  # ---------------------------------------------------------------------------
+
+  # When policy_pin.entry_symbol is declared, assert the declared symbol appears
+  # as a literal string in at least one of the frozen gating test source files.
+  # This is the mechanizable narrowing of INV-8 (HR-3): "appears in the test
+  # source" is not "is the exercised path" — the under-asserting/wrong-path
+  # residual remains critic-bounded by design (D-307 states ◐ PARTIAL honestly).
+  #
+  # Absent symbol → fold :fail into the verdict (%Verdict{status: :fail}).
+  # Present symbol → return the verdict unchanged.
+  # No entry_symbol declared → return the verdict unchanged (no-op).
+  defp apply_entry_symbol_check(%Request{} = req, %Verdict{} = verdict) do
+    case Map.fetch(req.policy_pin, :entry_symbol) do
+      :error ->
+        verdict
+
+      {:ok, nil} ->
+        verdict
+
+      {:ok, symbol} when is_binary(symbol) ->
+        if entry_symbol_present?(symbol, req.frozen_paths, req.workspace) do
+          verdict
+        else
+          Logger.debug(
+            "Gate D-307: entry symbol #{inspect(symbol)} absent from all gating test sources — folding :fail"
+          )
+
+          halves = Map.put(verdict.halves, :entry_symbol, :fail)
+          %Verdict{verdict | status: :fail, halves: halves}
+        end
+    end
+  end
+
+  # Returns true iff `symbol` appears as a literal substring in at least one
+  # of the gating test files listed in `frozen_paths` (relative to `workspace`).
+  defp entry_symbol_present?(symbol, frozen_paths, workspace) do
+    Enum.any?(frozen_paths, fn rel_path ->
+      abs_path = Path.join(workspace, rel_path)
+
+      case File.read(abs_path) do
+        {:ok, source} -> String.contains?(source, symbol)
+        {:error, _} -> false
+      end
+    end)
   end
 
   # ---------------------------------------------------------------------------

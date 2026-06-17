@@ -171,6 +171,36 @@ defmodule Tau.Factory.Ledger.Migrations do
        ON verdicts_v4 (hash, run, half)
        WHERE supersedes_id IS NULL
      """},
+    # D-307: The gate now includes the :entry_symbol half (the mechanizable
+    # narrowing of INV-8). SQLite does not support ALTER TABLE ADD CONSTRAINT;
+    # recreate verdicts_v4 as verdicts_v5 with the expanded half set.
+    # Append-only invariant (D-335) preserved: rows copied via INSERT … SELECT.
+    {"20260617_017_verdicts_v5_extend_half_entry_symbol",
+     """
+     CREATE TABLE IF NOT EXISTS verdicts_v5 (
+       id               INTEGER PRIMARY KEY AUTOINCREMENT,
+       hash             TEXT    NOT NULL,
+       run              TEXT    NOT NULL,
+       half             TEXT    NOT NULL CHECK (half IN ('critic', 'reviewer', 'mutation', 'lint', 'spec_membership', 'floor', 'entry_symbol')),
+       status           TEXT    NOT NULL CHECK (status IN ('pass', 'fail')),
+       idempotency_key  TEXT    NOT NULL,
+       supersedes_id    INTEGER REFERENCES verdicts_v5(id),
+       inserted_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+     )
+     """},
+    {"20260617_018_verdicts_v5_migrate_rows",
+     """
+     INSERT OR IGNORE INTO verdicts_v5
+       (id, hash, run, half, status, idempotency_key, supersedes_id, inserted_at)
+     SELECT id, hash, run, half, status, idempotency_key, supersedes_id, inserted_at
+     FROM verdicts_v4
+     """},
+    {"20260617_019_verdicts_v5_original_uidx",
+     """
+     CREATE UNIQUE INDEX IF NOT EXISTS verdicts_v5_original_uidx
+       ON verdicts_v5 (hash, run, half)
+       WHERE supersedes_id IS NULL
+     """},
     # PR #465 (D-355): Durable merge-outcome row. Append-only; no UPDATE/DELETE.
     # WAL-before-ack (D-315): the Writer replies only after step/2 (WAL commit)
     # returns. outcome CHECK restricts to the two valid terminal outcomes.
