@@ -77,6 +77,25 @@ defmodule Tau.Factory.Budget.Owner do
   end
 
   @doc """
+  Debit 1 unit from `dimension` for `unit_id` via the named owner process.
+
+  Used by `Tau.Factory.Scheduler` on the `:admit` path (D-320 / FR-7.1
+  conjunct 2): the Scheduler knows `owner_name` but not the underlying
+  `Ledger.Writer` reference, so it delegates to the Owner to perform the
+  debit through its own state.
+
+  The Owner issues `GenServer.call(self(), {:debit_via_owner, unit_id,
+  dimension})` internally — the actual write sequence (Ledger-first, then
+  ETS) is identical to `debit/4` with `cost = 1`.
+
+  Returns `:ok`.
+  """
+  @spec debit_admission(atom(), String.t(), atom()) :: :ok
+  def debit_admission(owner_name, unit_id, dimension) do
+    GenServer.call(owner_name, {:debit_via_owner, unit_id, dimension})
+  end
+
+  @doc """
   Debit `cost` units from `dimension` for `unit_id`.
 
   `writer` is the `Ledger.Writer` server reference (atom or pid). This
@@ -203,6 +222,16 @@ defmodule Tau.Factory.Budget.Owner do
   end
 
   def terminate(_reason, _state), do: :ok
+
+  @impl GenServer
+  def handle_call({:debit_via_owner, unit_id, dimension}, _from, %{ledger: ledger} = state) do
+    # Called by debit_admission/3 from the Scheduler on every :admit path
+    # (D-320 / FR-7.1 conjunct 2).  Uses the Owner's own ledger reference so
+    # the Scheduler does not need to know the writer name.  Cost = 1 per
+    # admitted unit.
+    debit(ledger, unit_id, dimension, 1)
+    {:reply, :ok, state}
+  end
 
   # ---------------------------------------------------------------------------
   # Private helpers
