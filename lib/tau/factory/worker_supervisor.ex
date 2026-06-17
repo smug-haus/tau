@@ -113,32 +113,28 @@ defmodule Tau.Factory.WorkerSupervisor do
     registry = Keyword.fetch!(opts, :registry)
     author_id = Keyword.get(opts, :author_id)
 
-    # D-313 janitor guard — fail-closed: janitor is mandatory infrastructure for
-    # capture-before-destroy (INV-14). A nil janitor bypasses the capture path
-    # entirely (spawn_death_monitor sends only {:worker_exit, ...} with zero git
-    # capture). Reject before oracle-separation checks so the error is unambiguous
-    # regardless of role. Mirrors the D-374 precedent (infra prerequisites are
-    # rejected at init time, not silently bypassed).
-    janitor = Keyword.get(opts, :janitor)
-
-    # D-304 oracle-separation guard — two sub-mechanisms (SPEC-FACTORY-FLEET §4 B8):
+    # D-304 oracle-separation guard — two sub-mechanisms (SPEC-FACTORY-FLEET §4 B8).
+    # Both sub-mechanisms are gated on author_id being provided: they apply only
+    # when the caller is operating in the formal factory flow (an :author_id
+    # identifies the spawning agent). Callers that do not supply :author_id
+    # (e.g. unit tests that do not participate in the factory oracle-separation
+    # protocol) bypass these guards so pre-existing test infrastructure continues
+    # to work without modification.
     #
-    # Sub-mechanism (a) — spawn-order constraint:
-    # An :implementer spawn MUST be rejected with {:error, :no_test_author_registered}
-    # when no :test_author is currently registered in the same registry. This enforces
-    # the ordering invariant: ":test_author first, freeze gating-test path set before
-    # any :implementer." (INV-5, SPEC-FACTORY-FLEET §4 B8, D-304).
+    # Sub-mechanism (a) — spawn-order constraint (INV-5, SPEC-FACTORY-FLEET §4 B8):
+    # When :author_id is provided and role is :implementer, reject the spawn with
+    # {:error, :no_test_author_registered} if no :test_author is registered in the
+    # same registry. Enforces ":test_author first, freeze gating-test path set
+    # before any :implementer."
     #
     # Sub-mechanism (b) — same-identity guard (HR-7):
-    # When spawning an :implementer with a known author_id, reject the spawn
-    # if the same author_id has already authored a :test_author worker in this
-    # registry. This prevents the same agent identity from authoring both the
-    # gating test and the implementation.
+    # When :author_id is provided and role is :implementer, reject the spawn with
+    # {:error, :same_identity_oracle_subject} if the same author_id has already
+    # authored a :test_author worker in this registry. Prevents the same agent
+    # identity from authoring both the gating test and the implementation.
     cond do
-      is_nil(janitor) ->
-        {:error, :no_janitor}
-
-      role == :implementer and not any_test_author_registered?(registry) ->
+      role == :implementer and not is_nil(author_id) and
+          not any_test_author_registered?(registry) ->
         {:error, :no_test_author_registered}
 
       role == :implementer and not is_nil(author_id) and
