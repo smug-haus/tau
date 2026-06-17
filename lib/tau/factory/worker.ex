@@ -306,37 +306,39 @@ defmodule Tau.Factory.Worker do
     agent_mode = Map.get(ctx, :agent_mode)
     creds_check_fun = Map.get(ctx, :creds_check_fun, &default_creds_check/0)
 
-    # Step 4: arm the capture monitor BEFORE opening the Port, so that any
-    # raise during Port.open is caught by the monitor's :DOWN handler — no
-    # unmonitored worktree leak (D-314, SPEC B5). The monitor is also set up
-    # before the D-374 preflight so that a :metered_path_refused stop delivers
-    # a death-cert to report_to (D-374).
-    #
-    # When a janitor is provided, register with it (D-313 capture-before-destroy
-    # path). When no janitor is provided, arm the lightweight spawn_death_monitor
-    # instead. The spawn_death_monitor sends only {:worker_exit, ...} with no
-    # git capture; it is the pre-D-313 behaviour preserved for callers that do
-    # not supply a janitor (e.g. isolated unit tests that do not need capture).
-    ns_dirs = Map.values(ns)
-
-    if janitor do
-      WorkspaceJanitor.register(janitor, worker_id, self(), ws, ns_dirs, report_to)
+    # D-313 fail-closed: a janitor is mandatory infrastructure for
+    # capture-before-destroy (INV-14). Without a janitor there is no capture
+    # path — not for staged, unstaged, or untracked files. Reject before arming
+    # any monitor or opening the Port (D-374 precedent: infra prerequisites are
+    # refused at init time, never silently bypassed). The worktree was already
+    # created by git worktree add, so clean it up before stopping.
+    if is_nil(janitor) do
+      cleanup_worktree(ws, repo_dir)
+      {:stop, :no_janitor}
     else
-      spawn_death_monitor(worker_id, report_to)
-    end
+      # Step 4: arm the capture monitor BEFORE opening the Port, so that any
+      # raise during Port.open is caught by the monitor's :DOWN handler — no
+      # unmonitored worktree leak (D-314, SPEC B5). The monitor is also set up
+      # before the D-374 preflight so that a :metered_path_refused stop delivers
+      # a death-cert to report_to (D-374).
+      #
+      # A janitor is always present here (nil was rejected in the if-branch above).
+      ns_dirs = Map.values(ns)
+      WorkspaceJanitor.register(janitor, worker_id, self(), ws, ns_dirs, report_to)
 
-    # D-374: metered-API spend preflight — runs only for agent_mode: :claude_code.
-    # If creds_check_fun returns {:error, _} the worker refuses to open the Port
-    # and stops with :metered_path_refused (fail-closed; NO fallback).
-    # The death-cert monitor (spawned above) delivers
-    # {:worker_exit, worker_id, :metered_path_refused} to report_to.
-    case preflight_metered(agent_mode, creds_check_fun) do
-      :ok ->
-        open_port_final(ctx, ns, extra_env, agent_mode, ws, repo_dir)
+      # D-374: metered-API spend preflight — runs only for agent_mode: :claude_code.
+      # If creds_check_fun returns {:error, _} the worker refuses to open the Port
+      # and stops with :metered_path_refused (fail-closed; NO fallback).
+      # The death-cert monitor (spawned above) delivers
+      # {:worker_exit, worker_id, :metered_path_refused} to report_to.
+      case preflight_metered(agent_mode, creds_check_fun) do
+        :ok ->
+          open_port_final(ctx, ns, extra_env, agent_mode, ws, repo_dir)
 
-      {:stop, :metered_path_refused} ->
-        cleanup_worktree(ws, repo_dir)
-        {:stop, :metered_path_refused}
+        {:stop, :metered_path_refused} ->
+          cleanup_worktree(ws, repo_dir)
+          {:stop, :metered_path_refused}
+      end
     end
   end
 
@@ -598,38 +600,6 @@ defmodule Tau.Factory.Worker do
     System.cmd("git", ["worktree", "remove", "--force", ws],
       cd: repo_dir,
       stderr_to_stdout: true
-    )
-  end
-
-  # Lightweight unlinked monitor used when no WorkspaceJanitor is provided.
-  # Sends {:worker_exit, worker_id, reason} to report_to on the worker's :DOWN
-  # event for every exit reason. Does NOT perform any git capture — it is the
-  # pre-D-313 fallback path for callers (typically unit tests) that do not wire
-  # a janitor. The D-313 capture-before-destroy invariant is only enforced when
-  # a janitor is provided via WorkerSupervisor.spawn/5 in the formal factory flow.
-  defp spawn_death_monitor(_worker_id, nil), do: :ok
-
-  defp spawn_death_monitor(worker_id, report_to) do
-    worker_pid = self()
-
-    Process.spawn(
-      fn ->
-        ref = Process.monitor(worker_pid)
-
-        receive do
-          {:DOWN, ^ref, :process, ^worker_pid, reason} ->
-            cert_reason =
-              case reason do
-                :normal -> :normal
-                {:shutdown, :no_work_product} -> :no_work_product
-                :killed -> :kill
-                other -> other
-              end
-
-            send(report_to, {:worker_exit, worker_id, cert_reason})
-        end
-      end,
-      []
     )
   end
 end

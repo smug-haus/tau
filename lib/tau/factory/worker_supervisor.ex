@@ -122,7 +122,8 @@ defmodule Tau.Factory.WorkerSupervisor do
   When `role` is `:implementer` and no `:test_author` is registered in the registry,
   the spawn is rejected with `{:error, :no_test_author_registered}`. This enforces
   INV-5: `:test_author` must be spawned first and its gating-test path set frozen
-  before any `:implementer` is spawned.
+  before any `:implementer` is spawned. The guard fires unconditionally — regardless
+  of whether `:author_id` is provided.
 
   Sub-mechanism (b) — same-identity guard (HR-7):
   When `role` is `:implementer` and `:author_id` is provided, the registry
@@ -175,15 +176,12 @@ defmodule Tau.Factory.WorkerSupervisor do
     else
       # D-304 oracle-separation guard — two sub-mechanisms (SPEC-FACTORY-FLEET §4 B8).
       #
-      # Oracle-separation is keyed on agent identity (:author_id). Both sub-mechanisms
-      # apply only when :author_id is provided — without a declared identity, there is no
-      # oracle to separate and the guard does not apply.
-      #
       # Sub-mechanism (a) — spawn-order constraint (INV-5, SPEC-FACTORY-FLEET §4 B8):
-      # When role is :implementer AND :author_id is provided, reject the spawn with
+      # When role is :implementer, reject the spawn with
       # {:error, :no_test_author_registered} if no :test_author is registered in the
       # same registry. Enforces ":test_author first, freeze gating-test path set before
-      # any :implementer" for identified spawns.
+      # any :implementer" — unconditionally, regardless of whether :author_id is provided.
+      # Without a prior :test_author there is no oracle separation; the guard fires.
       #
       # Sub-mechanism (b) — same-identity guard (HR-7):
       # When role is :implementer AND :author_id is provided, reject the spawn with
@@ -191,8 +189,7 @@ defmodule Tau.Factory.WorkerSupervisor do
       # authored a :test_author worker in this registry. Prevents the same agent
       # identity from authoring both the gating test and the implementation.
       cond do
-        role == :implementer and not is_nil(author_id) and
-            not any_test_author_registered?(registry) ->
+        role == :implementer and not any_test_author_registered?(registry) ->
           {:error, :no_test_author_registered}
 
         role == :implementer and not is_nil(author_id) and
