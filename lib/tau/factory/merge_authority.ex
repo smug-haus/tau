@@ -47,7 +47,7 @@ defmodule Tau.Factory.MergeAuthority do
     - `:ledger` — pid/name of the `Tau.Factory.Ledger.Writer`.
     - `:repo_dir` — filesystem path of the git working directory.
     - `:tasks_name` — registered name of the `Task.Supervisor` for builds.
-    - `:required_halves` — list of verdict halves required (default `[:critic, :reviewer]`).
+    - `:required_halves` — list of verdict halves required (default `[:mutation, :critic, :reviewer]`).
     - `:build_fun` — `(units, base) -> {:built, units, base, tip} | {:build_failed, reason}`
       (default: the real rebase+push implementation; injectable for tests).
     - `:cas` — the CAS module to use (default `Tau.Factory.Merge.Cas`; injectable for tests).
@@ -214,7 +214,7 @@ defmodule Tau.Factory.MergeAuthority do
     ledger = Keyword.fetch!(opts, :ledger)
     repo_dir = Keyword.fetch!(opts, :repo_dir)
     tasks_name = Keyword.fetch!(opts, :tasks_name)
-    required_halves = Keyword.get(opts, :required_halves, [:critic, :reviewer])
+    required_halves = Keyword.get(opts, :required_halves, [:mutation, :critic, :reviewer])
     cas = Keyword.get(opts, :cas, Cas)
     pubsub = Keyword.get(opts, :pubsub, Tau.PubSub)
 

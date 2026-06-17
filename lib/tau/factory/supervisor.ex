@@ -104,7 +104,7 @@ defmodule Tau.Factory.Supervisor do
     db_path = Keyword.get(opts, :db_path, default_db_path())
     sup_name = Keyword.get(opts, :name, __MODULE__)
     repo_dir = Keyword.get(opts, :repo_dir)
-    required_halves = Keyword.get(opts, :required_halves, [:critic, :reviewer])
+    required_halves = Keyword.get(opts, :required_halves, [:mutation, :critic, :reviewer])
     merge_authority_opts = Keyword.get(opts, :merge_authority_opts, [])
     budget_opts = Keyword.get(opts, :budget_opts)
     scheduler_opts = Keyword.get(opts, :scheduler_opts)
