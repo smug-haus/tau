@@ -148,6 +148,23 @@ defmodule Tau.Factory.MergeAuthority do
     :gen_statem.call(server, :clear_red_main)
   end
 
+  @doc """
+  Classify an `origin/main` write attempt by the given actor.
+
+  Returns `:ok` when `actor` is `:merge_authority` — the sole authorised
+  writer of `origin/main` per [C200-B4] / SPEC-FACTORY-MERGE §3.
+
+  Returns `{:escalate, :"E-DESTRUCTIVE"}` for every other actor.  A non-M
+  push is a destructive action that MUST be escalated to K and MUST NOT be
+  auto-executed (INV-20, SPEC-FACTORY-GOV D-319, [C212-B7]).
+
+  This function is a pure classifier — it has no side-effects and does not
+  execute any write regardless of the return value.
+  """
+  @spec classify_main_write(atom()) :: :ok | {:escalate, :"E-DESTRUCTIVE"}
+  def classify_main_write(:merge_authority), do: :ok
+  def classify_main_write(_actor), do: {:escalate, :"E-DESTRUCTIVE"}
+
   # ---------------------------------------------------------------------------
   # gen_statem callbacks
   # ---------------------------------------------------------------------------
