@@ -164,7 +164,7 @@ defmodule Tau.Factory.Scheduler do
     # never conflicts with its own in-flight entry (idempotent upsert).
     f_prime = Map.delete(state.f, unit_id)
 
-    case evaluate_admission(declared_scope, %{state | f: f_prime}) do
+    case evaluate_admission(unit_id, declared_scope, %{state | f: f_prime}) do
       :admit ->
         new_f = Map.put(state.f, unit_id, declared_scope)
         # INV-POLICY-PIN: pin the policy at admission when supplied.
@@ -203,9 +203,10 @@ defmodule Tau.Factory.Scheduler do
 
   # Evaluate all three admission conditions in precedence order.
   # Returns :admit or {:defer, reason}. Never mutates state.
-  @spec evaluate_admission(declared_scope(), state()) :: :admit | {:defer, defer_reason()}
-  defp evaluate_admission(declared_scope, %{f: f, w_cap: w_cap, budget: budget}) do
-    with :clear <- ConflictCheck.clear?(declared_scope, f),
+  @spec evaluate_admission(unit_id(), declared_scope(), state()) ::
+          :admit | {:defer, defer_reason()}
+  defp evaluate_admission(unit_id, declared_scope, %{f: f, w_cap: w_cap, budget: budget}) do
+    with :clear <- ConflictCheck.clear?(unit_id, declared_scope, f),
          :ok <- check_capacity(f, w_cap),
          :ok <- check_budget(budget) do
       :admit

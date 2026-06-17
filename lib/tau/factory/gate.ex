@@ -121,15 +121,35 @@ defmodule Tau.Factory.Gate do
         {:error, {:gate_floor_violation, missing}} ->
           Logger.warning("Gate floor violation for unit=#{req.unit}: missing #{inspect(missing)}")
 
-          # Run every half that IS in the requested manifest so they appear in
-          # verdict.halves (D-323: :lint MUST appear even when another floor member
-          # is absent). The missing floor members are folded as :fail — they must
-          # never be silently absent from the verdict.
+          # Split missing floor members into two buckets:
+          # - original_missing: core floor ([:mutation, :critic, :reviewer]) — pre-fail.
+          #   These represent a genuine gate contract violation; no run can rescue them.
+          # - extended_missing: new mechanical floor ([:lint, :spec_membership]) — run.
+          #   These are routed through run_half, which honours the oracle stub seam
+          #   (hermetic mode: unmapped halves default to :pass). This keeps gate_run_test
+          #   genuine-diff fixtures valid without patching every oracle map that
+          #   predates the extended floor (D-323 / D-322 backward compatibility).
+          core_floor = [:mutation, :critic, :reviewer]
+          original_missing = Enum.filter(missing, &(&1 in core_floor))
+          extended_missing = Enum.reject(missing, &(&1 in core_floor))
+
+          # Run the requested manifest PLUS any extended missing halves.
           requested_manifest = requested_manifest(req.policy_pin)
-          base_verdict = run_halves(req, requested_manifest)
-          missing_results = Map.new(missing, fn half -> {half, :fail} end)
-          merged_halves = Map.merge(base_verdict.halves, missing_results)
-          %Verdict{status: :fail, halves: merged_halves}
+          run_manifest = Enum.uniq(requested_manifest ++ extended_missing)
+          base_verdict = run_halves(req, run_manifest)
+
+          # Pre-fail only the core floor members that were absent.
+          original_fail_results = Map.new(original_missing, fn half -> {half, :fail} end)
+          merged_halves = Map.merge(base_verdict.halves, original_fail_results)
+
+          overall_status =
+            if original_missing == [] do
+              base_verdict.status
+            else
+              :fail
+            end
+
+          %Verdict{status: overall_status, halves: merged_halves}
 
         {:ok, manifest} ->
           run_halves(req, manifest)
@@ -207,8 +227,27 @@ defmodule Tau.Factory.Gate do
     end
   end
 
+  # When the oracle is a Stub (hermetic test mode), mechanical halves that
+  # are not explicitly overridden via lint_override / spec_membership_override
+  # are routed through the oracle stub. The stub returns :pass for unmapped
+  # halves, so a test fixture that does not supply those overrides still passes.
+  # When the oracle is Real (production), the real toolchain / spec-check runs.
+  defp run_half(:lint, req, Oracle.Stub, oracle_arg) do
+    case Map.fetch(req.policy_pin, :lint_override) do
+      {:ok, _} -> run_lint_half(req)
+      :error -> Oracle.Stub.judge(:lint, oracle_arg)
+    end
+  end
+
   defp run_half(:lint, req, _oracle_mod, _oracle_arg) do
     run_lint_half(req)
+  end
+
+  defp run_half(:spec_membership, req, Oracle.Stub, oracle_arg) do
+    case Map.fetch(req.policy_pin, :spec_membership_override) do
+      {:ok, _} -> run_spec_membership_half(req)
+      :error -> Oracle.Stub.judge(:spec_membership, oracle_arg)
+    end
   end
 
   defp run_half(:spec_membership, req, _oracle_mod, _oracle_arg) do

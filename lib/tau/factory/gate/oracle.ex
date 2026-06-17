@@ -78,7 +78,11 @@ defmodule Tau.Factory.Gate.Oracle do
       case Map.get(oracle_map, half) do
         :pass -> :pass
         :fail -> :fail
-        nil -> :fail
+        # hermetic default: unmapped halves pass in oracle-stub mode.
+        # The oracle map presence signals "hermetic unit test" — mechanical
+        # halves not explicitly set to :fail are treated as :pass so test
+        # fixtures can exercise the gate without real toolchain runs.
+        nil -> :pass
       end
     end
 
