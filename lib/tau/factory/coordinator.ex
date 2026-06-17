@@ -156,6 +156,11 @@ defmodule Tau.Factory.Coordinator do
   def running(:internal, :loop, data) do
     case data.select_fun.() do
       nil ->
+        # Milestone boundary: work exhausted. Broadcast operator-facing report
+        # on the observation plane (C117 / INV-REPORTING-ESCALATION-ONLY).
+        :ok =
+          Phoenix.PubSub.broadcast(data.pubsub, "factory:report", {:milestone_complete, %{}})
+
         {:keep_state, %{data | in_flight: nil}}
 
       work ->
@@ -227,14 +232,32 @@ defmodule Tau.Factory.Coordinator do
   # so the in-flight unit is drained before reaching :halted (drain-first).
   # If no unit is in flight, the existing halting(:internal, :drain) nil-branch
   # transitions immediately to :halted.
-  def running(:info, {:escalate, {_e, :global}}, data) do
+  # Broadcasts to "factory:escalation" per C117 / D-336 (escalation conservation).
+  def running(:info, {:escalate, {e, :global}}, data) do
     telemetry(:escalate, %{}, %{scope: :global})
+
+    :ok =
+      Phoenix.PubSub.broadcast(
+        data.pubsub,
+        "factory:escalation",
+        {:escalation, %{reason: e, scope: :global}}
+      )
+
     {:next_state, :halting, data, [{:next_event, :internal, :drain}]}
   end
 
   # Per-unit escalation → stay running; treat as a terminal for loop progress.
-  def running(:info, {:escalate, {_e, :unit}}, data) do
+  # Also broadcasts to "factory:escalation" per C117 / D-336.
+  def running(:info, {:escalate, {e, :unit}}, data) do
     telemetry(:escalate, %{}, %{scope: :unit})
+
+    :ok =
+      Phoenix.PubSub.broadcast(
+        data.pubsub,
+        "factory:escalation",
+        {:escalation, %{reason: e, scope: :unit}}
+      )
+
     data = %{data | in_flight: nil}
     {:keep_state, data, [{:next_event, :internal, :loop}]}
   end
