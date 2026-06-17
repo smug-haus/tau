@@ -63,15 +63,17 @@ defmodule Tau.Factory.ConflictCheckPCC5GatingPathsTest do
     shared_gating_path = "test/tau/factory/my_feature_test.exs"
 
     # Files are fully disjoint — only gating_paths overlaps.
-    scope_a = scope(
-      files: ["lib/tau/factory/coordinator.ex"],
-      gating_paths: [shared_gating_path]
-    )
+    scope_a =
+      scope(
+        files: ["lib/tau/factory/coordinator.ex"],
+        gating_paths: [shared_gating_path]
+      )
 
-    scope_b = scope(
-      files: ["lib/tau/factory/unit.ex"],
-      gating_paths: [shared_gating_path]
-    )
+    scope_b =
+      scope(
+        files: ["lib/tau/factory/unit.ex"],
+        gating_paths: [shared_gating_path]
+      )
 
     result = ConflictCheck.clear?(scope_a, %{"unit_b" => scope_b})
 
@@ -84,15 +86,17 @@ defmodule Tau.Factory.ConflictCheckPCC5GatingPathsTest do
 
   @tag :p_cc_5
   test "P-CC-5 clear?/2: scopes with disjoint gating_paths and disjoint files yield :clear" do
-    scope_a = scope(
-      files: ["lib/tau/factory/coordinator.ex"],
-      gating_paths: ["test/tau/factory/coordinator_test.exs"]
-    )
+    scope_a =
+      scope(
+        files: ["lib/tau/factory/coordinator.ex"],
+        gating_paths: ["test/tau/factory/coordinator_test.exs"]
+      )
 
-    scope_b = scope(
-      files: ["lib/tau/factory/unit.ex"],
-      gating_paths: ["test/tau/factory/unit_test.exs"]
-    )
+    scope_b =
+      scope(
+        files: ["lib/tau/factory/unit.ex"],
+        gating_paths: ["test/tau/factory/unit_test.exs"]
+      )
 
     result = ConflictCheck.clear?(scope_a, %{"unit_b" => scope_b})
 
@@ -107,16 +111,18 @@ defmodule Tau.Factory.ConflictCheckPCC5GatingPathsTest do
     # must also be caught — the union is symmetric.
     shared_path = "test/support/factory_helpers.exs"
 
-    scope_a = scope(
-      files: ["lib/tau/factory/coordinator.ex"],
-      gating_paths: [shared_path]
-    )
+    scope_a =
+      scope(
+        files: ["lib/tau/factory/coordinator.ex"],
+        gating_paths: [shared_path]
+      )
 
     # scope_b carries the shared path in files (not gating_paths)
-    scope_b = scope(
-      files: ["lib/tau/factory/unit.ex", shared_path],
-      gating_paths: []
-    )
+    scope_b =
+      scope(
+        files: ["lib/tau/factory/unit.ex", shared_path],
+        gating_paths: []
+      )
 
     result = ConflictCheck.clear?(scope_a, %{"unit_b" => scope_b})
 
@@ -130,15 +136,17 @@ defmodule Tau.Factory.ConflictCheckPCC5GatingPathsTest do
   test "P-CC-5 clear?/3: bidirectional form also blocks gating_path collision" do
     shared_gating_path = "test/tau/factory/shared_gate_test.exs"
 
-    scope_a = scope(
-      files: ["lib/tau/factory/coordinator.ex"],
-      gating_paths: [shared_gating_path]
-    )
+    scope_a =
+      scope(
+        files: ["lib/tau/factory/coordinator.ex"],
+        gating_paths: [shared_gating_path]
+      )
 
-    scope_b = scope(
-      files: ["lib/tau/factory/unit.ex"],
-      gating_paths: [shared_gating_path]
-    )
+    scope_b =
+      scope(
+        files: ["lib/tau/factory/unit.ex"],
+        gating_paths: [shared_gating_path]
+      )
 
     result = ConflictCheck.clear?("unit_a", scope_a, %{"unit_b" => scope_b})
 
@@ -151,10 +159,11 @@ defmodule Tau.Factory.ConflictCheckPCC5GatingPathsTest do
   test "P-CC-5 scope type must include gating_paths field and clear?/2 must not raise on it" do
     # If the scope type does not include gating_paths, Map.fetch!(scope, :gating_paths)
     # will raise KeyError — that error IS the expected failure mode pre-implementation.
-    scope_with_gating = scope(
-      files: ["lib/tau/factory/coordinator.ex"],
-      gating_paths: ["test/tau/factory/coordinator_test.exs"]
-    )
+    scope_with_gating =
+      scope(
+        files: ["lib/tau/factory/coordinator.ex"],
+        gating_paths: ["test/tau/factory/coordinator_test.exs"]
+      )
 
     assert Map.has_key?(scope_with_gating, :gating_paths),
            "scope map must carry :gating_paths key"
@@ -176,15 +185,17 @@ defmodule Tau.Factory.ConflictCheckPCC5GatingPathsTest do
     sched = start_scheduler(:admit_gating_path_collision)
     shared_gating_path = "test/tau/factory/shared_feature_test.exs"
 
-    scope_a = scope(
-      files: ["lib/tau/factory/coordinator.ex"],
-      gating_paths: [shared_gating_path]
-    )
+    scope_a =
+      scope(
+        files: ["lib/tau/factory/coordinator.ex"],
+        gating_paths: [shared_gating_path]
+      )
 
-    scope_b = scope(
-      files: ["lib/tau/factory/unit.ex"],
-      gating_paths: [shared_gating_path]
-    )
+    scope_b =
+      scope(
+        files: ["lib/tau/factory/unit.ex"],
+        gating_paths: [shared_gating_path]
+      )
 
     assert Scheduler.admit(sched, "unit_a", scope_a) == :admit,
            "First unit with unique scope must be admitted."
@@ -204,15 +215,17 @@ defmodule Tau.Factory.ConflictCheckPCC5GatingPathsTest do
     sched = start_scheduler(:readmit_after_release)
     shared_gating_path = "test/tau/factory/shared_feature_readmit_test.exs"
 
-    scope_a = scope(
-      files: ["lib/tau/factory/coordinator.ex"],
-      gating_paths: [shared_gating_path]
-    )
+    scope_a =
+      scope(
+        files: ["lib/tau/factory/coordinator.ex"],
+        gating_paths: [shared_gating_path]
+      )
 
-    scope_b = scope(
-      files: ["lib/tau/factory/unit.ex"],
-      gating_paths: [shared_gating_path]
-    )
+    scope_b =
+      scope(
+        files: ["lib/tau/factory/unit.ex"],
+        gating_paths: [shared_gating_path]
+      )
 
     assert Scheduler.admit(sched, "unit_a", scope_a) == :admit
     assert Scheduler.admit(sched, "unit_b", scope_b) == {:defer, {:conflict, :disjoint_files}}
