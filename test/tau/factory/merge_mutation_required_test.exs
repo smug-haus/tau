@@ -166,10 +166,10 @@ defmodule Tau.Factory.MergeMutationRequiredTest do
         start_supervised!(
           {
             @merge_authority,
+            # No required_halves override -- exercises the production default (INV-1).
             name: ma_name,
             ledger: writer,
             repo_dir: work_path,
-            # No required_halves override -- exercises the production default (INV-1).
             tasks_name: tasks_name,
             build_fun: build_fun
           },
@@ -240,10 +240,10 @@ defmodule Tau.Factory.MergeMutationRequiredTest do
         start_supervised!(
           {
             @merge_authority,
+            # No required_halves override -- production default must include :mutation.
             name: ma_name,
             ledger: writer,
             repo_dir: work_path,
-            # No required_halves override -- production default must include :mutation.
             tasks_name: tasks_name,
             build_fun: build_fun
           },
