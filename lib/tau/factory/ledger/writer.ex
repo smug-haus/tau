@@ -579,6 +579,14 @@ defmodule Tau.Factory.Ledger.Writer do
     ArgumentError -> :error
   end
 
+  # Backward-compat clause: callers that pre-date D-318 pass only unit_id/state/
+  # idempotency_key (no counter keys). Default all three counters to 0 and
+  # delegate to the full clause so the DB schema is satisfied.
+  defp do_snapshot_unit(db, %{unit_id: _, state: _, idempotency_key: _} = attrs)
+       when not is_map_key(attrs, :refine_count) do
+    do_snapshot_unit(db, Map.merge(%{refine_count: 0, pivot_count: 0, stall_count: 0}, attrs))
+  end
+
   # Insert a unit snapshot row. Uses INSERT OR IGNORE for idempotency — if the
   # idempotency_key already exists the row is skipped and we return the existing
   # row id. Append-only; WAL-before-ack (D-315, RPO=0).
