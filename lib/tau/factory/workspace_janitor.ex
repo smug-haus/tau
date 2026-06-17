@@ -57,12 +57,13 @@ defmodule Tau.Factory.WorkspaceJanitor do
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
-    # Register under __MODULE__ so callers can find this instance via
-    # Process.whereis(Tau.Factory.WorkspaceJanitor).  The :name opt is used
-    # only as the child id for supervisor deduplication; a process can have
-    # only one registered atom name, so we always use the module name here.
-    # Tests run async: false so only one janitor is alive at a time.
-    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+    # Use the :name opt as the registered atom name so that multiple
+    # WorkspaceJanitor instances (e.g. one per test) can coexist.  Callers
+    # address the janitor by the atom they passed; the supervisor deduplication
+    # id is set via child_spec/1.  Falls back to __MODULE__ for the singleton
+    # production case (one supervised janitor per factory fleet).
+    name = Keyword.get(opts, :name, __MODULE__)
+    GenServer.start_link(__MODULE__, opts, name: name)
   end
 
   @doc """
