@@ -429,6 +429,9 @@ defmodule Tau.Factory.Worker do
        registry: registry,
        heartbeat_interval: heartbeat_interval,
        heartbeat_timer: nil,
+       # INV-WF-12: janitor is stored so dispatch/2 can call
+       # WorkspaceJanitor.record_work_ready/3 for incremental Ledger streaming.
+       janitor: Map.get(ctx, :janitor),
        # D-326: set to true when the agent emits work_ready before exiting.
        # Exit-0 without work_ready is fail-closed → :no_work_product.
        work_ready_seen?: false
@@ -506,6 +509,17 @@ defmodule Tau.Factory.Worker do
   # of stream events cannot detect a wedged agent — heartbeat frames can.
   @spec dispatch(WorkReady.t() | Heartbeat.t() | {:unknown, binary()}, map()) :: map()
   defp dispatch(%WorkReady{branch: branch, head_sha: head_sha}, state) do
+    # INV-WF-12: stream the work_ready decision to the Ledger BEFORE notifying
+    # report_to so the durable write completes (WAL-before-ack) before the
+    # receiver can observe the work_ready signal. This guarantees
+    # captures_for/2 returns a non-empty list at the observation point in the
+    # test (and in production) — the :DOWN capture is then a thin backstop over
+    # a near-empty volatile tree, not the sole preservation mechanism.
+    if not is_nil(state.janitor) and not state.work_ready_seen? do
+      WorkspaceJanitor.record_work_ready(state.janitor, state.worker_id, branch, head_sha)
+    end
+
+    # D-326: forward work_ready to report_to AFTER the durable Ledger write.
     if not is_nil(state.report_to) and not state.work_ready_seen? do
       send(state.report_to, {:work_ready, state.worker_id, branch, head_sha})
     end

@@ -43,6 +43,7 @@ defmodule Tau.Factory.Supervisor do
   alias Tau.Factory.BriefAssembler
   alias Tau.Factory.Budget.Owner, as: BudgetOwner
   alias Tau.Factory.Fleet.Watchdog
+  alias Tau.Factory.Gate
   alias Tau.Factory.KillSwitch
   alias Tau.Factory.Ledger.Writer, as: LedgerWriter
   alias Tau.Factory.MergeAuthority
@@ -103,7 +104,7 @@ defmodule Tau.Factory.Supervisor do
     db_path = Keyword.get(opts, :db_path, default_db_path())
     sup_name = Keyword.get(opts, :name, __MODULE__)
     repo_dir = Keyword.get(opts, :repo_dir)
-    required_halves = Keyword.get(opts, :required_halves, [:critic, :reviewer])
+    required_halves = Keyword.get(opts, :required_halves, Gate.gate_floor())
     merge_authority_opts = Keyword.get(opts, :merge_authority_opts, [])
     budget_opts = Keyword.get(opts, :budget_opts)
     scheduler_opts = Keyword.get(opts, :scheduler_opts)
@@ -147,7 +148,7 @@ defmodule Tau.Factory.Supervisor do
       |> maybe_add_kill_switch(kill_switch_opts, ks_name, sup_name)
       |> maybe_add_coordinator(coordinator_opts, coord_name, ks_name, sup_name)
 
-    Supervisor.init(children, strategy: :one_for_one)
+    Supervisor.init(children, strategy: :rest_for_one)
   end
 
   # ---------------------------------------------------------------------------

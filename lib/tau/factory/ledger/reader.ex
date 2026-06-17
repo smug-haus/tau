@@ -59,4 +59,51 @@ defmodule Tau.Factory.Ledger.Reader do
   def merge_outcome_for(server, unit_id) do
     Writer.merge_outcome_for(server, unit_id)
   end
+
+  @doc """
+  Return the frozen scope for `unit_id` (HR-4, issue #584).
+
+  The frozen scope is the declared file set and gating-test paths as supplied to
+  `Tau.Factory.Unit.start_link/1` at admission (`:planned` entry snapshot).
+  It is written exactly once (at admission) and is immutable thereafter
+  (append-only Ledger, D-335).
+
+  Returns:
+    - `{:ok, frozen}` — a map with `:files` (`MapSet.t(String.t())`) and
+      `:gating_test_paths` (`[String.t()]`).
+    - `:none` — no frozen_scope has been persisted for this `unit_id` yet.
+  """
+  @spec frozen_scope_for(GenServer.server(), String.t()) :: {:ok, map()} | :none
+  def frozen_scope_for(server, unit_id) do
+    Writer.frozen_scope_for(server, unit_id)
+  end
+
+  @doc """
+  Return the lineage record for `unit_id` (D-353 / NFR-AUDIT).
+
+  Returns `{:ok, %Tau.Factory.Lineage{}}` or `:none` when no lineage row exists.
+  """
+  @spec lineage_for(GenServer.server(), String.t()) ::
+          {:ok, Tau.Factory.Lineage.t()} | :none
+  def lineage_for(server, unit_id) do
+    Writer.lineage_for(server, unit_id)
+  end
+
+  @doc """
+  Return the gate/merge coordinate (head_sha) for `unit_id` (INV-DS-DECISION-REPLAYABLE, #545).
+
+  After a crash, the Coordinator can recover the gate/merge coordinate from the
+  Ledger alone — no nondeterministic step (work_ready re-execution) is required
+  (INV-DS-DECISION-REPLAYABLE, durable-spine.md S1).
+
+  Returns:
+    - `{:ok, coordinate}` — the persisted `head_sha` from the highest-id snapshot
+      with a non-NULL `head_sha` for this `unit_id`.
+    - `:none` — no snapshot with a non-NULL `head_sha` exists for this `unit_id`
+      (fresh Ledger, or unit never reached :gating).
+  """
+  @spec coordinate_for(GenServer.server(), String.t()) :: {:ok, String.t()} | :none
+  def coordinate_for(server, unit_id) do
+    Writer.coordinate_for(server, unit_id)
+  end
 end

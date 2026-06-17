@@ -135,9 +135,11 @@ defmodule Tau.Factory.Ledger.Writer do
   end
 
   @type unit_snapshot_attrs :: %{
-          unit_id: String.t(),
-          state: atom(),
-          idempotency_key: String.t()
+          :unit_id => String.t(),
+          :state => atom(),
+          :idempotency_key => String.t(),
+          optional(:frozen_scope) => map() | nil,
+          optional(:head_sha) => String.t() | nil
         }
 
   @type capture_attrs :: %{
@@ -244,6 +246,90 @@ defmodule Tau.Factory.Ledger.Writer do
     GenServer.call(server, {:merge_outcome_for, unit_id})
   end
 
+  @type lineage_attrs :: %{
+          main_commit: String.t(),
+          unit_id: String.t(),
+          gate_verdicts: [map()],
+          gating_test_paths: [String.t()] | nil,
+          claims: [String.t()] | nil,
+          specs: [String.t()] | nil,
+          issues: [String.t()] | nil
+        }
+
+  @doc """
+  Write a merge-outcome row AND a lineage row in a single SQLite transaction.
+
+  Both rows are committed atomically (D-353 / NFR-AUDIT): an audit can never
+  observe a merge without its lineage. WAL-before-ack (D-315): the
+  `{:ok, %{merge_ref:, lineage_ref:}}` reply arrives only after the transaction
+  WAL commit is durable.
+
+  Returns `{:ok, %{merge_ref: integer(), lineage_ref: integer()}}` on success.
+  Returns `{:error, reason}` when any lineage link is nil (null-edge rejection
+  enforced by the schema's NOT NULL constraints) or on any SQLite error. When
+  an error occurs the entire transaction is rolled back — no orphan merge record.
+
+  `merge_attrs` fields: same as `record_merge_outcome/2`.
+  `lineage_attrs` fields:
+    - `:main_commit`        — `String.t()`; the merge commit SHA.
+    - `:unit_id`            — `String.t()`; the unit/PR identifier.
+    - `:gate_verdicts`      — `[map()]` with `:half`, `:verdict`, `:diff_hash`.
+    - `:gating_test_paths`  — `[String.t()]`; NOT NULL (null → `{:error, _}`).
+    - `:claims`             — `[String.t()]`; NOT NULL (null → `{:error, _}`).
+    - `:specs`              — `[String.t()]`; NOT NULL (null → `{:error, _}`).
+    - `:issues`             — `[String.t()]`; NOT NULL (null → `{:error, _}`).
+  """
+  @spec record_merge_with_lineage(GenServer.server(), merge_outcome_attrs(), lineage_attrs()) ::
+          {:ok, %{merge_ref: ref(), lineage_ref: ref()}} | {:error, term()}
+  def record_merge_with_lineage(server, merge_attrs, lineage_attrs) do
+    GenServer.call(server, {:record_merge_with_lineage, merge_attrs, lineage_attrs})
+  end
+
+  @doc """
+  Return the lineage record for `unit_id` (D-353 / NFR-AUDIT).
+
+  Returns `{:ok, %Tau.Factory.Lineage{}}` or `:none`.
+  """
+  @spec lineage_for(GenServer.server(), String.t()) ::
+          {:ok, Tau.Factory.Lineage.t()} | :none
+  def lineage_for(server, unit_id) do
+    GenServer.call(server, {:lineage_for, unit_id})
+  end
+
+  @doc """
+  Return the gate/merge coordinate (head_sha) for `unit_id` (INV-DS-DECISION-REPLAYABLE, #545).
+
+  The coordinate is the `head_sha` persisted in the `unit_snapshots` row written at
+  `:gating` entry. After a crash, the Coordinator can recover it from the Ledger
+  alone — no nondeterministic step (work_ready re-execution) is required.
+
+  Returns:
+    - `{:ok, coordinate}` — the persisted `head_sha` for the highest-id snapshot
+      row for `unit_id` that has a non-NULL `head_sha`.
+    - `:none` — no snapshot with a non-NULL `head_sha` exists for this `unit_id`
+      (fresh Ledger, or unit never reached :gating).
+  """
+  @spec coordinate_for(GenServer.server(), String.t()) :: {:ok, String.t()} | :none
+  def coordinate_for(server, unit_id) do
+    GenServer.call(server, {:coordinate_for, unit_id})
+  end
+
+  @doc """
+  Return the frozen scope for `unit_id` (HR-4, issue #584).
+
+  Reads the first non-NULL `frozen_scope` row from `unit_snapshots` for
+  the given `unit_id`. The frozen scope is written at the `:planned` snapshot
+  (admission) and is immutable thereafter (append-only Ledger, D-335).
+
+  Returns:
+    - `{:ok, frozen}` — a map with `:files` (MapSet) and `:gating_test_paths` ([String.t()]).
+    - `:none` — no frozen_scope has been persisted for this unit_id.
+  """
+  @spec frozen_scope_for(GenServer.server(), String.t()) :: {:ok, map()} | :none
+  def frozen_scope_for(server, unit_id) do
+    GenServer.call(server, {:frozen_scope_for, unit_id})
+  end
+
   # ---------------------------------------------------------------------------
   # GenServer callbacks
   # ---------------------------------------------------------------------------
@@ -317,6 +403,30 @@ defmodule Tau.Factory.Ledger.Writer do
 
   def handle_call({:merge_outcome_for, unit_id}, _from, %{db: db} = state) do
     result = do_merge_outcome_for(db, unit_id)
+    {:reply, result, state}
+  end
+
+  def handle_call({:frozen_scope_for, unit_id}, _from, %{db: db} = state) do
+    result = do_frozen_scope_for(db, unit_id)
+    {:reply, result, state}
+  end
+
+  def handle_call({:coordinate_for, unit_id}, _from, %{db: db} = state) do
+    result = do_coordinate_for(db, unit_id)
+    {:reply, result, state}
+  end
+
+  def handle_call(
+        {:record_merge_with_lineage, merge_attrs, lineage_attrs},
+        _from,
+        %{db: db} = state
+      ) do
+    result = do_record_merge_with_lineage(db, merge_attrs, lineage_attrs)
+    {:reply, result, state}
+  end
+
+  def handle_call({:lineage_for, unit_id}, _from, %{db: db} = state) do
+    result = do_lineage_for(db, unit_id)
     {:reply, result, state}
   end
 
@@ -547,20 +657,58 @@ defmodule Tau.Factory.Ledger.Writer do
   # Insert a unit snapshot row. Uses INSERT OR IGNORE for idempotency — if the
   # idempotency_key already exists the row is skipped and we return the existing
   # row id. Append-only; WAL-before-ack (D-315, RPO=0).
-  defp do_snapshot_unit(db, %{
-         unit_id: unit_id,
-         state: state,
-         idempotency_key: idempotency_key
-       }) do
-    state_text = Atom.to_string(state)
+  #
+  # HR-4 (issue #584): when attrs includes a non-nil :frozen_scope map, persist it
+  # as a JSON-encoded blob in the frozen_scope column. This column was added in
+  # migration 20260616_011. The scope is written at the :planned snapshot
+  # (admission) and never updated (D-335 append-only). The :files value (a MapSet)
+  # is serialised as a sorted list; :gating_test_paths is stored as-is.
+  #
+  # INV-DS-DECISION-REPLAYABLE (issue #545): when attrs includes a non-nil :head_sha
+  # string, persist it in the head_sha column (migration 20260617_013). This is the
+  # gate/merge coordinate captured from {:work_ready, worker_id, branch, head_sha}
+  # at :gating entry. Persisting it makes the decision log replayable: after a
+  # crash the Coordinator can recover the coordinate from the Ledger alone without
+  # re-running the nondeterministic work_ready step.
+  defp do_snapshot_unit(db, attrs) do
+    unit_id = Map.fetch!(attrs, :unit_id)
+    state = Map.fetch!(attrs, :state)
+    idempotency_key = Map.fetch!(attrs, :idempotency_key)
+    frozen_scope = Map.get(attrs, :frozen_scope, nil)
+    head_sha = Map.get(attrs, :head_sha, nil)
 
-    sql = """
-    INSERT OR IGNORE INTO unit_snapshots (unit_id, state, idempotency_key)
-    VALUES (?1, ?2, ?3)
-    """
+    state_text = Atom.to_string(state)
+    frozen_scope_json = encode_frozen_scope(frozen_scope)
+
+    {sql, bindings} =
+      cond do
+        frozen_scope_json && head_sha ->
+          {"""
+           INSERT OR IGNORE INTO unit_snapshots (unit_id, state, idempotency_key, frozen_scope, head_sha)
+           VALUES (?1, ?2, ?3, ?4, ?5)
+           """, [unit_id, state_text, idempotency_key, frozen_scope_json, head_sha]}
+
+        frozen_scope_json ->
+          {"""
+           INSERT OR IGNORE INTO unit_snapshots (unit_id, state, idempotency_key, frozen_scope)
+           VALUES (?1, ?2, ?3, ?4)
+           """, [unit_id, state_text, idempotency_key, frozen_scope_json]}
+
+        head_sha ->
+          {"""
+           INSERT OR IGNORE INTO unit_snapshots (unit_id, state, idempotency_key, head_sha)
+           VALUES (?1, ?2, ?3, ?4)
+           """, [unit_id, state_text, idempotency_key, head_sha]}
+
+        true ->
+          {"""
+           INSERT OR IGNORE INTO unit_snapshots (unit_id, state, idempotency_key)
+           VALUES (?1, ?2, ?3)
+           """, [unit_id, state_text, idempotency_key]}
+      end
 
     with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, String.trim(sql)),
-         :ok <- Exqlite.Sqlite3.bind(stmt, [unit_id, state_text, idempotency_key]),
+         :ok <- Exqlite.Sqlite3.bind(stmt, bindings),
          step_result <- Exqlite.Sqlite3.step(db, stmt),
          :ok <- Exqlite.Sqlite3.release(db, stmt) do
       case step_result do
@@ -682,8 +830,12 @@ defmodule Tau.Factory.Ledger.Writer do
     end
   end
 
-  # Insert an append-only merge-outcome row. No UPDATE/DELETE path (D-355).
-  # WAL-before-ack: reply sent only after step/2 (WAL commit) returns (D-315).
+  # Insert an append-only merge-outcome row co-transactionally with a lineage row.
+  # D-353 (INV-LINEAGE-ATOMIC, issue #550): every merge record MUST be written in
+  # the same transaction as its lineage row — no merge may be observable in L
+  # without a complete lineage record (WAL-before-ack, D-315; NFR-AUDIT=100%).
+  # Returns {:ok, ref} where ref is the merge_outcomes rowid (SPEC-FACTORY-MERGE §4 B9).
+  # No UPDATE/DELETE path (D-355).
   # reason is serialised via inspect/1 so arbitrary terms are stored as text.
   defp do_record_merge_outcome(db, %{
          unit_id: unit_id,
@@ -692,16 +844,57 @@ defmodule Tau.Factory.Ledger.Writer do
          reason: reason,
          run: run
        }) do
-    outcome_text = atom_to_outcome(outcome)
-    reason_text = if reason == nil, do: nil, else: inspect(reason)
+    :ok = Exqlite.Sqlite3.execute(db, "BEGIN")
+
+    result =
+      with {:ok, merge_ref} <-
+             insert_merge_row(db, %{
+               unit_id: unit_id,
+               outcome: outcome,
+               commit_sha: commit_sha,
+               reason: reason,
+               run: run
+             }),
+           {:ok, _lineage_ref} <- insert_lineage_row_minimal(db, unit_id, commit_sha) do
+        {:ok, merge_ref}
+      end
+
+    case result do
+      {:ok, _} = ok ->
+        :ok = Exqlite.Sqlite3.execute(db, "COMMIT")
+        ok
+
+      {:error, _} = err ->
+        Exqlite.Sqlite3.execute(db, "ROLLBACK")
+        err
+    end
+  end
+
+  # Insert a minimal lineage row for a merge outcome written via record_merge_outcome/2.
+  # D-353 (INV-LINEAGE-ATOMIC, issue #550): lineage must be co-transactional with
+  # the merge record (no null edge). Uses commit_sha (or "" for rejection outcomes
+  # with no sha) as main_commit; all list fields default to empty JSON arrays.
+  # Callers that have full lineage data use record_merge_with_lineage/3 instead.
+  defp insert_lineage_row_minimal(db, unit_id, commit_sha) do
+    main_commit = commit_sha || ""
+    empty_json = "[]"
 
     sql = """
-    INSERT INTO merge_outcomes (unit_id, outcome, commit_sha, reason, run)
-    VALUES (?1, ?2, ?3, ?4, ?5)
+    INSERT INTO lineage (unit_id, main_commit, gate_verdicts, gating_test_paths, claims, specs, issues)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
     """
 
     with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, String.trim(sql)),
-         :ok <- Exqlite.Sqlite3.bind(stmt, [unit_id, outcome_text, commit_sha, reason_text, run]),
+         :ok <-
+           Exqlite.Sqlite3.bind(stmt, [
+             unit_id,
+             main_commit,
+             empty_json,
+             empty_json,
+             empty_json,
+             empty_json,
+             empty_json
+           ]),
          step_result <- Exqlite.Sqlite3.step(db, stmt),
          :ok <- Exqlite.Sqlite3.release(db, stmt) do
       case step_result do
@@ -755,6 +948,307 @@ defmodule Tau.Factory.Ledger.Writer do
   end
 
   defp parse_reason(text), do: text
+
+  # HR-4 (issue #584): read the first non-NULL frozen_scope for a unit_id.
+  # The frozen scope is written at the :planned entry and is immutable
+  # (append-only ledger, D-335). We fetch by lowest `id` to get the admission
+  # snapshot, but any non-NULL row suffices since scope never changes post-admission.
+  defp do_frozen_scope_for(db, unit_id) do
+    sql = """
+    SELECT frozen_scope
+    FROM unit_snapshots
+    WHERE unit_id = ?1 AND frozen_scope IS NOT NULL
+    ORDER BY id ASC
+    LIMIT 1
+    """
+
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, String.trim(sql)),
+         :ok <- Exqlite.Sqlite3.bind(stmt, [unit_id]),
+         {:ok, rows} <- Exqlite.Sqlite3.fetch_all(db, stmt),
+         :ok <- Exqlite.Sqlite3.release(db, stmt) do
+      case rows do
+        [[json_text]] -> {:ok, decode_frozen_scope(json_text)}
+        [] -> :none
+      end
+    end
+  end
+
+  # Encode the frozen_scope map to JSON for storage. Returns nil when scope is nil.
+  # :files (MapSet) is serialised as a sorted list so it is JSON-compatible.
+  # :gating_test_paths is stored as-is (a list of strings).
+  defp encode_frozen_scope(nil), do: nil
+
+  defp encode_frozen_scope(scope) when is_map(scope) do
+    files_list =
+      case Map.get(scope, :files) do
+        nil -> []
+        %MapSet{} = ms -> ms |> MapSet.to_list() |> Enum.sort()
+        list when is_list(list) -> Enum.sort(list)
+      end
+
+    gating_test_paths = Map.get(scope, :gating_test_paths, [])
+
+    Jason.encode!(%{"files" => files_list, "gating_test_paths" => gating_test_paths})
+  end
+
+  # Decode the JSON frozen_scope back into a map with MapSet :files and list :gating_test_paths.
+  defp decode_frozen_scope(json_text) do
+    case Jason.decode(json_text) do
+      {:ok, %{"files" => files_list, "gating_test_paths" => paths}} ->
+        %{
+          files: MapSet.new(files_list),
+          gating_test_paths: paths
+        }
+
+      _ ->
+        %{files: MapSet.new(), gating_test_paths: []}
+    end
+  end
+
+  # D-353 (issue #668): write merge_outcomes + lineage in a single SQLite transaction.
+  # All lineage link columns are NOT NULL — a nil value returns {:error, :null_edge}
+  # before even opening the transaction, so the merge row is never written.
+  # WAL-before-ack (D-315): COMMIT flushes WAL to disk before returning; the
+  # GenServer.call reply is sent only after this function returns.
+  defp do_record_merge_with_lineage(db, merge_attrs, lineage_attrs) do
+    # Validate all required non-null lineage fields before opening a transaction.
+    with :ok <- validate_lineage_links(lineage_attrs),
+         {:ok, gate_verdicts_json} <- encode_json_field(lineage_attrs.gate_verdicts),
+         {:ok, paths_json} <- encode_json_field(lineage_attrs.gating_test_paths),
+         {:ok, claims_json} <- encode_json_field(lineage_attrs.claims),
+         {:ok, specs_json} <- encode_json_field(lineage_attrs.specs),
+         {:ok, issues_json} <- encode_json_field(lineage_attrs.issues) do
+      do_transact_merge_and_lineage(
+        db,
+        merge_attrs,
+        lineage_attrs,
+        gate_verdicts_json,
+        paths_json,
+        claims_json,
+        specs_json,
+        issues_json
+      )
+    end
+  end
+
+  # Validate that all required lineage link fields are non-nil.
+  # D-353 (NFR-AUDIT): "no null edge" applies to ALL six links, including
+  # gate_verdicts (the commit→verdicts step).
+  defp validate_lineage_links(attrs) do
+    required = [:gate_verdicts, :gating_test_paths, :claims, :specs, :issues]
+
+    null_fields =
+      Enum.filter(required, fn field -> Map.get(attrs, field) == nil end)
+
+    case null_fields do
+      [] -> :ok
+      [field | _] -> {:error, {:null_edge, field}}
+    end
+  end
+
+  # Encode a value to a JSON string; returns {:ok, json} or {:error, reason}.
+  defp encode_json_field(value) do
+    case Jason.encode(value) do
+      {:ok, json} -> {:ok, json}
+      {:error, reason} -> {:error, {:json_encode_failed, reason}}
+    end
+  end
+
+  # Execute the two-row transaction. On any error, ROLLBACK and return {:error, reason}.
+  # On success, COMMIT and return {:ok, %{merge_ref:, lineage_ref:}}.
+  defp do_transact_merge_and_lineage(
+         db,
+         merge_attrs,
+         lineage_attrs,
+         gate_verdicts_json,
+         paths_json,
+         claims_json,
+         specs_json,
+         issues_json
+       ) do
+    :ok = Exqlite.Sqlite3.execute(db, "BEGIN")
+
+    result =
+      with {:ok, merge_ref} <- insert_merge_row(db, merge_attrs),
+           {:ok, lineage_ref} <-
+             insert_lineage_row(
+               db,
+               lineage_attrs,
+               gate_verdicts_json,
+               paths_json,
+               claims_json,
+               specs_json,
+               issues_json
+             ) do
+        {:ok, %{merge_ref: merge_ref, lineage_ref: lineage_ref}}
+      end
+
+    case result do
+      {:ok, _} = ok ->
+        :ok = Exqlite.Sqlite3.execute(db, "COMMIT")
+        ok
+
+      {:error, _} = err ->
+        Exqlite.Sqlite3.execute(db, "ROLLBACK")
+        err
+    end
+  end
+
+  # Insert a single merge_outcomes row inside an open transaction.
+  defp insert_merge_row(db, %{
+         unit_id: unit_id,
+         outcome: outcome,
+         commit_sha: commit_sha,
+         reason: reason,
+         run: run
+       }) do
+    outcome_text = atom_to_outcome(outcome)
+    reason_text = if reason == nil, do: nil, else: inspect(reason)
+
+    sql = """
+    INSERT INTO merge_outcomes (unit_id, outcome, commit_sha, reason, run)
+    VALUES (?1, ?2, ?3, ?4, ?5)
+    """
+
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, String.trim(sql)),
+         :ok <- Exqlite.Sqlite3.bind(stmt, [unit_id, outcome_text, commit_sha, reason_text, run]),
+         step_result <- Exqlite.Sqlite3.step(db, stmt),
+         :ok <- Exqlite.Sqlite3.release(db, stmt) do
+      case step_result do
+        :done -> {:ok, fetch_last_rowid(db)}
+        {:error, reason_err} -> {:error, reason_err}
+      end
+    end
+  end
+
+  # Insert a single lineage row inside an open transaction.
+  defp insert_lineage_row(
+         db,
+         %{unit_id: unit_id, main_commit: main_commit},
+         gate_verdicts_json,
+         paths_json,
+         claims_json,
+         specs_json,
+         issues_json
+       ) do
+    sql = """
+    INSERT INTO lineage (unit_id, main_commit, gate_verdicts, gating_test_paths, claims, specs, issues)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+    """
+
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, String.trim(sql)),
+         :ok <-
+           Exqlite.Sqlite3.bind(stmt, [
+             unit_id,
+             main_commit,
+             gate_verdicts_json,
+             paths_json,
+             claims_json,
+             specs_json,
+             issues_json
+           ]),
+         step_result <- Exqlite.Sqlite3.step(db, stmt),
+         :ok <- Exqlite.Sqlite3.release(db, stmt) do
+      case step_result do
+        :done -> {:ok, fetch_last_rowid(db)}
+        {:error, reason_err} -> {:error, reason_err}
+      end
+    end
+  end
+
+  # Read the lineage row for unit_id and return a %Tau.Factory.Lineage{} struct.
+  # Returns {:ok, %Lineage{}} or :none.
+  defp do_lineage_for(db, unit_id) do
+    sql = """
+    SELECT main_commit, gate_verdicts, gating_test_paths, claims, specs, issues
+    FROM lineage
+    WHERE unit_id = ?1
+    ORDER BY id DESC
+    LIMIT 1
+    """
+
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, String.trim(sql)),
+         :ok <- Exqlite.Sqlite3.bind(stmt, [unit_id]),
+         {:ok, rows} <- Exqlite.Sqlite3.fetch_all(db, stmt),
+         :ok <- Exqlite.Sqlite3.release(db, stmt) do
+      case rows do
+        [[main_commit, verdicts_json, paths_json, claims_json, specs_json, issues_json]] ->
+          lineage = %Tau.Factory.Lineage{
+            main_commit: main_commit,
+            unit_id: unit_id,
+            gate_verdicts: decode_gate_verdicts(verdicts_json),
+            gating_test_paths: decode_json_list(paths_json),
+            claims: decode_json_list(claims_json),
+            specs: decode_json_list(specs_json),
+            issues: decode_json_list(issues_json)
+          }
+
+          {:ok, lineage}
+
+        [] ->
+          :none
+      end
+    end
+  end
+
+  # Decode a JSON array of gate verdict maps into a list with atom keys.
+  defp decode_gate_verdicts(json_text) do
+    case Jason.decode(json_text) do
+      {:ok, list} when is_list(list) ->
+        Enum.map(list, fn verdict ->
+          half =
+            case Map.get(verdict, "half") do
+              "critic" -> :critic
+              "reviewer" -> :reviewer
+              "mutation" -> :mutation
+              other -> String.to_existing_atom(other)
+            end
+
+          v =
+            case Map.get(verdict, "verdict") do
+              "pass" -> :pass
+              "fail" -> :fail
+              other -> String.to_existing_atom(other)
+            end
+
+          %{half: half, verdict: v, diff_hash: Map.get(verdict, "diff_hash")}
+        end)
+
+      _ ->
+        []
+    end
+  end
+
+  # Decode a JSON array of strings. Returns [] on error.
+  defp decode_json_list(json_text) do
+    case Jason.decode(json_text) do
+      {:ok, list} when is_list(list) -> list
+      _ -> []
+    end
+  end
+
+  # INV-DS-DECISION-REPLAYABLE (issue #545): read the highest-id head_sha from
+  # unit_snapshots for unit_id. Returns {:ok, coordinate} or :none.
+  # Uses MAX(id) to get the most-recently-written snapshot with a non-NULL head_sha.
+  defp do_coordinate_for(db, unit_id) do
+    sql = """
+    SELECT head_sha
+    FROM unit_snapshots
+    WHERE unit_id = ?1 AND head_sha IS NOT NULL
+    ORDER BY id DESC
+    LIMIT 1
+    """
+
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, String.trim(sql)),
+         :ok <- Exqlite.Sqlite3.bind(stmt, [unit_id]),
+         {:ok, rows} <- Exqlite.Sqlite3.fetch_all(db, stmt),
+         :ok <- Exqlite.Sqlite3.release(db, stmt) do
+      case rows do
+        [[head_sha]] -> {:ok, head_sha}
+        [] -> :none
+      end
+    end
+  end
 
   defp atom_to_outcome(:merged), do: "merged"
   defp atom_to_outcome(:rejected), do: "rejected"

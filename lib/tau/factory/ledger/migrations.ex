@@ -126,7 +126,42 @@ defmodule Tau.Factory.Ledger.Migrations do
        run         TEXT    NOT NULL,
        inserted_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
      )
-     """}
+     """},
+    # HR-4 (issue #584): add frozen_scope column to unit_snapshots.
+    # The frozen_scope is a JSON-encoded map carrying the declared file set and
+    # gating-test paths as supplied to Unit.start_link/1 at admission (planned entry).
+    # NULL for rows written before this migration. WAL-before-ack (D-315).
+    # ALTER TABLE ADD COLUMN is idempotent in SQLite when paired with IF NOT EXISTS
+    # semantics — we guard idempotency via the ledger_schema_migrations version key.
+    {"20260616_011_unit_snapshots_add_frozen_scope",
+     "ALTER TABLE unit_snapshots ADD COLUMN frozen_scope TEXT"},
+    # D-353 (issue #668): Audit lineage table. Written in the same transaction as
+    # the merge_outcomes row (WAL-before-ack, D-315 / RPO=0). All link columns are
+    # NOT NULL — a null edge violates NFR-AUDIT and is rejected at the schema level.
+    # gate_verdicts, gating_test_paths, claims, specs, issues are JSON arrays.
+    {"20260617_012_lineage",
+     """
+     CREATE TABLE IF NOT EXISTS lineage (
+       id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+       unit_id            TEXT    NOT NULL,
+       main_commit        TEXT    NOT NULL,
+       gate_verdicts      TEXT    NOT NULL,
+       gating_test_paths  TEXT    NOT NULL,
+       claims             TEXT    NOT NULL,
+       specs              TEXT    NOT NULL,
+       issues             TEXT    NOT NULL,
+       inserted_at        TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+     )
+     """},
+    # INV-DS-DECISION-REPLAYABLE (issue #545): add head_sha column to
+    # unit_snapshots so the gate/merge coordinate (captured from the work_ready
+    # 3-tuple seam) is durably persisted. After a crash the Coordinator can
+    # reconstruct the full in-flight Unit state — including the coordinate — from
+    # the Ledger alone, without re-running any nondeterministic step (work_ready).
+    # NULL for rows written before this migration and for states where head_sha has
+    # not yet been captured (e.g. :planned, :oracle, :implementing).
+    {"20260617_013_unit_snapshots_add_head_sha",
+     "ALTER TABLE unit_snapshots ADD COLUMN head_sha TEXT"}
   ]
 
   @doc "Expose the migration list. Used by tests to verify idempotency."
