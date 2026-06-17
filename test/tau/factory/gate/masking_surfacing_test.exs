@@ -39,6 +39,7 @@ defmodule Tau.Factory.Gate.MaskingSurfacingTest do
   @moduletag :capture_log
 
   alias Tau.Factory.Gate
+  alias Tau.Factory.Gate.Masking
   alias Tau.Factory.Gate.Request
   alias Tau.Factory.Ledger.Writer
 
@@ -242,7 +243,7 @@ defmodule Tau.Factory.Gate.MaskingSurfacingTest do
     # there IS a masking violation (assertion deletion). This proves the test is
     # not vacuous — the violation exists and Gate.run/1 should detect it.
     {masking_status, masking_findings} =
-      Tau.Factory.Gate.Masking.scan(req.diff, req.frozen_paths)
+      Masking.scan(req.diff, req.frozen_paths)
 
     assert masking_status == :flagged,
            "INV-MASKING-DETECTION-ONLY: precondition failed — the fixture diff must " <>
@@ -316,12 +317,15 @@ defmodule Tau.Factory.Gate.MaskingSurfacingTest do
   test "INV-MASKING-DETECTION-ONLY: Gate.run/1 does NOT emit masking:flagged telemetry when the diff has no masking violations",
        %{writer: writer, fixture_root: root} do
     repo = build_clean_repo(root)
-    req = build_request(repo, writer, unit: "inv-masking-no-violation-test", run: "run-masking-clean-1")
+
+    req =
+      build_request(repo, writer, unit: "inv-masking-no-violation-test", run: "run-masking-clean-1")
 
     # Precondition: Masking.scan/2 must confirm no violations.
     {diff, _} = System.cmd("git", ["diff", repo.merge_base, repo.head], cd: repo.dir)
+
     {clean_status, _clean_findings} =
-      Tau.Factory.Gate.Masking.scan(diff, req.frozen_paths)
+      Masking.scan(diff, req.frozen_paths)
 
     assert clean_status == :clean,
            "INV-MASKING-DETECTION-ONLY: negative-control precondition failed — " <>
