@@ -15,6 +15,7 @@ defmodule Tau.Factory.ConflictCheck do
   @type scope :: %{
           required(:deps) => [unit_id()],
           required(:files) => MapSet.t(String.t()),
+          required(:gating_paths) => MapSet.t(String.t()),
           required(:codepoints) => MapSet.t({String.t(), atom()}),
           required(:specs) => MapSet.t(atom()),
           required(:resources) => MapSet.t(atom()),
@@ -77,7 +78,7 @@ defmodule Tau.Factory.ConflictCheck do
 
       with :ok <- check_no_dependency(declared_scope, in_flight_ids),
            :ok <- check_reverse_dependency(candidate_id, in_flight),
-           :ok <- check_disjoint_sets(members, declared_scope, :files, :disjoint_files),
+           :ok <- check_disjoint_files(members, declared_scope),
            :ok <-
              check_disjoint_sets(members, declared_scope, :codepoints, :disjoint_codepoints),
            :ok <- check_disjoint_sets(members, declared_scope, :specs, :no_shared_spec),
@@ -137,11 +138,41 @@ defmodule Tau.Factory.ConflictCheck do
     end
   end
 
-  # Clauses 2–5 — symmetric MapSet disjointness checks
+  # Clause 2 — disjoint_files (P-CC-5: gating_paths are unioned into files)
+  # Two scopes conflict on files if (files ∪ gating_paths) of either scope
+  # intersects (files ∪ gating_paths) of any in-flight scope.
+  # Reference: control-plane.md:288-290.
+  @spec check_disjoint_files([scope()], scope()) :: :ok | {:conflict, :disjoint_files}
+  defp check_disjoint_files(members, declared_scope) do
+    declared_effective =
+      MapSet.union(
+        declared_scope.files,
+        Map.get(declared_scope, :gating_paths, MapSet.new())
+      )
+
+    conflict =
+      Enum.any?(members, fn member ->
+        member_effective =
+          MapSet.union(
+            member.files,
+            Map.get(member, :gating_paths, MapSet.new())
+          )
+
+        not MapSet.disjoint?(declared_effective, member_effective)
+      end)
+
+    if conflict do
+      {:conflict, :disjoint_files}
+    else
+      :ok
+    end
+  end
+
+  # Clauses 3–5 — symmetric MapSet disjointness checks
   @spec check_disjoint_sets(
           [scope()],
           scope(),
-          :files | :codepoints | :specs | :resources,
+          :codepoints | :specs | :resources,
           clause()
         ) :: :ok | {:conflict, clause()}
   defp check_disjoint_sets(members, declared_scope, field, clause) do
