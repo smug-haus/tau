@@ -615,7 +615,6 @@ defmodule Tau.Factory.MergeAuthority do
     # The serial regime (B = 1) is stable only when the queue is empty at the
     # moment of assembly; if ≥ 2 units wait, taking them all avoids ρ_g → 1.
     train = [unit | rest]
-    base = fetch_main_oid(data.repo_dir)
 
     # D-341 / B8: emit the :queue span with LIV-2 starvation falsification
     # measurements BEFORE launching the build Task. max_restale_count and
@@ -638,11 +637,20 @@ defmodule Tau.Factory.MergeAuthority do
     })
 
     build_fun = data.build_fun
+    repo_dir = data.repo_dir
     tasks_name = data.tasks_name
 
-    task = Task.Supervisor.async_nolink(tasks_name, fn -> build_fun.(train, base) end)
+    # INV-MAI-1 / D-302 / [C206-B1]: fetch_main_oid runs INSIDE the async Task
+    # (off the gen_statem mailbox) so that request_merge returns :queued
+    # immediately without blocking on network I/O. A stalled git fetch must not
+    # hold up the gen_statem callback — M's mailbox must stay free for T_int.
+    task =
+      Task.Supervisor.async_nolink(tasks_name, fn ->
+        base = fetch_main_oid(repo_dir)
+        build_fun.(train, base)
+      end)
 
-    telemetry(:integrating, %{hash: hd_hash(train)}, %{units: train, base: base})
+    telemetry(:integrating, %{hash: hd_hash(train)}, %{units: train, base: nil})
 
     next_data = %{
       data
