@@ -201,6 +201,165 @@ defmodule Tau.OtelReporter.Handler do
   end
 
   # ---------------------------------------------------------------------------
+  # Factory gate run (FR-9.1 / issue #664)
+  # ---------------------------------------------------------------------------
+
+  defp do_handle([:tau, :factory, :gate, :run, :start], _measurements, metadata, %{
+         reporter: reporter
+       }) do
+    unit = Map.get(metadata, :unit)
+    hash = Map.get(metadata, :hash)
+    run = Map.get(metadata, :run)
+    key = {:factory_gate_run, unit, hash, run}
+
+    attrs =
+      primitive_map(%{
+        "tau.factory.unit" => unit,
+        "tau.factory.gate.hash" => hash,
+        "tau.factory.gate.run" => run
+      })
+
+    GenServer.cast(reporter, {:span_open, key, "tau.factory.gate.run", attrs})
+  end
+
+  defp do_handle([:tau, :factory, :gate, :run, :stop], measurements, metadata, %{
+         reporter: reporter
+       }) do
+    unit = Map.get(metadata, :unit)
+    hash = Map.get(metadata, :hash)
+    run = Map.get(metadata, :run)
+    key = {:factory_gate_run, unit, hash, run}
+
+    duration = Map.get(measurements, :duration, 0)
+    status = Map.get(metadata, :status)
+    outcome = if status == :pass, do: :ok, else: :error
+    GenServer.cast(reporter, {:span_close, key, duration, outcome})
+  end
+
+  # ---------------------------------------------------------------------------
+  # Factory worker events (D-352)
+  # ---------------------------------------------------------------------------
+
+  defp do_handle([:tau, :factory, :worker, :start], _measurements, metadata, %{
+         reporter: reporter
+       }) do
+    worker_id = Map.get(metadata, :worker_id)
+    key = {:factory_worker, worker_id}
+
+    attrs =
+      primitive_map(%{
+        "tau.factory.worker_id" => worker_id,
+        "tau.factory.unit_id" => Map.get(metadata, :unit_id),
+        "tau.factory.agent_mode" => Map.get(metadata, :agent_mode)
+      })
+
+    GenServer.cast(reporter, {:span_open, key, "tau.factory.worker", attrs})
+  end
+
+  defp do_handle([:tau, :factory, :worker, :exit], measurements, metadata, %{
+         reporter: reporter
+       }) do
+    worker_id = Map.get(metadata, :worker_id)
+    key = {:factory_worker, worker_id}
+    duration = Map.get(measurements, :duration, 0)
+    reason = Map.get(metadata, :reason, :normal)
+    outcome = if reason == :normal, do: :ok, else: :error
+    GenServer.cast(reporter, {:span_close, key, duration, outcome})
+  end
+
+  # ---------------------------------------------------------------------------
+  # Factory unit outcome events (D-352)
+  # ---------------------------------------------------------------------------
+
+  defp do_handle([:tau, :factory, :unit, outcome], _measurements, metadata, %{
+         reporter: reporter
+       })
+       when outcome in [:merged, :escalated, :cancelled, :gating, :implementing] do
+    unit_id = Map.get(metadata, :unit_id)
+    ref = make_ref()
+    key = {:factory_unit_outcome, unit_id, outcome, ref}
+
+    attrs =
+      primitive_map(%{
+        "tau.factory.unit_id" => unit_id,
+        "tau.factory.unit.outcome" => outcome,
+        "tau.factory.unit.reason" => Map.get(metadata, :reason)
+      })
+
+    span_name = "tau.factory.unit.#{outcome}"
+    GenServer.cast(reporter, {:span_open, key, span_name, attrs})
+    GenServer.cast(reporter, {:span_close, key, 0, :ok})
+  end
+
+  # ---------------------------------------------------------------------------
+  # Factory coordinator events (D-352)
+  # ---------------------------------------------------------------------------
+
+  defp do_handle([:tau, :factory, :coordinator, event], _measurements, metadata, %{
+         reporter: reporter
+       }) do
+    ref = make_ref()
+    key = {:factory_coordinator, event, ref}
+
+    attrs =
+      primitive_map(%{
+        "tau.factory.coordinator.event" => event,
+        "tau.factory.coordinator.issue" => Map.get(metadata, :issue),
+        "tau.factory.coordinator.milestone" => Map.get(metadata, :milestone)
+      })
+
+    span_name = "tau.factory.coordinator.#{event}"
+    GenServer.cast(reporter, {:span_open, key, span_name, attrs})
+    GenServer.cast(reporter, {:span_close, key, 0, :ok})
+  end
+
+  # ---------------------------------------------------------------------------
+  # Factory merge events (D-352)
+  # ---------------------------------------------------------------------------
+
+  defp do_handle([:tau, :factory, :merge, event], measurements, metadata, %{
+         reporter: reporter
+       }) do
+    unit_id = Map.get(metadata, :unit_id)
+    ref = make_ref()
+    key = {:factory_merge, unit_id, event, ref}
+    duration = Map.get(measurements, :duration, 0)
+
+    attrs =
+      primitive_map(%{
+        "tau.factory.unit_id" => unit_id,
+        "tau.factory.merge.event" => event,
+        "tau.factory.merge.pr" => Map.get(metadata, :pr),
+        "tau.factory.merge.sha" => Map.get(metadata, :sha)
+      })
+
+    span_name = "tau.factory.merge.#{event}"
+    GenServer.cast(reporter, {:span_open, key, span_name, attrs})
+    GenServer.cast(reporter, {:span_close, key, duration, :ok})
+  end
+
+  # ---------------------------------------------------------------------------
+  # Factory janitor events (D-352)
+  # ---------------------------------------------------------------------------
+
+  defp do_handle([:tau, :factory, :janitor, :reclaim], _measurements, metadata, %{
+         reporter: reporter
+       }) do
+    worker_id = Map.get(metadata, :worker_id)
+    ref = make_ref()
+    key = {:factory_janitor_reclaim, worker_id, ref}
+
+    attrs =
+      primitive_map(%{
+        "tau.factory.worker_id" => worker_id,
+        "tau.factory.janitor.reason" => Map.get(metadata, :reason)
+      })
+
+    GenServer.cast(reporter, {:span_open, key, "tau.factory.janitor.reclaim", attrs})
+    GenServer.cast(reporter, {:span_close, key, 0, :ok})
+  end
+
+  # ---------------------------------------------------------------------------
   # Optional events (configurable; default off — no-op here)
   # ---------------------------------------------------------------------------
 
