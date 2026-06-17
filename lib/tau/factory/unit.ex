@@ -683,7 +683,19 @@ defmodule Tau.Factory.Unit do
         result
       end)
 
-    {:keep_state, %{data | gate_task_ref: task.ref}}
+    # INV-LIVE-CP-1: arm a per-state timeout so a permanently-wedged gate Task
+    # (crash, hang, or deadlock) cannot strand the Unit forever in :gating.
+    # The timeout fires if no {:gate_result, _} arrives within state_timeout_ms;
+    # the handler below escalates the Unit with :E_GATE_STALLED.
+    timeout_ms = data.state_timeout_ms
+    {:keep_state, %{data | gate_task_ref: task.ref}, [{:state_timeout, timeout_ms, :gate_stalled}]}
+  end
+
+  # INV-LIVE-CP-1: gate Task blocked/wedged — escalate. Symmetric with
+  # awaiting_merge(:state_timeout, :merge_stalled, data).
+  def gating(:state_timeout, :gate_stalled, data) do
+    Logger.warning("[Unit \#{data.unit_id}] gating :state_timeout — gate task stalled")
+    escalate(data, :E_GATE_STALLED)
   end
 
   # INV-SAFE-CP-5: handle the gate result delivered asynchronously from the Task.
