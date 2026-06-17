@@ -41,6 +41,18 @@ defmodule Tau.Factory.PolicyModelRoleTest do
     - `Tau.Factory.Policy.Owner` does not exist.
   A compile error or UndefinedFunctionError is the correct fail-before state.
 
+  ## Implementation note on conflict_predicate
+  Elixir module attributes are injected into function/macro call sites at
+  compile time and must be escapable AST literals. Anonymous functions (closures
+  created with `&(&1 == ...)`) are NOT escapable and cause a compile-time
+  `ArgumentError: cannot inject attribute @…`. The `conflict_predicate` field is
+  a function type (governance.md §3), so a valid value must be supplied — but it
+  MUST be an MFA reference (`&Mod.fun/arity`), not an anonymous function literal.
+  This test uses `&__MODULE__.trivial_predicate/2` to satisfy the type constraint
+  without triggering the module-attribute escaping restriction. This choice does
+  not weaken any invariant: INV-MODEL-POLICY is about model_per_role, not about
+  the conflict predicate.
+
   ## Gating-test paths
 
     - `test/tau/factory/policy_model_role_test.exs`
@@ -56,15 +68,24 @@ defmodule Tau.Factory.PolicyModelRoleTest do
   alias Tau.Factory.Policy.Owner, as: PolicyOwner
 
   # ---------------------------------------------------------------------------
-  # Minimal valid policy for testing.
-  # Every field uses the smallest admissible positive integer for numeric
-  # dimensions; model_per_role uses two representative roles.
+  # MFA reference for conflict_predicate.
+  # Elixir module attributes must hold escapable values; anonymous function
+  # literals are not escapable (ArgumentError at compile time). An MFA
+  # reference is escapable and satisfies the function-typed field requirement.
   # ---------------------------------------------------------------------------
+
+  # This function is the conflict_predicate target; it is deliberately trivial —
+  # it always returns true (no admission is blocked) because the tests here are
+  # about model_per_role, not conflict detection.
+  def trivial_predicate(_a, _b), do: true
 
   @model_per_role %{
     implementer: "claude-sonnet-4-5",
     critic: "claude-opus-4-5"
   }
+
+  # MFA reference — escapable into module attribute.
+  @conflict_predicate_mfa &__MODULE__.trivial_predicate/2
 
   @valid_policy %Policy{
     version: 1,
@@ -72,7 +93,7 @@ defmodule Tau.Factory.PolicyModelRoleTest do
     retry_bound_n: 3,
     budget: %{token: 100_000, cost: 10, wall_time: 3_600, iteration: 5},
     priority_order: [],
-    conflict_predicate: &(&1 == &1 and &2 == &2),
+    conflict_predicate: @conflict_predicate_mfa,
     gate_manifest: [:mutation, :critic, :reviewer],
     escalation_thresholds: %{upheld_challenges: 2}
   }
