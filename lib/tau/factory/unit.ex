@@ -207,7 +207,11 @@ defmodule Tau.Factory.Unit do
       # D-362: captured from {:work_ready, worker_id, branch, head_sha} (3-tuple seam).
       # Initialised to nil; stays nil when the legacy 2-tuple seam is used (D-363).
       head_sha: nil,
-      branch: nil
+      branch: nil,
+      # INV-WF-13: gating_test_paths captured from the 5-tuple work_ready form.
+      # Nil until the :test_author worker reports its path set; the oracle →
+      # implementing transition REQUIRES a non-empty list (Clause 2 guard).
+      gating_test_paths: nil
     }
 
     # Transition immediately to planned state, which triggers admission.
@@ -268,10 +272,16 @@ defmodule Tau.Factory.Unit do
     end
   end
 
-  # D-326: gate on work_ready keyed by the CURRENT worker_id (3-tuple seam).
-  # D-362: capture branch and head_sha into data on transition.
-  def oracle(:info, {:work_ready, worker_id, branch, head_sha}, %{worker_id: worker_id} = data)
-      when not is_nil(worker_id) do
+  # INV-WF-13 Clause 1: 5-tuple work_ready WITH gating_test_paths — capture paths and advance.
+  # The conformant oracle-separation contract requires the :test_author worker to carry
+  # a non-empty gating_test_paths list. This clause matches the extended form and captures
+  # the path set into data.gating_test_paths before transitioning to :implementing.
+  def oracle(
+        :info,
+        {:work_ready, worker_id, branch, head_sha, paths},
+        %{worker_id: worker_id} = data
+      )
+      when not is_nil(worker_id) and is_list(paths) and paths != [] do
     Process.demonitor(data.worker_mref, [:flush])
 
     new_data = %{
@@ -280,14 +290,52 @@ defmodule Tau.Factory.Unit do
         worker_id: nil,
         worker_mref: nil,
         branch: branch,
-        head_sha: head_sha
+        head_sha: head_sha,
+        gating_test_paths: paths
     }
 
     {:next_state, :implementing, new_data, [{:next_event, :internal, :on_enter}]}
   end
 
+  # INV-WF-13 Clause 2 guard: 5-tuple work_ready with an empty or missing path set —
+  # REFUSE the transition. Log a warning; the Unit stays in :oracle.
+  def oracle(
+        :info,
+        {:work_ready, worker_id, _branch, _head_sha, paths},
+        %{worker_id: worker_id} = data
+      )
+      when not is_nil(worker_id) do
+    Logger.warning(
+      "[Unit #{data.unit_id}] oracle work_ready from worker #{worker_id} carries " <>
+        "empty or invalid gating_test_paths #{inspect(paths)} — " <>
+        "refusing oracle→implementing transition (INV-WF-13 Clause 2)"
+    )
+
+    {:keep_state, data}
+  end
+
+  # D-326: gate on work_ready keyed by the CURRENT worker_id (3-tuple seam / legacy 4-tuple).
+  # D-362: would capture branch and head_sha, but INV-WF-13 Clause 2 requires a path set.
+  # A 4-tuple work_ready (no gating_test_paths) MUST NOT advance to :implementing.
+  # Log a warning and stay in :oracle.
+  def oracle(:info, {:work_ready, worker_id, _branch, _head_sha}, %{worker_id: worker_id} = data)
+      when not is_nil(worker_id) do
+    Logger.warning(
+      "[Unit #{data.unit_id}] oracle work_ready from worker #{worker_id} carries " <>
+        "no gating_test_paths (4-tuple form) — " <>
+        "refusing oracle→implementing transition (INV-WF-13 Clause 2)"
+    )
+
+    {:keep_state, data}
+  end
+
   # Discard work_ready from a superseded worker_id (stale-worker discard, B8).
   def oracle(:info, {:work_ready, _other_id, _branch, _head_sha}, data) do
+    {:keep_state, data}
+  end
+
+  # Discard 5-tuple work_ready from a superseded worker_id.
+  def oracle(:info, {:work_ready, _other_id, _branch, _head_sha, _paths}, data) do
     {:keep_state, data}
   end
 
