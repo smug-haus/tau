@@ -60,6 +60,10 @@ defmodule Tau.Factory.MergeAuthority do
     - `:post_merge_health_fun` — `(repo_dir, lang, ctx) -> :green | {:red, report}`
       post-merge origin/main health check (default: `Health.check/3`; injectable
       for tests, D-303).
+    - `:node_list_fun` — `(-> [node()])` returns the list of connected BEAM nodes
+      (default: `&Node.list/0`; injectable for tests). If non-empty on startup,
+      `start_link/1` returns `{:error, {:multi_node_detected, nodes}}` and the
+      process is NOT started (INV-ST-11: control plane MUST stay single-node).
   """
   @spec child_spec(keyword()) :: Supervisor.child_spec()
   def child_spec(opts) do
@@ -75,7 +79,23 @@ defmodule Tau.Factory.MergeAuthority do
   @spec start_link(keyword()) :: :gen_statem.start_ret()
   def start_link(opts) do
     name = Keyword.fetch!(opts, :name)
-    :gen_statem.start_link({:local, name}, __MODULE__, opts, [])
+
+    # INV-ST-11: Perform the single-node guard BEFORE start_link to avoid
+    # propagating the EXIT signal to the caller. gen_statem.start_link links
+    # the caller, and a {:stop, reason} from init/1 exits the child process
+    # AFTER init_ack — the linked EXIT then arrives at the caller's mailbox.
+    # Guard here (pre-spawn) eliminates the race entirely. init/1 still checks
+    # (defence-in-depth) but the early guard makes start_link safe to call
+    # from un-supervised callers (including tests).
+    node_list_fun = Keyword.get(opts, :node_list_fun, &Node.list/0)
+
+    case node_list_fun.() do
+      [] ->
+        :gen_statem.start_link({:local, name}, __MODULE__, opts, [])
+
+      nodes ->
+        {:error, {:multi_node_detected, nodes}}
+    end
   end
 
   @doc """
@@ -112,6 +132,23 @@ defmodule Tau.Factory.MergeAuthority do
 
   @impl :gen_statem
   def init(opts) do
+    # INV-ST-11: single-node guard. The control plane MUST NOT start when
+    # connected BEAM nodes are visible — distributing M imports split-brain risk.
+    # node_list_fun is injectable for test isolation (default: &Node.list/0).
+    node_list_fun = Keyword.get(opts, :node_list_fun, &Node.list/0)
+
+    case node_list_fun.() do
+      [] ->
+        init_state(opts)
+
+      nodes ->
+        # Defence-in-depth: if start_link's pre-spawn guard was bypassed
+        # (e.g. direct :gen_statem.start_link call), stop the process here.
+        {:stop, {:multi_node_detected, nodes}}
+    end
+  end
+
+  defp init_state(opts) do
     ledger = Keyword.fetch!(opts, :ledger)
     repo_dir = Keyword.fetch!(opts, :repo_dir)
     tasks_name = Keyword.fetch!(opts, :tasks_name)
