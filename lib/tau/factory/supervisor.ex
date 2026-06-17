@@ -261,8 +261,9 @@ defmodule Tau.Factory.Supervisor do
       {LedgerWriter, db_path: db_path, name: writer_name},
       # 2. Budget.Owner — ETS snapshot of per-dimension budget limits.
       {BudgetOwner, ledger: writer_name, totals: %{}, name: budget_owner_name},
-      # 3. Scheduler — admission authority.
-      {Scheduler, name: scheduler_name, w_cap: 5},
+      # 3. Scheduler — admission authority (D-320: wired to Budget.Owner so
+      #    budget ceiling is enforced on the enabled production path).
+      {Scheduler, name: scheduler_name, w_cap: 5, budget: {budget_owner_name, [:tokens]}},
       # 4. Task.Supervisor for MergeAuthority's async integration tasks.
       {Task.Supervisor, name: tasks_name},
       # 5. MergeAuthority — sole writer of origin/main; gen_statem.
