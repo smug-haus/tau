@@ -501,7 +501,12 @@ defmodule Tau.Factory.Gate do
       Logger.warning("Lint half: step execution error (fail-closed)")
       :fail
   catch
-    _, _ ->
+    kind, reason ->
+      Logger.warning(
+        "Lint half: unexpected throw/exit — " <>
+          inspect(kind) <> ": " <> inspect(reason) <> " (fail-closed)"
+      )
+
       :fail
   end
 
