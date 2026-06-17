@@ -75,11 +75,18 @@ defmodule Tau.Factory.KillSwitch do
     sentinel_path = Keyword.get(opts, :sentinel_path)
     poll_interval = Keyword.get(opts, :poll_interval, @default_poll_interval_ms)
 
+    # INV-KILLSWITCH-OPERATOR-STATE: the halt flag is durable operator state
+    # stored in an ETS table owned by this process (not process heap), so it
+    # survives an ETS read from any inspector without a GenServer roundtrip and
+    # persists across message-queue drains.
+    table = :ets.new(:kill_switch_control, [:set, :protected])
+
     state = %{
       pubsub: pubsub,
       sentinel_path: sentinel_path,
       poll_interval: poll_interval,
-      sentinel_triggered: false
+      sentinel_triggered: false,
+      table: table
     }
 
     if sentinel_path do
@@ -91,6 +98,9 @@ defmodule Tau.Factory.KillSwitch do
 
   @impl GenServer
   def handle_call(:request_halt, _from, state) do
+    # INV-KILLSWITCH-OPERATOR-STATE: write the halt flag to ETS before
+    # broadcasting so any observer reading the table sees the flag set.
+    :ets.insert(state.table, {:halt, true})
     :ok = Phoenix.PubSub.broadcast(state.pubsub, "factory:control", :halt_requested)
     {:reply, :ok, state}
   end
