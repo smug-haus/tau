@@ -29,10 +29,12 @@ defmodule Tau.Factory.Policy do
     unguarded path in `Gate.Oracle.select/1` (SPEC-FACTORY-GOV HR-8 /
     issue #553).
 
-  - **∞-budget rejected (`reject_infinite_budget`):** every budget dimension
-    (`token`, `cost`, `wall_time`, `iteration`) MUST be a positive integer; an
-    `:infinity`/`nil`/`≤0` sentinel is rejected (an ∞ budget defeats INV-21
-    outright). Protects D-320/D-321.
+  - **∞-budget rejected (`reject_infinite_budget`):** budget dimensions that are
+    **present** (`token`, `cost`, `wall_time`, `iteration`) MUST be positive
+    integers; an `:infinity`/`≤0` sentinel is rejected (an ∞ budget defeats
+    INV-21 outright). A dimension that is **absent** (nil / not set) is simply
+    not constrained by this policy and is skipped silently — absent ≠ infinite.
+    Protects D-320/D-321.
 
   ## Process
 
@@ -56,8 +58,8 @@ defmodule Tau.Factory.Policy do
     is not permitted because oracle admission must be a hard stop.
   - `{:error, {:gate_floor_violation, missing}}` — the `gate_manifest` omits one
     or more floor members from `{:mutation, :critic, :reviewer}`.
-  - `{:error, {:infinite_budget, dimension}}` — a budget dimension is
-    `:infinity`, `nil`, or `≤ 0`.
+  - `{:error, {:infinite_budget, dimension}}` — a budget dimension is **present**
+    and is `:infinity`, or `≤ 0`. Absent dimensions (nil / not set) are skipped.
 
   Pure: no side effects, no process. Properties before examples (OTP
   non-negotiable #6).
@@ -103,6 +105,11 @@ defmodule Tau.Factory.Policy do
 
   # ---------------------------------------------------------------------------
   # Private guard: ∞-budget rejection (D-320/D-321)
+  #
+  # A budget dimension that is absent (nil / not present in the map) is simply
+  # unconstrained by this policy — that is the safe-envelope default.  Only a
+  # dimension that is *present* with a non-positive or non-integer value
+  # constitutes an infinite-budget violation.  Absent != infinite.
   # ---------------------------------------------------------------------------
 
   @budget_dimensions [:token, :cost, :wall_time, :iteration]
@@ -111,10 +118,13 @@ defmodule Tau.Factory.Policy do
     Enum.reduce_while(@budget_dimensions, :ok, fn dim, :ok ->
       v = Map.get(candidate, dim)
 
-      if is_integer(v) and v > 0 do
-        {:cont, :ok}
-      else
-        {:halt, {:error, {:infinite_budget, dim}}}
+      cond do
+        # Absent dimension (nil) -- not set, not infinite; skip silently.
+        is_nil(v) -> {:cont, :ok}
+        # Present and positive integer -- valid finite budget.
+        is_integer(v) and v > 0 -> {:cont, :ok}
+        # Present but non-positive or non-integer -- infinite or invalid budget.
+        true -> {:halt, {:error, {:infinite_budget, dim}}}
       end
     end)
   end
