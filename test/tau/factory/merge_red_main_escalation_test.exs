@@ -258,7 +258,7 @@ defmodule Tau.Factory.MergeRedMainEscalationTest do
       assert_receive {:escalate, {:"E-RED-MAIN", :global}},
                      5_000,
                      "D-303 ([C209-B6]): MergeAuthority MUST broadcast " <>
-                       "{:escalate, {:\"E-RED-MAIN\", :global}} on \"factory:control\" " <>
+                       ~s({:escalate, {:"E-RED-MAIN", :global}} on "factory:control" ) <>
                        "after detecting a red post-merge origin/main. " <>
                        "No such message received within 5000ms. " <>
                        "The post_merge_health_fun was injected to return {:red, _}, " <>
