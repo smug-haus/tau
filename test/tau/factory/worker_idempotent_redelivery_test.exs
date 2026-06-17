@@ -15,16 +15,23 @@ defmodule Tau.Factory.WorkerIdempotentRedeliveryTest do
   This test exercises the real user-facing dispatch boundary:
   `Tau.Factory.WorkerSupervisor.spawn/5`.
 
-  Two sub-properties are asserted here:
+  Three sub-properties are asserted here:
 
   ### P1 — Oban queue infrastructure present (INV-DIST-WORKER-IDEMPOTENT / queue path)
 
   The documented architecture (`docs/arch/04-software-architecture/supervision-tree.md`
   §6 D-S4) specifies that the distribution boundary for remote worker dispatch is
   Oban: "remote workers pull work; they are idempotent and ref-correlated."
-  The anti-pattern review confirms: "Node-crossing (future) is idempotent +
-  ref-correlated via Oban." Oban MUST be a declared dependency for the invariant's
-  queue path to exist.
+  (`worker-fleet.md` §8: "Distribution is configuration plus an Oban queue, not a
+  rearchitecture of W.")
+
+  A bare `Oban` module stub at `lib/oban.ex` is NOT the queue boundary. The invariant
+  requires:
+    1. A concrete `Tau.Factory.WorkerJob` module implementing `@behaviour Oban.Worker`
+       with a `perform/1` callback — the unit of re-delivery idempotency at the Oban
+       layer.
+    2. The real Oban package (not a stub) — verified by `Oban.insert/2` existing on
+       the `Oban` module — so the queue dispatch is real, not simulated.
 
   ### P2 — Re-delivery idempotency: duplicate spawn with same worker_id MUST NOT
   double-execute (INV-DIST-WORKER-IDEMPOTENT / re-delivery)
@@ -130,18 +137,49 @@ defmodule Tau.Factory.WorkerIdempotentRedeliveryTest do
 
   describe "INV-DIST-WORKER-IDEMPOTENT P1 — Oban queue infrastructure present" do
     @tag :inv_dist_worker_idempotent
-    test "INV-DIST-WORKER-IDEMPOTENT: Oban must be a declared dependency for the idempotent queue path" do
+    test "INV-DIST-WORKER-IDEMPOTENT: a real Tau.Factory.WorkerJob implementing Oban.Worker must exist for the idempotent queue path" do
       # The documented architecture specifies Oban as the distribution boundary:
       # "remote workers pull work; they are idempotent and ref-correlated."
-      # (docs/arch/04-software-architecture/supervision-tree.md §6 D-S4)
-      # This assertion fails until Oban is added to mix.exs deps.
-      assert Code.ensure_loaded?(Oban),
-             "INV-DIST-WORKER-IDEMPOTENT: Oban module must be available. " <>
-               "The architecture specifies Oban as the distribution queue boundary " <>
-               "(supervision-tree.md §6 D-S4): 'remote workers pull work; they are " <>
-               "idempotent and ref-correlated.' Oban is absent from mix.exs deps — " <>
-               "add {:oban, \"~> 2.x\"} and the Oban.Worker behaviour to the worker " <>
-               "dispatch path to satisfy this invariant."
+      # (docs/arch/04-software-architecture/supervision-tree.md §6 D-S4 anti-pattern 10;
+      #  worker-fleet.md §8: "Distribution is configuration plus an Oban queue")
+      #
+      # A bare module stub at lib/oban.ex is NOT the queue boundary:
+      # it satisfies `Code.ensure_loaded?(Oban)` without providing a real job queue.
+      # The invariant (INV-DIST-WORKER-IDEMPOTENT) requires:
+      #   1. A concrete `Tau.Factory.WorkerJob` module implementing `@behaviour
+      #      Oban.Worker` that exports `perform/1` — this is the unit of
+      #      re-delivery idempotency at the Oban layer.
+      #   2. The real Oban package (not a stub) — verified by `Oban.insert/2` existing
+      #      on the `Oban` module — so the queue dispatch is real, not simulated.
+      #
+      # Assertions 1a and 1b fail against a stub-only implementation because
+      # Tau.Factory.WorkerJob does not exist. Assertion 1c fails because the
+      # stub lib/oban.ex does not export insert/2.
+
+      # Assert 1a: Tau.Factory.WorkerJob module exists as the real Oban worker.
+      # Code.ensure_loaded/1 returns {:module, mod} on success, {:error, reason} on
+      # failure. We assert the successful tuple form — NOT Code.ensure_loaded?/1
+      # which returns a boolean and cannot distinguish "module loaded" from "absent".
+      assert match?({:module, Tau.Factory.WorkerJob}, Code.ensure_loaded(Tau.Factory.WorkerJob)),
+             "INV-DIST-WORKER-IDEMPOTENT: Tau.Factory.WorkerJob must exist as the " <>
+               "Oban worker module for the distribution queue path (worker-fleet.md §8, " <>
+               "supervision-tree.md §6 D-S4 anti-pattern 10). A stub lib/oban.ex alone " <>
+               "is not sufficient. Implement Tau.Factory.WorkerJob with @behaviour Oban.Worker."
+
+      # Assert 1b: Tau.Factory.WorkerJob exports perform/1 (the Oban.Worker callback).
+      assert function_exported?(Tau.Factory.WorkerJob, :perform, 1),
+             "INV-DIST-WORKER-IDEMPOTENT: Tau.Factory.WorkerJob must export perform/1 " <>
+               "implementing the Oban.Worker callback so the Oban queue can re-deliver " <>
+               "the job idempotently (worker-fleet.md §8 D-S4: 'remote workers pull " <>
+               "work; they are idempotent and ref-correlated')."
+
+      # Assert 1c: Oban.insert/2 must be exported — a real Oban installation
+      # (not a minimal stub module) is required for the queue dispatch.
+      assert function_exported?(Oban, :insert, 2),
+             "INV-DIST-WORKER-IDEMPOTENT: Oban.insert/2 must be exported by the Oban " <>
+               "module. The current lib/oban.ex is a minimal stub with no insert/2 — " <>
+               "replace it with the real {:oban, ~> 2.x} Hex dependency so the " <>
+               "queue dispatch path (worker-fleet.md §8 D-S4) is real and not simulated."
     end
   end
 
