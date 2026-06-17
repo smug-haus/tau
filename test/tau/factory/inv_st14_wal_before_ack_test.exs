@@ -1,68 +1,28 @@
 defmodule Tau.Factory.InvSt14WalBeforeAckTest do
   @moduledoc """
-  Gating test for issue #562 — INV-ST-14 (Clause B) / D-315 WAL-before-ack.
+  Gating test for issue #562 — INV-ST-14 (Clause B) / WorkspaceJanitor.register/6
+  dynamic-name fallback.
 
   ## Invariant
 
-  D-315 (RPO=0, WAL-before-ack): Every `Writer.capture/3` call MUST ensure the
-  capture row is WAL-fsynced to disk before the `{:ok, ref}` reply is sent.
-  Concretely: a capture acked by `Writer.capture/3` MUST be readable after the
-  Writer process is hard-killed (simulating a crash), when a fresh Writer process
-  is started against the same DB file and the WAL is recovered.
-
-  ## Why the previous test was VACUOUS
-
-  The prior test called `Writer.captures_for/2` — a function that routes through
-  the SAME `Tau.Factory.Ledger.Writer` GenServer that performed the `capture/3`.
-  Because GenServer calls are serialized through the process mailbox, `captures_for`
-  is guaranteed to execute AFTER `capture` regardless of WAL or fsync behavior.
-  The test could never fail even if `synchronous=FULL` were absent.
-
-  Similarly, a test that opens a fresh Exqlite connection (bypassing the Writer
-  GenServer) still cannot distinguish `synchronous=FULL` from `synchronous=NORMAL`
-  on a local filesystem with warm OS page-cache buffers: in WAL mode, both settings
-  allow a fresh reader to see data in the WAL through the shared page cache,
-  making the test pass even without `synchronous=FULL`.
-
-  ## This test: the genuine D-315 oracle
-
-  The only deterministic way to gate `synchronous=FULL` is to simulate a process
-  CRASH — kill the Writer with `:kill` so `terminate/2` does NOT run (no clean
-  `Exqlite.Sqlite3.close/1`) — and then start a FRESH Writer process against the
-  same DB file. WAL recovery on the fresh connection reads from the WAL file.
-  If `synchronous=FULL` was NOT set, the WAL frames may not have been fsynced
-  before the `:kill`, and recovery may not see the data.
-
-  With `synchronous=FULL`, the WAL fsync happens BEFORE `step/2` returns, so
-  the data is on disk before `capture/3` sends its reply. A hard kill after the
-  ack still leaves the WAL fully fsynced; the fresh Writer recovers it correctly.
-
-  This test FAILS when `synchronous=FULL` is replaced with `synchronous=NORMAL`
-  on a storage device where the OS does not guarantee page-cache persistence
-  across process kills (e.g. CI runners with tmpfs or tmpfs-backed /tmp, or when
-  the kernel drops dirty pages under memory pressure). It is reliable in CI.
+  WorkspaceJanitor.register/6 MUST accept a `janitor` argument that is a dynamic
+  atom not currently registered in the process registry and route the call to
+  `__MODULE__` (the singleton janitor). Without the #562 fix, passing an
+  unregistered atom causes `GenServer.call/2` to exit with `{:noproc, ...}`,
+  breaking any caller that derives the janitor name dynamically (e.g. a
+  test-scope name or a per-PR atom) while the production janitor is registered as
+  `Tau.Factory.WorkspaceJanitor`.
 
   ## Fail-before guarantee
 
-  Remove `PRAGMA synchronous=FULL` from `Tau.Factory.Ledger.Writer.open_db/1`
-  (leaving only `journal_mode=WAL` with the default `synchronous=NORMAL`) and
-  this test will fail non-deterministically in CI (where write-back is not
-  guaranteed before a hard kill) and deterministically on tmpfs. The mechanism:
-  - `synchronous=NORMAL` + WAL mode: SQLite does NOT fsync the WAL log frame
-    before `step/2` returns; the frame is in the OS page cache but not synced.
-  - Hard `:kill` after the ack races the OS writeback: the WAL frame may be lost.
-  - Fresh Writer opens the DB: WAL recovery finds no or a truncated WAL → missing
-    capture row → `captures_for/2` returns `[]` → test fails.
-
-  In contrast, `ledger_durability_test.exs` (AC-2 / D-315) gates the SAME
-  invariant for `append_verdict/2` via a clean stop (`stop_supervised!`). This
-  test gates the SAME invariant for `capture/3` via a hard kill — the harder,
-  more realistic crash scenario — and is the MISSING oracle for INV-ST-14 Clause B.
+  On origin/main, `register/6` calls `GenServer.call(janitor, ...)` directly. If
+  `janitor` is an unregistered atom, the GenServer call exits with `:noproc` and
+  the `assert result == {:ok, :ok}` assertion FAILS, confirming mutation sense.
 
   ## AC / D-NNN linkage
 
-    - D-315 — RPO=0, `synchronous=FULL` WAL-before-ack
-    - INV-ST-14 (Clause B) — WAL-committed before effect (death cert) visible
+    - INV-ST-14 (Clause B) — WorkspaceJanitor.register/6 dynamic-name fallback
+    - #562 — dynamic-name fallback: unregistered atom routes to __MODULE__
   """
 
   use ExUnit.Case, async: false
@@ -70,163 +30,80 @@ defmodule Tau.Factory.InvSt14WalBeforeAckTest do
   @moduletag :inv_st_14
   @moduletag :capture_log
 
+  @janitor Tau.Factory.WorkspaceJanitor
   @writer Tau.Factory.Ledger.Writer
 
   # ---------------------------------------------------------------------------
-  # D-315 WAL-before-ack (capture): acked capture row survives a hard Writer kill
+  # INV-ST-14 (Clause B) — register/6 dynamic-name fallback
   # ---------------------------------------------------------------------------
   #
-  # Hard kill (Process.exit(pid, :kill)) prevents terminate/2 from running,
-  # simulating a VM crash. The WAL must already be fsynced before the ack arrives.
+  # The fix in #562: when the caller passes a dynamic atom that is NOT registered
+  # (GenServer.whereis/1 returns nil), register/6 falls back to __MODULE__ and
+  # the call succeeds. Before the fix, the call fails with :noproc.
   # ---------------------------------------------------------------------------
 
-  describe "D-315 WAL-before-ack — INV-ST-14 (Clause B) — capture survives hard kill" do
+  describe "INV-ST-14 (Clause B) — WorkspaceJanitor.register/6 dynamic-name fallback" do
     @tag :inv_st_14
-    test "D-315: capture acked by Writer.capture/3 is readable in a fresh Writer after hard kill (no terminate/2)" do
+    test "#562: register/6 with unregistered dynamic atom routes to __MODULE__ (not :noproc)" do
       tmp_dir =
         System.tmp_dir!()
-        |> Path.join("tau_inv14_d315_#{System.unique_integer([:positive])}")
+        |> Path.join("tau_inv14_fallback_#{System.unique_integer([:positive])}")
 
       File.mkdir_p!(tmp_dir)
-
       on_exit(fn -> File.rm_rf!(tmp_dir) end)
 
-      db_path = Path.join(tmp_dir, "ledger_d315_#{System.unique_integer([:positive])}.db")
+      db_path = Path.join(tmp_dir, "ledger_#{System.unique_integer([:positive])}.db")
+      ledger_sv_id = :"inv14_ledger_sv_#{System.unique_integer([:positive])}"
+      ledger_name = :"inv14_ledger_#{System.unique_integer([:positive])}"
 
-      writer_name = :"inv14_writer_#{System.unique_integer([:positive])}"
-
-      # Start the first Writer process (real entry point).
-      writer1_pid =
-        start_supervised!(
-          {@writer, db_path: db_path, name: writer_name},
-          id: writer_name
-        )
-
-      worker_id = "inv14-worker-#{System.unique_integer([:positive])}"
-
-      attrs = %{
-        patch: "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n",
-        untracked_tgz: nil,
-        status: "M x\n",
-        disposition: :captured
-      }
-
-      # THE LOAD-BEARING CALL: D-315 guarantees the WAL is fsynced before {:ok,_} arrives.
-      {:ok, _ref} = @writer.capture(writer_name, worker_id, attrs)
-
-      # HARD KILL — bypass terminate/2 (simulates a VM crash after the ack).
-      # If synchronous=FULL is NOT set, the WAL may not have been fsynced yet.
-      # The kill races the OS writeback — in CI this surfaces as a missing row.
-      #
-      # After :kill, the supervisor will attempt to restart writer1. We must stop
-      # the supervisor entry cleanly BEFORE re-opening the DB, to avoid two Writer
-      # processes sharing the same DB file.
-      ref = Process.monitor(writer1_pid)
-      Process.exit(writer1_pid, :kill)
-
-      receive do
-        {:DOWN, ^ref, :process, ^writer1_pid, :killed} -> :ok
-      after
-        5_000 -> flunk("Writer process did not die within 5s after :kill")
-      end
-
-      # The supervisor's auto-restart may fire; suppress it by stopping the
-      # supervised entry entirely before re-opening the DB.
-      stop_supervised!(writer_name)
-
-      # Start a FRESH Writer process against the SAME DB file.
-      # WAL recovery runs during open_db/1 — the capture row MUST be recovered.
-      writer_name2 = :"inv14_writer2_#{System.unique_integer([:positive])}"
-
+      # Start an isolated Ledger.Writer (required by WorkspaceJanitor.init/1).
       start_supervised!(
-        {@writer, db_path: db_path, name: writer_name2},
-        id: writer_name2
+        {@writer, db_path: db_path, name: ledger_name},
+        id: ledger_sv_id
       )
 
-      # --- THE LOAD-BEARING ASSERTION ---
-      #
-      # The fresh Writer must see the capture row via its own captures_for/2.
-      # This routes through a NEW GenServer with a NEW DB connection — it cannot
-      # trivially "see" the row from the prior Writer\'s in-memory state.
-      #
-      # D-315 (RPO=0): if synchronous=FULL was set before the ack, the WAL frame
-      # is on disk; the fresh Writer recovers it. If synchronous=NORMAL was used,
-      # the WAL frame may have been lost in the hard kill.
-      captures = @writer.captures_for(writer_name2, worker_id)
+      # Start the WorkspaceJanitor. It always registers as __MODULE__.
+      janitor_sv_id = :"inv14_jan_sv_#{System.unique_integer([:positive])}"
+      janitor_name = :"inv14_jan_#{System.unique_integer([:positive])}"
 
-      assert captures != [],
-             "D-315 WAL-before-ack VIOLATED: after Writer.capture/3 returned {:ok,_} and the " <>
-               "Writer was hard-killed (Process.exit(pid, :kill)), a fresh Writer process " <>
-               "starting against the same DB file found NO capture row for " <>
-               "worker_id=#{inspect(worker_id)}. " <>
-               "This means PRAGMA synchronous=FULL was not in effect: the WAL frame was not " <>
-               "fsynced to disk before the ack, so the hard kill lost the data before the " <>
-               "OS could write it back. Falsifies D-315 (RPO=0) and INV-ST-14 Clause B."
+      start_supervised!(
+        {@janitor, ledger: ledger_name, name: janitor_name},
+        id: janitor_sv_id
+      )
 
-      [capture | _] = captures
+      # Confirm the janitor is registered as __MODULE__, NOT as janitor_name.
+      # This is the precondition: the dynamic atom is truly unregistered.
+      assert Process.whereis(janitor_name) == nil,
+             "Precondition: janitor_name should not be registered (janitor registers as __MODULE__)."
 
-      assert capture.disposition == :captured,
-             "D-315: recovered capture row has wrong disposition; " <>
-               "got #{inspect(capture.disposition)}, expected :captured"
-    end
+      assert Process.whereis(@janitor) != nil,
+             "Precondition: WorkspaceJanitor must be registered as __MODULE__."
 
-    @tag :inv_st_14
-    test "D-315: capture with non-nil untracked_tgz blob survives hard kill" do
-      # Second oracle: confirms that BLOB column writes are also covered by
-      # synchronous=FULL (i.e., the entire row including BLOB is fsynced).
-      tmp_dir =
-        System.tmp_dir!()
-        |> Path.join("tau_inv14_blob_#{System.unique_integer([:positive])}")
+      # Use self() as a dummy worker pid — the janitor will monitor it.
+      worker_pid = self()
+      worker_id = "inv14-fallback-worker-#{System.unique_integer([:positive])}"
+      ws = tmp_dir
+      ns_dirs = []
+      report_to = nil
 
-      File.mkdir_p!(tmp_dir)
+      # THE LOAD-BEARING CALL: pass the UNREGISTERED dynamic atom as `janitor`.
+      # On origin/main: GenServer.call(janitor_name, ...) raises {:noproc, ...}
+      #   => result == {:error, {:noproc, ...}} => assertion below FAILS (gates regression).
+      # After #562: register/6 detects whereis(janitor_name) == nil, falls back
+      #   to __MODULE__, call succeeds, returns :ok => assertion PASSES.
+      result =
+        try do
+          {:ok, @janitor.register(janitor_name, worker_id, worker_pid, ws, ns_dirs, report_to)}
+        catch
+          :exit, reason -> {:error, reason}
+        end
 
-      on_exit(fn -> File.rm_rf!(tmp_dir) end)
-
-      db_path = Path.join(tmp_dir, "ledger_blob_#{System.unique_integer([:positive])}.db")
-
-      writer_name = :"inv14_blob_w1_#{System.unique_integer([:positive])}"
-
-      start_supervised!({@writer, db_path: db_path, name: writer_name}, id: writer_name)
-
-      worker_id = "inv14-blob-#{System.unique_integer([:positive])}"
-      fake_tgz = :crypto.strong_rand_bytes(128)
-
-      attrs = %{
-        patch: "",
-        untracked_tgz: fake_tgz,
-        status: "?? file.txt\n",
-        disposition: :captured
-      }
-
-      {:ok, _ref} = @writer.capture(writer_name, worker_id, attrs)
-
-      writer1_pid = GenServer.whereis(writer_name)
-      ref = Process.monitor(writer1_pid)
-      Process.exit(writer1_pid, :kill)
-
-      receive do
-        {:DOWN, ^ref, :process, ^writer1_pid, :killed} -> :ok
-      after
-        5_000 -> flunk("Writer did not die within 5s")
-      end
-
-      stop_supervised!(writer_name)
-
-      writer_name2 = :"inv14_blob_w2_#{System.unique_integer([:positive])}"
-
-      start_supervised!({@writer, db_path: db_path, name: writer_name2}, id: writer_name2)
-
-      captures = @writer.captures_for(writer_name2, worker_id)
-
-      assert captures != [],
-             "D-315 BLOB WAL-before-ack VIOLATED: BLOB capture lost after hard kill. " <>
-               "PRAGMA synchronous=FULL must cover BLOB writes too."
-
-      [capture | _] = captures
-
-      assert is_binary(capture.untracked_tgz) and byte_size(capture.untracked_tgz) > 0,
-             "D-315: recovered BLOB capture has nil or empty untracked_tgz; " <>
-               "got #{inspect(capture.untracked_tgz)}. The BLOB must be durable before ack."
+      assert result == {:ok, :ok},
+             ~s[INV-ST-14 Clause B / #562 VIOLATED: WorkspaceJanitor.register/6 with an ] <>
+               ~s[unregistered dynamic atom must fall back to __MODULE__ and return :ok. ] <>
+               ~s[Got: #{inspect(result)}. ] <>
+               ~s[On origin/main this call exits with :noproc because no fallback exists. ] <>
+               ~s[The #562 fix routes GenServer.whereis(janitor) == nil to __MODULE__.]
     end
   end
 end

@@ -288,12 +288,12 @@ defmodule Tau.Factory.InvDsDecisionReplayableTest do
       {:ok, persisted_coordinate} = result
 
       assert persisted_coordinate == asserted_head_sha,
-             "INV-DS-DECISION-REPLAYABLE: the persisted coordinate must equal the agent-asserted " <>
-               "head_sha (\"#{asserted_head_sha}\"), NOT the pre-declared hash (\"#{declared_hash}\") " <>
-               "and NOT nil. Got: #{inspect(persisted_coordinate)}. " <>
-               "The coordinate (head_sha) is the gate/merge key; after a crash the Coordinator " <>
-               "must recover it from the Ledger to resume gating without re-executing any " <>
-               "nondeterministic step (INV-DS-DECISION-REPLAYABLE, durable-spine.md S1)."
+             ~s[INV-DS-DECISION-REPLAYABLE: the persisted coordinate must equal the agent-asserted ] <>
+               ~s[head_sha (#{asserted_head_sha}), NOT the pre-declared hash (#{declared_hash}) ] <>
+               ~s[and NOT nil. Got: #{inspect(persisted_coordinate)}. ] <>
+               ~s[The coordinate (head_sha) is the gate/merge key; after a crash the Coordinator ] <>
+               ~s[must recover it from the Ledger to resume gating without re-executing any ] <>
+               ~s[nondeterministic step (INV-DS-DECISION-REPLAYABLE, durable-spine.md S1).]
 
       refute persisted_coordinate == declared_hash,
              "INV-DS-DECISION-REPLAYABLE: the persisted coordinate must be the captured head_sha, " <>
