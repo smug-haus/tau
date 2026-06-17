@@ -22,13 +22,28 @@ defmodule Tau.Factory.Scheduler do
   `pinned_policy_for/2` exposes the frozen `%Policy{}` for downstream use
   (e.g., by the Unit FSM when composing a `Gate.Request`; arch `control-plane.md §2.2`).
 
+  ## INV-LIVE-CP-3
+
+  When `release/2` removes a unit from F (freeing a capacity slot or clearing a
+  file-conflict), the Scheduler broadcasts `{:admission_slots_available, name}`
+  on the `"factory:scheduler"` PubSub topic so that deferred units can learn the
+  blocker has cleared and retry admission.  Without this notification a unit that
+  received `{:defer, :at_capacity}` or `{:defer, {:conflict, _}}` has no mechanism
+  to learn a slot has opened and will remain permanently deferred (issue #632).
+
+  To enable broadcasts, pass `:pubsub` (a `Phoenix.PubSub` name atom) to
+  `start_link/1`.  When `:pubsub` is absent the broadcast is skipped (backward-
+  compatible default).
+
   ## Public API
 
     - `start_link/1` — start and register.
     - `admit/3` — `call`; returns `:admit` or `{:defer, reason}`. No policy pin.
     - `admit/4` — `call`; returns `:admit` or `{:defer, reason}`. Pins the `%Policy{}`
       at admission (INV-POLICY-PIN, arch §2.2).
-    - `release/2` — `call`; removes `unit_id` from F and pins; no-op if absent.
+    - `release/2` — `call`; removes `unit_id` from F and pins; broadcasts
+      `{:admission_slots_available, name}` on `"factory:scheduler"` when `:pubsub`
+      is configured (INV-LIVE-CP-3, issue #632).
     - `in_flight/1` — `call`; returns the current F snapshot.
     - `pinned_policy_for/2` — `call`; returns the `%Policy{}` pinned at admission,
       or `nil` if the unit has no pin.
@@ -55,7 +70,9 @@ defmodule Tau.Factory.Scheduler do
           f: %{unit_id() => declared_scope()},
           pins: %{unit_id() => Policy.t()},
           w_cap: pos_integer(),
-          budget: {atom(), [atom()]} | nil
+          budget: {atom(), [atom()]} | nil,
+          pubsub: atom() | nil,
+          name: atom()
         }
 
   # ---------------------------------------------------------------------------
@@ -73,6 +90,10 @@ defmodule Tau.Factory.Scheduler do
     - `:budget` — `{owner_name :: atom(), dimensions :: [atom()]}`;
                   if present, `admit/3` gates on `Budget.Owner.budget_precheck/2`
                   for each listed dimension.
+    - `:pubsub` — atom; name of a running `Phoenix.PubSub` instance.
+                  When set, `release/2` broadcasts
+                  `{:admission_slots_available, name}` on `"factory:scheduler"`
+                  (INV-LIVE-CP-3, issue #632).
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -125,6 +146,10 @@ defmodule Tau.Factory.Scheduler do
 
   @doc """
   Release `unit_id` from F. No-op if `unit_id` is not currently in F.
+
+  When `:pubsub` was supplied at `start_link/1` time, broadcasts
+  `{:admission_slots_available, name}` on the `"factory:scheduler"` topic so
+  deferred units can retry admission (INV-LIVE-CP-3, issue #632).
   """
   @spec release(GenServer.server(), unit_id()) :: :ok
   def release(server, unit_id) do
@@ -145,14 +170,18 @@ defmodule Tau.Factory.Scheduler do
 
   @impl GenServer
   def init(opts) do
+    name = Keyword.fetch!(opts, :name)
     w_cap = Keyword.fetch!(opts, :w_cap)
     budget = Keyword.get(opts, :budget, nil)
+    pubsub = Keyword.get(opts, :pubsub, nil)
 
     state = %{
       f: %{},
       pins: %{},
       w_cap: w_cap,
-      budget: budget
+      budget: budget,
+      pubsub: pubsub,
+      name: name
     }
 
     {:ok, state}
@@ -217,7 +246,20 @@ defmodule Tau.Factory.Scheduler do
   def handle_call({:release, unit_id}, _from, state) do
     new_f = Map.delete(state.f, unit_id)
     new_pins = Map.delete(state.pins, unit_id)
-    {:reply, :ok, %{state | f: new_f, pins: new_pins}}
+    new_state = %{state | f: new_f, pins: new_pins}
+
+    # INV-LIVE-CP-3 (issue #632): broadcast re-admission notification so deferred
+    # units can learn the blocker has cleared and retry admission.  Only fires
+    # when a :pubsub instance was supplied at start_link/1 time.
+    if state.pubsub do
+      Phoenix.PubSub.broadcast(
+        state.pubsub,
+        "factory:scheduler",
+        {:admission_slots_available, state.name}
+      )
+    end
+
+    {:reply, :ok, new_state}
   end
 
   def handle_call(:in_flight, _from, state) do
