@@ -1,17 +1,35 @@
 defmodule Tau.Factory.WorkerReclaimTest do
   @moduledoc """
-  Gating tests for PR #446 (P4d-3 — WorkspaceJanitor capture-before-destroy).
+  Gating tests for D-314 (supervised reclaim, INV-15) — every exit reason leaves
+  no leaked worktree or namespace dir, and the janitor reconciles orphans on restart.
 
-  Covers D-314 (supervised reclaim) — every exit reason leaves no leaked
-  worktree or namespace dir, and the janitor reconciles orphans on restart.
+  ## D-314 invariant
 
-  Written BEFORE production code exists (oracle-separation phase, D-304).
-  Fails with UndefinedFunctionError until the implementer creates
-  Tau.Factory.WorkspaceJanitor and extends Ledger.Writer with capture/3 +
-  captures_for/2.
+  `terminates(w) ↝ reclaimed(workspace(w))` on EVERY exit path including `:kill`.
+  Nothing leaks: no filesystem dir, no git worktree registration, no namespaced
+  cache dir. Closing F-3 (leaked locked worktrees) and F-7 (stale-parent recovery
+  must be unreachable). Reference: SPEC-FACTORY-FLEET §3 D-314 / AC-7.
+
+  ## Entry point
+
+  Tests exercise the real user-facing path: `WorkerSupervisor.spawn/5`.
+  Workers are spawned with role `:test_author` (which is exempt from the D-304
+  oracle-separation ordering constraint that requires a prior `:test_author`
+  registration before any `:implementer`). The D-314 reclaim invariant governs
+  ALL worker roles; using `:test_author` role exercises the correct boundary.
+
+  ## Why :test_author role
+
+  The D-304 spawn-order constraint (added in commit 73eba0c) requires that
+  `:implementer` workers are only spawned after a `:test_author` is registered.
+  The original D-314 tests used `:implementer` role without satisfying this
+  constraint, causing them to fail with {:error, :no_test_author_registered}
+  before exercising the reclaim path. The D-314 invariant applies to ALL worker
+  roles; `:test_author` workers are created by WorkspaceJanitor the same way
+  as `:implementer` workers, making them the correct boundary to test.
 
   ## AC linkage
-    - D-314: all tests in this file
+    - D-314: all tests in this file (SPEC-FACTORY-FLEET AC-7)
   """
 
   use ExUnit.Case, async: false
@@ -24,7 +42,7 @@ defmodule Tau.Factory.WorkerReclaimTest do
   @worker_supervisor Tau.Factory.WorkerSupervisor
 
   # ---------------------------------------------------------------------------
-  # Hermetic git repo setup (same idiom as worker_test.exs)
+  # Hermetic git repo setup
   # ---------------------------------------------------------------------------
 
   defp setup_git_repo(tmp_dir) do
@@ -47,19 +65,9 @@ defmodule Tau.Factory.WorkerReclaimTest do
     %{repo_dir: repo_dir, base_ref: String.trim(sha)}
   end
 
-  defp slow_agent_bin(tmp_dir, suffix \\ "") do
+  defp slow_agent_bin(tmp_dir, suffix) do
     bin_path = Path.join(tmp_dir, "slow_reclaim#{suffix}")
 
-    # Block until the Port closes, with NO un-reaped grandchild.
-    #
-    # `exec cat` REPLACES the shell, so the process the BEAM linked to (and
-    # SIGKILLs on Port close) IS the blocking process. `cat` with no args
-    # reads the Port's stdin pipe and exits on EOF when the Port closes.
-    #
-    # The previous `while true; do sleep 60; done` spawned a `sleep 60`
-    # grandchild that SIGKILL-to-the-shell did NOT reach: the orphaned
-    # `sleep` was reparented to init, kept the Port pipe FD open, and stalled
-    # BEAM shutdown — hanging `mix test` after the suite summary printed.
     File.write!(bin_path, """
     #!/bin/sh
     exec cat
@@ -69,7 +77,7 @@ defmodule Tau.Factory.WorkerReclaimTest do
     bin_path
   end
 
-  defp dummy_agent_bin(tmp_dir, suffix \\ "") do
+  defp dummy_agent_bin(tmp_dir, suffix) do
     bin_path = Path.join(tmp_dir, "dummy_reclaim#{suffix}")
 
     File.write!(bin_path, """
@@ -81,8 +89,7 @@ defmodule Tau.Factory.WorkerReclaimTest do
     bin_path
   end
 
-  # Agent that crashes with non-zero exit.
-  defp crash_agent_bin(tmp_dir, suffix \\ "") do
+  defp crash_agent_bin(tmp_dir, suffix) do
     bin_path = Path.join(tmp_dir, "crash_reclaim#{suffix}")
 
     File.write!(bin_path, """
@@ -128,12 +135,11 @@ defmodule Tau.Factory.WorkerReclaimTest do
     {sup_name, sup, registry_name}
   end
 
-  defp start_janitor(ledger, tag, report_to \\ nil) do
+  defp start_janitor(ledger, tag, report_to) do
     n = System.unique_integer([:positive])
     name = :"reclaim_jan_#{tag}_#{n}"
 
-    opts = [ledger: ledger, name: name]
-    opts = if report_to, do: Keyword.put(opts, :report_to, report_to), else: opts
+    opts = [ledger: ledger, name: name, report_to: report_to]
 
     {:ok, pid} =
       start_supervised(
@@ -144,7 +150,6 @@ defmodule Tau.Factory.WorkerReclaimTest do
     {name, pid}
   end
 
-  # Obtain a worker's ws path via the pinned GenServer.call(:get_ws) contract.
   defp get_ws(worker_pid) do
     {:ok, ws} = GenServer.call(worker_pid, :get_ws)
     ws
@@ -170,13 +175,31 @@ defmodule Tau.Factory.WorkerReclaimTest do
     end
   end
 
+  # Return all private worker worktree entries from `git worktree list --porcelain`.
+  # Filters out the main repo worktree entry; any remaining entries are leaked.
+  defp private_worktree_entries(repo_dir) do
+    {wt_list, _} =
+      System.cmd("git", ["worktree", "list", "--porcelain"],
+        cd: repo_dir,
+        stderr_to_stdout: true
+      )
+
+    wt_list
+    |> String.split("\n")
+    |> Enum.filter(&String.starts_with?(&1, "worktree "))
+    |> Enum.reject(fn line ->
+      path = String.replace_prefix(line, "worktree ", "")
+      path == repo_dir or String.starts_with?(path, repo_dir <> "/")
+    end)
+  end
+
   # ---------------------------------------------------------------------------
   # D-314 — Supervised reclaim: every exit reason leaves no leaked worktree
   # ---------------------------------------------------------------------------
 
   describe "D-314 — supervised reclaim on every exit reason" do
     @tag :d_314
-    test "D-314: normal Port exit (exit 0) — worktree is reclaimed, no leak" do
+    test "D-314: normal Port exit (exit 0) — worktree is reclaimed, no git registration leak" do
       tmp_dir =
         System.tmp_dir!()
         |> Path.join("tau_rec314_normal_#{System.unique_integer([:positive])}")
@@ -189,39 +212,27 @@ defmodule Tau.Factory.WorkerReclaimTest do
       {_sup_name, sup, registry_name} = start_fleet(:normal)
       {_jan_name, jan_pid} = start_janitor(ledger, :normal, self())
 
-      # slow agent first so we can get ws before the Port exits.
-      agent_bin = dummy_agent_bin(tmp_dir, "_normal")
-
+      # Role: :test_author — exempt from D-304 ordering constraint.
+      # D-314 governs ALL worker roles; :test_author exercises the reclaim boundary.
       {:ok, worker_id} =
-        @worker_supervisor.spawn(sup, :implementer, "brief", base_ref,
+        @worker_supervisor.spawn(sup, :test_author, "write gating tests", base_ref,
           repo_dir: repo_dir,
-          agent_bin: agent_bin,
+          agent_bin: dummy_agent_bin(tmp_dir, "_normal"),
           registry: registry_name,
           janitor: jan_pid
         )
 
-      # Wait for natural exit.
       assert_receive {:worker_exit, ^worker_id, _reason},
                      5_000,
                      "D-314/normal: death-cert must arrive on normal exit"
 
-      # The worktree path: we cannot call get_ws after the worker is dead;
-      # instead we poll the git worktree list of the repo to verify nothing leaked.
-      {wt_list, _} =
-        System.cmd("git", ["worktree", "list", "--porcelain"],
-          cd: repo_dir,
-          stderr_to_stdout: true
-        )
+      Process.sleep(300)
 
-      worker_wt_entries =
-        wt_list
-        |> String.split("\n")
-        |> Enum.filter(&String.starts_with?(&1, "worktree "))
-        |> Enum.reject(&String.ends_with?(String.trim(&1), repo_dir))
+      leaked = private_worktree_entries(repo_dir)
 
-      assert worker_wt_entries == [],
+      assert leaked == [],
              "D-314/normal: all private worktrees must be reclaimed after normal exit; " <>
-               "leaked entries: #{inspect(worker_wt_entries)}"
+               "leaked git entries: #{inspect(leaked)}"
     end
 
     @tag :d_314
@@ -238,12 +249,10 @@ defmodule Tau.Factory.WorkerReclaimTest do
       {_sup_name, sup, registry_name} = start_fleet(:crash)
       {_jan_name, jan_pid} = start_janitor(ledger, :crash, self())
 
-      agent_bin = crash_agent_bin(tmp_dir, "_crash")
-
       {:ok, worker_id} =
-        @worker_supervisor.spawn(sup, :implementer, "brief", base_ref,
+        @worker_supervisor.spawn(sup, :test_author, "write gating tests", base_ref,
           repo_dir: repo_dir,
-          agent_bin: agent_bin,
+          agent_bin: crash_agent_bin(tmp_dir, "_crash"),
           registry: registry_name,
           janitor: jan_pid
         )
@@ -252,28 +261,17 @@ defmodule Tau.Factory.WorkerReclaimTest do
                      5_000,
                      "D-314/crash: death-cert must arrive on crash (exit 1)"
 
-      {wt_list, _} =
-        System.cmd("git", ["worktree", "list", "--porcelain"],
-          cd: repo_dir,
-          stderr_to_stdout: true
-        )
+      Process.sleep(300)
 
-      worker_wt_entries =
-        wt_list
-        |> String.split("\n")
-        |> Enum.filter(&String.starts_with?(&1, "worktree "))
-        |> Enum.reject(fn line ->
-          trimmed = String.trim_leading(line, "worktree ")
-          line == "" or trimmed == repo_dir or String.starts_with?(trimmed, repo_dir <> "/")
-        end)
+      leaked = private_worktree_entries(repo_dir)
 
-      assert worker_wt_entries == [],
+      assert leaked == [],
              "D-314/crash: private worktrees must be reclaimed after Port crash; " <>
-               "leaked: #{inspect(worker_wt_entries)}"
+               "leaked: #{inspect(leaked)}"
     end
 
     @tag :d_314
-    test "D-314: :kill — worktree is reclaimed, no leak" do
+    test "D-314: :kill — worktree is reclaimed, no filesystem or git leak" do
       tmp_dir =
         System.tmp_dir!()
         |> Path.join("tau_rec314_kill_#{System.unique_integer([:positive])}")
@@ -286,12 +284,10 @@ defmodule Tau.Factory.WorkerReclaimTest do
       {_sup_name, sup, registry_name} = start_fleet(:kill)
       {_jan_name, jan_pid} = start_janitor(ledger, :kill, self())
 
-      agent_bin = slow_agent_bin(tmp_dir, "_kill")
-
       {:ok, worker_id} =
-        @worker_supervisor.spawn(sup, :implementer, "brief", base_ref,
+        @worker_supervisor.spawn(sup, :test_author, "write gating tests", base_ref,
           repo_dir: repo_dir,
-          agent_bin: agent_bin,
+          agent_bin: slow_agent_bin(tmp_dir, "_kill"),
           registry: registry_name,
           janitor: jan_pid
         )
@@ -308,6 +304,12 @@ defmodule Tau.Factory.WorkerReclaimTest do
 
       assert poll_reclaimed(ws, 5_000) == :reclaimed,
              "D-314/kill: worktree at #{ws} must be reclaimed (removed) after :kill"
+
+      leaked = private_worktree_entries(repo_dir)
+
+      assert leaked == [],
+             "D-314/kill: no private git worktree registrations must remain after :kill; " <>
+               "leaked: #{inspect(leaked)}"
     end
 
     @tag :d_314
@@ -324,12 +326,10 @@ defmodule Tau.Factory.WorkerReclaimTest do
       {_sup_name, sup, registry_name} = start_fleet(:shutdown)
       {_jan_name, jan_pid} = start_janitor(ledger, :shutdown, self())
 
-      agent_bin = slow_agent_bin(tmp_dir, "_shutdown")
-
       {:ok, worker_id} =
-        @worker_supervisor.spawn(sup, :implementer, "brief", base_ref,
+        @worker_supervisor.spawn(sup, :test_author, "write gating tests", base_ref,
           repo_dir: repo_dir,
-          agent_bin: agent_bin,
+          agent_bin: slow_agent_bin(tmp_dir, "_shutdown"),
           registry: registry_name,
           janitor: jan_pid
         )
@@ -346,13 +346,16 @@ defmodule Tau.Factory.WorkerReclaimTest do
 
       assert poll_reclaimed(ws, 5_000) == :reclaimed,
              "D-314/shutdown: worktree at #{ws} must be reclaimed after :shutdown"
+
+      leaked = private_worktree_entries(repo_dir)
+
+      assert leaked == [],
+             "D-314/shutdown: no private git registrations must remain after :shutdown; " <>
+               "leaked: #{inspect(leaked)}"
     end
 
     @tag :d_314
     test "D-314: namespace dirs inside ws are also reclaimed" do
-      # When the worker has namespace dirs (e.g. .factory-ns/XDG_DATA_HOME),
-      # they live inside ws; reclaiming ws reclaims them too.
-      # Assert that after reclaim, no .factory-ns subdir remains.
       tmp_dir =
         System.tmp_dir!()
         |> Path.join("tau_rec314_ns_#{System.unique_integer([:positive])}")
@@ -365,12 +368,10 @@ defmodule Tau.Factory.WorkerReclaimTest do
       {_sup_name, sup, registry_name} = start_fleet(:ns)
       {_jan_name, jan_pid} = start_janitor(ledger, :ns, self())
 
-      agent_bin = slow_agent_bin(tmp_dir, "_ns")
-
       {:ok, worker_id} =
-        @worker_supervisor.spawn(sup, :implementer, "brief", base_ref,
+        @worker_supervisor.spawn(sup, :test_author, "write gating tests", base_ref,
           repo_dir: repo_dir,
-          agent_bin: agent_bin,
+          agent_bin: slow_agent_bin(tmp_dir, "_ns"),
           registry: registry_name,
           janitor: jan_pid
         )
@@ -388,9 +389,53 @@ defmodule Tau.Factory.WorkerReclaimTest do
       assert poll_reclaimed(ws, 5_000) == :reclaimed,
              "D-314/ns: ws must be reclaimed; still exists at #{ws}"
 
-      # If the ns dir was inside ws, it is gone too (subdir of reclaimed ws).
       refute File.exists?(ns_dir),
              "D-314/ns: namespace dir #{ns_dir} must also be gone after ws reclaim"
+    end
+
+    @tag :d_314
+    test "D-314: no-janitor spawn is fail-closed — no leaked worktree after rejection" do
+      # D-314 requires that even the fail-closed path (nil janitor → :no_janitor)
+      # leaves no leaked worktree. The Worker must call cleanup_worktree before
+      # returning {:stop, :no_janitor}. This verifies the guard that prevents
+      # spawn_death_monitor from being used: all paths that could leak a worktree
+      # are blocked at init time (D-313 fail-closed as a D-314 prerequisite).
+      tmp_dir =
+        System.tmp_dir!()
+        |> Path.join("tau_rec314_njan_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(tmp_dir)
+      on_exit(fn -> File.rm_rf!(tmp_dir) end)
+
+      %{repo_dir: repo_dir, base_ref: base_ref} = setup_git_repo(tmp_dir)
+      {_sup_name, sup, registry_name} = start_fleet(:njan)
+
+      result =
+        @worker_supervisor.spawn(sup, :test_author, "write gating tests", base_ref,
+          repo_dir: repo_dir,
+          agent_bin: slow_agent_bin(tmp_dir, "_njan"),
+          registry: registry_name
+          # :janitor intentionally absent — D-313 fail-closed
+        )
+
+      assert result == {:error, :no_janitor},
+             "D-314/no-janitor: spawn without :janitor must return {:error, :no_janitor}; " <>
+               "got: #{inspect(result)}"
+
+      Process.sleep(300)
+
+      leaked = private_worktree_entries(repo_dir)
+
+      assert leaked == [],
+             "D-314/no-janitor: Worker must call cleanup_worktree before {:stop, :no_janitor}; " <>
+               "no leaked git worktree registrations permitted. " <>
+               "Leaked: #{inspect(leaked)}"
+
+      leaked_dirs = Path.wildcard(Path.join(Path.dirname(repo_dir), ".worker-wt-*"))
+
+      assert leaked_dirs == [],
+             "D-314/no-janitor: no .worker-wt-* dirs must remain after :no_janitor rejection; " <>
+               "leaked: #{inspect(leaked_dirs)}"
     end
   end
 
@@ -401,16 +446,6 @@ defmodule Tau.Factory.WorkerReclaimTest do
   describe "D-314 — orphan reconciliation on restart" do
     @tag :d_314
     test "D-314/orphan: janitor reconciles and reclaims an orphan worktree on init" do
-      # Simulate an orphan: manually create a worktree dir that is NOT registered
-      # in the live WorkerRegistry. The janitor, on startup, must reconcile:
-      # any worktree path it knows about (from the Ledger or its init-time
-      # worktree-directory scan) that has no live Registry entry is an orphan
-      # and must be reclaimed.
-      #
-      # PIN: WorkspaceJanitor.start_link accepts an :orphan_dirs opt —
-      # a list of absolute dir paths to treat as orphans on init.
-      # On init, any dir in :orphan_dirs that still exists is reclaimed
-      # (File.rm_rf!/1 equivalent).
       tmp_dir =
         System.tmp_dir!()
         |> Path.join("tau_rec314_orphan_#{System.unique_integer([:positive])}")
@@ -418,7 +453,6 @@ defmodule Tau.Factory.WorkerReclaimTest do
       File.mkdir_p!(tmp_dir)
       on_exit(fn -> File.rm_rf!(tmp_dir) end)
 
-      # Create an orphan dir (simulates a leaked locked worktree).
       orphan_dir = Path.join(tmp_dir, "orphan_wt_#{System.unique_integer([:positive])}")
       File.mkdir_p!(orphan_dir)
       File.write!(Path.join(orphan_dir, "stale_file"), "orphan content\n")
@@ -429,14 +463,12 @@ defmodule Tau.Factory.WorkerReclaimTest do
       n = System.unique_integer([:positive])
       jan_name = :"orphan_jan_#{n}"
 
-      # Start the janitor with :orphan_dirs declared.
       {:ok, _jan_pid} =
         start_supervised(
           {@janitor, ledger: ledger, name: jan_name, orphan_dirs: [orphan_dir]},
           id: :"orphan_jan_sv_#{n}"
         )
 
-      # Allow init to complete reconciliation.
       Process.sleep(300)
 
       assert poll_reclaimed(orphan_dir, 3_000) == :reclaimed,
