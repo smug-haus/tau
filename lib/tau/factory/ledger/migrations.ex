@@ -112,6 +112,95 @@ defmodule Tau.Factory.Ledger.Migrations do
        ON verdicts_v2 (hash, run, half)
        WHERE supersedes_id IS NULL
      """},
+    # D-323: The gate floor now includes :lint. SQLite does not support ALTER
+    # TABLE ADD CONSTRAINT; recreate verdicts_v2 with the expanded half set.
+    # Append-only invariant (D-335) preserved: rows copied via INSERT … SELECT.
+    {"20260616_011_verdicts_v3_extend_half_lint",
+     """
+     CREATE TABLE IF NOT EXISTS verdicts_v3 (
+       id               INTEGER PRIMARY KEY AUTOINCREMENT,
+       hash             TEXT    NOT NULL,
+       run              TEXT    NOT NULL,
+       half             TEXT    NOT NULL CHECK (half IN ('critic', 'reviewer', 'mutation', 'lint')),
+       status           TEXT    NOT NULL CHECK (status IN ('pass', 'fail')),
+       idempotency_key  TEXT    NOT NULL,
+       supersedes_id    INTEGER REFERENCES verdicts_v3(id),
+       inserted_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+     )
+     """},
+    {"20260616_012_verdicts_v3_migrate_rows",
+     """
+     INSERT OR IGNORE INTO verdicts_v3
+       (id, hash, run, half, status, idempotency_key, supersedes_id, inserted_at)
+     SELECT id, hash, run, half, status, idempotency_key, supersedes_id, inserted_at
+     FROM verdicts_v2
+     """},
+    {"20260616_013_verdicts_v3_original_uidx",
+     """
+     CREATE UNIQUE INDEX IF NOT EXISTS verdicts_v3_original_uidx
+       ON verdicts_v3 (hash, run, half)
+       WHERE supersedes_id IS NULL
+     """},
+    # D-322 / D-323: The gate floor now includes :spec_membership and :floor
+    # (the synthetic floor-violation half). SQLite does not support ALTER TABLE
+    # ADD CONSTRAINT; recreate verdicts_v3 with the expanded half set.
+    # Append-only invariant (D-335) preserved: rows copied via INSERT … SELECT.
+    {"20260617_014_verdicts_v4_extend_half_spec_membership",
+     """
+     CREATE TABLE IF NOT EXISTS verdicts_v4 (
+       id               INTEGER PRIMARY KEY AUTOINCREMENT,
+       hash             TEXT    NOT NULL,
+       run              TEXT    NOT NULL,
+       half             TEXT    NOT NULL CHECK (half IN ('critic', 'reviewer', 'mutation', 'lint', 'spec_membership', 'floor')),
+       status           TEXT    NOT NULL CHECK (status IN ('pass', 'fail')),
+       idempotency_key  TEXT    NOT NULL,
+       supersedes_id    INTEGER REFERENCES verdicts_v4(id),
+       inserted_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+     )
+     """},
+    {"20260617_015_verdicts_v4_migrate_rows",
+     """
+     INSERT OR IGNORE INTO verdicts_v4
+       (id, hash, run, half, status, idempotency_key, supersedes_id, inserted_at)
+     SELECT id, hash, run, half, status, idempotency_key, supersedes_id, inserted_at
+     FROM verdicts_v3
+     """},
+    {"20260617_016_verdicts_v4_original_uidx",
+     """
+     CREATE UNIQUE INDEX IF NOT EXISTS verdicts_v4_original_uidx
+       ON verdicts_v4 (hash, run, half)
+       WHERE supersedes_id IS NULL
+     """},
+    # D-307: The gate now includes the :entry_symbol half (the mechanizable
+    # narrowing of INV-8). SQLite does not support ALTER TABLE ADD CONSTRAINT;
+    # recreate verdicts_v4 as verdicts_v5 with the expanded half set.
+    # Append-only invariant (D-335) preserved: rows copied via INSERT … SELECT.
+    {"20260617_017_verdicts_v5_extend_half_entry_symbol",
+     """
+     CREATE TABLE IF NOT EXISTS verdicts_v5 (
+       id               INTEGER PRIMARY KEY AUTOINCREMENT,
+       hash             TEXT    NOT NULL,
+       run              TEXT    NOT NULL,
+       half             TEXT    NOT NULL CHECK (half IN ('critic', 'reviewer', 'mutation', 'lint', 'spec_membership', 'floor', 'entry_symbol')),
+       status           TEXT    NOT NULL CHECK (status IN ('pass', 'fail')),
+       idempotency_key  TEXT    NOT NULL,
+       supersedes_id    INTEGER REFERENCES verdicts_v5(id),
+       inserted_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+     )
+     """},
+    {"20260617_018_verdicts_v5_migrate_rows",
+     """
+     INSERT OR IGNORE INTO verdicts_v5
+       (id, hash, run, half, status, idempotency_key, supersedes_id, inserted_at)
+     SELECT id, hash, run, half, status, idempotency_key, supersedes_id, inserted_at
+     FROM verdicts_v4
+     """},
+    {"20260617_019_verdicts_v5_original_uidx",
+     """
+     CREATE UNIQUE INDEX IF NOT EXISTS verdicts_v5_original_uidx
+       ON verdicts_v5 (hash, run, half)
+       WHERE supersedes_id IS NULL
+     """},
     # PR #465 (D-355): Durable merge-outcome row. Append-only; no UPDATE/DELETE.
     # WAL-before-ack (D-315): the Writer replies only after step/2 (WAL commit)
     # returns. outcome CHECK restricts to the two valid terminal outcomes.

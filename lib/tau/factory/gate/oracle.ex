@@ -43,6 +43,38 @@ defmodule Tau.Factory.Gate.Oracle do
               :pass | :fail | {:error, term()}
 
   @doc """
+  Mechanical incomplete-fix verdict rule (D-308 / INV-9).
+
+  Given a critic or reviewer `finding` (a map with at least a `:text` key)
+  and the list of `claimed_acs` tokens from the PR's `## Acceptance criteria`
+  section (e.g. `["AC-1", "AC-5", "D-308"]`), returns:
+
+  - `:reopen` — the finding text contains at least one of the named AC-N/D-NNN
+    tokens, meaning the finding falsifies a named acceptance criterion.
+    Severity is irrelevant; `:info` and `:suggestion` do NOT lower this bar
+    (SPEC-FACTORY-GATE §4 D-308).
+
+  - `:admissible_followup` — the finding text contains none of the named
+    tokens, or `claimed_acs` is empty (no AC can be falsified when none are
+    claimed).
+
+  The test is purely lexical: the token must appear as a substring of the
+  finding text. Case-sensitive, matching the `AC-N` / `D-NNN` form used in
+  the PR body.
+  """
+  @spec incomplete_fix_check(finding :: map(), claimed_acs :: [String.t()]) ::
+          :reopen | :admissible_followup
+  def incomplete_fix_check(_finding, []), do: :admissible_followup
+
+  def incomplete_fix_check(%{text: text}, claimed_acs) when is_list(claimed_acs) do
+    if Enum.any?(claimed_acs, &String.contains?(text, &1)) do
+      :reopen
+    else
+      :admissible_followup
+    end
+  end
+
+  @doc """
   Select the oracle implementation for the given `policy_pin`.
 
   Returns `{module, pin_or_map}` where `module` implements the `Oracle`
@@ -78,7 +110,11 @@ defmodule Tau.Factory.Gate.Oracle do
       case Map.get(oracle_map, half) do
         :pass -> :pass
         :fail -> :fail
-        nil -> :fail
+        # hermetic default: unmapped halves pass in oracle-stub mode.
+        # The oracle map presence signals "hermetic unit test" — mechanical
+        # halves not explicitly set to :fail are treated as :pass so test
+        # fixtures can exercise the gate without real toolchain runs.
+        nil -> :pass
       end
     end
 

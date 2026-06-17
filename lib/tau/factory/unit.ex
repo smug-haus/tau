@@ -98,6 +98,15 @@ defmodule Tau.Factory.Unit do
     - `:merge_fun`      — `(unit_id, hash -> :queued | {:error, reason})`.
 
   Optional options:
+    - `:challenge_fun`  — `(payload :: map() -> {:upheld, term()} | {:rejected, term()})`;
+                          the critic-routing seam invoked when the implementer sends
+                          `{:challenge, payload}` while in `:implementing` state.
+                          The Unit routes the challenge to this fun (the independent
+                          critic), accumulates upheld rulings, and escalates
+                          `E-CHALLENGE` when `> 2` upheld challenges occur on this
+                          unit (factory-loop §Challenge protocol; SPEC-FACTORY-GATE
+                          §C214-B6). When `nil` or absent, `{:challenge, _}` messages
+                          are silently discarded (backward-compat / non-challenge unit).
     - `:ledger`         — `GenServer.server()` | `nil`; when present and non-nil,
                           the Unit calls `Ledger.Writer.snapshot_unit/2` on each
                           state entry (WAL-before-ack, D-318). The idempotency key
@@ -141,6 +150,7 @@ defmodule Tau.Factory.Unit do
     ledger = Keyword.get(opts, :ledger, nil)
     pubsub = Keyword.get(opts, :pubsub, Tau.PubSub)
     registry_name = Keyword.get(opts, :registry_name, nil)
+    challenge_fun = Keyword.get(opts, :challenge_fun, nil)
     timeouts = Keyword.get(opts, :timeouts, [])
     state_timeout_ms = Keyword.get(timeouts, :state_timeout_ms, @default_state_timeout_ms)
 
@@ -191,7 +201,13 @@ defmodule Tau.Factory.Unit do
       # D-362: captured from {:work_ready, worker_id, branch, head_sha} (3-tuple seam).
       # Initialised to nil; stays nil when the legacy 2-tuple seam is used (D-363).
       head_sha: nil,
-      branch: nil
+      branch: nil,
+      # INV-CHALLENGE-ROUTING: critic-routing seam for implementer challenges.
+      # Nil when the unit is not configured for challenge routing (back-compat).
+      challenge_fun: challenge_fun,
+      # Count of upheld challenge rulings for this unit. Escalates E-CHALLENGE
+      # when > 2 upheld (SPEC-FACTORY-GATE §C214-B6; factory-loop §Safety circuit 7).
+      upheld_count: 0
     }
 
     # Transition immediately to planned state, which triggers admission.
@@ -503,6 +519,41 @@ defmodule Tau.Factory.Unit do
     {:keep_state, data}
   end
 
+  # INV-CHALLENGE-ROUTING (SPEC-FACTORY-GATE §C214-B6): route {:challenge, payload}
+  # to the injected challenge_fun (the independent critic). Never self-adjudicate.
+  # When challenge_fun is nil (unit not configured for challenges), discard silently.
+  # Upheld rulings accumulate; > 2 upheld on one unit escalates E-CHALLENGE
+  # (factory-loop §Safety circuit condition 7).
+  def implementing(:info, {:challenge, payload}, data) do
+    case data.challenge_fun do
+      nil ->
+        # challenge_fun not configured — discard (backward-compat, non-challenge unit).
+        Logger.debug(
+          "[Unit #{data.unit_id}] implementing {:challenge, _} ignored (no challenge_fun)"
+        )
+
+        {:keep_state, data}
+
+      fun when is_function(fun, 1) ->
+        ruling = fun.(payload)
+
+        case ruling do
+          {:upheld, _} ->
+            new_upheld = data.upheld_count + 1
+
+            if new_upheld > 2 do
+              new_data = %{data | upheld_count: new_upheld}
+              escalate_e_challenge(new_data)
+            else
+              {:keep_state, %{data | upheld_count: new_upheld}}
+            end
+
+          {:rejected, _} ->
+            {:keep_state, data}
+        end
+    end
+  end
+
   def implementing(:state_timeout, :worker_stalled, data) do
     Logger.warning("[Unit #{data.unit_id}] implementing :state_timeout — worker stalled")
     demonitor_worker(data)
@@ -672,6 +723,29 @@ defmodule Tau.Factory.Unit do
   @spec escalate(map(), atom()) :: {:next_state, :escalated, map()}
   defp escalate(data, reason) do
     terminal(data, :escalated, data.last_findings, reason)
+  end
+
+  # INV-CHALLENGE-ROUTING: escalate with E-CHALLENGE outcome for > 2 upheld challenges.
+  # Sends {:unit_terminal, unit_id, {:escalated, :"E-CHALLENGE"}, provenance} so the
+  # coordinator can extract the escalation class from the outcome tuple
+  # (SPEC-FACTORY-GATE §C214-B6; SPEC-FACTORY-CORE escalation table).
+  # The gen_statem transitions to the :escalated quiescent sink state.
+  @spec escalate_e_challenge(map()) :: {:next_state, :escalated, map()}
+  defp escalate_e_challenge(data) do
+    provenance = %{
+      attempt_count: data.attempt_count,
+      last_findings: data.last_findings,
+      reason: :"E-CHALLENGE"
+    }
+
+    data = snapshot_state(:escalated, data)
+    Scheduler.release(data.scheduler, data.unit_id)
+    send(data.report_to, {:unit_terminal, data.unit_id, {:escalated, :"E-CHALLENGE"}, provenance})
+
+    emit_telemetry(:escalated, data, provenance)
+
+    new_data = Map.put(data, :terminal_provenance, provenance)
+    {:next_state, :escalated, new_data}
   end
 
   # D-326 / D-378 / D-379: unified bounded worker-outcome retry ladder for oracle

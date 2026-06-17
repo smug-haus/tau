@@ -15,7 +15,7 @@ defmodule Mix.Gate.Masking do
   @doc """
   Scans `unified_diff` for removed assertion lines.
 
-  Returns a list of maps `%{file: String.t(), line: integer(), removed: String.t()}`.
+  Returns a list of maps `%{file: String.t(), line: integer(), removed: String.t() | nil}`.
   `file` is the path from the `+++ b/` diff header. `line` is the original-file
   line number (parsed from `@@ -L,N` hunks). `removed` is the raw content of the
   `-` line (without the leading `-`).
@@ -26,19 +26,39 @@ defmodule Mix.Gate.Masking do
   those paths).
   """
   @spec masking_violations(String.t()) :: [
-          %{file: String.t(), line: integer(), removed: String.t()}
+          %{file: String.t(), line: non_neg_integer(), removed: String.t() | nil}
         ]
   def masking_violations(unified_diff) when is_binary(unified_diff) do
-    {_status, findings} = PureMasking.scan(unified_diff, MapSet.new())
+    masking_violations(unified_diff, MapSet.new())
+  end
 
-    # Adapt: filter to assertion-deletion findings and map to the legacy shape.
-    findings
-    |> Enum.filter(&(Map.get(&1, :reason) == :assertion_deleted))
-    |> Enum.map(fn f ->
+  @doc """
+  Scans `unified_diff` for masking violations, including path-based violations
+  for any path in `gating_paths` (P-MK2 / INV-6 / issue #566).
+
+  Accepts both assertion-deletion findings (P-MK1) and gating-path-edit findings
+  (P-MK2). Neither finding type is filtered out — all findings are mandatory
+  review items for the critic (SPEC-FACTORY-GATE §4 B6 / C207-B6).
+
+  Returns a list of maps:
+  - For assertion deletions: `%{file: path, line: line, removed: content}`.
+  - For gating-path edits: `%{file: path, line: 0, removed: nil}`.
+  """
+  @spec masking_violations(String.t(), MapSet.t(String.t())) :: [
+          %{file: String.t(), line: non_neg_integer(), removed: String.t() | nil}
+        ]
+  def masking_violations(unified_diff, gating_paths)
+      when is_binary(unified_diff) and is_struct(gating_paths, MapSet) do
+    {_status, findings} = PureMasking.scan(unified_diff, gating_paths)
+
+    # Both :assertion_deleted and :gating_path_edited findings are surfaced —
+    # no filtering by reason. All are mandatory review items for the critic
+    # (SPEC-FACTORY-GATE §4 B6 / C207-B6 / INV-6 / issue #566).
+    Enum.map(findings, fn f ->
       %{
         file: Map.get(f, :path),
         line: Map.get(f, :line, 0),
-        removed: Map.get(f, :removed, "")
+        removed: Map.get(f, :removed)
       }
     end)
   end

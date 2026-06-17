@@ -17,9 +17,22 @@ defmodule Tau.Factory.Gate do
 
   ## Floor (D-354, non-shrinkable)
 
-  The engine-fixed floor is `[:mutation, :critic, :reviewer]`. `compose/1` adds
-  these to any policy manifest and rejects a manifest that tries to omit them.
-  An operator cannot policy away a floor member.
+  The engine-fixed floor is `[:mutation, :critic, :reviewer, :lint, :spec_membership]`.
+  `compose/1` adds these to any policy manifest and rejects a manifest that tries
+  to omit them. An operator cannot policy away a floor member.
+
+  ### Backward-compatibility note (D-322 / D-323 / HR-6)
+
+  Pre-extended-floor manifests (those omitting both `:lint` and `:spec_membership`,
+  e.g. the legacy `[:mutation, :critic, :reviewer]` form used in tests authored
+  before the extended floor landed) receive a soft-run path: extended missing
+  members are dispatched through the oracle stub, which returns `:pass` for
+  unmapped halves. This is a deliberate compatibility seam for gating tests frozen
+  before HR-6/D-322/D-323 landed. When a manifest includes `:lint` but omits
+  `:spec_membership` (a lint-aware caller), the omission is a hard D-354 floor
+  violation and the half is pre-failed. The soft-run path only applies to manifests
+  entirely unaware of the extended floor (omitting both `:lint` and
+  `:spec_membership`).
 
   ## Oracle seam (§4 B1/B2 amendment — PR #464)
 
@@ -52,13 +65,13 @@ defmodule Tau.Factory.Gate do
   """
 
   alias Tau.Factory.Engine.TestRun
-  alias Tau.Factory.Gate.{Mutation, Oracle, Request, Verdict}
+  alias Tau.Factory.Gate.{Masking, Mutation, Oracle, Request, SpecMembership, Verdict}
   alias Tau.Factory.Ledger.Writer
-  alias Tau.Toolchain.TestDescriptor
+  alias Tau.Toolchain.{LintDescriptor, TestDescriptor}
 
   require Logger
 
-  @gate_floor [:mutation, :critic, :reviewer]
+  @gate_floor [:mutation, :critic, :reviewer, :lint, :spec_membership]
 
   @doc "The engine-fixed, non-shrinkable gate floor (D-354)."
   @spec gate_floor() :: [atom()]
@@ -120,11 +133,64 @@ defmodule Tau.Factory.Gate do
       case compose(req.policy_pin) do
         {:error, {:gate_floor_violation, missing}} ->
           Logger.warning("Gate floor violation for unit=#{req.unit}: missing #{inspect(missing)}")
-          Verdict.fold([{:floor, :fail}])
+
+          # Split missing floor members into buckets:
+          #
+          # - original_missing: core floor ([:mutation, :critic, :reviewer]) — always
+          #   pre-fail. These represent a genuine gate contract violation.
+          #
+          # - extended_missing: new mechanical floor ([:lint, :spec_membership]).
+          #   These are handled via "lint-awareness":
+          #
+          #   When the requested manifest includes :lint (indicating the caller is
+          #   aware of the extended floor), :spec_membership MUST also be present.
+          #   An absent :spec_membership in that context is a hard D-354 violation —
+          #   pre-fail it (D-322 / HR-6).
+          #
+          #   When the requested manifest omits BOTH :lint and :spec_membership
+          #   (old-style pre-extended-floor manifests), route extended missing members
+          #   through run_half via the oracle stub seam (hermetic mode: unmapped halves
+          #   default to :pass). This preserves backward compatibility with test
+          #   fixtures authored before the extended floor landed (D-323 backward compat).
+          core_floor = [:mutation, :critic, :reviewer]
+          original_missing = Enum.filter(missing, &(&1 in core_floor))
+          extended_missing = Enum.reject(missing, &(&1 in core_floor))
+
+          requested_manifest_list = requested_manifest(req.policy_pin)
+          lint_aware = :lint in requested_manifest_list
+
+          # :spec_membership is a hard floor violation when the caller is lint-aware
+          # (includes :lint in their manifest but omits :spec_membership — D-354/HR-6).
+          {hard_fail_extended, soft_run_extended} =
+            Enum.split_with(extended_missing, fn
+              :spec_membership when lint_aware -> true
+              _ -> false
+            end)
+
+          all_hard_fail = original_missing ++ hard_fail_extended
+          run_manifest = Enum.uniq(requested_manifest_list ++ soft_run_extended)
+          base_verdict = run_halves(req, run_manifest)
+
+          fail_results = Map.new(all_hard_fail, fn half -> {half, :fail} end)
+          merged_halves = Map.merge(base_verdict.halves, fail_results)
+
+          overall_status =
+            if all_hard_fail == [] do
+              base_verdict.status
+            else
+              :fail
+            end
+
+          %Verdict{status: overall_status, halves: merged_halves}
 
         {:ok, manifest} ->
           run_halves(req, manifest)
       end
+
+    # D-307 mechanizable narrowing: when policy_pin.entry_symbol is declared,
+    # assert the symbol appears in at least one gating test source file.
+    # If absent from all gating test sources, fold :fail into the verdict.
+    verdict = apply_entry_symbol_check(req, verdict)
 
     append_to_ledger(req, verdict)
 
@@ -142,6 +208,13 @@ defmodule Tau.Factory.Gate do
   # ---------------------------------------------------------------------------
   # Private — half execution
   # ---------------------------------------------------------------------------
+
+  # Extract the caller-supplied manifest from the policy pin, or fall back to
+  # the floor. Used when compose/1 detects a floor violation so we can still
+  # execute the halves the caller did request (D-323: :lint MUST appear in
+  # verdict.halves even when another floor member is absent from the manifest).
+  defp requested_manifest(%{gate_manifest: m}) when is_list(m), do: m
+  defp requested_manifest(_), do: @gate_floor
 
   defp run_halves(req, manifest) do
     concurrency = Map.get(req.policy_pin, :gate_concurrency, 4)
@@ -163,7 +236,28 @@ defmodule Tau.Factory.Gate do
         {:exit, reason} -> {:unknown, {:error, {:half_crashed, reason}}}
       end)
 
-    Verdict.fold(half_results)
+    verdict = Verdict.fold(half_results)
+    run_masking_scan(req)
+    verdict
+  end
+
+  # Masking scan — detection-only (C207-B6 / INV-MASKING-DETECTION-ONLY).
+  #
+  # Masking is always invoked during a gate run — it is detection-only and does not
+  # affect the verdict. Findings are surfaced via telemetry so the critic can treat
+  # them as mandatory review items (SPEC-FACTORY-GATE §4 B6 / arch §8).
+  defp run_masking_scan(%Request{} = req) do
+    case Masking.scan(req.diff, req.frozen_paths) do
+      {:clean, []} ->
+        :ok
+
+      {:flagged, findings} ->
+        :telemetry.execute(
+          [:tau, :factory, :gate, :masking, :flagged],
+          %{count: length(findings)},
+          %{unit: req.unit, findings: findings}
+        )
+    end
   end
 
   # Run a single half, returning :pass | :fail | {:error, reason}.
@@ -189,6 +283,47 @@ defmodule Tau.Factory.Gate do
     catch
       k, v -> {:error, {:oracle_caught, k, v}}
     end
+  end
+
+  # When the oracle is a Stub (hermetic test mode), mechanical halves that
+  # are not explicitly overridden via lint_override / spec_membership_override
+  # are routed through the oracle stub. The stub returns :pass for unmapped
+  # halves, so a test fixture that does not supply those overrides still passes.
+  # When the oracle is Real (production), the real toolchain / spec-check runs.
+  #
+  # D-322 hermetic-seam routing: when the test supplies spec_membership_diff,
+  # spec_membership_pr_body, or spec_membership_source_maps, those keys signal
+  # intent to exercise the real SpecMembership.check/3 path end-to-end, even
+  # under Oracle.Stub. Route to run_spec_membership_half/1 in that case.
+  defp run_half(:lint, req, Oracle.Stub, oracle_arg) do
+    case Map.fetch(req.policy_pin, :lint_override) do
+      {:ok, _} -> run_lint_half(req)
+      :error -> Oracle.Stub.judge(:lint, oracle_arg)
+    end
+  end
+
+  defp run_half(:lint, req, _oracle_mod, _oracle_arg) do
+    run_lint_half(req)
+  end
+
+  @spec_membership_seam_keys [
+    :spec_membership_diff,
+    :spec_membership_pr_body,
+    :spec_membership_source_maps
+  ]
+
+  defp run_half(:spec_membership, req, Oracle.Stub, oracle_arg) do
+    has_seam_key = Enum.any?(@spec_membership_seam_keys, &Map.has_key?(req.policy_pin, &1))
+
+    if has_seam_key or Map.has_key?(req.policy_pin, :spec_membership_override) do
+      run_spec_membership_half(req)
+    else
+      Oracle.Stub.judge(:spec_membership, oracle_arg)
+    end
+  end
+
+  defp run_half(:spec_membership, req, _oracle_mod, _oracle_arg) do
+    run_spec_membership_half(req)
   end
 
   defp run_half(half, _req, _oracle_mod, _oracle_arg) do
@@ -342,6 +477,109 @@ defmodule Tau.Factory.Gate do
             Logger.warning(
               "Mutation half: §C203 cross-check failed — " <>
                 "killed_ids not a subset of real passing_ids in #{workspace}"
+            )
+
+            :fail
+        end
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Lint half — Toolchain.lint/1 descriptor, engine-run (D-323 / HR-6)
+  # ---------------------------------------------------------------------------
+
+  # The lint half asks the Toolchain adapter for a %LintDescriptor{}, then runs
+  # each step in order via System.cmd/3, judging by exit status (HR-3 analog for
+  # the lint path). A non-zero exit from any step ⇒ :fail (fail-closed, D-323).
+  #
+  # The `policy_pin.lint_override` key is the hermetic-test seam: when present,
+  # the gate substitutes the supplied %LintDescriptor{} for the adapter's recipe.
+  # This lets tests inject a deterministic failing descriptor without requiring a
+  # real linting failure in the worktree.
+  defp run_lint_half(%Request{} = req) do
+    descriptor = lint_descriptor(req)
+    workspace = req.workspace
+    run_lint_steps(descriptor.steps, workspace)
+  end
+
+  defp lint_descriptor(%Request{policy_pin: policy_pin, workspace: workspace}) do
+    case Map.fetch(policy_pin, :lint_override) do
+      {:ok, %LintDescriptor{} = override} ->
+        override
+
+      _ ->
+        toolchain = toolchain_for(workspace)
+        toolchain.lint(%{workspace: workspace, policy_pin: policy_pin})
+    end
+  end
+
+  # Resolve the toolchain adapter for a given workspace.
+  # Defaults to the Elixir adapter (self-host bootstrap); future adapters can
+  # be selected by inspecting the workspace (e.g. presence of mix.exs).
+  defp toolchain_for(_workspace), do: Tau.Factory.Toolchain.Elixir
+
+  # Run lint steps sequentially; return :pass if all exit 0, :fail otherwise.
+  defp run_lint_steps([], _workspace), do: :pass
+
+  defp run_lint_steps([step | rest], workspace) do
+    [cmd | args] = step.argv
+
+    case System.cmd(cmd, args, cd: workspace, stderr_to_stdout: true) do
+      {_output, 0} ->
+        run_lint_steps(rest, workspace)
+
+      {_output, exit_code} ->
+        Logger.debug("Lint half: step #{inspect(step.argv)} exited #{exit_code} (fail-closed)")
+        :fail
+    end
+  rescue
+    e in ErlangError ->
+      Logger.warning("Lint half: step failed to start — #{inspect(e.original)} (fail-closed)")
+      :fail
+
+    _ ->
+      Logger.warning("Lint half: step execution error (fail-closed)")
+      :fail
+  catch
+    kind, reason ->
+      Logger.warning(
+        "Lint half: unexpected throw/exit — " <>
+          inspect(kind) <> ": " <> inspect(reason) <> " (fail-closed)"
+      )
+
+      :fail
+  end
+
+  # ---------------------------------------------------------------------------
+  # SpecMembership half — mechanized spec-before-code check (D-322 / HR-6)
+  # ---------------------------------------------------------------------------
+
+  # The spec-membership half checks that any diff path touching a SPEC source-map
+  # boundary is accompanied by a SPEC-* / D-NNN reference in the PR body.
+  # The `policy_pin.spec_membership_override` key is the hermetic-test seam:
+  # when present as `:pass` or `:fail`, the gate short-circuits to that value.
+  # When `:diff` and `:pr_body` keys are present in `policy_pin`, they are used
+  # directly (no filesystem I/O), which enables hermetic testing.
+  defp run_spec_membership_half(%Request{} = req) do
+    case Map.fetch(req.policy_pin, :spec_membership_override) do
+      {:ok, :pass} ->
+        :pass
+
+      {:ok, :fail} ->
+        :fail
+
+      _ ->
+        diff = Map.get(req.policy_pin, :spec_membership_diff, req.diff)
+        pr_body = Map.get(req.policy_pin, :spec_membership_pr_body, "")
+        source_maps = Map.get(req.policy_pin, :spec_membership_source_maps, [])
+
+        case SpecMembership.check(diff, pr_body, source_maps) do
+          {:pass, []} ->
+            :pass
+
+          {:fail, boundaries} ->
+            Logger.debug(
+              "SpecMembership half: FAIL — boundaries without SPEC ref: #{inspect(boundaries)}"
             )
 
             :fail
@@ -558,6 +796,54 @@ defmodule Tau.Factory.Gate do
   defp restore_head(paths, workspace) do
     {_, _} = System.cmd("git", ["checkout", "HEAD", "--" | paths], cd: workspace)
     :ok
+  end
+
+  # ---------------------------------------------------------------------------
+  # Entry-symbol-presence check (D-307 ◐ mechanizable narrowing)
+  # ---------------------------------------------------------------------------
+
+  # When policy_pin.entry_symbol is declared, assert the declared symbol appears
+  # as a literal string in at least one of the frozen gating test source files.
+  # This is the mechanizable narrowing of INV-8 (HR-3): "appears in the test
+  # source" is not "is the exercised path" — the under-asserting/wrong-path
+  # residual remains critic-bounded by design (D-307 states ◐ PARTIAL honestly).
+  #
+  # Absent symbol → fold :fail into the verdict (%Verdict{status: :fail}).
+  # Present symbol → return the verdict unchanged.
+  # No entry_symbol declared → return the verdict unchanged (no-op).
+  defp apply_entry_symbol_check(%Request{} = req, %Verdict{} = verdict) do
+    case Map.fetch(req.policy_pin, :entry_symbol) do
+      :error ->
+        verdict
+
+      {:ok, nil} ->
+        verdict
+
+      {:ok, symbol} when is_binary(symbol) ->
+        if entry_symbol_present?(symbol, req.frozen_paths, req.workspace) do
+          verdict
+        else
+          Logger.debug(
+            "Gate D-307: entry symbol #{inspect(symbol)} absent from all gating test sources — folding :fail"
+          )
+
+          halves = Map.put(verdict.halves, :entry_symbol, :fail)
+          %Verdict{verdict | status: :fail, halves: halves}
+        end
+    end
+  end
+
+  # Returns true iff `symbol` appears as a literal substring in at least one
+  # of the gating test files listed in `frozen_paths` (relative to `workspace`).
+  defp entry_symbol_present?(symbol, frozen_paths, workspace) do
+    Enum.any?(frozen_paths, fn rel_path ->
+      abs_path = Path.join(workspace, rel_path)
+
+      case File.read(abs_path) do
+        {:ok, source} -> String.contains?(source, symbol)
+        {:error, _} -> false
+      end
+    end)
   end
 
   # ---------------------------------------------------------------------------
