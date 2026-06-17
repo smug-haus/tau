@@ -250,7 +250,20 @@ defmodule Tau.OtelReporter do
       # gate.ex emits :start/:stop with {unit, hash, run} metadata;
       # Handler correlates them via {:factory_gate_run, unit, hash, run} key.
       [:tau, :factory, :gate, :run, :start],
-      [:tau, :factory, :gate, :run, :stop]
+      [:tau, :factory, :gate, :run, :stop],
+      # D-352: user-visible factory events (issue #667).
+      # worker.start/exit — paired span keyed on worker_id.
+      # unit outcomes, coordinator, merge, janitor — point spans (open+close).
+      [:tau, :factory, :worker, :start],
+      [:tau, :factory, :worker, :exit],
+      [:tau, :factory, :unit, :merged],
+      [:tau, :factory, :unit, :escalated],
+      [:tau, :factory, :unit, :cancelled],
+      [:tau, :factory, :unit, :gating],
+      [:tau, :factory, :unit, :implementing],
+      [:tau, :factory, :coordinator, :step_start],
+      [:tau, :factory, :merge, :completed],
+      [:tau, :factory, :janitor, :reclaim]
     ]
 
     # Optional events (SPEC §4 B1: configurable, default off).
