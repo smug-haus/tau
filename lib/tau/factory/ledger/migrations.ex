@@ -112,6 +112,35 @@ defmodule Tau.Factory.Ledger.Migrations do
        ON verdicts_v2 (hash, run, half)
        WHERE supersedes_id IS NULL
      """},
+    # D-323: The gate floor now includes :lint. SQLite does not support ALTER
+    # TABLE ADD CONSTRAINT; recreate verdicts_v2 with the expanded half set.
+    # Append-only invariant (D-335) preserved: rows copied via INSERT … SELECT.
+    {"20260616_011_verdicts_v3_extend_half_lint",
+     """
+     CREATE TABLE IF NOT EXISTS verdicts_v3 (
+       id               INTEGER PRIMARY KEY AUTOINCREMENT,
+       hash             TEXT    NOT NULL,
+       run              TEXT    NOT NULL,
+       half             TEXT    NOT NULL CHECK (half IN ('critic', 'reviewer', 'mutation', 'lint')),
+       status           TEXT    NOT NULL CHECK (status IN ('pass', 'fail')),
+       idempotency_key  TEXT    NOT NULL,
+       supersedes_id    INTEGER REFERENCES verdicts_v3(id),
+       inserted_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+     )
+     """},
+    {"20260616_012_verdicts_v3_migrate_rows",
+     """
+     INSERT OR IGNORE INTO verdicts_v3
+       (id, hash, run, half, status, idempotency_key, supersedes_id, inserted_at)
+     SELECT id, hash, run, half, status, idempotency_key, supersedes_id, inserted_at
+     FROM verdicts_v2
+     """},
+    {"20260616_013_verdicts_v3_original_uidx",
+     """
+     CREATE UNIQUE INDEX IF NOT EXISTS verdicts_v3_original_uidx
+       ON verdicts_v3 (hash, run, half)
+       WHERE supersedes_id IS NULL
+     """},
     # PR #465 (D-355): Durable merge-outcome row. Append-only; no UPDATE/DELETE.
     # WAL-before-ack (D-315): the Writer replies only after step/2 (WAL commit)
     # returns. outcome CHECK restricts to the two valid terminal outcomes.

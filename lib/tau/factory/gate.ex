@@ -17,9 +17,9 @@ defmodule Tau.Factory.Gate do
 
   ## Floor (D-354, non-shrinkable)
 
-  The engine-fixed floor is `[:mutation, :critic, :reviewer]`. `compose/1` adds
-  these to any policy manifest and rejects a manifest that tries to omit them.
-  An operator cannot policy away a floor member.
+  The engine-fixed floor is `[:mutation, :critic, :reviewer, :lint]`. `compose/1`
+  adds these to any policy manifest and rejects a manifest that tries to omit
+  them. An operator cannot policy away a floor member.
 
   ## Oracle seam (§4 B1/B2 amendment — PR #464)
 
@@ -54,11 +54,11 @@ defmodule Tau.Factory.Gate do
   alias Tau.Factory.Engine.TestRun
   alias Tau.Factory.Gate.{Mutation, Oracle, Request, Verdict}
   alias Tau.Factory.Ledger.Writer
-  alias Tau.Toolchain.TestDescriptor
+  alias Tau.Toolchain.{LintDescriptor, TestDescriptor}
 
   require Logger
 
-  @gate_floor [:mutation, :critic, :reviewer]
+  @gate_floor [:mutation, :critic, :reviewer, :lint]
 
   @doc "The engine-fixed, non-shrinkable gate floor (D-354)."
   @spec gate_floor() :: [atom()]
@@ -189,6 +189,10 @@ defmodule Tau.Factory.Gate do
     catch
       k, v -> {:error, {:oracle_caught, k, v}}
     end
+  end
+
+  defp run_half(:lint, req, _oracle_mod, _oracle_arg) do
+    run_lint_half(req)
   end
 
   defp run_half(half, _req, _oracle_mod, _oracle_arg) do
@@ -347,6 +351,67 @@ defmodule Tau.Factory.Gate do
             :fail
         end
     end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Lint half — Toolchain.lint/1 descriptor, engine-run (D-323 / HR-6)
+  # ---------------------------------------------------------------------------
+
+  # The lint half asks the Toolchain adapter for a %LintDescriptor{}, then runs
+  # each step in order via System.cmd/3, judging by exit status (HR-3 analog for
+  # the lint path). A non-zero exit from any step ⇒ :fail (fail-closed, D-323).
+  #
+  # The `policy_pin.lint_override` key is the hermetic-test seam: when present,
+  # the gate substitutes the supplied %LintDescriptor{} for the adapter's recipe.
+  # This lets tests inject a deterministic failing descriptor without requiring a
+  # real linting failure in the worktree.
+  defp run_lint_half(%Request{} = req) do
+    descriptor = lint_descriptor(req)
+    workspace = req.workspace
+    run_lint_steps(descriptor.steps, workspace)
+  end
+
+  defp lint_descriptor(%Request{policy_pin: policy_pin, workspace: workspace}) do
+    case Map.fetch(policy_pin, :lint_override) do
+      {:ok, %LintDescriptor{} = override} ->
+        override
+
+      _ ->
+        toolchain = toolchain_for(workspace)
+        toolchain.lint(%{workspace: workspace, policy_pin: policy_pin})
+    end
+  end
+
+  # Resolve the toolchain adapter for a given workspace.
+  # Defaults to the Elixir adapter (self-host bootstrap); future adapters can
+  # be selected by inspecting the workspace (e.g. presence of mix.exs).
+  defp toolchain_for(_workspace), do: Tau.Factory.Toolchain.Elixir
+
+  # Run lint steps sequentially; return :pass if all exit 0, :fail otherwise.
+  defp run_lint_steps([], _workspace), do: :pass
+
+  defp run_lint_steps([step | rest], workspace) do
+    [cmd | args] = step.argv
+
+    case System.cmd(cmd, args, cd: workspace, stderr_to_stdout: true) do
+      {_output, 0} ->
+        run_lint_steps(rest, workspace)
+
+      {_output, exit_code} ->
+        Logger.debug("Lint half: step #{inspect(step.argv)} exited #{exit_code} (fail-closed)")
+        :fail
+    end
+  rescue
+    e in ErlangError ->
+      Logger.warning("Lint half: step failed to start — #{inspect(e.original)} (fail-closed)")
+      :fail
+
+    _ ->
+      Logger.warning("Lint half: step execution error (fail-closed)")
+      :fail
+  catch
+    _, _ ->
+      :fail
   end
 
   # ---------------------------------------------------------------------------
