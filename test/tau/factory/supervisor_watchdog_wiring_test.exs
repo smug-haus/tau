@@ -149,7 +149,14 @@ defmodule Tau.Factory.SupervisorWatchdogWiringTest do
       # `drive_fun.(unit_work_item, unit_deps)` — so this seam sees the EXACT
       # deps the supervisor assembled (post-`:watchdog`-addition, if fixed).
       # Returns a fake pid so the Coordinator can track the unit in-flight.
-      fake_unit_pid = spawn(fn -> receive do :stop -> :ok after 10_000 -> :ok end end)
+      fake_unit_pid =
+        spawn(fn ->
+          receive do
+            :stop -> :ok
+          after
+            10_000 -> :ok
+          end
+        end)
 
       capture_drive_fun = fn _work_item, unit_deps ->
         send(test_pid, {:captured_unit_deps, unit_deps})
