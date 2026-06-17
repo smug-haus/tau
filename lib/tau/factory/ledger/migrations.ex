@@ -126,7 +126,15 @@ defmodule Tau.Factory.Ledger.Migrations do
        run         TEXT    NOT NULL,
        inserted_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
      )
-     """}
+     """},
+    # HR-4 (issue #584): add frozen_scope column to unit_snapshots.
+    # The frozen_scope is a JSON-encoded map carrying the declared file set and
+    # gating-test paths as supplied to Unit.start_link/1 at admission (planned entry).
+    # NULL for rows written before this migration. WAL-before-ack (D-315).
+    # ALTER TABLE ADD COLUMN is idempotent in SQLite when paired with IF NOT EXISTS
+    # semantics — we guard idempotency via the ledger_schema_migrations version key.
+    {"20260616_011_unit_snapshots_add_frozen_scope",
+     "ALTER TABLE unit_snapshots ADD COLUMN frozen_scope TEXT"}
   ]
 
   @doc "Expose the migration list. Used by tests to verify idempotency."

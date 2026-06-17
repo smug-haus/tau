@@ -59,4 +59,22 @@ defmodule Tau.Factory.Ledger.Reader do
   def merge_outcome_for(server, unit_id) do
     Writer.merge_outcome_for(server, unit_id)
   end
+
+  @doc """
+  Return the frozen scope for `unit_id` (HR-4, issue #584).
+
+  The frozen scope is the declared file set and gating-test paths as supplied to
+  `Tau.Factory.Unit.start_link/1` at admission (`:planned` entry snapshot).
+  It is written exactly once (at admission) and is immutable thereafter
+  (append-only Ledger, D-335).
+
+  Returns:
+    - `{:ok, frozen}` — a map with `:files` (`MapSet.t(String.t())`) and
+      `:gating_test_paths` (`[String.t()]`).
+    - `:none` — no frozen_scope has been persisted for this `unit_id` yet.
+  """
+  @spec frozen_scope_for(GenServer.server(), String.t()) :: {:ok, map()} | :none
+  def frozen_scope_for(server, unit_id) do
+    Writer.frozen_scope_for(server, unit_id)
+  end
 end
