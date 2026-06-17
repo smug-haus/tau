@@ -575,7 +575,11 @@ defmodule Tau.Factory.MergeAuthority do
   # ---------------------------------------------------------------------------
 
   defp enqueue(%{queue: queue} = data, unit) do
-    %{data | queue: queue ++ [unit]}
+    # D-341: stamp enqueued_at on first entry; preserved across requeues so
+    # max_wait_ms in start_build/1 reflects total wait, not just the latest
+    # enqueue cycle.
+    stamped = Map.put_new(unit, :enqueued_at, System.monotonic_time(:millisecond))
+    %{data | queue: queue ++ [stamped]}
   end
 
   # D-394: head guard — if a backoff timer is armed, do NOT launch a build.
@@ -595,6 +599,26 @@ defmodule Tau.Factory.MergeAuthority do
     # moment of assembly; if ≥ 2 units wait, taking them all avoids ρ_g → 1.
     train = [unit | rest]
     base = fetch_main_oid(data.repo_dir)
+
+    # D-341 / B8: emit the :queue span with LIV-2 starvation falsification
+    # measurements BEFORE launching the build Task. max_restale_count and
+    # max_wait_ms are the live runtime watches for the fair FIFO+aging queue.
+    now_ms = System.monotonic_time(:millisecond)
+
+    max_restale =
+      Enum.reduce(train, 0, fn u, acc ->
+        max(acc, Map.get(u, :restale_count, 0))
+      end)
+
+    max_wait =
+      Enum.reduce(train, 0, fn u, acc ->
+        enqueued = Map.get(u, :enqueued_at, now_ms)
+        max(acc, now_ms - enqueued)
+      end)
+
+    telemetry(:queue, %{max_restale_count: max_restale, max_wait_ms: max_wait}, %{
+      units: train
+    })
 
     build_fun = data.build_fun
     tasks_name = data.tasks_name
@@ -754,7 +778,11 @@ defmodule Tau.Factory.MergeAuthority do
   end
 
   defp requeue_units(%{queue: queue} = data, units) do
-    %{data | queue: units ++ queue, task_ref: nil, task_pid: nil, train: []}
+    # D-341: increment restale_count on each unit being requeued. This tracks
+    # how many times a unit has been re-staled (fresh-merge-race or build-retry),
+    # driving the aging priority in the fair FIFO+aging queue (LIV-2).
+    restaled = Enum.map(units, fn u -> Map.update(u, :restale_count, 1, &(&1 + 1)) end)
+    %{data | queue: restaled ++ queue, task_ref: nil, task_pid: nil, train: []}
   end
 
   # Fetch current origin/main oid after a fetch; returns a string or raises.
