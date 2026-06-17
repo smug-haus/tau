@@ -639,6 +639,15 @@ defmodule Tau.Factory.Unit do
     {:next_state, :gating, data, [{:next_event, :internal, :on_enter}]}
   end
 
+  def awaiting_merge(:info, {:merge_result, {:conflict, _details}}, data) do
+    # LIVE-liveness-5 / SPEC-FACTORY-CORE D-317 / SPEC-FACTORY-MERGE §5:
+    # An unresolvable rebase conflict broadcast by M as {:merge_result, {:conflict, _}}
+    # is NOT retried under D-394 and MUST immediately escalate :"E-CONFLICT".
+    # D-356: unsubscribe on exit from awaiting_merge (escalation path).
+    Phoenix.PubSub.unsubscribe(data.pubsub, "factory:pr:#{data.unit_id}")
+    escalate(data, :"E-CONFLICT")
+  end
+
   def awaiting_merge(:state_timeout, :merge_stalled, data) do
     Logger.warning("[Unit #{data.unit_id}] awaiting_merge :state_timeout — merge stalled")
     # D-356: unsubscribe on exit from awaiting_merge (escalation path).
