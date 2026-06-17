@@ -46,13 +46,22 @@ defmodule Tau.Factory.Egress do
   @spec call(module(), map(), map()) ::
           {:ok, term()} | {:error, :rate_limited | :circuit_open | :budget_exhausted | term()}
   def call(provider, req, ctx) do
-    with :ok <- acquire_rate_limit(provider),
-         {:ok, cb_state} <- check_circuit_breaker(provider),
-         :ok <- check_budget(ctx) do
-      result = invoke_provider(provider, req, ctx)
-      record_circuit_breaker_outcome(provider, cb_state, result)
-      result
-    end
+    result =
+      with :ok <- acquire_rate_limit(provider),
+           {:ok, cb_state} <- check_circuit_breaker(provider),
+           :ok <- check_budget(ctx) do
+        outcome = invoke_provider(provider, req, ctx)
+        record_circuit_breaker_outcome(provider, cb_state, outcome)
+        outcome
+      end
+
+    :telemetry.execute(
+      [:tau, :factory, :egress, :call],
+      %{system_time: System.system_time()},
+      %{provider: provider, result: result}
+    )
+
+    result
   end
 
   # ---------------------------------------------------------------------------
