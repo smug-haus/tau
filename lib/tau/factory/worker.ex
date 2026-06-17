@@ -108,6 +108,12 @@ defmodule Tau.Factory.Worker do
 
   @impl GenServer
   def init(opts) do
+    # NFR-SPAWN: capture spawn start time before any I/O (git worktree add,
+    # namespace resolution, position verify, Port.open). duration_ms is emitted
+    # in the [:tau, :factory, :worker, :start] telemetry so external collectors
+    # (Prometheus, OtelReporter) can derive p95 spawn latency (issue #679).
+    t0 = System.monotonic_time(:millisecond)
+
     worker_id = Keyword.fetch!(opts, :worker_id)
     role = Keyword.fetch!(opts, :role)
     brief = Keyword.fetch!(opts, :brief)
@@ -149,7 +155,8 @@ defmodule Tau.Factory.Worker do
           extra_env: extra_env,
           agent_mode: agent_mode,
           creds_check_fun: creds_check_fun,
-          ws: ws
+          ws: ws,
+          t0: t0
         }
 
         init_after_worktree(init_ctx)
@@ -466,9 +473,13 @@ defmodule Tau.Factory.Worker do
     # The :heartbeat_interval opt is preserved in state as metadata (the shim
     # reads it at write time for rate-limiting). heartbeat_timer starts nil and
     # is kept nil throughout — the dispatch(%Heartbeat{}) handler checks it.
+    # NFR-SPAWN: emit duration_ms so external collectors can derive p95 spawn latency.
+    # t0 was captured at the start of init/1, before git worktree add (issue #679).
+    duration_ms = System.monotonic_time(:millisecond) - ctx.t0
+
     :telemetry.execute(
       [:tau, :factory, :worker, :start],
-      %{},
+      %{duration_ms: duration_ms},
       %{worker_id: worker_id, role: role}
     )
 
