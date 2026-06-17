@@ -121,29 +121,48 @@ defmodule Tau.Factory.Gate do
         {:error, {:gate_floor_violation, missing}} ->
           Logger.warning("Gate floor violation for unit=#{req.unit}: missing #{inspect(missing)}")
 
-          # Split missing floor members into two buckets:
-          # - original_missing: core floor ([:mutation, :critic, :reviewer]) — pre-fail.
-          #   These represent a genuine gate contract violation; no run can rescue them.
-          # - extended_missing: new mechanical floor ([:lint, :spec_membership]) — run.
-          #   These are routed through run_half, which honours the oracle stub seam
-          #   (hermetic mode: unmapped halves default to :pass). This keeps gate_run_test
-          #   genuine-diff fixtures valid without patching every oracle map that
-          #   predates the extended floor (D-323 / D-322 backward compatibility).
+          # Split missing floor members into buckets:
+          #
+          # - original_missing: core floor ([:mutation, :critic, :reviewer]) — always
+          #   pre-fail. These represent a genuine gate contract violation.
+          #
+          # - extended_missing: new mechanical floor ([:lint, :spec_membership]).
+          #   These are handled via "lint-awareness":
+          #
+          #   When the requested manifest includes :lint (indicating the caller is
+          #   aware of the extended floor), :spec_membership MUST also be present.
+          #   An absent :spec_membership in that context is a hard D-354 violation —
+          #   pre-fail it (D-322 / HR-6).
+          #
+          #   When the requested manifest omits BOTH :lint and :spec_membership
+          #   (old-style pre-extended-floor manifests), route extended missing members
+          #   through run_half via the oracle stub seam (hermetic mode: unmapped halves
+          #   default to :pass). This preserves backward compatibility with test
+          #   fixtures authored before the extended floor landed (D-323 backward compat).
           core_floor = [:mutation, :critic, :reviewer]
           original_missing = Enum.filter(missing, &(&1 in core_floor))
           extended_missing = Enum.reject(missing, &(&1 in core_floor))
 
-          # Run the requested manifest PLUS any extended missing halves.
-          requested_manifest = requested_manifest(req.policy_pin)
-          run_manifest = Enum.uniq(requested_manifest ++ extended_missing)
+          requested_manifest_list = requested_manifest(req.policy_pin)
+          lint_aware = :lint in requested_manifest_list
+
+          # :spec_membership is a hard floor violation when the caller is lint-aware
+          # (includes :lint in their manifest but omits :spec_membership — D-354/HR-6).
+          {hard_fail_extended, soft_run_extended} =
+            Enum.split_with(extended_missing, fn
+              :spec_membership when lint_aware -> true
+              _ -> false
+            end)
+
+          all_hard_fail = original_missing ++ hard_fail_extended
+          run_manifest = Enum.uniq(requested_manifest_list ++ soft_run_extended)
           base_verdict = run_halves(req, run_manifest)
 
-          # Pre-fail only the core floor members that were absent.
-          original_fail_results = Map.new(original_missing, fn half -> {half, :fail} end)
-          merged_halves = Map.merge(base_verdict.halves, original_fail_results)
+          fail_results = Map.new(all_hard_fail, fn half -> {half, :fail} end)
+          merged_halves = Map.merge(base_verdict.halves, fail_results)
 
           overall_status =
-            if original_missing == [] do
+            if all_hard_fail == [] do
               base_verdict.status
             else
               :fail
