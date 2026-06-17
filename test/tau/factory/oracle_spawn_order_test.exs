@@ -3,16 +3,16 @@ defmodule Tau.Factory.OracleSpawnOrderTest do
   Gating test for issue #570 — D-304 mechanism conformance (cited, SPEC-FACTORY-FLEET
   §4 B8 / SPEC-FACTORY-GATE D-304):
 
-  WorkerSupervisor.spawn/5 MUST record the author identity (HR-7) of every spawned
-  worker, and MUST reject spawning an `:implementer` whose `:author_id` matches an
-  already-registered `:test_author` worker in the same supervisor.
+  WorkerSupervisor.spawn/5 MUST enforce the oracle-separation mechanism (INV-5):
+    (a) Spawn-order: reject `:implementer` when no `:test_author` is registered.
+    (b) Identity: record author_id (HR-7) and reject same-identity oracle+subject.
 
   ## The invariant (AC-11, SPEC-FACTORY-FLEET / D-304 mechanism)
 
   D-304 (SPEC-FACTORY-GATE) defines two sub-mechanisms the fleet enforces:
 
     (a) The `:test_author` worker is spawned and its gating-test path set is frozen
-        before any `:implementer` is spawned (spawn-order).
+        before any `:implementer` is spawned (spawn-order ordering constraint).
     (b) The author identity of every worker is recorded (HR-7), and a gating test
         whose authoring identity is the implementer is rejected — i.e.
         `author(test_author_worker) != author(implementer_worker)`.
@@ -27,29 +27,27 @@ defmodule Tau.Factory.OracleSpawnOrderTest do
   frozen before any `:implementer`, and each worker's author identity is recorded;
   same-identity oracle/subject is rejected at the cited gate."
 
-  ## The defect (issue #570 evidence)
+  ## The defect (issue #570 evidence — repaired gating test)
 
-  Current `WorkerSupervisor.spawn/5` (worker_supervisor.ex:89-132):
-    - Accepts `:role` but NO `:author_id` opt.
-    - Records no author/identity field in the Registry.
-    - Performs no same-identity comparison or rejection guard.
-    - `generate_worker_id/0` produces a random UUID per spawn that is NOT a stable
-      logical author identity.
+  The original gating test only exercised sub-mechanism (b) (same-identity
+  rejection), which the implementation already satisfies. It did NOT test the
+  spawn-order constraint of sub-mechanism (a): that any `:implementer` spawn
+  attempted when NO `:test_author` is registered in the same registry MUST be
+  rejected with `{:error, :no_test_author_registered}`.
 
-  This means sub-mechanism (b) of D-304 is completely absent: any agent identity
-  can simultaneously author both the gating test and the implementation — the
-  oracle-separation invariant is trivially defeatable.
+  Current `WorkerSupervisor.spawn/5` has no such guard — it accepts the
+  `:implementer` spawn unconditionally when no `:test_author` is present,
+  returning `{:ok, worker_id}` instead of `{:error, :no_test_author_registered}`.
+  This makes the spawn-order portion of D-304 mechanism (a) completely absent.
 
   ## Required fix
 
   `WorkerSupervisor.spawn/5` MUST:
-    1. Accept an `:author_id` opt (string; stable logical identity of the spawning
-       agent — NOT the generated worker_id UUID).
-    2. Record the `{role, author_id}` pair in the WorkerRegistry metadata (or the
-       Unit's Ledger) so the Gate can compare author identities at gate time.
-    3. Return `{:error, :same_identity_oracle_subject}` if an `:implementer` spawn
-       is attempted with an `:author_id` that matches an already-registered
-       `:test_author` worker under the same supervisor.
+    1. When `role` is `:implementer`, check the registry for any registered
+       `:test_author` worker (regardless of `:author_id`).
+    2. If none exists, return `{:error, :no_test_author_registered}` — the
+       spawn-order constraint (sub-mechanism (a)).
+    3. Additionally retain the same-identity guard (sub-mechanism (b)).
 
   ## AC linkage
     - D-304 (mechanism, cited; SPEC-FACTORY-FLEET §4 B8 / SPEC-FACTORY-GATE D-304)
@@ -139,10 +137,60 @@ defmodule Tau.Factory.OracleSpawnOrderTest do
   end
 
   # ---------------------------------------------------------------------------
-  # D-304 mechanism — author identity recorded, same-identity rejected
+  # D-304 mechanism — spawn-order (sub-mechanism (a)) and author identity (b)
   # ---------------------------------------------------------------------------
 
   describe "D-304 mechanism — oracle spawn order + HR-7 author identity" do
+    @tag :d_304
+    test "D-304 AC-11: spawning :implementer when NO :test_author is registered MUST return {:error, :no_test_author_registered}" do
+      # SPEC-FACTORY-FLEET §4 B8: "spawn :test_author first, freeze its gating-test
+      # path set before any :implementer." This is an unconditional ordering
+      # constraint — any :implementer spawn attempted while no :test_author is
+      # registered in the same registry MUST be rejected, regardless of :author_id.
+      #
+      # This is sub-mechanism (a) of D-304. Current WorkerSupervisor.spawn/5 has
+      # no such check. It only checks same-identity when :author_id is provided
+      # (sub-mechanism (b)). A fresh registry with no :test_author accepts an
+      # :implementer spawn unconditionally, defeating the ordering invariant (INV-5).
+      #
+      # Failing mode before fix: WorkerSupervisor.spawn/5 returns {:ok, worker_id}
+      # instead of {:error, :no_test_author_registered}.
+
+      tmp_dir =
+        System.tmp_dir!()
+        |> Path.join("tau_oso304_ord_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(tmp_dir)
+      on_exit(fn -> File.rm_rf!(tmp_dir) end)
+
+      %{repo_dir: repo_dir, base_ref: base_ref} = setup_git_repo(tmp_dir)
+      agent_bin = slow_agent_bin(tmp_dir, "_d304_ord")
+
+      ledger = start_ledger(tmp_dir, :order)
+      janitor = start_janitor(ledger, :order, self())
+      {sup, registry_name} = start_fleet(:order)
+
+      # Registry is empty — no :test_author has been registered.
+      # Spawn :implementer directly; the spawn-order guard MUST reject this.
+      result =
+        WorkerSupervisor.spawn(sup, :implementer, "implement the issue", base_ref,
+          repo_dir: repo_dir,
+          agent_bin: agent_bin,
+          registry: registry_name,
+          report_to: self(),
+          janitor: janitor,
+          author_id: "some-agent-id"
+        )
+
+      assert result == {:error, :no_test_author_registered},
+             "D-304 AC-11 (spawn-order, sub-mechanism (a)): WorkerSupervisor.spawn/5 " <>
+               "MUST return {:error, :no_test_author_registered} when an :implementer " <>
+               "is spawned before any :test_author is registered in the same registry. " <>
+               "SPEC-FACTORY-FLEET §4 B8: ':test_author first, freeze path set before " <>
+               "any :implementer'. " <>
+               "Got: #{inspect(result)}"
+    end
+
     @tag :d_304
     test "D-304 AC-11: spawning :implementer with same :author_id as a :test_author MUST return {:error, :same_identity_oracle_subject}" do
       # This test exercises the user-facing boundary WorkerSupervisor.spawn/5.
