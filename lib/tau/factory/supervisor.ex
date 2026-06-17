@@ -147,7 +147,20 @@ defmodule Tau.Factory.Supervisor do
       |> maybe_add_kill_switch(kill_switch_opts, ks_name, sup_name)
       |> maybe_add_coordinator(coordinator_opts, coord_name, ks_name, sup_name)
 
-    Supervisor.init(children, strategy: :one_for_one)
+    # INV-ST-3: when downstream dependents are present (children list grew
+    # beyond base_children), a crash of any earlier child (e.g. LedgerWriter)
+    # MUST restart all later children. Use :rest_for_one so the cascade is
+    # enforced structurally. With only the base children (Writer + Task.Supervisor)
+    # and no dependents, :one_for_one is equivalent and avoids unnecessary restarts.
+    strategy =
+      if length(children) > length(base_children),
+        do: :rest_for_one,
+        else: :one_for_one
+
+    # NFR-CONTROL-AVAIL (#672): set max_restarts > 3 and max_seconds >= 60 so
+    # a transient crash-loop within the 60 s RTO window does not terminate the
+    # factory control plane and leave recovery to an external restarter.
+    Supervisor.init(children, strategy: strategy, max_restarts: 10, max_seconds: 60)
   end
 
   # ---------------------------------------------------------------------------
@@ -292,7 +305,10 @@ defmodule Tau.Factory.Supervisor do
        drive_fun: wrapped_drive_fun}
     ]
 
-    Supervisor.init(children, strategy: :rest_for_one)
+    # NFR-CONTROL-AVAIL (#672): set max_restarts > 3 and max_seconds >= 60 so
+    # a transient crash-loop within the 60 s RTO window does not terminate the
+    # full factory control subtree and leave recovery to an external restarter.
+    Supervisor.init(children, strategy: :rest_for_one, max_restarts: 10, max_seconds: 60)
   end
 
   # ---------------------------------------------------------------------------

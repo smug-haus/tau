@@ -100,7 +100,15 @@ defmodule Tau.Application do
         Tau.Sessions.Supervisor
       ])
 
-    opts = [strategy: :rest_for_one, name: Tau.Supervisor]
+    # NFR-CONTROL-AVAIL (#672): set max_restarts > 3 and max_seconds >= 60 so
+    # a transient crash-loop within the 60 s RTO window does not terminate the
+    # whole supervision tree and leave recovery to an external restarter.
+    opts = [
+      strategy: :rest_for_one,
+      name: Tau.Supervisor,
+      max_restarts: 10,
+      max_seconds: 60
+    ]
 
     case Supervisor.start_link(children, opts) do
       {:ok, pid} ->
