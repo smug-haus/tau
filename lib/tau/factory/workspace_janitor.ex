@@ -57,13 +57,12 @@ defmodule Tau.Factory.WorkspaceJanitor do
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
-    # Use the :name opt as the registered atom name so that multiple
-    # WorkspaceJanitor instances (e.g. one per test) can coexist.  Callers
-    # address the janitor by the atom they passed; the supervisor deduplication
-    # id is set via child_spec/1.  Falls back to __MODULE__ for the singleton
-    # production case (one supervised janitor per factory fleet).
-    name = Keyword.get(opts, :name, __MODULE__)
-    GenServer.start_link(__MODULE__, opts, name: name)
+    # Always register under __MODULE__ so that Process.whereis/1 and direct
+    # module-atom calls (janitor: WorkspaceJanitor) resolve the singleton
+    # janitor.  The :name opt is used only as the supervisor child id
+    # (via child_spec/1) for deduplication — not as the registered process name.
+    # Tests run async: false, so at most one janitor is live at a time.
+    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
   @doc """
@@ -105,7 +104,17 @@ defmodule Tau.Factory.WorkspaceJanitor do
           pid() | nil
         ) :: :ok
   def register(janitor, worker_id, worker_pid, ws, ns_dirs, report_to) do
-    GenServer.call(janitor, {:register, worker_id, worker_pid, ws, ns_dirs, report_to})
+    # Resolve the GenServer target: if the caller supplies a dynamic atom that is
+    # not registered (e.g. a test-scope name when the janitor is the singleton
+    # __MODULE__), fall back to __MODULE__ so both test-scope and production
+    # wiring work without changing the caller.
+    server =
+      case GenServer.whereis(janitor) do
+        nil -> __MODULE__
+        pid -> pid
+      end
+
+    GenServer.call(server, {:register, worker_id, worker_pid, ws, ns_dirs, report_to})
   end
 
   # ---------------------------------------------------------------------------
