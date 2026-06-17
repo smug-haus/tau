@@ -64,6 +64,41 @@ defmodule Tau.Factory.ConflictCheck do
     end
   end
 
+  @doc """
+  Three-argument form of `clear?/2`: bidirectional dependency check (D-312).
+
+  Identical to `clear?/2` except that it also checks the reverse direction:
+  returns `{:conflict, :no_dependency}` when any in-flight unit's `deps` list
+  contains `candidate_id`.  The Scheduler self-excludes the candidate from
+  `in_flight` before calling (D-380), so `candidate_id` is not a key in
+  `in_flight`; this scan covers the reverse edge.
+  """
+  @spec clear?(unit_id(), scope(), in_flight()) :: :clear | {:conflict, clause()}
+  def clear?(candidate_id, declared_scope, in_flight) do
+    candidate_sentinel = Map.get(declared_scope, :universal_conflict, false)
+
+    in_flight_has_sentinel =
+      Enum.any?(Map.values(in_flight), &Map.get(&1, :universal_conflict, false))
+
+    if (candidate_sentinel or in_flight_has_sentinel) and map_size(in_flight) > 0 do
+      {:conflict, :no_dependency}
+    else
+      in_flight_ids = MapSet.new(Map.keys(in_flight))
+      members = Map.values(in_flight)
+
+      with :ok <- check_no_dependency(declared_scope, in_flight_ids),
+           :ok <- check_reverse_dependency(candidate_id, members),
+           :ok <- check_disjoint_sets(members, declared_scope, :files, :disjoint_files),
+           :ok <-
+             check_disjoint_sets(members, declared_scope, :codepoints, :disjoint_codepoints),
+           :ok <- check_disjoint_sets(members, declared_scope, :specs, :no_shared_spec),
+           :ok <-
+             check_disjoint_sets(members, declared_scope, :resources, :resource_isolatable) do
+        :clear
+      end
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # Private helpers
   # ---------------------------------------------------------------------------
@@ -80,6 +115,23 @@ defmodule Tau.Factory.ConflictCheck do
     dep_blocked = Enum.any?(declared_scope.deps, &MapSet.member?(in_flight_ids, &1))
 
     if dep_blocked do
+      {:conflict, :no_dependency}
+    else
+      :ok
+    end
+  end
+
+  # Reverse-dependency check (D-312): conflict if any in-flight unit lists
+  # candidate_id in its deps. This is the direction clear?/2 misses.
+  @spec check_reverse_dependency(unit_id(), [scope()]) ::
+          :ok | {:conflict, :no_dependency}
+  defp check_reverse_dependency(candidate_id, in_flight_members) do
+    reverse_blocked =
+      Enum.any?(in_flight_members, fn member ->
+        candidate_id in member.deps
+      end)
+
+    if reverse_blocked do
       {:conflict, :no_dependency}
     else
       :ok
