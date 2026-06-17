@@ -274,24 +274,22 @@ defmodule Tau.Factory.UnitD318CounterDurabilityTest do
       max_iterations = @n_refine + @n_pivot + @pre_refines + 2
 
       Enum.reduce_while(1..max_iterations, :ok, fn _i, :ok ->
-        cond do
-          not Process.alive?(unit_pid_2) ->
-            {:halt, :dead}
+        if Process.alive?(unit_pid_2) do
+          case :sys.get_state(unit_pid_2) do
+            {state, _} when state in [:escalated] ->
+              {:halt, :escalated}
 
-          true ->
-            case :sys.get_state(unit_pid_2) do
-              {state, _} when state in [:escalated] ->
-                {:halt, :escalated}
+            {state, _} when state in [:implementing, :oracle] ->
+              :ok = deliver_worker_done(unit_pid_2)
+              :timer.sleep(30)
+              {:cont, :ok}
 
-              {state, _} when state in [:implementing, :oracle] ->
-                :ok = deliver_worker_done(unit_pid_2)
-                :timer.sleep(30)
-                {:cont, :ok}
-
-              _ ->
-                :timer.sleep(20)
-                {:cont, :ok}
-            end
+            _ ->
+              :timer.sleep(20)
+              {:cont, :ok}
+          end
+        else
+          {:halt, :dead}
         end
       end)
 
