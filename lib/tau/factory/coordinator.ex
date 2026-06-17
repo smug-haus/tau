@@ -37,6 +37,14 @@ defmodule Tau.Factory.Coordinator do
   # Default retry interval (ms) for re-probing main_synced_fun when it returns false.
   @default_main_sync_retry_ms 250
 
+  # NFR-KILL-LATENCY: default and hard ceiling for the absolute unit-max timer.
+  # V3-b clamp contract (verify-volatility-split.md §3): every liveness-bounding
+  # number must be clamped against a compile-time ceiling.
+  # Default: 30 minutes (1_800_000 ms).
+  # Hard ceiling: 2 hours (7_200_000 ms). Over-ceiling values are silently clamped.
+  @default_unit_max_ms 1_800_000
+  @max_unit_max_ms 7_200_000
+
   # ---------------------------------------------------------------------------
   # Public API
   # ---------------------------------------------------------------------------
@@ -111,7 +119,12 @@ defmodule Tau.Factory.Coordinator do
     scheduler = Keyword.get(opts, :scheduler)
     on_halted = Keyword.get(opts, :on_halted)
     main_synced_fun = Keyword.get(opts, :main_synced_fun)
-    unit_max_ms = Keyword.get(opts, :unit_max_ms)
+
+    unit_max_ms =
+      opts
+      |> Keyword.get(:unit_max_ms, @default_unit_max_ms)
+      |> then(fn ms -> min(ms, @max_unit_max_ms) end)
+
     ledger = Keyword.get(opts, :ledger)
 
     :ok = Phoenix.PubSub.subscribe(pubsub, "factory:control")
