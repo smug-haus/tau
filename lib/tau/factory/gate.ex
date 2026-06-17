@@ -65,7 +65,7 @@ defmodule Tau.Factory.Gate do
   """
 
   alias Tau.Factory.Engine.TestRun
-  alias Tau.Factory.Gate.{Mutation, Oracle, Request, SpecMembership, Verdict}
+  alias Tau.Factory.Gate.{Masking, Mutation, Oracle, Request, SpecMembership, Verdict}
   alias Tau.Factory.Ledger.Writer
   alias Tau.Toolchain.{LintDescriptor, TestDescriptor}
 
@@ -231,7 +231,28 @@ defmodule Tau.Factory.Gate do
         {:exit, reason} -> {:unknown, {:error, {:half_crashed, reason}}}
       end)
 
-    Verdict.fold(half_results)
+    verdict = Verdict.fold(half_results)
+    run_masking_scan(req)
+    verdict
+  end
+
+  # Masking scan — detection-only (C207-B6 / INV-MASKING-DETECTION-ONLY).
+  #
+  # Masking is always invoked during a gate run — it is detection-only and does not
+  # affect the verdict. Findings are surfaced via telemetry so the critic can treat
+  # them as mandatory review items (SPEC-FACTORY-GATE §4 B6 / arch §8).
+  defp run_masking_scan(%Request{} = req) do
+    case Masking.scan(req.diff, req.frozen_paths) do
+      {:clean, []} ->
+        :ok
+
+      {:flagged, findings} ->
+        :telemetry.execute(
+          [:tau, :factory, :gate, :masking, :flagged],
+          %{count: length(findings)},
+          %{unit: req.unit, findings: findings}
+        )
+    end
   end
 
   # Run a single half, returning :pass | :fail | {:error, reason}.
