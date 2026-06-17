@@ -143,7 +143,7 @@ defmodule Tau.Factory.Gate.SpecMembershipPropertyTest do
       assert {:fail, failed_boundaries} = result,
              "Expected {:fail, _} but got #{inspect(result)} for diff touching #{boundary.path} without D-NNN"
 
-      assert is_list(failed_boundaries) and length(failed_boundaries) > 0,
+      assert is_list(failed_boundaries) and failed_boundaries != [],
              "Expected non-empty boundary list, got #{inspect(failed_boundaries)}"
 
       # The returned boundary list MUST name the boundary that was triggered.
@@ -176,7 +176,7 @@ defmodule Tau.Factory.Gate.SpecMembershipPropertyTest do
       assert {:fail, failed_boundaries} = result,
              "Expected {:fail, _} for multi-boundary diff without token, got #{inspect(result)}"
 
-      assert length(failed_boundaries) >= 1,
+      assert failed_boundaries != [],
              "Expected at least one boundary named in #{inspect(failed_boundaries)}"
     end
   end
@@ -302,7 +302,7 @@ defmodule Tau.Factory.Gate.SpecMembershipPropertyTest do
 
     result = SpecMembership.check(diff, pr_body, source_maps)
     assert {:fail, boundaries} = result
-    assert length(boundaries) > 0, "Expected non-empty boundary list, got #{inspect(boundaries)}"
+    assert boundaries != [], "Expected non-empty boundary list, got #{inspect(boundaries)}"
   end
 
   @tag :d_322

@@ -16,7 +16,7 @@ defmodule Tau.Factory.KillSwitchConformanceTest do
     before notifying `:on_halted`. Currently absent from the Coordinator — tests
     will fail with `UndefinedFunctionError` or assertion failure.
 
-  - INV-DS-KILL-SWITCH: `Tau.Factory.StepJob` (an Oban Worker) must exist and
+  - INV-DS-KILL-SWITCH: `StepJob` (an Oban Worker) must exist and
     check the kill-switch sentinel at the start of `perform/1`. Oban dep is not
     declared → compile error is the legitimate fail-before.
 
@@ -33,6 +33,9 @@ defmodule Tau.Factory.KillSwitchConformanceTest do
   use ExUnit.Case, async: true
 
   @moduletag :capture_log
+
+  alias Tau.Factory.KillSwitch.Store
+  alias Tau.Factory.StepJob
 
   @kill_switch Tau.Factory.KillSwitch
   @coordinator Tau.Factory.Coordinator
@@ -72,12 +75,12 @@ defmodule Tau.Factory.KillSwitchConformanceTest do
     # KillSwitch.Store must exist and be startable independently.
     # It owns the ETS table; the KillSwitch GenServer writes to it.
     start_supervised!(
-      {Tau.Factory.KillSwitch.Store, name: store_name},
+      {Store, name: store_name},
       id: store_name
     )
 
     # Armed? should be false before any halt request.
-    refute Tau.Factory.KillSwitch.Store.armed?(store_name),
+    refute Store.armed?(store_name),
            "INV-KILLSWITCH-OPERATOR-STATE: Store.armed? should be false before request_halt"
 
     # Start the KillSwitch, wired to the same Store.
@@ -91,7 +94,7 @@ defmodule Tau.Factory.KillSwitchConformanceTest do
 
     # The flag must now be readable directly from the ETS owner (the Store),
     # not from the KillSwitch GenServer's process state.
-    assert Tau.Factory.KillSwitch.Store.armed?(store_name),
+    assert Store.armed?(store_name),
            "INV-KILLSWITCH-OPERATOR-STATE: halt flag not in ETS after request_halt — " <>
              "flag lives in process heap, not operator state (Store)"
   end
@@ -103,7 +106,7 @@ defmodule Tau.Factory.KillSwitchConformanceTest do
 
     # Start the Store (independent ETS owner).
     start_supervised!(
-      {Tau.Factory.KillSwitch.Store, name: store_name},
+      {Store, name: store_name},
       id: store_name
     )
 
@@ -117,7 +120,7 @@ defmodule Tau.Factory.KillSwitchConformanceTest do
     # Arm the switch.
     :ok = @kill_switch.request_halt(ks_name)
 
-    assert Tau.Factory.KillSwitch.Store.armed?(store_name),
+    assert Store.armed?(store_name),
            "INV-KILLSWITCH-OPERATOR-STATE: armed flag not set in Store after request_halt"
 
     # Kill the KillSwitch process (simulates a crash).
@@ -126,7 +129,7 @@ defmodule Tau.Factory.KillSwitchConformanceTest do
 
     # The Store is a separate process; ETS table must still show armed = true.
     # If the flag was in process heap, it would be lost here.
-    assert Tau.Factory.KillSwitch.Store.armed?(store_name),
+    assert Store.armed?(store_name),
            "INV-KILLSWITCH-OPERATOR-STATE: armed flag lost after KillSwitch process crash — " <>
              "flag was in process heap (not ETS), violating operator-state invariant"
   end
@@ -262,7 +265,7 @@ defmodule Tau.Factory.KillSwitchConformanceTest do
   # ---------------------------------------------------------------------------
 
   @tag :inv_ds_kill_switch
-  test "INV-DS-KILL-SWITCH: Tau.Factory.StepJob.perform/1 cancels when kill-switch sentinel is armed" do
+  test "INV-DS-KILL-SWITCH: StepJob.perform/1 cancels when kill-switch sentinel is armed" do
     # The StepJob is an Oban Worker. When the kill-switch sentinel is armed,
     # perform/1 must return {:cancel, :kill_switch_armed} without executing
     # any factory-step work.
@@ -273,21 +276,21 @@ defmodule Tau.Factory.KillSwitchConformanceTest do
     store_name = unique_name(:ks_store_stepjob)
 
     start_supervised!(
-      {Tau.Factory.KillSwitch.Store, name: store_name},
+      {Store, name: store_name},
       id: store_name
     )
 
     # Arm the kill switch in the Store.
-    :ok = Tau.Factory.KillSwitch.Store.set_armed(store_name)
+    :ok = Store.set_armed(store_name)
 
     # Build a StepJob args map pointing at our test Store.
     args = %{"store" => store_name, "milestone" => "test-milestone"}
 
     # Calling perform/1 via the Oban.Worker contract.
     # Must return {:cancel, :kill_switch_armed} when the sentinel is armed.
-    job = Tau.Factory.StepJob.new(args)
+    job = StepJob.new(args)
 
-    result = Tau.Factory.StepJob.perform(job)
+    result = StepJob.perform(job)
 
     assert result == {:cancel, :kill_switch_armed},
            "INV-DS-KILL-SWITCH: StepJob.perform/1 did not cancel when kill-switch was armed; " <>
@@ -295,18 +298,18 @@ defmodule Tau.Factory.KillSwitchConformanceTest do
   end
 
   @tag :inv_ds_kill_switch
-  test "INV-DS-KILL-SWITCH: Tau.Factory.StepJob exists and implements Oban.Worker behaviour" do
+  test "INV-DS-KILL-SWITCH: StepJob exists and implements Oban.Worker behaviour" do
     # This test will fail to compile / raise UndefinedFunctionError if
     # Tau.Factory.StepJob does not exist.
 
-    assert function_exported?(Tau.Factory.StepJob, :perform, 1),
-           "INV-DS-KILL-SWITCH: Tau.Factory.StepJob does not export perform/1 — " <>
+    assert function_exported?(StepJob, :perform, 1),
+           "INV-DS-KILL-SWITCH: StepJob does not export perform/1 — " <>
              "the Oban cron/recurring driver that checks the sentinel does not exist"
 
-    assert Tau.Factory.StepJob.__info__(:attributes)
+    assert StepJob.__info__(:attributes)
            |> Keyword.get(:behaviour, [])
            |> Enum.member?(Oban.Worker),
-           "INV-DS-KILL-SWITCH: Tau.Factory.StepJob does not implement the Oban.Worker behaviour"
+           "INV-DS-KILL-SWITCH: StepJob does not implement the Oban.Worker behaviour"
   end
 
   # ---------------------------------------------------------------------------
