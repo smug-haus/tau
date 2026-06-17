@@ -202,7 +202,8 @@ defmodule Tau.Factory.ChallengeRoutingTest do
       # FAILS until: Unit.implementing/3 has a {:challenge, payload} clause
       # that calls data.challenge_fun.(payload) and the :challenge_fun opt is
       # stored in data.
-      assert_receive {:challenge_routed, ^challenge_payload}, 1_000,
+      assert_receive {:challenge_routed, ^challenge_payload},
+                     1_000,
                      "INV-CHALLENGE-ROUTING: Unit FSM did not invoke challenge_fun — " <>
                        "challenge was silently dropped (handle_unexpected) instead of " <>
                        "being routed to the critic oracle"
@@ -278,16 +279,21 @@ defmodule Tau.Factory.ChallengeRoutingTest do
       send(unit_pid, {:challenge, %{test_name: "test_3", spec_clause: "§4 B3"}})
 
       # FAILS until: challenge routing + escalation-on-upheld-count exist.
-      assert_receive {:unit_terminal, ^unit_id, outcome, _provenance}, 2_000,
+      assert_receive {:unit_terminal, ^unit_id, outcome, _provenance},
+                     2_000,
                      "INV-CHALLENGE-ROUTING: Unit did not send {:unit_terminal, ...} after 3 upheld challenges"
 
       # Extract escalation class from whatever shape the outcome takes.
       escalation_class =
         case outcome do
-          {:escalated, class} when is_atom(class) -> class
+          {:escalated, class} when is_atom(class) ->
+            class
+
           {:escalated, meta} when is_map(meta) ->
             Map.get(meta, :class) || Map.get(meta, :reason)
-          _ -> nil
+
+          _ ->
+            nil
         end
 
       assert escalation_class in [:"E-CHALLENGE", :E_CHALLENGE, "E-CHALLENGE"],
