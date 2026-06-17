@@ -146,7 +146,7 @@ defmodule Tau.Factory.ToolchainRunnerScriptTest do
            "FR-3.3: mutation_descriptor/1 must return %#{inspect(@test_descriptor_mod)}{}, " <>
              "got: #{inspect(descriptor)}"
 
-    assert is_list(descriptor.argv) and length(descriptor.argv) > 0,
+    assert is_list(descriptor.argv) and descriptor.argv != [],
            "FR-3.3: mutation_descriptor/1 must return non-empty argv list"
 
     # The conformant argv begins with "mix" (any mix invocation is acceptable).
@@ -166,15 +166,15 @@ defmodule Tau.Factory.ToolchainRunnerScriptTest do
     assert second_arg == "test",
            "FR-3.3 VIOLATION: The Elixir adapter's mutation_descriptor/1 returned " <>
              "argv #{inspect(descriptor.argv)}. The second element is " <>
-             "\"#{second_arg}\", not \"test\".\n\n" <>
+             ~s("#{second_arg}", not "test".\n\n) <>
              "Current violation: the engine generates an ExUnit runner script " <>
              "(_gate_runner_<nonce>.exs) in build_junit_runner/3 (gate.ex ~line 434), " <>
              "scans workspace/lib for .ex files in find_lib_ex_files/1 (gate.ex ~line 522), " <>
              "then passes script_rel/artifact_rel via ctx so the adapter can return " <>
-             "[\"mix\", \"run\", script_rel]. This embeds Elixir source-layout knowledge " <>
+             ~s(["mix", "run", script_rel]. This embeds Elixir source-layout knowledge ) <>
              "(workspace/lib/*.ex) and ExUnit-specific script generation in the engine.\n\n" <>
              "FR-3.3 requires: the adapter alone describes the mutation-run recipe. " <>
-             "The conformant adapter returns [\"mix\", \"test\", \"--only\", \"gating\", ...] " <>
+             ~s(The conformant adapter returns ["mix", "test", "--only", "gating", ...] ) <>
              "and the engine executes it verbatim — NO script generation, NO .ex scanning."
   end
 
