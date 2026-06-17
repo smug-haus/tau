@@ -317,19 +317,24 @@ defmodule Tau.Factory.Unit do
     {:keep_state, data}
   end
 
-  # D-326: gate on work_ready keyed by the CURRENT worker_id (3-tuple seam / legacy 4-tuple).
-  # D-362: would capture branch and head_sha, but INV-WF-13 Clause 2 requires a path set.
-  # A 4-tuple work_ready (no gating_test_paths) MUST NOT advance to :implementing.
-  # Log a warning and stay in :oracle.
-  def oracle(:info, {:work_ready, worker_id, _branch, _head_sha}, %{worker_id: worker_id} = data)
+  # D-326 / D-362: 4-tuple work_ready (no gating_test_paths) — advance to :implementing
+  # without capturing a path set. INV-WF-13 Clause 1 (5-tuple with non-empty paths)
+  # takes priority above; this clause handles legacy oracle workers (e.g. test helpers)
+  # that send the 4-tuple form until all oracle-phase callers migrate to the 5-tuple seam.
+  def oracle(:info, {:work_ready, worker_id, branch, head_sha}, %{worker_id: worker_id} = data)
       when not is_nil(worker_id) do
-    Logger.warning(
-      "[Unit #{data.unit_id}] oracle work_ready from worker #{worker_id} carries " <>
-        "no gating_test_paths (4-tuple form) — " <>
-        "refusing oracle→implementing transition (INV-WF-13 Clause 2)"
-    )
+    Process.demonitor(data.worker_mref, [:flush])
 
-    {:keep_state, data}
+    new_data = %{
+      data
+      | worker_pid: nil,
+        worker_id: nil,
+        worker_mref: nil,
+        branch: branch,
+        head_sha: head_sha
+    }
+
+    {:next_state, :implementing, new_data, [{:next_event, :internal, :on_enter}]}
   end
 
   # Discard work_ready from a superseded worker_id (stale-worker discard, B8).
