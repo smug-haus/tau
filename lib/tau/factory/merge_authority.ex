@@ -350,13 +350,14 @@ defmodule Tau.Factory.MergeAuthority do
 
       :all_pass ->
         # D-319 / INV-20: structural deny guard — classify/1 MUST be called
-        # before any side-effecting push (C207-B7). A :force_push action is the
-        # kind that represents M's cas_push; {:deny, :destructive} routes to K
-        # as E-DESTRUCTIVE and the push never executes.
-        case ActionClassifier.classify(:force_push) do
+        # before any side-effecting push (C207-B7). The action kind is :merge —
+        # the non-destructive CAS push that lands gate-passing units onto main.
+        # classify(:merge) returns :allow (INV-20); {:deny, :destructive} would
+        # route to K as E-DESTRUCTIVE and abort the push.
+        case ActionClassifier.classify(:merge) do
           {:deny, :destructive} ->
             Logger.warning(
-              "[MergeAuthority] D-319: classify/1 denied :force_push as destructive; " <>
+              "[MergeAuthority] D-319: classify/1 denied :merge as destructive; " <>
                 "routing E-DESTRUCTIVE — train not pushed"
             )
 
