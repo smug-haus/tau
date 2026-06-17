@@ -54,6 +54,7 @@ defmodule Tau.Factory.Gate do
   alias Tau.Factory.Engine.TestRun
   alias Tau.Factory.Gate.{Mutation, Oracle, Request, Verdict}
   alias Tau.Factory.Ledger.Writer
+  alias Tau.Factory.Toolchain
   alias Tau.Toolchain.TestDescriptor
 
   require Logger
@@ -215,17 +216,28 @@ defmodule Tau.Factory.Gate do
   #
   # Fail-closed (D-306 / HR-3): a reverted-tree runner crash → :fail, never :pass.
   defp run_mutation_half(%Request{} = req) do
-    gating_paths = MapSet.to_list(req.frozen_paths)
-    workspace = req.workspace
-    merge_base = req.merge_base
+    language = Map.get(req, :language, :elixir)
 
-    # plan/2 produces the pure data record for the engine seam (used below).
-    plan = Mutation.plan(merge_base, req.frozen_paths)
+    case Toolchain.for(language) do
+      {:error, {:unsupported_language, lang}} ->
+        # Fail closed: cannot run a mutation check for an unknown language (D-S2).
+        Logger.warning("Mutation half: unsupported language #{inspect(lang)} — fail-closed (D-S2)")
 
-    if project_creation_na?(gating_paths, merge_base, workspace) do
-      :pass
-    else
-      execute_mutation_check(plan, gating_paths, workspace)
+        :fail
+
+      _adapter ->
+        gating_paths = MapSet.to_list(req.frozen_paths)
+        workspace = req.workspace
+        merge_base = req.merge_base
+
+        # plan/2 produces the pure data record for the engine seam (used below).
+        plan = Mutation.plan(merge_base, req.frozen_paths)
+
+        if project_creation_na?(gating_paths, merge_base, workspace) do
+          :pass
+        else
+          execute_mutation_check(plan, gating_paths, workspace)
+        end
     end
   end
 
