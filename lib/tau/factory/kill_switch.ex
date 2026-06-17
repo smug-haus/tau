@@ -16,6 +16,8 @@ defmodule Tau.Factory.KillSwitch do
 
   use GenServer
 
+  alias Tau.Factory.KillSwitch.Store
+
   require Logger
 
   @default_poll_interval_ms 500
@@ -32,6 +34,12 @@ defmodule Tau.Factory.KillSwitch do
     - `:pubsub` — atom; name of a running `Phoenix.PubSub`.
 
   Optional options:
+    - `:store`          — `GenServer.server()`; a running
+                          `Tau.Factory.KillSwitch.Store`. When provided,
+                          `request_halt/1` also calls `Store.set_armed/1` so
+                          the halt flag is durable in the Store's ETS table
+                          independently of this GenServer's lifetime
+                          (INV-KILLSWITCH-OPERATOR-STATE).
     - `:sentinel_path`  — `Path.t()`; if given, KillSwitch polls for the
                           file's existence and broadcasts `:halt_requested`
                           once on first detection.
@@ -72,14 +80,23 @@ defmodule Tau.Factory.KillSwitch do
   @impl GenServer
   def init(opts) do
     pubsub = Keyword.fetch!(opts, :pubsub)
+    store = Keyword.get(opts, :store)
     sentinel_path = Keyword.get(opts, :sentinel_path)
     poll_interval = Keyword.get(opts, :poll_interval, @default_poll_interval_ms)
 
+    # INV-KILLSWITCH-OPERATOR-STATE: the halt flag is durable operator state
+    # stored in an ETS table owned by this process (not process heap), so it
+    # survives an ETS read from any inspector without a GenServer roundtrip and
+    # persists across message-queue drains.
+    table = :ets.new(:kill_switch_control, [:set, :protected])
+
     state = %{
       pubsub: pubsub,
+      store: store,
       sentinel_path: sentinel_path,
       poll_interval: poll_interval,
-      sentinel_triggered: false
+      sentinel_triggered: false,
+      table: table
     }
 
     if sentinel_path do
@@ -91,6 +108,16 @@ defmodule Tau.Factory.KillSwitch do
 
   @impl GenServer
   def handle_call(:request_halt, _from, state) do
+    # INV-KILLSWITCH-OPERATOR-STATE: write the halt flag to ETS before
+    # broadcasting so any observer reading the table sees the flag set.
+    :ets.insert(state.table, {:halt, true})
+
+    # When a Store is wired in, also persist the flag there so it survives
+    # a crash-and-restart of this GenServer (the Store is a separate process).
+    if state.store do
+      :ok = Store.set_armed(state.store)
+    end
+
     :ok = Phoenix.PubSub.broadcast(state.pubsub, "factory:control", :halt_requested)
     {:reply, :ok, state}
   end

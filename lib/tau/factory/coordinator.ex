@@ -14,6 +14,15 @@ defmodule Tau.Factory.Coordinator do
     - `{:escalate, {e, :global}}` → `:halting` (total escalation).
     - `{:escalate, {e, :unit}}`   → stays `:running` (per-unit; loop continues).
 
+  D-321 main-sync clause: when `:main_synced_fun` is configured, the
+  `halting → halted` transition calls `main_synced_fun.()` before notifying
+  `:on_halted`. If it returns `false`, the Coordinator stays in `:halting`
+  and retries the sync check on the next drain attempt.
+
+  NFR-KILL-LATENCY: when `:unit_max_ms` is configured, entering `:halting`
+  with a unit in flight arms an absolute-ceiling timer. If the unit does not
+  complete within `unit_max_ms`, the Coordinator forcibly ejects it and halts.
+
   See `docs/spec/SPEC-FACTORY-CORE.md`, D-321, D-320.
   """
 
@@ -24,6 +33,9 @@ defmodule Tau.Factory.Coordinator do
   require Logger
 
   @terminal_states [:merged, :escalated]
+
+  # Default retry interval (ms) for re-probing main_synced_fun when it returns false.
+  @default_main_sync_retry_ms 250
 
   # ---------------------------------------------------------------------------
   # Public API
@@ -44,18 +56,27 @@ defmodule Tau.Factory.Coordinator do
                       to the Coordinator to signal completion.
 
   Optional options:
-    - `:scheduler`  — atom | pid | nil; passed through to `data.scheduler`
-                      (D-380: admission is performed by the Unit FSM, not here).
-    - `:on_halted`  — pid; notified with `:coordinator_halted` when the
-                      Coordinator reaches `:halted`.
-    - `:ledger`     — `GenServer.server()` reference to a running
-                      `Ledger.Writer`. When present, `init/1` reads
-                      `Ledger.Reader.latest_unit_snapshots/1` and rehydrates
-                      each NON-terminal unit at its snapshotted state (driving
-                      it forward). Units already at a terminal sink
-                      (`:merged`/`:escalated`) are skipped — exactly-once on
-                      resume (D-344 / §5 Coordinator `running` entry =
-                      "start (resume from L)").
+    - `:scheduler`       — atom | pid | nil; passed through to `data.scheduler`
+                           (D-380: admission is performed by the Unit FSM, not here).
+    - `:on_halted`       — pid; notified with `:coordinator_halted` when the
+                           Coordinator reaches `:halted`.
+    - `:main_synced_fun` — `(-> boolean())`; called before transitioning to
+                           `:halted` (D-321 main-sync clause). Must return `true`
+                           to proceed. When `false`, the Coordinator stays in
+                           `:halting` and does not notify `:on_halted`.
+    - `:unit_max_ms`     — non_neg_integer(); absolute ceiling on unit runtime
+                           (NFR-KILL-LATENCY). When set and a unit is in flight
+                           during `:halting`, an accumulating timer fires after
+                           this many ms and forces the unit to be ejected, then
+                           halts the factory.
+    - `:ledger`          — `GenServer.server()` reference to a running
+                           `Ledger.Writer`. When present, `init/1` reads
+                           `Ledger.Reader.latest_unit_snapshots/1` and rehydrates
+                           each NON-terminal unit at its snapshotted state (driving
+                           it forward). Units already at a terminal sink
+                           (`:merged`/`:escalated`) are skipped — exactly-once on
+                           resume (D-344 / §5 Coordinator `running` entry =
+                           "start (resume from L)").
   """
   @spec start_link(keyword()) :: :gen_statem.start_ret()
   def start_link(opts) do
@@ -89,6 +110,8 @@ defmodule Tau.Factory.Coordinator do
     drive_fun = Keyword.fetch!(opts, :drive_fun)
     scheduler = Keyword.get(opts, :scheduler)
     on_halted = Keyword.get(opts, :on_halted)
+    main_synced_fun = Keyword.get(opts, :main_synced_fun)
+    unit_max_ms = Keyword.get(opts, :unit_max_ms)
     ledger = Keyword.get(opts, :ledger)
 
     :ok = Phoenix.PubSub.subscribe(pubsub, "factory:control")
@@ -121,6 +144,8 @@ defmodule Tau.Factory.Coordinator do
       drive_fun: drive_fun,
       scheduler: scheduler,
       on_halted: on_halted,
+      main_synced_fun: main_synced_fun,
+      unit_max_ms: unit_max_ms,
       halt_pending: false,
       in_flight: nil,
       # Track rehydrated units so :sys.get_state reveals them (Oracle c).
@@ -173,9 +198,12 @@ defmodule Tau.Factory.Coordinator do
   end
 
   def running(:info, :halt_requested, data) do
-    # Unit in flight: set flag, honour at next terminal.
+    # Unit in flight: transition to :halting immediately so the absolute-ceiling
+    # timer (unit_max_ms / NFR-KILL-LATENCY) can be armed in :halting/:drain.
+    # The unit terminal will still be handled in :halting if it arrives in time.
     telemetry(:halt_requested, %{}, %{in_flight: data.in_flight})
-    {:keep_state, %{data | halt_pending: true}}
+
+    {:next_state, :halting, %{data | halt_pending: true}, [{:next_event, :internal, :drain}]}
   end
 
   # Unit completed.
@@ -248,31 +276,73 @@ defmodule Tau.Factory.Coordinator do
   # State: :halting
   # ---------------------------------------------------------------------------
 
-  # Drain: if no in-flight unit, transition to halted.
+  # Drain: if no in-flight unit, check main-sync then transition to halted.
+  # D-321 main-sync clause: call main_synced_fun before notifying :on_halted.
+  # If it returns false, stay in :halting and schedule a retry drain (D-321 retry path).
   def halting(:internal, :drain, %{in_flight: nil} = data) do
-    notify_halted(data)
-    {:next_state, :halted, data}
+    if main_synced?(data) do
+      do_halt(data)
+    else
+      Logger.debug("[Coordinator] halting: main not synced, scheduling retry drain")
+      retry_ms = Map.get(data, :main_sync_retry_ms, @default_main_sync_retry_ms)
+      {:keep_state, data, [{{:timeout, :main_sync_retry}, retry_ms, :drain}]}
+    end
   end
 
+  # D-321 retry path: re-probe main_synced_fun after the retry interval.
+  def halting({:timeout, :main_sync_retry}, :drain, data) do
+    {:keep_state, data, [{:next_event, :internal, :drain}]}
+  end
+
+  # In-flight unit exists: arm the absolute-ceiling timer if configured
+  # (NFR-KILL-LATENCY), then wait for the terminal.
   def halting(:internal, :drain, data) do
-    # In-flight unit exists: wait for its terminal.
-    {:keep_state, data}
+    actions = arm_unit_max_timer(data)
+    {:keep_state, data, actions}
   end
 
-  # Unit completed while halting: drain now.
+  # Unit completed while halting: clear in_flight, check main-sync, halt.
   def halting(:info, {:unit_terminal, _unit_id, _outcome}, data) do
     telemetry(:unit_terminal, %{}, %{state: :halting})
     data = %{data | in_flight: nil}
-    notify_halted(data)
-    {:next_state, :halted, data}
+
+    if main_synced?(data) do
+      do_halt(data)
+    else
+      Logger.debug("[Coordinator] halting: unit terminal, but main not synced; scheduling retry")
+      retry_ms = Map.get(data, :main_sync_retry_ms, @default_main_sync_retry_ms)
+      {:keep_state, data, [{{:timeout, :main_sync_retry}, retry_ms, :drain}]}
+    end
   end
 
   # Also handle the 4-arg variant sent by the real Unit FSM (D-340).
   def halting(:info, {:unit_terminal, _unit_id, _outcome, _provenance}, data) do
     telemetry(:unit_terminal, %{}, %{state: :halting})
     data = %{data | in_flight: nil}
-    notify_halted(data)
-    {:next_state, :halted, data}
+
+    if main_synced?(data) do
+      do_halt(data)
+    else
+      Logger.debug(
+        "[Coordinator] halting: unit terminal (4-arg), but main not synced; scheduling retry"
+      )
+
+      retry_ms = Map.get(data, :main_sync_retry_ms, @default_main_sync_retry_ms)
+      {:keep_state, data, [{{:timeout, :main_sync_retry}, retry_ms, :drain}]}
+    end
+  end
+
+  # NFR-KILL-LATENCY: absolute-ceiling named timeout fired. The in-flight unit
+  # is forcibly ejected (treated as escalated). Proceed to halt regardless of
+  # main-sync (the ceiling is an absolute bound, not a soft drain).
+  def halting({:timeout, :unit_max_ceiling}, :unit_max_timeout, data) do
+    Logger.warning(
+      "[Coordinator] halting: unit_max_ms elapsed; forcibly ejecting in_flight unit " <>
+        inspect(data.in_flight)
+    )
+
+    data = %{data | in_flight: nil}
+    do_halt(data)
   end
 
   # Absorb stray halt_requested (already halting).
@@ -304,6 +374,29 @@ defmodule Tau.Factory.Coordinator do
     :ok = data.drive_fun.(work)
     %{data | in_flight: unit_id}
   end
+
+  # D-321 main-sync check: call main_synced_fun if configured; default true.
+  defp main_synced?(%{main_synced_fun: nil}), do: true
+  defp main_synced?(%{main_synced_fun: fun}) when is_function(fun, 0), do: fun.()
+
+  # Notify :on_halted and transition to :halted.
+  defp do_halt(data) do
+    notify_halted(data)
+    {:next_state, :halted, data}
+  end
+
+  # NFR-KILL-LATENCY: arm the absolute-ceiling timer when entering :halting
+  # with a unit in flight. The timer fires :unit_max_timeout as an :info message.
+  defp arm_unit_max_timer(%{unit_max_ms: nil}), do: []
+
+  defp arm_unit_max_timer(%{unit_max_ms: ms}) when is_integer(ms) and ms > 0 do
+    # gen_statem state_timeout fires when the state hasn't changed for ms.
+    # Since we stay in :halting, a Process.send_after to self is cleaner
+    # and avoids interaction with the state-timeout mechanism used in Unit FSM.
+    [{{:timeout, :unit_max_ceiling}, ms, :unit_max_timeout}]
+  end
+
+  defp arm_unit_max_timer(_), do: []
 
   defp notify_halted(%{on_halted: nil}), do: :ok
 
