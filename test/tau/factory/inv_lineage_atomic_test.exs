@@ -32,22 +32,34 @@ defmodule Tau.Factory.InvLineageAtomicTest do
   production path) and assert that no merge is observable without a lineage
   record.
 
+  ## API contract (SPEC-FACTORY-MERGE §4 B9)
+
+  SPEC-FACTORY-MERGE §4 B9 specifies:
+
+      record_merge_outcome/2 :: (ledger, attrs) -> {:ok, ref}
+
+  This is the documented return type. The correct fix for INV-LINEAGE-ATOMIC is
+  to make `record_merge_outcome/2` write lineage atomically (internally, in the
+  same transaction) while continuing to return `{:ok, ref}`. An implementation
+  that makes `record_merge_outcome/2` return `{:error, _}` contradicts
+  SPEC-FACTORY-MERGE §4 B9 and is NOT a conformant fix.
+
+  The prior ORACLE 2 in this file asserted `record_merge_outcome/2` returns
+  `{:error, _}` — this was a test error: it contradicted SPEC-FACTORY-MERGE §4
+  B9's explicit `{:ok, ref}` return-type contract. It has been removed. The
+  invariant (D-353) requires atomicity of the write, not rejection of the API.
+
   ## Fail-before validity (oracle separation, factory-loop §4b)
 
   On the current branch (no implementer yet):
 
   - `LedgerWriter.record_merge_outcome/2` exists and inserts a `merge_outcomes`
-    row without any lineage row (confirmed: `do_record_merge_outcome/2` at
-    writer.ex lines 688-712 is a bare single INSERT, no BEGIN/COMMIT, no
-    lineage insert).
+    row without any lineage row (confirmed: `do_record_merge_outcome/2` in
+    writer.ex is a bare single INSERT with no BEGIN/COMMIT and no lineage insert).
   - After the call, `LedgerReader.lineage_for/2` returns `:none` — the merge
     is observable in L with no lineage, directly falsifying INV-LINEAGE-ATOMIC.
   - ORACLE 1 therefore fails: it asserts `lineage_for/2` does NOT return
     `:none`, but it does.
-  - ORACLE 2 asserts `record_merge_outcome/2` returns `{:error, _}` when
-    called without lineage attrs (or that it is replaced by a new API
-    requiring lineage attrs). The current implementation returns `{:ok, ref}`,
-    so ORACLE 2 also fails.
 
   D-NNN linkage: **D-353** (same-txn lineage co-write, NFR-AUDIT=100%).
   Cross-refs: INV-16 (durable factory state / RPO=0), issue #550, issue #668.
@@ -95,6 +107,10 @@ defmodule Tau.Factory.InvLineageAtomicTest do
   # queryable via `lineage_for/2`. On the current branch this fails: the merge
   # row is written but `lineage_for/2` returns `:none` — a merge commit is
   # observable in L without lineage, directly falsifying INV-LINEAGE-ATOMIC.
+  #
+  # The correct conformant fix (SPEC-FACTORY-MERGE §4 B9 + SPEC-FACTORY-GOV
+  # §4 C210-B10 / D-353) is to update `record_merge_outcome/2` to write lineage
+  # atomically in the same transaction while retaining its {:ok, ref} return.
   # ---------------------------------------------------------------------------
 
   describe "INV-LINEAGE-ATOMIC — no merge observable in L without its lineage" do
@@ -105,14 +121,10 @@ defmodule Tau.Factory.InvLineageAtomicTest do
       attrs = merge_outcome_attrs(unit_id)
 
       # This is the REAL entry point MergeAuthority calls (merge_authority.ex
-      # lines 245, 322, 360, 553). INV-LINEAGE-ATOMIC requires that every merge
-      # record write is co-transactional with a lineage record. Either:
-      #   (a) `record_merge_outcome/2` is updated to require and write lineage
-      #       atomically, OR
-      #   (b) MergeAuthority is updated to call `record_merge_with_lineage/3`
-      #       instead, and `record_merge_outcome/2` without lineage is rejected.
-      # In EITHER case, a successful `record_merge_outcome/2` call MUST have a
-      # corresponding lineage row immediately visible in L.
+      # lines 245, 322, 360, 553). INV-LINEAGE-ATOMIC + SPEC-FACTORY-MERGE §4 B9
+      # together require that record_merge_outcome/2 returns {:ok, ref} AND that
+      # a lineage row is immediately visible in L after the call. The conformant
+      # fix writes lineage co-transactionally inside record_merge_outcome/2 itself.
       {:ok, _ref} = LedgerWriter.record_merge_outcome(ledger, attrs)
 
       lineage_result = LedgerReader.lineage_for(ledger, unit_id)
@@ -156,39 +168,6 @@ defmodule Tau.Factory.InvLineageAtomicTest do
                "unit #{unit_id} but lineage_for/2 returned :none — no lineage for a rejection " <>
                "outcome violates INV-LINEAGE-ATOMIC (every merge write must be co-transactional " <>
                "with a lineage row). Got: #{inspect(lineage_result)}"
-    end
-  end
-
-  # ---------------------------------------------------------------------------
-  # ORACLE 2 — `record_merge_outcome/2` without lineage attrs is rejected.
-  #
-  # The correct fix must make calling `record_merge_outcome/2` alone (without
-  # paired lineage) return {:error, _} — since any successful return would
-  # produce a merge observable without lineage in L. On the current branch
-  # `record_merge_outcome/2` returns {:ok, ref}, so this oracle fails.
-  # ---------------------------------------------------------------------------
-
-  describe "INV-LINEAGE-ATOMIC — lone record_merge_outcome/2 (no lineage) is rejected" do
-    @tag :inv_lineage_atomic
-    test "INV-LINEAGE-ATOMIC: record_merge_outcome/2 alone (without lineage) returns {:error, _}" do
-      ledger = start_ledger()
-      unit_id = "u-inv-lineage-atomic-lone-#{System.unique_integer([:positive])}"
-      attrs = merge_outcome_attrs(unit_id)
-
-      # INV-LINEAGE-ATOMIC: the only correct implementation is one where calling
-      # `record_merge_outcome/2` WITHOUT paired lineage attrs is rejected — since
-      # any successful return would produce a merge without lineage in L.
-      # Expected post-fix: {:error, :lineage_required} | {:error, {:lineage_required, _}}
-      # On the current branch, `record_merge_outcome/2` returns {:ok, ref},
-      # so this assert fails.
-      result = LedgerWriter.record_merge_outcome(ledger, attrs)
-
-      assert match?({:error, _}, result),
-             "INV-LINEAGE-ATOMIC: record_merge_outcome/2 without lineage attrs MUST return " <>
-               "{:error, _} (e.g. {:error, :lineage_required}) to prevent any merge write " <>
-               "from succeeding without its paired lineage row. On the current branch this " <>
-               "returns {:ok, ref} — a merge row is written to L with no lineage, directly " <>
-               "falsifying INV-LINEAGE-ATOMIC. Got: #{inspect(result)}"
     end
   end
 end
