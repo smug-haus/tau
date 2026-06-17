@@ -52,13 +52,13 @@ defmodule Tau.Factory.Gate do
   """
 
   alias Tau.Factory.Engine.TestRun
-  alias Tau.Factory.Gate.{Mutation, Oracle, Request, Verdict}
+  alias Tau.Factory.Gate.{Mutation, Oracle, Request, SpecMembership, Verdict}
   alias Tau.Factory.Ledger.Writer
   alias Tau.Toolchain.{LintDescriptor, TestDescriptor}
 
   require Logger
 
-  @gate_floor [:mutation, :critic, :reviewer, :lint]
+  @gate_floor [:mutation, :critic, :reviewer, :lint, :spec_membership]
 
   @doc "The engine-fixed, non-shrinkable gate floor (D-354)."
   @spec gate_floor() :: [atom()]
@@ -193,6 +193,10 @@ defmodule Tau.Factory.Gate do
 
   defp run_half(:lint, req, _oracle_mod, _oracle_arg) do
     run_lint_half(req)
+  end
+
+  defp run_half(:spec_membership, req, _oracle_mod, _oracle_arg) do
+    run_spec_membership_half(req)
   end
 
   defp run_half(half, _req, _oracle_mod, _oracle_arg) do
@@ -412,6 +416,43 @@ defmodule Tau.Factory.Gate do
   catch
     _, _ ->
       :fail
+  end
+
+  # ---------------------------------------------------------------------------
+  # SpecMembership half — mechanized spec-before-code check (D-322 / HR-6)
+  # ---------------------------------------------------------------------------
+
+  # The spec-membership half checks that any diff path touching a SPEC source-map
+  # boundary is accompanied by a SPEC-* / D-NNN reference in the PR body.
+  # The `policy_pin.spec_membership_override` key is the hermetic-test seam:
+  # when present as `:pass` or `:fail`, the gate short-circuits to that value.
+  # When `:diff` and `:pr_body` keys are present in `policy_pin`, they are used
+  # directly (no filesystem I/O), which enables hermetic testing.
+  defp run_spec_membership_half(%Request{} = req) do
+    case Map.fetch(req.policy_pin, :spec_membership_override) do
+      {:ok, :pass} ->
+        :pass
+
+      {:ok, :fail} ->
+        :fail
+
+      _ ->
+        diff = Map.get(req.policy_pin, :spec_membership_diff, req.diff)
+        pr_body = Map.get(req.policy_pin, :spec_membership_pr_body, "")
+        source_maps = Map.get(req.policy_pin, :spec_membership_source_maps, [])
+
+        case SpecMembership.check(diff, pr_body, source_maps) do
+          {:pass, []} ->
+            :pass
+
+          {:fail, boundaries} ->
+            Logger.debug(
+              "SpecMembership half: FAIL — boundaries without SPEC ref: #{inspect(boundaries)}"
+            )
+
+            :fail
+        end
+    end
   end
 
   # ---------------------------------------------------------------------------
