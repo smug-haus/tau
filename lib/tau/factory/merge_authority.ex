@@ -437,6 +437,36 @@ defmodule Tau.Factory.MergeAuthority do
             {:keep_state, next_data}
         end
 
+      {:git_conflict, conflict_output} ->
+        # LIVE-liveness-5 / SPEC-FACTORY-MERGE §5: an unresolvable rebase conflict
+        # is NOT a transient failure and MUST NOT enter the D-394 bounded-retry
+        # climb. Broadcast {:merge_result, {:conflict, _}} on every train member's
+        # per-PR PubSub topic immediately so U can escalate :"E-CONFLICT" (D-317).
+        # WAL-before-ack: write durable :rejected rows before the broadcast so
+        # the Ledger reflects the outcome before ephemeral state changes.
+        Enum.each(train, fn unit ->
+          LedgerWriter.record_merge_outcome(data.ledger, %{
+            unit_id: unit.id,
+            outcome: :rejected,
+            commit_sha: nil,
+            reason: :git_conflict,
+            run: unit.run
+          })
+        end)
+
+        telemetry(:reject, %{hash: hd_hash(train)}, %{reason: :git_conflict, units: train})
+
+        Enum.each(train, fn unit ->
+          Phoenix.PubSub.broadcast(
+            data.pubsub,
+            "factory:pr:#{unit.id}",
+            {:merge_result, {:conflict, conflict_output}}
+          )
+        end)
+
+        next_data = eject_train(data)
+        transition_from_idle(next_data)
+
       _other ->
         # D-394: non-health retryable failure — bounded retry or terminal eject.
         bounded_retry_or_eject(data, :build_failed)
