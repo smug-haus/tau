@@ -56,26 +56,45 @@ defmodule Tau.Factory.PolicyModelRoleTest do
   alias Tau.Factory.Policy.Owner, as: PolicyOwner
 
   # ---------------------------------------------------------------------------
-  # Minimal valid policy for testing.
-  # Every field uses the smallest admissible positive integer for numeric
-  # dimensions; model_per_role uses two representative roles.
+  # Named predicate — Elixir cannot store anonymous functions in module
+  # attributes; use a named function and capture it in test bodies.
   # ---------------------------------------------------------------------------
 
-  @model_per_role %{
-    implementer: "claude-sonnet-4-5",
-    critic: "claude-opus-4-5"
-  }
+  def always_true(_, _), do: true
 
-  @valid_policy %Policy{
-    version: 1,
-    model_per_role: @model_per_role,
-    retry_bound_n: 3,
-    budget: %{token: 100_000, cost: 10, wall_time: 3_600, iteration: 5},
-    priority_order: [],
-    conflict_predicate: &(&1 == &1 and &2 == &2),
-    gate_manifest: [:mutation, :critic, :reviewer],
-    escalation_thresholds: %{upheld_challenges: 2}
-  }
+  # ---------------------------------------------------------------------------
+  # Helper: build a minimal valid policy struct inside a test/setup body.
+  # Building here (not in a module attribute) avoids the ArgumentError that
+  # arises when Elixir tries to escape an anonymous function into a module
+  # attribute at compile time.
+  # ---------------------------------------------------------------------------
+
+  defp valid_policy(model_per_role \\ nil) do
+    mpr =
+      model_per_role ||
+        %{
+          implementer: "claude-sonnet-4-5",
+          critic: "claude-opus-4-5"
+        }
+
+    %Policy{
+      version: 1,
+      model_per_role: mpr,
+      retry_bound_n: 3,
+      budget: %{token: 100_000, cost: 10, wall_time: 3_600, iteration: 5},
+      priority_order: [],
+      conflict_predicate: &__MODULE__.always_true/2,
+      gate_manifest: [:mutation, :critic, :reviewer],
+      escalation_thresholds: %{upheld_challenges: 2}
+    }
+  end
+
+  defp default_model_per_role do
+    %{
+      implementer: "claude-sonnet-4-5",
+      critic: "claude-opus-4-5"
+    }
+  end
 
   # ---------------------------------------------------------------------------
   # INV-MODEL-POLICY assertion 1 — struct field presence
@@ -90,7 +109,8 @@ defmodule Tau.Factory.PolicyModelRoleTest do
       #
       # FAIL BEFORE: Tau.Factory.Policy does not exist → compile error.
 
-      policy = @valid_policy
+      policy = valid_policy()
+      model_per_role = default_model_per_role()
 
       assert Map.has_key?(policy, :model_per_role),
              "INV-MODEL-POLICY: %Policy{} must carry a :model_per_role field " <>
@@ -103,7 +123,7 @@ defmodule Tau.Factory.PolicyModelRoleTest do
                "got #{inspect(policy.model_per_role)}"
 
       # Each value in the map must be a non-empty string (a real model id).
-      for {role, model} <- policy.model_per_role do
+      for {role, model} <- model_per_role do
         assert is_binary(model) and model != "",
                "INV-MODEL-POLICY: model_per_role[#{inspect(role)}] must be a " <>
                  "non-empty model-id string; got #{inspect(model)}"
@@ -125,15 +145,18 @@ defmodule Tau.Factory.PolicyModelRoleTest do
       #
       # FAIL BEFORE: Tau.Factory.Policy.clamp/1 does not exist → UndefinedFunctionError.
 
-      assert {:ok, clamped} = Policy.clamp(@valid_policy),
+      model_per_role = default_model_per_role()
+      policy = valid_policy(model_per_role)
+
+      assert {:ok, clamped} = Policy.clamp(policy),
              "INV-MODEL-POLICY: Policy.clamp/1 must return {:ok, policy} for a " <>
                "valid policy; got error instead"
 
-      assert clamped.model_per_role == @model_per_role,
+      assert clamped.model_per_role == model_per_role,
              "INV-MODEL-POLICY: clamp/1 must NOT overwrite model_per_role with a " <>
                "hardcoded value.  The caller-supplied map must survive the clamp " <>
                "unchanged (FR-7.4). " <>
-               "expected=#{inspect(@model_per_role)}, " <>
+               "expected=#{inspect(model_per_role)}, " <>
                "got=#{inspect(clamped.model_per_role)}"
     end
   end
@@ -157,29 +180,32 @@ defmodule Tau.Factory.PolicyModelRoleTest do
       # FAIL BEFORE: Tau.Factory.Policy.Owner does not exist → compile error or
       # UndefinedFunctionError on start_link/pin/resolve.
 
+      model_per_role = default_model_per_role()
+      policy = valid_policy(model_per_role)
+
       unit_id = "test-unit-#{System.unique_integer([:positive])}"
       owner_name = :"policy_owner_test_#{System.unique_integer([:positive])}"
 
       {:ok, _owner} = PolicyOwner.start_link(name: owner_name)
 
-      {:ok, clamped} = Policy.clamp(@valid_policy)
+      {:ok, clamped} = Policy.clamp(policy)
 
       :ok = PolicyOwner.pin(owner_name, unit_id, clamped)
 
       resolved = PolicyOwner.resolve(owner_name, unit_id, :model_per_role)
 
-      assert resolved == @model_per_role,
+      assert resolved == model_per_role,
              "INV-MODEL-POLICY: Policy.Owner.resolve/3 for :model_per_role after " <>
                "pin/3 must return the policy-driven map; a hardcoded constant " <>
                "would make the engine the model source and falsify INV-MODEL-POLICY. " <>
-               "expected=#{inspect(@model_per_role)}, " <>
+               "expected=#{inspect(model_per_role)}, " <>
                "got=#{inspect(resolved)}"
 
       # Extra: verify that a *different* policy value for a second unit produces
       # a different resolved model_per_role — ruling out a global hardcoded default.
       alt_model_per_role = %{implementer: "claude-haiku-3-5", critic: "claude-haiku-3-5"}
 
-      alt_policy = %Policy{clamped | model_per_role: alt_model_per_role}
+      alt_policy = valid_policy(alt_model_per_role)
       {:ok, clamped_alt} = Policy.clamp(alt_policy)
 
       unit_id_2 = "test-unit-alt-#{System.unique_integer([:positive])}"
