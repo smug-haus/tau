@@ -98,7 +98,8 @@ defmodule Tau.Factory.Policy do
     end
   end
 
-  defp enforce_gate_floor(_candidate), do: :ok
+  defp enforce_gate_floor(_candidate),
+    do: {:error, {:gate_floor_violation, @gate_floor}}
 
   # ---------------------------------------------------------------------------
   # Private guard: ∞-budget rejection (D-320/D-321)
