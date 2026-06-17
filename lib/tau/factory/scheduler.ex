@@ -122,6 +122,11 @@ defmodule Tau.Factory.Scheduler do
 
     case evaluate_admission(declared_scope, %{state | f: f_prime}) do
       :admit ->
+        # D-320 / FR-7.1 conjunct 2: every billable action MUST be debited
+        # pre-admission (INV-21, CON-3). Record the spend in the Ledger (via
+        # Budget.Owner) BEFORE F is updated and BEFORE the reply is sent
+        # (D-315 WAL-before-ack).  A defer path MUST NOT write a debit (D-343).
+        debit_budget_dimensions(state.budget, unit_id)
         new_f = Map.put(state.f, unit_id, declared_scope)
         {:reply, :admit, %{state | f: new_f}}
 
@@ -165,6 +170,17 @@ defmodule Tau.Factory.Scheduler do
     else
       {:defer, :at_capacity}
     end
+  end
+
+  # Record a Ledger debit (cost = 1) for each configured budget dimension on the
+  # :admit path (D-320 / FR-7.1 conjunct 2).  No-op when no budget is configured.
+  @spec debit_budget_dimensions({atom(), [atom()]} | nil, unit_id()) :: :ok
+  defp debit_budget_dimensions(nil, _unit_id), do: :ok
+
+  defp debit_budget_dimensions({owner_name, dimensions}, unit_id) do
+    Enum.each(dimensions, fn dim ->
+      BudgetOwner.debit_admission(owner_name, unit_id, dim)
+    end)
   end
 
   @spec check_budget({atom(), [atom()]} | nil) :: :ok | {:defer, {:budget, atom()}}

@@ -126,10 +126,17 @@ defmodule Tau.Factory.Ledger.Writer do
 
   @doc """
   Return a map of `%{dimension_atom => total_cost}` by summing all recorded
-  debit rows per dimension. Used by `Tau.Factory.Budget.Owner.init/1` to
-  rebuild the ETS snapshot from Ledger truth.
+  debit rows per dimension, or `{:error, reason}` if the ledger query fails.
+  Used by `Tau.Factory.Budget.Owner.init/1` to rebuild the ETS snapshot from
+  Ledger truth.
+
+  INV-DS-BUDGET-REBUILD: on DB failure this function returns `{:error, reason}`
+  rather than `%{}`. Callers MUST NOT treat `{:error, reason}` as a zero-debits
+  signal. A DB failure means the true debit total is UNKNOWN — not that it is
+  zero. `Budget.Owner.init/1` handles this by treating the budget as fully
+  exhausted (remaining = 0 for all dimensions) — a conservative safe default.
   """
-  @spec budget_debited(GenServer.server()) :: %{atom() => non_neg_integer()}
+  @spec budget_debited(GenServer.server()) :: %{atom() => non_neg_integer()} | {:error, term()}
   def budget_debited(server) do
     GenServer.call(server, :budget_debited)
   end
@@ -515,7 +522,17 @@ defmodule Tau.Factory.Ledger.Writer do
     end
   end
 
-  # SELECT dimension, SUM(cost) GROUP BY dimension; return as %{atom => integer}.
+  # SELECT dimension, SUM(cost) GROUP BY dimension; return as %{atom => integer}
+  # on success or {:error, reason} on any DB failure.
+  #
+  # INV-DS-BUDGET-REBUILD: a DB failure MUST NOT be silently swallowed as %{}.
+  # A silent %{} fallback causes Budget.Owner.init/1 to populate ETS with
+  # limit - 0 = limit for every dimension — overstating available budget after a
+  # restart in which the ledger query fails. Instead we propagate {:error, reason}
+  # so that Budget.Owner.init/1 can detect the failure and apply a conservative
+  # safe default (treat all dimensions as fully exhausted, remaining = 0) rather
+  # than overstating available budget.
+  #
   # Converts stored text back to atom via String.to_existing_atom/1.
   # Unknown atoms (not pre-existing in the atom table) are skipped gracefully.
   defp do_budget_debited(db) do
@@ -533,7 +550,8 @@ defmodule Tau.Factory.Ledger.Writer do
         end
       end)
     else
-      _ -> %{}
+      {:error, reason} -> {:error, {:budget_debited_failed, reason}}
+      _ -> {:error, {:budget_debited_failed, :unknown}}
     end
   end
 

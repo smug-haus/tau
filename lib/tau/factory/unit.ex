@@ -50,6 +50,7 @@ defmodule Tau.Factory.Unit do
 
   @behaviour :gen_statem
 
+  alias Tau.Factory.Escalation
   alias Tau.Factory.Ledger.Reader, as: LedgerReader
   alias Tau.Factory.Ledger.Writer, as: LedgerWriter
   alias Tau.Factory.Retry
@@ -212,7 +213,19 @@ defmodule Tau.Factory.Unit do
 
       {:defer, reason} ->
         Logger.info("[Unit #{data.unit_id}] deferred from Scheduler: #{inspect(reason)}")
-        escalate(data, :E_SCHEDULER_DEFER)
+
+        case Escalation.classify(reason) do
+          {e, :global} ->
+            # D-320: budget/global-scope defer → notify the Coordinator to halt
+            # globally. Send {:escalate, {e, :global}} FIRST so the Coordinator
+            # transitions to :halting, then allow terminal/4 to send
+            # {:unit_terminal, ...} so the Coordinator can drain and reach :halted.
+            send(data.report_to, {:escalate, {e, :global}})
+            terminal(data, :escalated, data.last_findings, :E_SCHEDULER_DEFER)
+
+          {_e, :unit} ->
+            escalate(data, :E_SCHEDULER_DEFER)
+        end
     end
   end
 
