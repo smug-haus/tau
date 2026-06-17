@@ -108,15 +108,12 @@ defmodule Tau.Factory.Policy do
 
   defp reject_infinite_budget(candidate) do
     Enum.reduce_while(@budget_dimensions, :ok, fn dim, :ok ->
-      case Map.get(candidate, dim) do
-        nil ->
-          {:cont, :ok}
+      v = Map.get(candidate, dim)
 
-        v when v == :infinity or (is_number(v) and v <= 0) ->
-          {:halt, {:error, {:infinite_budget, dim}}}
-
-        _ ->
-          {:cont, :ok}
+      if is_integer(v) and v > 0 do
+        {:cont, :ok}
+      else
+        {:halt, {:error, {:infinite_budget, dim}}}
       end
     end)
   end
