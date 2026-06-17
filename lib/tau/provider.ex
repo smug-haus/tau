@@ -130,6 +130,8 @@ defmodule Tau.Provider do
 
   @optional_callbacks [configure: 1, chat: 3, cache_regions: 2, context_window: 1]
 
+  alias Tau.Factory.Egress
+
   @doc "Look up the configured default provider."
   @spec default() :: module()
   def default, do: Application.get_env(:tau, :default_provider, Tau.Providers.Anthropic)
@@ -166,7 +168,7 @@ defmodule Tau.Provider do
   end
 
   defp drain_stream(provider, messages, opts, ctx) do
-    with {:ok, stream} <- provider.stream(messages, opts, ctx) do
+    with {:ok, stream} <- Egress.call(provider, %{messages: messages, opts: opts}, ctx) do
       assembler =
         Enum.reduce(
           stream,

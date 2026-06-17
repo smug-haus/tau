@@ -1,15 +1,19 @@
 defmodule Tau.Factory.Egress do
   @moduledoc """
-  Single outbound chokepoint for all factory provider calls (INV-EGRESS-CHOKEPOINT / D-351).
+  Single outbound chokepoint for all provider calls (INV-EGRESS-CHOKEPOINT / D-351).
 
-  `call/3` is the **only** permitted caller of a provider's `stream/3` in the
-  factory plane. It applies three fail-closed guards in the load-bearing order
+  `call/3` is the **only** permitted caller of a provider's `stream/3` anywhere
+  in the system. It applies three fail-closed guards in the load-bearing order
   mandated by SPEC-FACTORY-GOV §4 B1 / D-351:
 
       RateLimiter.acquire(provider)          → {:error, :rate_limited}    (back-pressure)
       CircuitBreaker — state check (ETS read) → {:error, :circuit_open}    (visible event)
       Budget.Owner.admit(owner, est_cost)    → {:error, :budget_exhausted} (→ E-BUDGET)
       provider.stream(messages, opts, ctx)   ← only when all guards pass
+
+  After a successful or failed provider call, the circuit breaker outcome is
+  recorded (ETS CAS) so the breaker's state machine can transition correctly
+  (SPEC-FACTORY-GOV §4 B3 `record/3`).
 
   Every short-circuit is **visible** — a tagged error is returned to the caller
   AND a telemetry event is emitted. No silent drops (C211).
@@ -25,12 +29,13 @@ defmodule Tau.Factory.Egress do
   `call/3` never raises across the boundary (OTP non-negotiable #7).
   """
 
+  alias Tau.CircuitBreaker.State, as: CBState
   alias Tau.CircuitBreaker.Store
   alias Tau.Factory.Budget.Owner, as: BudgetOwner
   alias Tau.Providers.RateLimiter
 
   @doc """
-  The single outbound chokepoint for factory provider calls (D-351).
+  The single outbound chokepoint for all provider calls (D-351 / INV-EGRESS-CHOKEPOINT).
 
   Applies fail-closed guards in load-bearing order:
   `RateLimiter → CircuitBreaker → Budget → provider.stream/3`.
@@ -42,9 +47,11 @@ defmodule Tau.Factory.Egress do
           {:ok, term()} | {:error, :rate_limited | :circuit_open | :budget_exhausted | term()}
   def call(provider, req, ctx) do
     with :ok <- acquire_rate_limit(provider),
-         :ok <- check_circuit_breaker(provider),
+         {:ok, cb_state} <- check_circuit_breaker(provider),
          :ok <- check_budget(ctx) do
-      invoke_provider(provider, req, ctx)
+      result = invoke_provider(provider, req, ctx)
+      record_circuit_breaker_outcome(provider, cb_state, result)
+      result
     end
   end
 
@@ -75,6 +82,8 @@ defmodule Tau.Factory.Egress do
   # SPEC-FACTORY-GOV §4 B3: `check` is an ETS read, never a GenServer.call.
   # An :open breaker short-circuits with no call made; the short-circuit emits
   # [:tau,:circuit_breaker,:open] (C211 / C205 visible-event requirement).
+  # Returns {:ok, observed_state} so the caller can record the outcome after
+  # the provider call (B3 `record/3` contract).
   defp check_circuit_breaker(provider) do
     Store.ensure_row(provider)
     now_ms = System.monotonic_time(:millisecond)
@@ -88,14 +97,14 @@ defmodule Tau.Factory.Egress do
       :half_open ->
         # Half-open: admit exactly one probe via CAS; reject concurrent callers.
         if Store.probe_admitted?(provider) do
-          :ok
+          {:ok, :half_open}
         else
           emit_circuit_open(provider, :half_open, now_ms)
           {:error, :circuit_open}
         end
 
       :closed ->
-        :ok
+        {:ok, :closed}
     end
   end
 
@@ -140,6 +149,65 @@ defmodule Tau.Factory.Egress do
     rescue
       e -> {:error, {:provider_exception, e}}
     end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Private: circuit breaker outcome recording (SPEC-FACTORY-GOV §4 B3)
+  # ---------------------------------------------------------------------------
+
+  # Record the outcome of a provider call into the circuit breaker's ETS table
+  # so the state machine can transition correctly (`:closed` failure accumulation,
+  # `:half_open` probe success/failure).  Uses the same ETS-CAS approach as
+  # `Tau.CircuitBreaker` — counter increments are atomic via `Store.bump_*/1`,
+  # state transitions are a CAS `select_replace` (no GenServer.call, C205).
+  defp record_circuit_breaker_outcome(provider, observed_state, {:ok, _}) do
+    new_count = Store.bump_success_count(provider)
+    row = current_cb_struct(provider)
+    struct_pre_bump = %CBState{row | success_count: new_count - 1}
+    now_ms = System.monotonic_time(:millisecond)
+    new_state = CBState.record_success(struct_pre_bump, now_ms: now_ms)
+    maybe_cb_transition(provider, observed_state, new_state)
+  end
+
+  defp record_circuit_breaker_outcome(provider, observed_state, {:error, _}) do
+    new_count = Store.bump_failure_count(provider)
+    row = current_cb_struct(provider)
+    struct_pre_bump = %CBState{row | failure_count: new_count - 1}
+    now_ms = System.monotonic_time(:millisecond)
+    new_state = CBState.record_failure(struct_pre_bump, now_ms: now_ms)
+    maybe_cb_transition(provider, observed_state, new_state)
+  end
+
+  defp current_cb_struct(provider) do
+    case Store.get(provider) do
+      nil ->
+        %CBState{}
+
+      {_key, state_atom, failure_count, success_count, opened_at_ms, probe_slot} ->
+        %CBState{
+          state: state_atom,
+          failure_count: failure_count,
+          success_count: success_count,
+          opened_at_ms: opened_at_ms,
+          probe_slot: probe_slot
+        }
+    end
+  end
+
+  defp maybe_cb_transition(provider, current_state, new_state) do
+    if new_state.state != current_state do
+      count = Store.transition(provider, current_state, new_state)
+
+      if count == 1 do
+        :telemetry.execute(
+          [:tau, :circuit_breaker, :transition],
+          %{system_time: System.system_time()},
+          %{provider: provider, from: current_state, to: new_state.state}
+        )
+      end
+    end
+
+    :ok
   end
 
   # ---------------------------------------------------------------------------

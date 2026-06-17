@@ -20,6 +20,7 @@ defmodule Tau.Session.ProviderTurn do
     treated as terminal.
   """
 
+  alias Tau.Factory.Egress
   alias Tau.Message.{Assembler, Assistant}
   alias Tau.Provider.Event, as: PEvent
   alias Tau.Session.Events
@@ -496,9 +497,9 @@ defmodule Tau.Session.ProviderTurn do
         Tau.Session.SkillActivation.model_visible_tool_specs(data)
       )
 
-    case Tau.CircuitBreaker.call(data.provider, [], fn ->
-           data.provider.stream(data.messages, stream_opts, ctx)
-         end) do
+    req = %{messages: data.messages, opts: stream_opts}
+
+    case Egress.call(data.provider, req, ctx) do
       {:ok, stream} ->
         stream_ref = make_ref()
 
