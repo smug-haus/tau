@@ -941,8 +941,10 @@ defmodule Tau.Factory.Ledger.Writer do
   end
 
   # Validate that all required lineage link fields are non-nil.
+  # D-353 (NFR-AUDIT): "no null edge" applies to ALL six links, including
+  # gate_verdicts (the commit→verdicts step).
   defp validate_lineage_links(attrs) do
-    required = [:gating_test_paths, :claims, :specs, :issues]
+    required = [:gate_verdicts, :gating_test_paths, :claims, :specs, :issues]
 
     null_fields =
       Enum.filter(required, fn field -> Map.get(attrs, field) == nil end)
