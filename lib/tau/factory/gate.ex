@@ -285,6 +285,11 @@ defmodule Tau.Factory.Gate do
   # are routed through the oracle stub. The stub returns :pass for unmapped
   # halves, so a test fixture that does not supply those overrides still passes.
   # When the oracle is Real (production), the real toolchain / spec-check runs.
+  #
+  # D-322 hermetic-seam routing: when the test supplies spec_membership_diff,
+  # spec_membership_pr_body, or spec_membership_source_maps, those keys signal
+  # intent to exercise the real SpecMembership.check/3 path end-to-end, even
+  # under Oracle.Stub. Route to run_spec_membership_half/1 in that case.
   defp run_half(:lint, req, Oracle.Stub, oracle_arg) do
     case Map.fetch(req.policy_pin, :lint_override) do
       {:ok, _} -> run_lint_half(req)
@@ -296,10 +301,19 @@ defmodule Tau.Factory.Gate do
     run_lint_half(req)
   end
 
+  @spec_membership_seam_keys [
+    :spec_membership_diff,
+    :spec_membership_pr_body,
+    :spec_membership_source_maps
+  ]
+
   defp run_half(:spec_membership, req, Oracle.Stub, oracle_arg) do
-    case Map.fetch(req.policy_pin, :spec_membership_override) do
-      {:ok, _} -> run_spec_membership_half(req)
-      :error -> Oracle.Stub.judge(:spec_membership, oracle_arg)
+    has_seam_key = Enum.any?(@spec_membership_seam_keys, &Map.has_key?(req.policy_pin, &1))
+
+    if has_seam_key or Map.has_key?(req.policy_pin, :spec_membership_override) do
+      run_spec_membership_half(req)
+    else
+      Oracle.Stub.judge(:spec_membership, oracle_arg)
     end
   end
 
