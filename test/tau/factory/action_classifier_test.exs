@@ -36,16 +36,21 @@ defmodule Tau.Factory.ActionClassifierTest do
 
   5. **Structural-deny in MergeAuthority (D-319 / INV-20)**: the deny is
      structural — `Tau.Factory.ActionClassifier` is referenced from the module
-     that owns the `cas_push` path (`Tau.Factory.MergeAuthority`), so the guard
-     cannot be absent without the production code failing to compile. The test
-     checks this at the source level.
+     that owns the `cas_push` path (`Tau.Factory.MergeAuthority`), AND the
+     classify call is made with a non-hardcoded-destructive argument so that the
+     `:allow` branch is reachable. If MergeAuthority passes a literal denylist
+     member (e.g. `:force_push`) directly to classify/1, the `:allow` branch is
+     permanently dead, `cas_push` can never execute, and MergeAuthority can never
+     merge — which falsifies INV-20 (no auto-execute means no merge at all, the
+     opposite of the intent). The guard must sit in front of an *actual action
+     context*, not hardcode a destructive kind.
 
-  ## Failure expectation on current branch
+  ## Failure expectation
 
-  `Tau.Factory.ActionClassifier` does not exist in lib/ (grep on the branch
-  confirms zero `defmodule Tau.Factory.ActionClassifier` results). Tests that
-  invoke `classify/1` fail with `UndefinedFunctionError`. The structural-deny
-  test (5) fails because MergeAuthority does not alias or call ActionClassifier.
+  After the reviewer found f-2: MergeAuthority calls `classify(:force_push)`
+  hardcoded — the `:allow` branch is permanently dead and `cas_push` can never
+  execute. Test #5b asserts this pattern is NOT present in MergeAuthority source;
+  it FAILS against the current production code (correct fail-before).
 
   ## Pinned API contract (implementer must conform exactly)
 
@@ -68,6 +73,9 @@ defmodule Tau.Factory.ActionClassifierTest do
   - Any other input yields `:allow`.
   - The function is total — never raises on any input.
   - Must be called BEFORE any side-effecting execution (C207 / B7).
+  - Must be called with the action kind from context, NOT a hardcoded denylist
+    member — a hardcoded denylist member makes the :allow branch permanently
+    dead, defeating INV-20's requirement that non-destructive actions proceed.
 
   ## AC linkage
 
@@ -76,10 +84,9 @@ defmodule Tau.Factory.ActionClassifierTest do
 
   use ExUnit.Case, async: true
 
-  @moduletag :d_319
+  alias Tau.Factory.ActionClassifier
 
-  # Module reference via attribute to avoid compile-time crash when absent.
-  @classifier Tau.Factory.ActionClassifier
+  @moduletag :d_319
 
   # The full denylist per SPEC-FACTORY-GOV §4 B7.
   @destructive_kinds [
@@ -97,17 +104,17 @@ defmodule Tau.Factory.ActionClassifierTest do
   describe "D-319 — Tau.Factory.ActionClassifier must exist and export classify/1" do
     @tag :d_319
     test "D-319: Tau.Factory.ActionClassifier module is defined" do
-      assert Code.ensure_loaded?(@classifier),
+      assert Code.ensure_loaded?(ActionClassifier),
              "Tau.Factory.ActionClassifier module does not exist — D-319 requires it as " <>
                "the structural deny boundary for destructive actions (SPEC-FACTORY-GOV §4 B7 / C7)"
     end
 
     @tag :d_319
     test "D-319: Tau.Factory.ActionClassifier exports classify/1" do
-      assert Code.ensure_loaded?(@classifier),
+      assert Code.ensure_loaded?(ActionClassifier),
              "Tau.Factory.ActionClassifier does not exist"
 
-      assert function_exported?(@classifier, :classify, 1),
+      assert function_exported?(ActionClassifier, :classify, 1),
              "Tau.Factory.ActionClassifier.classify/1 is not exported — " <>
                "D-319 requires this as the single deny boundary before any effecting path " <>
                "(SPEC-FACTORY-GOV §4 B7 / C7)"
@@ -129,7 +136,7 @@ defmodule Tau.Factory.ActionClassifierTest do
       @tag :d_319
       @kind kind
       test "D-319: #{kind} is denied — classify/1 returns {:deny, :destructive}" do
-        result = apply(@classifier, :classify, [@kind])
+        result = ActionClassifier.classify(@kind)
 
         assert {:deny, :destructive} == result,
                "D-319: ActionClassifier.classify/1 must return {:deny, :destructive} " <>
@@ -146,7 +153,7 @@ defmodule Tau.Factory.ActionClassifierTest do
   describe "D-319 — non-destructive action kind yields :allow" do
     @tag :d_319
     test "D-319: classify/1 returns :allow for a non-destructive kind :read" do
-      result = apply(@classifier, :classify, [:read])
+      result = ActionClassifier.classify(:read)
 
       assert :allow == result,
              "D-319: ActionClassifier.classify/1 must return :allow for non-destructive kinds; " <>
@@ -155,7 +162,7 @@ defmodule Tau.Factory.ActionClassifierTest do
 
     @tag :d_319
     test "D-319: classify/1 returns :allow for :merge (a normal coordinated action)" do
-      result = apply(@classifier, :classify, [:merge])
+      result = ActionClassifier.classify(:merge)
 
       assert :allow == result,
              "D-319: ActionClassifier.classify/1 must return :allow for :merge; " <>
@@ -172,7 +179,7 @@ defmodule Tau.Factory.ActionClassifierTest do
     test "D-319 / C219: classify/1 does not raise on an unknown atom" do
       result =
         try do
-          apply(@classifier, :classify, [:unknown_action_xyz_d319])
+          ActionClassifier.classify(:unknown_action_xyz_d319)
         rescue
           e -> {:raised, e}
         catch
@@ -196,7 +203,7 @@ defmodule Tau.Factory.ActionClassifierTest do
     test "D-319 / C219: classify/1 does not raise on nil input" do
       result =
         try do
-          apply(@classifier, :classify, [nil])
+          ActionClassifier.classify(nil)
         rescue
           e -> {:raised, e}
         catch
@@ -215,7 +222,7 @@ defmodule Tau.Factory.ActionClassifierTest do
     test "D-319 / C219: classify/1 does not raise on an arbitrary tuple input" do
       result =
         try do
-          apply(@classifier, :classify, [{:some, :arbitrary, "tuple"}])
+          ActionClassifier.classify({:some, :arbitrary, "tuple"})
         rescue
           e -> {:raised, e}
         catch
@@ -241,67 +248,35 @@ defmodule Tau.Factory.ActionClassifierTest do
   # B7 (C207): "classify/1 MUST be called before any side-effecting execution
   # of the action (the git push, the release), not after."
   #
-  # The test asserts the structural deny is present in MergeAuthority by
-  # inspecting the source code of the committing-state handler (the path that
-  # calls cas_push). If ActionClassifier is not referenced in that path, the
-  # guard is absent — a structural violation of D-319, not a policy choice.
+  # INV-20 (□(destructive(a) → escalate ∧ ¬auto_execute)) has two complementary
+  # requirements:
+  #   (a) a destructive action MUST be denied and escalated (never auto-execute)
+  #   (b) a NON-destructive action (e.g. :merge from a gate-passing unit) MUST
+  #       be allowed to proceed (the :allow branch must be reachable)
   #
-  # We assert this at the source level rather than via a runtime integration
-  # test, because the MergeAuthority process requires a live git repo for
-  # start_build/1 (fetch_main_oid runs before the injected build_fun). The
-  # source-level check is a necessary precondition for the runtime invariant;
-  # Gate 5.3 (mutation check) confirms the runtime path.
+  # If MergeAuthority calls ActionClassifier.classify/1 with a hardcoded
+  # denylist member (e.g. classify(:force_push)), the :allow branch is
+  # permanently unreachable — cas_push can never execute and MergeAuthority
+  # can never merge. This violates INV-20 by making ¬auto_execute absolute
+  # (no action ever executes), which is the opposite of the contract intent.
+  #
+  # The guard must wrap the *actual action context*, not a literal destructive
+  # atom drawn from the denylist itself.
+  #
+  # Assertion strategy:
+  #   5a. MergeAuthority references ActionClassifier (structural guard present).
+  #   5b. MergeAuthority does NOT call classify with a hardcoded denylist member
+  #       (the :allow branch is structurally reachable). FAILS against current
+  #       production code that has classify(:force_push) hardcoded.
+  #   5c. ActionClassifier.classify/1 itself correctly returns :allow for :merge,
+  #       confirming the :allow path is real at the classifier level.
+  #   5d. ActionClassifier.classify/1 denies :force_push (deny side is real).
+  #   5e. All five @destructive kinds are denied (full denylist check).
   # ---------------------------------------------------------------------------
 
   describe "D-319 / INV-20 — structural deny: ActionClassifier guards the cas_push path in MergeAuthority" do
     @tag :d_319
-    test "D-319 / INV-20: ActionClassifier.classify/1 denies :force_push (primary M effecting action)" do
-      # :force_push is the action kind that corresponds to M's cas_push call
-      # (a --force-with-lease push to origin/main). D-319 requires that
-      # classify(:force_push) returns {:deny, :destructive} so the structural
-      # guard at the cas_push path can stop it.
-      assert Code.ensure_loaded?(@classifier),
-             "D-319 / INV-20: Tau.Factory.ActionClassifier module absent — " <>
-               "the structural deny guard for M's cas_push path does not exist " <>
-               "(SPEC-FACTORY-GOV §4 B7, §6 D-319)"
-
-      result = apply(@classifier, :classify, [:force_push])
-
-      assert {:deny, :destructive} == result,
-             "D-319 / INV-20: ActionClassifier.classify(:force_push) must return " <>
-               "{:deny, :destructive} — :force_push is the primary destructive action " <>
-               "guarded on M's push path; got: #{inspect(result)} " <>
-               "(SPEC-FACTORY-GOV §4 B7 / INV-20 □(destructive(a) → escalate ∧ ¬auto_execute))"
-    end
-
-    @tag :d_319
-    test "D-319 / INV-20: classify/1 covers all five documented @destructive kinds" do
-      # Assert the full denylist in one place so a missing entry fails here.
-      for kind <- @destructive_kinds do
-        result = apply(@classifier, :classify, [kind])
-
-        assert {:deny, :destructive} == result,
-               "D-319 / INV-20: ActionClassifier.classify/1 failed to deny #{inspect(kind)} — " <>
-                 "all five @destructive members must be denied; got: #{inspect(result)} " <>
-                 "(SPEC-FACTORY-GOV §4 B7, §6 D-319)"
-      end
-    end
-
-    @tag :d_319
-    test "D-319 / INV-20: MergeAuthority source references ActionClassifier in the committing path" do
-      # The structural deny requires that MergeAuthority's committing-state
-      # handler (the code path that calls cas_push) references
-      # Tau.Factory.ActionClassifier. If it does not, the guard is structurally
-      # absent regardless of what classify/1 returns.
-      #
-      # We read the MergeAuthority source and assert the reference is present.
-      # This is a source-level structural check — the necessary precondition
-      # for the runtime invariant (runtime confirmation is Gate 5.3).
-      #
-      # On the current branch, MergeAuthority does NOT reference ActionClassifier
-      # anywhere — grep returns nothing. This test fails (correct fail-before).
-      # After the implementer adds the classify/1 call in the committing handler,
-      # the source reference is present and this test passes.
+    test "D-319 / INV-20 (5a): MergeAuthority source references ActionClassifier" do
       source_path =
         Path.expand("lib/tau/factory/merge_authority.ex", File.cwd!())
 
@@ -317,6 +292,89 @@ defmodule Tau.Factory.ActionClassifierTest do
                "cas_push path (SPEC-FACTORY-GOV §4 B7 / C207) is absent. " <>
                "The implementer must add a classify/1 call in the committing-state " <>
                "handler before cas_push executes."
+    end
+
+    @tag :d_319
+    test "D-319 / INV-20 (5b): MergeAuthority does NOT hardcode a denylist member as the classify/1 argument" do
+      # If MergeAuthority passes a hardcoded denylist member (e.g. :force_push,
+      # :history_rewrite, :release, :external_publish, :data_migration) as the
+      # argument to classify/1, the :allow branch is permanently dead and
+      # cas_push can never execute. This makes it impossible for MergeAuthority
+      # to merge anything — the opposite of its purpose.
+      #
+      # The test scans MergeAuthority source for each denylist atom appearing
+      # directly inside a classify() call. A match indicates a hardcoded-denylist
+      # bug; the fix is to derive the action kind from unit/train context.
+      #
+      # CURRENT STATE: MergeAuthority calls ActionClassifier.classify(:force_push)
+      # — this test FAILS (correct fail-before for reviewer finding f-2, #578).
+      source_path =
+        Path.expand("lib/tau/factory/merge_authority.ex", File.cwd!())
+
+      assert File.exists?(source_path),
+             "D-319 / INV-20: lib/tau/factory/merge_authority.ex does not exist"
+
+      source = File.read!(source_path)
+
+      # Each of these patterns is a hardcoded-denylist call that makes :allow
+      # permanently unreachable in MergeAuthority. None should appear in source.
+      hardcoded_denylist_patterns = [
+        "classify(:force_push)",
+        "classify(:history_rewrite)",
+        "classify(:release)",
+        "classify(:external_publish)",
+        "classify(:data_migration)"
+      ]
+
+      for pattern <- hardcoded_denylist_patterns do
+        refute String.contains?(source, pattern),
+               "D-319 / INV-20: Tau.Factory.MergeAuthority calls ActionClassifier." <>
+                 "#{pattern} with a hardcoded denylist member — the :allow branch " <>
+                 "is permanently unreachable, cas_push can never execute, and " <>
+                 "MergeAuthority can never merge. INV-20 requires non-destructive " <>
+                 "actions to auto-execute; a hardcoded deny makes that impossible. " <>
+                 "Fix: derive the action kind from unit/train context, not from the " <>
+                 "denylist itself. (SPEC-FACTORY-GOV §4 B7 / C207 / INV-20)"
+      end
+    end
+
+    @tag :d_319
+    test "D-319 / INV-20 (5c): ActionClassifier.classify/1 allows :merge (confirming :allow path is real)" do
+      # The :merge action kind is representative of the non-destructive action
+      # that MergeAuthority's cas_push path executes on behalf of a gate-passing
+      # unit. classify(:merge) MUST return :allow.
+      result = ActionClassifier.classify(:merge)
+
+      assert :allow == result,
+             "D-319 / INV-20: ActionClassifier.classify(:merge) returned #{inspect(result)} " <>
+               "instead of :allow — the :allow branch at MergeAuthority's cas_push guard " <>
+               "is unreachable for the non-destructive :merge action. INV-20 requires " <>
+               "non-destructive actions to proceed. (SPEC-FACTORY-GOV §4 B7 / INV-20)"
+    end
+
+    @tag :d_319
+    test "D-319 / INV-20 (5d): ActionClassifier.classify/1 denies :force_push (primary destructive action)" do
+      # :force_push is the denylist kind associated with M's --force-with-lease
+      # git push. The guard must deny it when it is the actual action context.
+      result = ActionClassifier.classify(:force_push)
+
+      assert {:deny, :destructive} == result,
+             "D-319 / INV-20: ActionClassifier.classify(:force_push) must return " <>
+               "{:deny, :destructive} — :force_push is in the @destructive denylist; " <>
+               "got: #{inspect(result)} " <>
+               "(SPEC-FACTORY-GOV §4 B7 / INV-20 □(destructive(a) → escalate ∧ ¬auto_execute))"
+    end
+
+    @tag :d_319
+    test "D-319 / INV-20 (5e): classify/1 covers all five documented @destructive kinds" do
+      for kind <- @destructive_kinds do
+        result = ActionClassifier.classify(kind)
+
+        assert {:deny, :destructive} == result,
+               "D-319 / INV-20: ActionClassifier.classify/1 failed to deny #{inspect(kind)} — " <>
+                 "all five @destructive members must be denied; got: #{inspect(result)} " <>
+                 "(SPEC-FACTORY-GOV §4 B7, §6 D-319)"
+      end
     end
   end
 end
