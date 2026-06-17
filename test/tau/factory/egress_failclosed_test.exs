@@ -79,6 +79,7 @@ defmodule Tau.Factory.EgressFailclosedTest do
   use ExUnit.Case, async: true
 
   alias Tau.CircuitBreaker
+  alias Tau.CircuitBreaker.Store, as: CircuitBreakerStore
   alias Tau.Factory.Budget.Owner, as: BudgetOwner
   alias Tau.Providers.RateLimiter
 
@@ -171,7 +172,7 @@ defmodule Tau.Factory.EgressFailclosedTest do
       end
 
       # Confirm the breaker is now :open.
-      :open = Tau.CircuitBreaker.Store.state_for(provider)
+      :open = CircuitBreakerStore.state_for(provider)
 
       # Act: call with the open breaker.
       result =
@@ -231,8 +232,7 @@ defmodule Tau.Factory.EgressFailclosedTest do
 
       {:ok, writer} =
         start_supervised(
-          {Tau.Factory.Ledger.Writer,
-           [db_path: ":memory:", name: :"#{owner_name}_writer"]}
+          {Tau.Factory.Ledger.Writer, [db_path: ":memory:", name: :"#{owner_name}_writer"]}
         )
 
       {:ok, _owner_pid} =
@@ -280,8 +280,7 @@ defmodule Tau.Factory.EgressFailclosedTest do
 
       {:ok, writer} =
         start_supervised(
-          {Tau.Factory.Ledger.Writer,
-           [db_path: ":memory:", name: :"#{owner_name}_writer"]}
+          {Tau.Factory.Ledger.Writer, [db_path: ":memory:", name: :"#{owner_name}_writer"]}
         )
 
       {:ok, _owner_pid} =
@@ -332,8 +331,7 @@ defmodule Tau.Factory.EgressFailclosedTest do
 
       {:ok, writer} =
         start_supervised(
-          {Tau.Factory.Ledger.Writer,
-           [db_path: ":memory:", name: :"#{owner_name}_writer"]}
+          {Tau.Factory.Ledger.Writer, [db_path: ":memory:", name: :"#{owner_name}_writer"]}
         )
 
       {:ok, _owner_pid} =
