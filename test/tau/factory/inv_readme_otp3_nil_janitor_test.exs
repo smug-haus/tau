@@ -146,10 +146,7 @@ defmodule Tau.Factory.InvReadmeOtp3NilJanitorTest do
     # SPEC §4 B6: "The capture disposition is written via the single Ledger writer".
     {:ok, _jan} =
       start_supervised(
-        {@workspace_janitor,
-         ledger: ledger_name,
-         name: janitor_name,
-         report_to: self()},
+        {@workspace_janitor, ledger: ledger_name, name: janitor_name, report_to: self()},
         id: :"otp3_jan_#{n}"
       )
 
