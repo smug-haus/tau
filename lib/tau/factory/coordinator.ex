@@ -207,6 +207,38 @@ defmodule Tau.Factory.Coordinator do
 
         {:keep_state, %{data | in_flight: nil}}
 
+      {:ambiguity, reason} ->
+        # LIVE-liveness-3 / E-AMBIGUITY: select_fun signals irreducible spec/product
+        # ambiguity requiring human judgement. Per liveness.md §E-AMBIGUITY the scope
+        # is :unit — the loop continues, not a global halt. drive_fun MUST NOT be
+        # called with the ambiguity tuple.
+        #
+        # WAL-before-ack (D-315, CON-7): record_escalation/4 before broadcast (RPO=0).
+        duration_ms = System.monotonic_time(:millisecond) - data.start_mono_ms
+        measurements = %{total_tokens: data.accumulated_tokens, duration_ms: duration_ms}
+        :telemetry.execute([:tau, :factory, :coordinator, :escalate], measurements, %{scope: :unit})
+
+        if data.ledger do
+          snapshot = %{
+            state: :running,
+            in_flight: data.in_flight,
+            accumulated_tokens: data.accumulated_tokens
+          }
+
+          LedgerWriter.record_escalation(data.ledger, :"E-AMBIGUITY", :unit, snapshot)
+        end
+
+        :ok =
+          Phoenix.PubSub.broadcast(
+            data.pubsub,
+            "factory:escalation",
+            {:escalation,
+             Map.merge(%{reason: :"E-AMBIGUITY", scope: :unit, detail: reason}, measurements)}
+          )
+
+        # Per-unit scope: stay running; loop continues.
+        {:keep_state, data, [{:next_event, :internal, :loop}]}
+
       work ->
         unit_id = work
         data = drive_unit(data, work, unit_id)
