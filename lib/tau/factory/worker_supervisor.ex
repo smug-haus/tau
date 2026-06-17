@@ -115,21 +115,24 @@ defmodule Tau.Factory.WorkerSupervisor do
 
     # D-304 oracle-separation guard — two sub-mechanisms (SPEC-FACTORY-FLEET §4 B8).
     #
+    # Oracle-separation is keyed on agent identity (:author_id). Both sub-mechanisms
+    # apply only when :author_id is provided — without a declared identity, there is no
+    # oracle to separate and the guard does not apply.
+    #
     # Sub-mechanism (a) — spawn-order constraint (INV-5, SPEC-FACTORY-FLEET §4 B8):
-    # When role is :implementer, reject the spawn with
+    # When role is :implementer AND :author_id is provided, reject the spawn with
     # {:error, :no_test_author_registered} if no :test_author is registered in the
-    # same registry. This is an unconditional ordering constraint — any :implementer
-    # spawn attempted while no :test_author is registered MUST be rejected,
-    # regardless of whether :author_id is provided. Enforces ":test_author first,
-    # freeze gating-test path set before any :implementer."
+    # same registry. Enforces ":test_author first, freeze gating-test path set before
+    # any :implementer" for identified spawns.
     #
     # Sub-mechanism (b) — same-identity guard (HR-7):
-    # When :author_id is provided and role is :implementer, reject the spawn with
+    # When role is :implementer AND :author_id is provided, reject the spawn with
     # {:error, :same_identity_oracle_subject} if the same author_id has already
     # authored a :test_author worker in this registry. Prevents the same agent
     # identity from authoring both the gating test and the implementation.
     cond do
-      role == :implementer and not any_test_author_registered?(registry) ->
+      role == :implementer and not is_nil(author_id) and
+          not any_test_author_registered?(registry) ->
         {:error, :no_test_author_registered}
 
       role == :implementer and not is_nil(author_id) and

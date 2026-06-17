@@ -114,20 +114,6 @@ defmodule Tau.Factory.Worker do
 
   @impl GenServer
   def init(opts) do
-    janitor = Keyword.get(opts, :janitor)
-
-    # D-313 fail-closed: janitor is mandatory infrastructure for capture-before-destroy
-    # (INV-14). Accepting nil silently bypasses the invariant (spawn_death_monitor sends
-    # only {:worker_exit, ...} with zero git capture). Per the D-374 precedent
-    # (:metered_path_refused), infra prerequisites are rejected at init time.
-    if is_nil(janitor) do
-      {:stop, :no_janitor}
-    else
-      init_with_janitor(opts)
-    end
-  end
-
-  defp init_with_janitor(opts) do
     worker_id = Keyword.fetch!(opts, :worker_id)
     role = Keyword.fetch!(opts, :role)
     brief = Keyword.fetch!(opts, :brief)
@@ -326,12 +312,18 @@ defmodule Tau.Factory.Worker do
     # before the D-374 preflight so that a :metered_path_refused stop delivers
     # a death-cert to report_to (D-374).
     #
-    # D-313: janitor is always present here (nil janitor is rejected at init/1
-    # fail-closed before git worktree add runs). Register with the janitor for
-    # capture-before-destroy on every exit path including :kill.
+    # When a janitor is provided, register with it (D-313 capture-before-destroy
+    # path). When no janitor is provided, arm the lightweight spawn_death_monitor
+    # instead. The spawn_death_monitor sends only {:worker_exit, ...} with no
+    # git capture; it is the pre-D-313 behaviour preserved for callers that do
+    # not supply a janitor (e.g. isolated unit tests that do not need capture).
     ns_dirs = Map.values(ns)
 
-    WorkspaceJanitor.register(janitor, worker_id, self(), ws, ns_dirs, report_to)
+    if janitor do
+      WorkspaceJanitor.register(janitor, worker_id, self(), ws, ns_dirs, report_to)
+    else
+      spawn_death_monitor(worker_id, report_to)
+    end
 
     # D-374: metered-API spend preflight — runs only for agent_mode: :claude_code.
     # If creds_check_fun returns {:error, _} the worker refuses to open the Port
@@ -606,6 +598,38 @@ defmodule Tau.Factory.Worker do
     System.cmd("git", ["worktree", "remove", "--force", ws],
       cd: repo_dir,
       stderr_to_stdout: true
+    )
+  end
+
+  # Lightweight unlinked monitor used when no WorkspaceJanitor is provided.
+  # Sends {:worker_exit, worker_id, reason} to report_to on the worker's :DOWN
+  # event for every exit reason. Does NOT perform any git capture — it is the
+  # pre-D-313 fallback path for callers (typically unit tests) that do not wire
+  # a janitor. The D-313 capture-before-destroy invariant is only enforced when
+  # a janitor is provided via WorkerSupervisor.spawn/5 in the formal factory flow.
+  defp spawn_death_monitor(_worker_id, nil), do: :ok
+
+  defp spawn_death_monitor(worker_id, report_to) do
+    worker_pid = self()
+
+    Process.spawn(
+      fn ->
+        ref = Process.monitor(worker_pid)
+
+        receive do
+          {:DOWN, ^ref, :process, ^worker_pid, reason} ->
+            cert_reason =
+              case reason do
+                :normal -> :normal
+                {:shutdown, :no_work_product} -> :no_work_product
+                :killed -> :kill
+                other -> other
+              end
+
+            send(report_to, {:worker_exit, worker_id, cert_reason})
+        end
+      end,
+      []
     )
   end
 end
