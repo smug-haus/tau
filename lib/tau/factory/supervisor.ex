@@ -241,6 +241,11 @@ defmodule Tau.Factory.Supervisor do
       # UnitDriver omits the key → Worker skips preflight (non-:claude_code unchanged).
       agent_mode: agent_mode,
       creds_check_fun: creds_check_fun,
+      # D-379(b): thread the derived Watchdog name so UnitDriver.drive/2 can
+      # register each spawned worker with the Watchdog via `if watchdog do`
+      # (unit_driver.ex:249). The Watchdog IS started as a child (line 282) but
+      # was previously absent from this map — workers were never registered.
+      watchdog: watchdog_name,
       report_to: coord_name
     }
 
