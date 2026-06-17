@@ -168,29 +168,26 @@ defmodule Tau.Factory.Budget.Owner do
     # INV-DS-BUDGET-REBUILD: Writer.budget_debited/1 returns %{dim => total}
     # on success, or {:error, reason} if the ledger query fails (e.g. the
     # budget_debits table is missing after a DB corruption / schema migration).
-    # A DB failure means the true debit total is UNKNOWN — NOT zero. Treating
-    # it as zero would overstate available budget (limit - 0 = limit). Instead,
-    # on any {:error, reason}, we populate ETS with remaining = 0 for all
-    # dimensions (fully-exhausted safe default). This is conservative: no new
-    # spend is admitted until the Ledger is healthy and the Owner is restarted
-    # with accurate rebuild data. The supervisor can then retry or escalate.
-    debited =
-      case Writer.budget_debited(ledger) do
-        {:error, reason} ->
-          Logger.warning(
-            "Budget.Owner: ledger rebuild failed (#{inspect(reason)}); " <>
-              "ETS snapshot set to fully-exhausted to avoid overstating budget."
-          )
+    # A DB failure means the true debit total is UNKNOWN. The correct response
+    # is {:stop, reason} so that start_link returns {:error, reason} and the
+    # supervisor receives the failure signal to retry or escalate.
+    # Silently starting with a conservative default hides the DB failure from
+    # the supervisor — that violates INV-DS-BUDGET-REBUILD.
+    case Writer.budget_debited(ledger) do
+      {:error, reason} ->
+        Logger.warning(
+          "Budget.Owner: ledger rebuild failed (#{inspect(reason)}); " <>
+            "refusing to start — supervisor must retry or escalate."
+        )
 
-          # Use totals as the debited map so remaining = max(0, limit - limit) = 0
-          # for every dimension — a conservative safe default that prevents
-          # admission of new spend when the true debit total is unknown.
-          totals
+        {:stop, {:budget_rebuild_failed, reason}}
 
-        map when is_map(map) ->
-          map
-      end
+      debited when is_map(debited) ->
+        do_init(name, ledger, totals, debited)
+    end
+  end
 
+  defp do_init(name, ledger, totals, debited) do
     # Create the named ETS table owned by this process.
     # Table name == the registered GenServer name (B4).
     table =
