@@ -111,6 +111,9 @@ defmodule Tau.Factory.Policy do
 
   # Reject any budget dimension that is not a positive integer.
   # governance.md §3: "∞ sentinel REJECTED" for budget — defeats INV-21.
+  # nil means no budget configured — pass through (Scheduler.budget accepts nil).
+  defp reject_infinite_budget(nil), do: :ok
+
   defp reject_infinite_budget(%{token: t, cost: c, wall_time: w, iteration: i} = _b) do
     if Enum.all?([t, c, w, i], &(is_integer(&1) and &1 > 0)) do
       :ok
@@ -121,6 +124,9 @@ defmodule Tau.Factory.Policy do
 
   # {mutation, critic, reviewer} are non-shrinkable floor halves.
   # A manifest may ADD halves but MUST include the floor set.
+  # nil means unconfigured — default to the floor set (always valid).
+  defp enforce_gate_floor(nil), do: {:ok, MapSet.to_list(@gate_floor)}
+
   defp enforce_gate_floor(manifest) do
     m = MapSet.new(manifest)
 
@@ -134,6 +140,11 @@ defmodule Tau.Factory.Policy do
 
   # Compose the caller-supplied predicate with the engine disjointness floor.
   # A plugin predicate can only NARROW the admissible set — it is AND-ed with the floor.
+  # nil means unconfigured — use only the engine disjointness floor.
+  defp floor_conflict_predicate(nil) do
+    {:ok, &ConflictCheck.engine_floor(&1, &2)}
+  end
+
   defp floor_conflict_predicate(policy_pred) do
     composed = &(ConflictCheck.engine_floor(&1, &2) and policy_pred.(&1, &2))
     {:ok, composed}
