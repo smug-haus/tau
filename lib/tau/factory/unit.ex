@@ -371,6 +371,15 @@ defmodule Tau.Factory.Unit do
     {:keep_state, data, [{:state_timeout, timeout_ms, :worker_stalled}]}
   end
 
+  # D-377 (2-tuple seam): worker_fun returned {:ok, pid} so worker_id is nil.
+  # {:worker_heartbeat, nil} IS the current-worker heartbeat — re-arm :state_timeout.
+  # Guard: worker_pid must be set (a live 2-tuple worker is active).
+  def oracle(:info, {:worker_heartbeat, nil}, %{worker_id: nil, worker_pid: worker_pid} = data)
+      when not is_nil(worker_pid) do
+    timeout_ms = data.state_timeout_ms
+    {:keep_state, data, [{:state_timeout, timeout_ms, :worker_stalled}]}
+  end
+
   # Stale-worker heartbeat — discard.
   def oracle(:info, {:worker_heartbeat, _stale_id}, data) do
     {:keep_state, data}
@@ -547,6 +556,19 @@ defmodule Tau.Factory.Unit do
   # A progressing worker never trips the fixed cap. Stale-worker heartbeats → discard.
   def implementing(:info, {:worker_heartbeat, worker_id}, %{worker_id: worker_id} = data)
       when not is_nil(worker_id) do
+    timeout_ms = data.state_timeout_ms
+    {:keep_state, data, [{:state_timeout, timeout_ms, :worker_stalled}]}
+  end
+
+  # D-377 (2-tuple seam): worker_fun returned {:ok, pid} so worker_id is nil.
+  # {:worker_heartbeat, nil} IS the current-worker heartbeat — re-arm :state_timeout.
+  # Guard: worker_pid must be set (a live 2-tuple worker is active).
+  def implementing(
+        :info,
+        {:worker_heartbeat, nil},
+        %{worker_id: nil, worker_pid: worker_pid} = data
+      )
+      when not is_nil(worker_pid) do
     timeout_ms = data.state_timeout_ms
     {:keep_state, data, [{:state_timeout, timeout_ms, :worker_stalled}]}
   end
