@@ -819,6 +819,12 @@ defmodule Tau.Factory.Unit do
   # check's oracle boundary survives a crash (RPO=0, D-315). All other snapshots
   # omit frozen_scope (nil → no column write) to keep rows lean.
   #
+  # INV-DS-DECISION-REPLAYABLE (issue #545): when the unit has a non-nil head_sha
+  # (captured from {:work_ready, worker_id, branch, head_sha} at :gating entry),
+  # persist it in the head_sha column so the gate/merge coordinate is recoverable
+  # from the Ledger alone after a crash — without re-running the nondeterministic
+  # work_ready step.
+  #
   # Returns updated data with incremented entry_seq so the counter is threaded
   # through all state functions correctly.
   #
@@ -843,11 +849,17 @@ defmodule Tau.Factory.Unit do
         nil
       end
 
+    # INV-DS-DECISION-REPLAYABLE (issue #545): persist head_sha when present so the
+    # gate/merge coordinate is durable in the Ledger after a crash. head_sha is
+    # non-nil from :gating entry onwards (captured from the work_ready 3-tuple seam).
+    head_sha = Map.get(data, :head_sha, nil)
+
     LedgerWriter.snapshot_unit(data.ledger, %{
       unit_id: data.unit_id,
       state: state,
       idempotency_key: idempotency_key,
-      frozen_scope: frozen_scope
+      frozen_scope: frozen_scope,
+      head_sha: head_sha
     })
 
     %{data | entry_seq: seq + 1}

@@ -88,4 +88,22 @@ defmodule Tau.Factory.Ledger.Reader do
   def lineage_for(server, unit_id) do
     Writer.lineage_for(server, unit_id)
   end
+
+  @doc """
+  Return the gate/merge coordinate (head_sha) for `unit_id` (INV-DS-DECISION-REPLAYABLE, #545).
+
+  After a crash, the Coordinator can recover the gate/merge coordinate from the
+  Ledger alone — no nondeterministic step (work_ready re-execution) is required
+  (INV-DS-DECISION-REPLAYABLE, durable-spine.md S1).
+
+  Returns:
+    - `{:ok, coordinate}` — the persisted `head_sha` from the highest-id snapshot
+      with a non-NULL `head_sha` for this `unit_id`.
+    - `:none` — no snapshot with a non-NULL `head_sha` exists for this `unit_id`
+      (fresh Ledger, or unit never reached :gating).
+  """
+  @spec coordinate_for(GenServer.server(), String.t()) :: {:ok, String.t()} | :none
+  def coordinate_for(server, unit_id) do
+    Writer.coordinate_for(server, unit_id)
+  end
 end

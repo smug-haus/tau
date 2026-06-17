@@ -152,7 +152,16 @@ defmodule Tau.Factory.Ledger.Migrations do
        issues             TEXT    NOT NULL,
        inserted_at        TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
      )
-     """}
+     """},
+    # INV-DS-DECISION-REPLAYABLE (issue #545): add head_sha column to
+    # unit_snapshots so the gate/merge coordinate (captured from the work_ready
+    # 3-tuple seam) is durably persisted. After a crash the Coordinator can
+    # reconstruct the full in-flight Unit state — including the coordinate — from
+    # the Ledger alone, without re-running any nondeterministic step (work_ready).
+    # NULL for rows written before this migration and for states where head_sha has
+    # not yet been captured (e.g. :planned, :oracle, :implementing).
+    {"20260617_013_unit_snapshots_add_head_sha",
+     "ALTER TABLE unit_snapshots ADD COLUMN head_sha TEXT"}
   ]
 
   @doc "Expose the migration list. Used by tests to verify idempotency."

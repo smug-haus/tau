@@ -138,7 +138,8 @@ defmodule Tau.Factory.Ledger.Writer do
           :unit_id => String.t(),
           :state => atom(),
           :idempotency_key => String.t(),
-          optional(:frozen_scope) => map() | nil
+          optional(:frozen_scope) => map() | nil,
+          optional(:head_sha) => String.t() | nil
         }
 
   @type capture_attrs :: %{
@@ -296,6 +297,24 @@ defmodule Tau.Factory.Ledger.Writer do
   end
 
   @doc """
+  Return the gate/merge coordinate (head_sha) for `unit_id` (INV-DS-DECISION-REPLAYABLE, #545).
+
+  The coordinate is the `head_sha` persisted in the `unit_snapshots` row written at
+  `:gating` entry. After a crash, the Coordinator can recover it from the Ledger
+  alone — no nondeterministic step (work_ready re-execution) is required.
+
+  Returns:
+    - `{:ok, coordinate}` — the persisted `head_sha` for the highest-id snapshot
+      row for `unit_id` that has a non-NULL `head_sha`.
+    - `:none` — no snapshot with a non-NULL `head_sha` exists for this `unit_id`
+      (fresh Ledger, or unit never reached :gating).
+  """
+  @spec coordinate_for(GenServer.server(), String.t()) :: {:ok, String.t()} | :none
+  def coordinate_for(server, unit_id) do
+    GenServer.call(server, {:coordinate_for, unit_id})
+  end
+
+  @doc """
   Return the frozen scope for `unit_id` (HR-4, issue #584).
 
   Reads the first non-NULL `frozen_scope` row from `unit_snapshots` for
@@ -389,6 +408,11 @@ defmodule Tau.Factory.Ledger.Writer do
 
   def handle_call({:frozen_scope_for, unit_id}, _from, %{db: db} = state) do
     result = do_frozen_scope_for(db, unit_id)
+    {:reply, result, state}
+  end
+
+  def handle_call({:coordinate_for, unit_id}, _from, %{db: db} = state) do
+    result = do_coordinate_for(db, unit_id)
     {:reply, result, state}
   end
 
@@ -639,26 +663,48 @@ defmodule Tau.Factory.Ledger.Writer do
   # migration 20260616_011. The scope is written at the :planned snapshot
   # (admission) and never updated (D-335 append-only). The :files value (a MapSet)
   # is serialised as a sorted list; :gating_test_paths is stored as-is.
+  #
+  # INV-DS-DECISION-REPLAYABLE (issue #545): when attrs includes a non-nil :head_sha
+  # string, persist it in the head_sha column (migration 20260617_013). This is the
+  # gate/merge coordinate captured from {:work_ready, worker_id, branch, head_sha}
+  # at :gating entry. Persisting it makes the decision log replayable: after a
+  # crash the Coordinator can recover the coordinate from the Ledger alone without
+  # re-running the nondeterministic work_ready step.
   defp do_snapshot_unit(db, attrs) do
     unit_id = Map.fetch!(attrs, :unit_id)
     state = Map.fetch!(attrs, :state)
     idempotency_key = Map.fetch!(attrs, :idempotency_key)
     frozen_scope = Map.get(attrs, :frozen_scope, nil)
+    head_sha = Map.get(attrs, :head_sha, nil)
 
     state_text = Atom.to_string(state)
     frozen_scope_json = encode_frozen_scope(frozen_scope)
 
     {sql, bindings} =
-      if frozen_scope_json do
-        {"""
-         INSERT OR IGNORE INTO unit_snapshots (unit_id, state, idempotency_key, frozen_scope)
-         VALUES (?1, ?2, ?3, ?4)
-         """, [unit_id, state_text, idempotency_key, frozen_scope_json]}
-      else
-        {"""
-         INSERT OR IGNORE INTO unit_snapshots (unit_id, state, idempotency_key)
-         VALUES (?1, ?2, ?3)
-         """, [unit_id, state_text, idempotency_key]}
+      cond do
+        frozen_scope_json && head_sha ->
+          {"""
+           INSERT OR IGNORE INTO unit_snapshots (unit_id, state, idempotency_key, frozen_scope, head_sha)
+           VALUES (?1, ?2, ?3, ?4, ?5)
+           """, [unit_id, state_text, idempotency_key, frozen_scope_json, head_sha]}
+
+        frozen_scope_json ->
+          {"""
+           INSERT OR IGNORE INTO unit_snapshots (unit_id, state, idempotency_key, frozen_scope)
+           VALUES (?1, ?2, ?3, ?4)
+           """, [unit_id, state_text, idempotency_key, frozen_scope_json]}
+
+        head_sha ->
+          {"""
+           INSERT OR IGNORE INTO unit_snapshots (unit_id, state, idempotency_key, head_sha)
+           VALUES (?1, ?2, ?3, ?4)
+           """, [unit_id, state_text, idempotency_key, head_sha]}
+
+        true ->
+          {"""
+           INSERT OR IGNORE INTO unit_snapshots (unit_id, state, idempotency_key)
+           VALUES (?1, ?2, ?3)
+           """, [unit_id, state_text, idempotency_key]}
       end
 
     with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, String.trim(sql)),
@@ -1133,6 +1179,29 @@ defmodule Tau.Factory.Ledger.Writer do
     case Jason.decode(json_text) do
       {:ok, list} when is_list(list) -> list
       _ -> []
+    end
+  end
+
+  # INV-DS-DECISION-REPLAYABLE (issue #545): read the highest-id head_sha from
+  # unit_snapshots for unit_id. Returns {:ok, coordinate} or :none.
+  # Uses MAX(id) to get the most-recently-written snapshot with a non-NULL head_sha.
+  defp do_coordinate_for(db, unit_id) do
+    sql = """
+    SELECT head_sha
+    FROM unit_snapshots
+    WHERE unit_id = ?1 AND head_sha IS NOT NULL
+    ORDER BY id DESC
+    LIMIT 1
+    """
+
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, String.trim(sql)),
+         :ok <- Exqlite.Sqlite3.bind(stmt, [unit_id]),
+         {:ok, rows} <- Exqlite.Sqlite3.fetch_all(db, stmt),
+         :ok <- Exqlite.Sqlite3.release(db, stmt) do
+      case rows do
+        [[head_sha]] -> {:ok, head_sha}
+        [] -> :none
+      end
     end
   end
 
