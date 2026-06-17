@@ -173,9 +173,13 @@ defmodule Tau.Factory.Coordinator do
 
   def running(:internal, {:rehydrate, non_terminal}, data) do
     # Pop one unit_id and drive it; store the remainder for post-terminal replay.
-    [{unit_id, _state} | rest] = Map.to_list(non_terminal)
+    # Thread the snapshotted Ledger state through the work_item so the Unit FSM
+    # can resume at the correct state rather than restarting at :planned
+    # (D-344 / INV-SA-FC1-IDEMPOTENT: exactly-once on resume).
+    [{unit_id, snapshotted_state} | rest] = Map.to_list(non_terminal)
     remaining = Map.new(rest)
-    data = drive_unit(data, unit_id, unit_id)
+    work_item = %{unit_id: unit_id, resume_state: snapshotted_state}
+    data = drive_unit(data, work_item, unit_id)
     data = Map.put(data, :rehydrate_queue, remaining)
     {:keep_state, data}
   end
