@@ -117,6 +117,28 @@ defmodule Tau.Factory.WorkspaceJanitor do
     GenServer.call(server, {:register, worker_id, worker_pid, ws, ns_dirs, report_to})
   end
 
+  @doc """
+  Write a durable `work_ready` record to the Ledger for `worker_id`.
+
+  INV-WF-12: Called by the Worker in `dispatch/2` when a `work_ready` frame
+  arrives from the agent Port. This writes a capture row BEFORE the Worker
+  exits so the `:DOWN` capture in the `:DOWN` handler is a thin backstop over
+  a near-empty volatile tree, not the sole preservation mechanism.
+
+  The row uses `disposition: :work_ready` to distinguish it from the terminal
+  `:DOWN` capture (which uses `disposition: :captured`).
+  """
+  @spec record_work_ready(GenServer.server(), String.t(), String.t(), String.t()) :: :ok
+  def record_work_ready(janitor, worker_id, branch, head_sha) do
+    server =
+      case GenServer.whereis(janitor) do
+        nil -> __MODULE__
+        pid -> pid
+      end
+
+    GenServer.call(server, {:record_work_ready, worker_id, branch, head_sha})
+  end
+
   # ---------------------------------------------------------------------------
   # GenServer callbacks
   # ---------------------------------------------------------------------------
@@ -154,6 +176,22 @@ defmodule Tau.Factory.WorkspaceJanitor do
     new_workers = Map.put(state.workers, ref, entry)
 
     {:reply, :ok, %{state | workers: new_workers}}
+  end
+
+  def handle_call({:record_work_ready, worker_id, branch, head_sha}, _from, state) do
+    # INV-WF-12: write a durable capture row recording the work_ready decision.
+    # disposition: :work_ready distinguishes this incremental record from the
+    # terminal :captured row written by the :DOWN handler.
+    # status and patch encode the branch + head_sha for traceability.
+    attrs = %{
+      patch: "",
+      untracked_tgz: nil,
+      status: "work_ready branch=#{branch} head_sha=#{head_sha}",
+      disposition: :work_ready
+    }
+
+    Writer.capture(state.ledger, worker_id, attrs)
+    {:reply, :ok, state}
   end
 
   @impl GenServer
