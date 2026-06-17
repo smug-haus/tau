@@ -21,9 +21,9 @@ defmodule Tau.Factory.ActionClassifier do
   `classify/1` is a total pure function over `%Action{}` that denies every
   action whose `kind` is in the `@destructive` denylist and allows all others.
 
-  The denylist is data (a compile-time list of atoms — INV-24 #2: pattern-match on
-  atoms/structs, no string-keyed dispatch). Adding a new destructive class is
-  one list entry, not a new code path.
+  The denylist is a compile-time `MapSet` of atoms (SPEC-FACTORY-GOV §4 B7,
+  C203, C222 — INV-24 #2: data, not string-keyed dispatch). Adding a new
+  destructive class is one `MapSet` entry, not a new code path.
 
   A `{:deny, :destructive}` verdict routes to the Coordinator as E-DESTRUCTIVE
   via `Tau.Factory.Escalation.classify({:destructive, action})`, and the action
@@ -41,21 +41,24 @@ defmodule Tau.Factory.ActionClassifier do
 
   alias Tau.Factory.ActionClassifier.Action
 
-  # The denylist is data — one list entry to add a new destructive class (INV-24 #2).
-  # A compile-time list is used directly in the guard clause (Elixir guards require compile-time literals).
-  @destructive [
-    :force_push,
-    :history_rewrite,
-    :release,
-    :external_publish,
-    :data_migration
-  ]
+  # The denylist is a compile-time MapSet — one entry to add a new destructive
+  # class (SPEC-FACTORY-GOV §4 B7, C203, C222; INV-24 #2: data denylist, no
+  # string-keyed dispatch). MapSet membership is used in the function body rather
+  # than a guard because Elixir 1.18 guards require compile-time list literals for
+  # `in/2` — a MapSet cannot be used in a guard expression.
+  @destructive MapSet.new([
+                 :force_push,
+                 :history_rewrite,
+                 :release,
+                 :external_publish,
+                 :data_migration
+               ])
 
   @doc """
   Classifies an action as `:allow` or `{:deny, :destructive}`.
 
   The function is total over `%Action{}`: it never raises for any valid struct.
-  Any `kind` present in the `@destructive` denylist returns `{:deny, :destructive}`;
+  Any `kind` present in the `@destructive` MapSet returns `{:deny, :destructive}`;
   all other kinds return `:allow`.
 
   ## Examples
@@ -65,8 +68,10 @@ defmodule Tau.Factory.ActionClassifier do
 
       iex> classify(%Action{kind: :read_file})
       :allow
+
   """
   @spec classify(Action.t()) :: :allow | {:deny, :destructive}
-  def classify(%Action{kind: k}) when k in @destructive, do: {:deny, :destructive}
-  def classify(%Action{}), do: :allow
+  def classify(%Action{kind: k}) do
+    if MapSet.member?(@destructive, k), do: {:deny, :destructive}, else: :allow
+  end
 end
