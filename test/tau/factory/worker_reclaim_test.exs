@@ -476,4 +476,121 @@ defmodule Tau.Factory.WorkerReclaimTest do
                "still exists"
     end
   end
+
+
+  # ---------------------------------------------------------------------------
+  # D-314 x HR-7 -- registry metadata: Worker registers with %{role, author_id}
+  # so WorkerSupervisor.any_test_author_registered?/1 (D-304) can select by role.
+  #
+  # Discriminating gate: at merge-base, Worker registered WITHOUT metadata
+  # ({:via, Registry, {registry, worker_id}}); Registry.lookup returned
+  # [{pid, nil}]. At HEAD, Worker registers WITH metadata
+  # ({:via, Registry, {registry, worker_id, %{role: ..., author_id: ...}}});
+  # Registry.lookup returns [{pid, %{role: :test_author, author_id: nil}}].
+  #
+  # These tests fail at merge-base (metadata is nil / spawn guard absent) and
+  # pass at HEAD. They are the discriminating gate making the D-314 suite
+  # genuinely fail-before against the merge-base production code.
+  # ---------------------------------------------------------------------------
+
+  describe "D-314 x HR-7 -- Worker registers with role metadata for D-304 oracle-separation" do
+    @tag :d_314
+    @tag :hr_7
+    test "D-314/HR-7: spawned :test_author worker registry entry has %{role: :test_author} metadata" do
+      # Gate: Worker.start_link/1 must store role metadata in the registry.
+      # Used by WorkerSupervisor.any_test_author_registered?/1 (D-304 sub-mechanism (a)).
+      # At merge-base: {:via, Registry, {reg, worker_id}} -- no metadata -> nil.
+      # At HEAD:       {:via, Registry, {reg, worker_id, %{role: :test_author, ...}}} -> map.
+      tmp_dir =
+        System.tmp_dir!()
+        |> Path.join("tau_rec314_hr7_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(tmp_dir)
+      on_exit(fn -> File.rm_rf!(tmp_dir) end)
+
+      %{repo_dir: repo_dir, base_ref: base_ref} = setup_git_repo(tmp_dir)
+      ledger = start_ledger(tmp_dir, :hr7)
+      {_sup_name, sup, registry_name} = start_fleet(:hr7)
+      {_jan_name, jan_pid} = start_janitor(ledger, :hr7, self())
+
+      {:ok, worker_id} =
+        @worker_supervisor.spawn(sup, :test_author, "write gating tests", base_ref,
+          repo_dir: repo_dir,
+          agent_bin: slow_agent_bin(tmp_dir, "_hr7"),
+          registry: registry_name,
+          janitor: jan_pid
+        )
+
+      # Look up registry entry; the value field is the stored metadata.
+      entries = Registry.lookup(registry_name, worker_id)
+
+      assert entries != [],
+             "D-314/HR-7: worker must be registered in registry under worker_id=#{inspect(worker_id)}"
+
+      [{_pid, metadata}] = entries
+
+      assert is_map(metadata),
+             "D-314/HR-7: registry value (metadata) MUST be a map; " <>
+               "at merge-base Worker registered without metadata so value is nil. " <>
+               "Got: #{inspect(metadata)}"
+
+      assert Map.get(metadata, :role) == :test_author,
+             "D-314/HR-7: metadata[:role] MUST be :test_author; " <>
+               "WorkerSupervisor.any_test_author_registered?/1 (D-304) selects by this key. " <>
+               "Got metadata: #{inspect(metadata)}"
+
+      # Cleanup: kill the slow agent worker.
+      [{pid, _}] = Registry.lookup(registry_name, worker_id)
+      Process.exit(pid, :kill)
+      assert_receive {:worker_exit, ^worker_id, _}, 3_000
+    end
+
+    @tag :d_314
+    @tag :d_304
+    test "D-314/D-304: spawning :implementer without prior :test_author -- rejected AND no leaked worktree" do
+      # D-314 x D-304 composite gate.
+      #
+      # At merge-base: WorkerSupervisor has NO spawn-order guard; spawn/5 returns
+      # {:ok, worker_id} and starts a worker (possibly creating a worktree).
+      # The assert below fails because result != {:error, :no_test_author_registered}.
+      #
+      # At HEAD: the D-304 guard rejects the spawn BEFORE git worktree add runs,
+      # returning {:error, :no_test_author_registered}. D-314 requires no leaked
+      # worktree after any rejection path.
+      tmp_dir =
+        System.tmp_dir!()
+        |> Path.join("tau_rec314_d304_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(tmp_dir)
+      on_exit(fn -> File.rm_rf!(tmp_dir) end)
+
+      %{repo_dir: repo_dir, base_ref: base_ref} = setup_git_repo(tmp_dir)
+      {_sup_name, sup, registry_name} = start_fleet(:d304_no_leak)
+
+      # NO :test_author registered -- D-304 guard must reject :implementer.
+      result =
+        @worker_supervisor.spawn(sup, :implementer, "implement feature", base_ref,
+          repo_dir: repo_dir,
+          agent_bin: slow_agent_bin(tmp_dir, "_d304"),
+          registry: registry_name
+          # No :janitor -- the D-304 guard fires BEFORE janitor check.
+        )
+
+      assert result == {:error, :no_test_author_registered},
+             "D-314/D-304: spawning :implementer without a prior :test_author " <>
+               "MUST return {:error, :no_test_author_registered}. " <>
+               "At merge-base this guard is absent and spawn returns {:ok, worker_id}. " <>
+               "Got: #{inspect(result)}"
+
+      # D-314: the D-304 rejection must leave NO leaked worktree.
+      # The guard fires before git worktree add, so the worktree count must stay at 1.
+      Process.sleep(100)
+
+      leaked = private_worktree_entries(repo_dir)
+
+      assert leaked == [],
+             "D-314/D-304: a D-304 rejection must leave no leaked git worktree entries. " <>
+               "Leaked: #{inspect(leaked)}"
+    end
+  end
 end
