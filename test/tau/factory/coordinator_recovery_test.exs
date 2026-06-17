@@ -145,7 +145,15 @@ defmodule Tau.Factory.CoordinatorRecoveryTest do
     coord = unique_name(:coord_recovery)
 
     drive_fun = fn work ->
-      unit_id = work
+      # D-344 / #607: the production Coordinator passes a map %{unit_id: id,
+      # resume_state: state} for rehydrated units (coordinator.ex:181) and a
+      # plain binary for newly-selected work (coordinator.ex:208). Accept both.
+      unit_id =
+        case work do
+          %{unit_id: id} -> id
+          id when is_binary(id) -> id
+        end
+
       Agent.update(drive_log, fn log -> log ++ [unit_id] end)
       send(test_pid, {:driven, unit_id})
       # The rehydrated unit "completes" immediately so the loop can quiesce; the

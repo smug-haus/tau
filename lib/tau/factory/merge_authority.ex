@@ -18,6 +18,8 @@ defmodule Tau.Factory.MergeAuthority do
 
   @behaviour :gen_statem
 
+  alias Tau.Factory.ActionClassifier
+  alias Tau.Factory.ActionClassifier.Action
   alias Tau.Factory.Ledger.Writer, as: LedgerWriter
   alias Tau.Factory.Merge.Cas
   alias Tau.Factory.Merge.Health
@@ -226,8 +228,9 @@ defmodule Tau.Factory.MergeAuthority do
     {:next_state, :committing, next_data, [commit_action]}
   end
 
-  # Task result: build failed — health_red means eject (D-303, B=1); other
-  # failures enter D-394 bounded backed-off retry or terminal eject.
+  # Task result: build failed — health_red means eject (D-303, B=1);
+  # destructive_action_denied escalates as E-DESTRUCTIVE (D-319, B8, INV-20);
+  # other failures enter D-394 bounded backed-off retry or terminal eject.
   def integrating(:info, {ref, {:build_failed, reason}}, %{task_ref: ref} = data) do
     Process.demonitor(ref, [:flush])
     Logger.warning("[MergeAuthority] build failed: #{inspect(reason)}")
@@ -261,6 +264,54 @@ defmodule Tau.Factory.MergeAuthority do
             {:merge_result, :rejected}
           )
         end)
+
+        next_data = eject_train(data)
+        transition_from_idle(next_data)
+
+      {:destructive_action_denied, _action} ->
+        # D-319 / SPEC-FACTORY-GOV §4 B8, INV-20:
+        # ActionClassifier.classify/1 returned {:deny, :destructive} — the push was
+        # blocked (B7 ✓). Now route as E-DESTRUCTIVE to K (B8). This is NOT a
+        # retryable failure — a destructive action is terminal at B=1 (retrying
+        # would auto-execute it, violating INV-20 ¬auto_execute).
+        #
+        # WAL-before-ack (D-315, RPO=0): durable rejection rows written BEFORE any
+        # telemetry or broadcast.
+        Enum.each(train, fn unit ->
+          LedgerWriter.record_merge_outcome(data.ledger, %{
+            unit_id: unit.id,
+            outcome: :rejected,
+            commit_sha: nil,
+            reason: :destructive_action_denied,
+            run: unit.run
+          })
+        end)
+
+        telemetry(:reject, %{hash: hd_hash(train)}, %{
+          reason: :destructive_action_denied,
+          units: train
+        })
+
+        # D-356: broadcast :rejected to each ejected member (terminal rejection).
+        Enum.each(train, fn unit ->
+          Phoenix.PubSub.broadcast(
+            data.pubsub,
+            "factory:pr:#{unit.id}",
+            {:merge_result, :rejected}
+          )
+        end)
+
+        # B8 / D-319: emit E-DESTRUCTIVE to K via "factory:control" so the
+        # Coordinator can halt or surface to the operator.
+        # INV-20: □(destructive(a) → escalate ∧ ¬auto_execute) — escalate half.
+        # The Coordinator's running/3 handles {:escalate, {e, :unit}} (2-tuple);
+        # that is the canonical format on "factory:control".
+        :ok =
+          Phoenix.PubSub.broadcast(
+            data.pubsub,
+            "factory:control",
+            {:escalate, {:"E-DESTRUCTIVE", :unit}}
+          )
 
         next_data = eject_train(data)
         transition_from_idle(next_data)
@@ -650,28 +701,37 @@ defmodule Tau.Factory.MergeAuthority do
       System.cmd("git", args, cd: merge_wt, stderr_to_stdout: true)
     end
 
-    with {_, 0} <- System.cmd("git", ["fetch", "origin"], cd: repo_dir, stderr_to_stdout: true),
-         {_, 0} <- git_wt.(["rebase", base]),
-         {tip_raw, 0} <- git_wt.(["rev-parse", "HEAD"]),
-         {_, 0} <-
-           System.cmd(
-             "git",
-             ["push", "--force-with-lease", "origin", "HEAD:#{unit.branch}"],
-             cd: merge_wt,
-             stderr_to_stdout: true
-           ) do
-      tip = String.trim(tip_raw)
+    # D-319 / SPEC-FACTORY-GOV §4 B7 C207: classify the push action BEFORE
+    # any side-effecting execution. :force_push ∈ @destructive → {:deny, :destructive}
+    # → the push MUST NOT execute (INV-20 □(destructive(a) → escalate ∧ ¬auto_execute)).
+    case ActionClassifier.classify(%Action{kind: :force_push}) do
+      {:deny, :destructive} ->
+        {:build_failed, {:destructive_action_denied, :force_push}}
 
-      case Health.check(merge_wt, :elixir, %{}) do
-        :green ->
-          {:built, units, base, tip}
+      :allow ->
+        with {_, 0} <- System.cmd("git", ["fetch", "origin"], cd: repo_dir, stderr_to_stdout: true),
+             {_, 0} <- git_wt.(["rebase", base]),
+             {tip_raw, 0} <- git_wt.(["rev-parse", "HEAD"]),
+             {_, 0} <-
+               System.cmd(
+                 "git",
+                 ["push", "--force-with-lease", "origin", "HEAD:#{unit.branch}"],
+                 cd: merge_wt,
+                 stderr_to_stdout: true
+               ) do
+          tip = String.trim(tip_raw)
 
-        {:red, report} ->
-          {:build_failed, {:health_red, report}}
-      end
-    else
-      {output, code} ->
-        {:build_failed, {:git_error, code, output}}
+          case Health.check(merge_wt, :elixir, %{}) do
+            :green ->
+              {:built, units, base, tip}
+
+            {:red, report} ->
+              {:build_failed, {:health_red, report}}
+          end
+        else
+          {output, code} ->
+            {:build_failed, {:git_error, code, output}}
+        end
     end
   end
 

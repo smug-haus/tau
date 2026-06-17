@@ -19,7 +19,9 @@ defmodule Tau.Factory.Coordinator do
 
   @behaviour :gen_statem
 
+  alias Tau.Factory.Escalation
   alias Tau.Factory.Ledger.Reader, as: LedgerReader
+  alias Tau.Factory.Ledger.Writer, as: LedgerWriter
 
   require Logger
 
@@ -93,6 +95,24 @@ defmodule Tau.Factory.Coordinator do
 
     :ok = Phoenix.PubSub.subscribe(pubsub, "factory:control")
 
+    # Subscribe to unit-merged telemetry to accumulate token counts for
+    # INV-REPORTING-SOURCED (governance.md §5). Token counts MUST be sourced
+    # from telemetry spans, never hardcoded.
+    self_pid = self()
+    # Use a unique handler id per coordinator instance so handlers don't collide
+    # across concurrent coordinators and can be detached on terminate.
+    telemetry_handler_id =
+      "coordinator-unit-merged-#{System.unique_integer([:positive, :monotonic])}"
+
+    :telemetry.attach(
+      telemetry_handler_id,
+      [:tau, :factory, :unit, :merged],
+      fn _event, measurements, metadata, pid ->
+        send(pid, {:telemetry_unit_merged, measurements, metadata})
+      end,
+      self_pid
+    )
+
     # Resume from L when a ledger is provided (D-344, §5 "start (resume from L)").
     # Read latest_unit_snapshots/1 to discover which units were in flight at crash
     # time. Non-terminal units are rehydrated (driven). Terminal sinks are skipped.
@@ -121,10 +141,21 @@ defmodule Tau.Factory.Coordinator do
       drive_fun: drive_fun,
       scheduler: scheduler,
       on_halted: on_halted,
+      ledger: ledger,
       halt_pending: false,
       in_flight: nil,
       # Track rehydrated units so :sys.get_state reveals them (Oracle c).
-      rehydrated: rehydrated
+      rehydrated: rehydrated,
+      # Monotonic start time for duration_ms telemetry sourcing (INV-REPORTING-SOURCED).
+      start_mono_ms: System.monotonic_time(:millisecond),
+      # Accumulated token counts from [:tau, :factory, :unit, :merged] telemetry
+      # spans (INV-REPORTING-SOURCED). MUST NOT be hardcoded — sourced from spans.
+      accumulated_tokens: 0,
+      # Pending token counts keyed by unit_id, awaiting unit_terminal to commit.
+      # Allows telemetry events and unit_terminal to arrive in any order.
+      pending_unit_tokens: %{},
+      # Telemetry handler id; detached in terminate/3 to prevent cross-test leaks.
+      telemetry_handler_id: telemetry_handler_id
     }
 
     {:ok, :running, data, init_events}
@@ -145,9 +176,13 @@ defmodule Tau.Factory.Coordinator do
 
   def running(:internal, {:rehydrate, non_terminal}, data) do
     # Pop one unit_id and drive it; store the remainder for post-terminal replay.
-    [{unit_id, _state} | rest] = Map.to_list(non_terminal)
+    # Thread the snapshotted Ledger state through the work_item so the Unit FSM
+    # can resume at the correct state rather than restarting at :planned
+    # (D-344 / INV-SA-FC1-IDEMPOTENT: exactly-once on resume).
+    [{unit_id, snapshotted_state} | rest] = Map.to_list(non_terminal)
     remaining = Map.new(rest)
-    data = drive_unit(data, unit_id, unit_id)
+    work_item = %{unit_id: unit_id, resume_state: snapshotted_state}
+    data = drive_unit(data, work_item, unit_id)
     data = Map.put(data, :rehydrate_queue, remaining)
     {:keep_state, data}
   end
@@ -156,7 +191,53 @@ defmodule Tau.Factory.Coordinator do
   def running(:internal, :loop, data) do
     case data.select_fun.() do
       nil ->
+        # Milestone boundary: work exhausted. Broadcast operator-facing report
+        # on the observation plane (C117 / INV-REPORTING-ESCALATION-ONLY).
+        # Measurements sourced from monotonic clock span (INV-REPORTING-SOURCED, governance.md §5).
+        duration_ms = System.monotonic_time(:millisecond) - data.start_mono_ms
+        measurements = %{total_tokens: data.accumulated_tokens, duration_ms: duration_ms}
+        :telemetry.execute([:tau, :factory, :coordinator, :milestone], measurements, %{})
+
+        :ok =
+          Phoenix.PubSub.broadcast(
+            data.pubsub,
+            "factory:report",
+            {:milestone_complete, measurements}
+          )
+
         {:keep_state, %{data | in_flight: nil}}
+
+      {:ambiguity, reason} ->
+        # LIVE-liveness-3 / E-AMBIGUITY: select_fun signals irreducible spec/product
+        # ambiguity requiring human judgement. Per liveness.md §E-AMBIGUITY the scope
+        # is :unit — the loop continues, not a global halt. drive_fun MUST NOT be
+        # called with the ambiguity tuple.
+        #
+        # WAL-before-ack (D-315, CON-7): record_escalation/4 before broadcast (RPO=0).
+        duration_ms = System.monotonic_time(:millisecond) - data.start_mono_ms
+        measurements = %{total_tokens: data.accumulated_tokens, duration_ms: duration_ms}
+        :telemetry.execute([:tau, :factory, :coordinator, :escalate], measurements, %{scope: :unit})
+
+        if data.ledger do
+          snapshot = %{
+            state: :running,
+            in_flight: data.in_flight,
+            accumulated_tokens: data.accumulated_tokens
+          }
+
+          LedgerWriter.record_escalation(data.ledger, :"E-AMBIGUITY", :unit, snapshot)
+        end
+
+        :ok =
+          Phoenix.PubSub.broadcast(
+            data.pubsub,
+            "factory:escalation",
+            {:escalation,
+             Map.merge(%{reason: :"E-AMBIGUITY", scope: :unit, detail: reason}, measurements)}
+          )
+
+        # Per-unit scope: stay running; loop continues.
+        {:keep_state, data, [{:next_event, :internal, :loop}]}
 
       work ->
         unit_id = work
@@ -184,9 +265,17 @@ defmodule Tau.Factory.Coordinator do
     {:next_state, :halting, %{data | in_flight: nil}, [{:next_event, :internal, :drain}]}
   end
 
-  def running(:info, {:unit_terminal, _unit_id, _outcome}, data) do
+  def running(:info, {:unit_terminal, unit_id, _outcome}, data) do
     telemetry(:unit_terminal, %{}, %{halt_pending: false})
-    data = %{data | in_flight: nil}
+    # Commit any staged token counts for this unit (INV-REPORTING-SOURCED).
+    {tokens, pending} = Map.pop(data.pending_unit_tokens, unit_id, 0)
+
+    data = %{
+      data
+      | in_flight: nil,
+        accumulated_tokens: data.accumulated_tokens + tokens,
+        pending_unit_tokens: pending
+    }
 
     # If rehydration of recovered units is still in progress, drive the next one.
     case Map.get(data, :rehydrate_queue, %{}) do
@@ -209,9 +298,17 @@ defmodule Tau.Factory.Coordinator do
     {:next_state, :halting, %{data | in_flight: nil}, [{:next_event, :internal, :drain}]}
   end
 
-  def running(:info, {:unit_terminal, _unit_id, _outcome, _provenance}, data) do
+  def running(:info, {:unit_terminal, unit_id, _outcome, _provenance}, data) do
     telemetry(:unit_terminal, %{}, %{halt_pending: false})
-    data = %{data | in_flight: nil}
+    # Commit any staged token counts for this unit (INV-REPORTING-SOURCED).
+    {tokens, pending} = Map.pop(data.pending_unit_tokens, unit_id, 0)
+
+    data = %{
+      data
+      | in_flight: nil,
+        accumulated_tokens: data.accumulated_tokens + tokens,
+        pending_unit_tokens: pending
+    }
 
     case Map.get(data, :rehydrate_queue, %{}) do
       queue when map_size(queue) > 0 ->
@@ -227,20 +324,104 @@ defmodule Tau.Factory.Coordinator do
   # so the in-flight unit is drained before reaching :halted (drain-first).
   # If no unit is in flight, the existing halting(:internal, :drain) nil-branch
   # transitions immediately to :halted.
-  def running(:info, {:escalate, {_e, :global}}, data) do
-    telemetry(:escalate, %{}, %{scope: :global})
+  # Broadcasts to "factory:escalation" per C117 / D-336 (escalation conservation).
+  # WAL-before-ack (D-315, CON-7): record_escalation/4 call completes before
+  # any external effect (halt or broadcast) to ensure RPO=0 durability.
+  def running(:info, {:escalate, {e, :global}}, data) do
+    # Measurements sourced from monotonic clock span (INV-REPORTING-SOURCED, governance.md §5).
+    duration_ms = System.monotonic_time(:millisecond) - data.start_mono_ms
+    measurements = %{total_tokens: data.accumulated_tokens, duration_ms: duration_ms}
+    :telemetry.execute([:tau, :factory, :coordinator, :escalate], measurements, %{scope: :global})
+
+    # CON-7 / LIVE-liveness-2 (2/3): durable write — WAL-before-ack.
+    # Write reason + state snapshot to the Ledger BEFORE external effects so the
+    # escalation is durable even if the process crashes mid-broadcast (RPO=0).
+    if data.ledger do
+      snapshot = %{
+        state: :running,
+        in_flight: data.in_flight,
+        accumulated_tokens: data.accumulated_tokens
+      }
+
+      LedgerWriter.record_escalation(data.ledger, e, :global, snapshot)
+    end
+
+    :ok =
+      Phoenix.PubSub.broadcast(
+        data.pubsub,
+        "factory:escalation",
+        {:escalation, Map.merge(%{reason: e, scope: :global}, measurements)}
+      )
+
     {:next_state, :halting, data, [{:next_event, :internal, :drain}]}
   end
 
   # Per-unit escalation → stay running; treat as a terminal for loop progress.
-  def running(:info, {:escalate, {_e, :unit}}, data) do
-    telemetry(:escalate, %{}, %{scope: :unit})
+  # Also broadcasts to "factory:escalation" per C117 / D-336.
+  # WAL-before-ack (D-315, CON-7): record_escalation/4 call completes before
+  # any external effect (broadcast or loop) to ensure RPO=0 durability.
+  def running(:info, {:escalate, {e, :unit}}, data) do
+    # Measurements sourced from monotonic clock span (INV-REPORTING-SOURCED, governance.md §5).
+    duration_ms = System.monotonic_time(:millisecond) - data.start_mono_ms
+    measurements = %{total_tokens: data.accumulated_tokens, duration_ms: duration_ms}
+    :telemetry.execute([:tau, :factory, :coordinator, :escalate], measurements, %{scope: :unit})
+
+    # CON-7 / LIVE-liveness-2 (2/3): durable write — WAL-before-ack.
+    # Write reason + state snapshot to the Ledger BEFORE external effects so the
+    # escalation is durable even if the process crashes mid-broadcast (RPO=0).
+    if data.ledger do
+      snapshot = %{
+        state: :running,
+        in_flight: data.in_flight,
+        accumulated_tokens: data.accumulated_tokens
+      }
+
+      LedgerWriter.record_escalation(data.ledger, e, :unit, snapshot)
+    end
+
+    :ok =
+      Phoenix.PubSub.broadcast(
+        data.pubsub,
+        "factory:escalation",
+        {:escalation, Map.merge(%{reason: e, scope: :unit}, measurements)}
+      )
+
     data = %{data | in_flight: nil}
     {:keep_state, data, [{:next_event, :internal, :loop}]}
   end
 
+  # Stage token counts from unit-merged telemetry spans (INV-REPORTING-SOURCED).
+  # [:tau, :factory, :unit, :merged] fires when a Unit FSM transitions to :merged;
+  # the measurements map carries :total_tokens from the span.
+  # Store by unit_id so tokens are committed when unit_terminal fires — this
+  # tolerates any ordering of telemetry vs unit_terminal messages (async-safe).
+  def running(:info, {:telemetry_unit_merged, measurements, metadata}, data) do
+    unit_id = Map.get(metadata, :unit_id)
+    tokens = Map.get(measurements, :total_tokens, 0)
+
+    pending = Map.update(data.pending_unit_tokens, unit_id, tokens, &(&1 + tokens))
+    {:keep_state, %{data | pending_unit_tokens: pending}}
+  end
+
   def running(event_type, event, data) do
     Logger.debug("[Coordinator] running: unhandled #{inspect(event_type)} #{inspect(event)}")
+
+    # D-317(b): every reachable non-progress state MUST emit a trigger into E.
+    # Classify the unrecognised event via Escalation.classify/1 (which is total
+    # over term() — unknown inputs return {:"E-UNCLASSIFIED", :global}) and
+    # broadcast to "factory:escalation" so the control plane observes it.
+    {e, scope} = Escalation.classify(event)
+
+    duration_ms = System.monotonic_time(:millisecond) - data.start_mono_ms
+    measurements = %{total_tokens: data.accumulated_tokens, duration_ms: duration_ms}
+
+    :ok =
+      Phoenix.PubSub.broadcast(
+        data.pubsub,
+        "factory:escalation",
+        {:escalation, Map.merge(%{reason: e, scope: scope}, measurements)}
+      )
+
     {:keep_state, data}
   end
 
@@ -291,6 +472,17 @@ defmodule Tau.Factory.Coordinator do
 
   def halted(_event_type, _event, data) do
     {:keep_state, data}
+  end
+
+  # ---------------------------------------------------------------------------
+  # Terminate: detach telemetry handler to prevent cross-process leaks
+  # (INV-REPORTING-SOURCED — each coordinator instance owns its own handler).
+  # ---------------------------------------------------------------------------
+
+  @impl :gen_statem
+  def terminate(_reason, _state, data) do
+    :telemetry.detach(data.telemetry_handler_id)
+    :ok
   end
 
   # ---------------------------------------------------------------------------

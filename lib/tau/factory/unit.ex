@@ -191,7 +191,10 @@ defmodule Tau.Factory.Unit do
       # D-362: captured from {:work_ready, worker_id, branch, head_sha} (3-tuple seam).
       # Initialised to nil; stays nil when the legacy 2-tuple seam is used (D-363).
       head_sha: nil,
-      branch: nil
+      branch: nil,
+      # FR-4.4: count of upheld implementer challenges on this unit.
+      # When upheld_challenge_count > 2, the unit escalates E-CHALLENGE.
+      upheld_challenge_count: 0
     }
 
     # Transition immediately to planned state, which triggers admission.
@@ -508,6 +511,31 @@ defmodule Tau.Factory.Unit do
     demonitor_worker(data)
     new_data = %{data | worker_pid: nil, worker_id: nil, worker_mref: nil}
     escalate(new_data, :E_WORKER_STALLED)
+  end
+
+  # FR-4.4: handle an upheld implementer challenge.
+  # Every {:challenge, test, clause} message delivered to the Unit while in
+  # :implementing is treated as an upheld challenge (the actual adjudication
+  # by an independent critic is performed outside the FSM before sending this
+  # message — see factory-loop.md §Challenge protocol).
+  # When upheld_challenge_count + 1 > 2, escalate E-CHALLENGE (D-317).
+  def implementing(:info, {:challenge, _test, _clause}, data) do
+    new_count = data.upheld_challenge_count + 1
+
+    Logger.info("[Unit #{data.unit_id}] challenge received — upheld_challenge_count=#{new_count}")
+
+    if new_count > 2 do
+      Logger.warning(
+        "[Unit #{data.unit_id}] upheld challenge count #{new_count} > 2 — escalating E-CHALLENGE (FR-4.4)"
+      )
+
+      escalate(
+        %{data | upheld_challenge_count: new_count},
+        {:challenge, %{upheld_count: new_count}}
+      )
+    else
+      {:keep_state, %{data | upheld_challenge_count: new_count}}
+    end
   end
 
   # Handle monitored worker :DOWN (infra crash path, B8/C105).
