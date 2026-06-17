@@ -22,6 +22,7 @@ defmodule Tau.Factory.MergeAuthority do
   alias Tau.Factory.Merge.Cas
   alias Tau.Factory.Merge.Health
   alias Tau.Factory.Merge.RepoDirRegistry
+  alias Tau.Factory.Merge.Train
 
   require Logger
 
@@ -371,39 +372,115 @@ defmodule Tau.Factory.MergeAuthority do
 
     case reason do
       {:health_red, _report} ->
-        # Eject the train; do NOT requeue — health failure is terminal for this tip.
-        # D-355 (symmetric) / WAL-before-ack: write the durable :rejected outcome
-        # row for each ejected member BEFORE the ephemeral telemetry projection
-        # fires. Mirrors the :merged WAL-before-ack path in :committing (D-315,
-        # RPO=0). Only TERMINAL rejections are durable; requeues write nothing.
-        Enum.each(train, fn unit ->
-          LedgerWriter.record_merge_outcome(data.ledger, %{
-            unit_id: unit.id,
-            outcome: :rejected,
-            commit_sha: nil,
-            reason: :build_failed,
-            run: unit.run
-          })
-        end)
+        # INV-MAI-8 / D-303: when the batch tip is red and the train has a
+        # single member, it is trivially the culprit — eject immediately (same
+        # semantics as before). When B > 1, we cannot know which member broke
+        # the combined tip, so we spawn a bisect Task (Train.bisect/3) that
+        # calls build_fun on sub-trains to identify the culprit in O(log B)
+        # steps. The bisect result arrives as {:bisect_result, culprit,
+        # survivors}; a dedicated integrating/3 clause handles it.
+        case train do
+          [_single] ->
+            # B = 1: the lone member is the culprit — terminal eject.
+            # D-355 (symmetric) / WAL-before-ack: write the durable :rejected
+            # outcome row for the ejected member BEFORE the ephemeral telemetry
+            # projection fires.
+            Enum.each(train, fn unit ->
+              LedgerWriter.record_merge_outcome(data.ledger, %{
+                unit_id: unit.id,
+                outcome: :rejected,
+                commit_sha: nil,
+                reason: :build_failed,
+                run: unit.run
+              })
+            end)
 
-        telemetry(:reject, %{hash: hd_hash(train)}, %{reason: :build_failed, units: train})
+            telemetry(:reject, %{hash: hd_hash(train)}, %{reason: :build_failed, units: train})
 
-        # D-356: broadcast :rejected to each ejected member (terminal rejection).
-        Enum.each(train, fn unit ->
-          Phoenix.PubSub.broadcast(
-            data.pubsub,
-            "factory:pr:#{unit.id}",
-            {:merge_result, :rejected}
-          )
-        end)
+            # D-356: broadcast :rejected to the ejected member (terminal rejection).
+            Enum.each(train, fn unit ->
+              Phoenix.PubSub.broadcast(
+                data.pubsub,
+                "factory:pr:#{unit.id}",
+                {:merge_result, :rejected}
+              )
+            end)
 
-        next_data = eject_train(data)
-        transition_from_idle(next_data)
+            next_data = eject_train(data)
+            transition_from_idle(next_data)
+
+          _multiple ->
+            # B > 1: spawn a bisect Task to identify the culprit in O(log B)
+            # steps. The Task calls build_fun on sub-trains; when it completes
+            # the gen_statem receives {:bisect_result, culprit, survivors} and
+            # handles it in a dedicated clause below. We reuse task_ref/task_pid
+            # (the original build task has already returned at this point).
+            build_fun = data.build_fun
+            repo_dir = data.repo_dir
+            tasks_name = data.tasks_name
+
+            bisect_task =
+              Task.Supervisor.async_nolink(tasks_name, fn ->
+                base = fetch_main_oid(repo_dir)
+                {:culprit, culprit, survivors} = Train.bisect(train, build_fun, base)
+                {:bisect_result, culprit, survivors}
+              end)
+
+            telemetry(:bisect, %{}, %{units: train})
+
+            next_data = %{
+              data
+              | task_ref: bisect_task.ref,
+                task_pid: bisect_task.pid
+            }
+
+            {:keep_state, next_data}
+        end
 
       _other ->
         # D-394: non-health retryable failure — bounded retry or terminal eject.
         bounded_retry_or_eject(data, :build_failed)
     end
+  end
+
+  # Bisect task result: culprit identified; eject the culprit and re-queue
+  # the innocent survivors for re-integration (INV-MAI-8, D-303).
+  def integrating(:info, {ref, {:bisect_result, culprit, survivors}}, %{task_ref: ref} = data) do
+    Process.demonitor(ref, [:flush])
+
+    Logger.info(
+      "[MergeAuthority] bisect identified culprit: #{inspect(culprit.id)}; " <>
+        "survivors: #{inspect(Enum.map(survivors, & &1.id))}"
+    )
+
+    # Terminal eject for the culprit only (D-355 WAL-before-ack + D-356 broadcast).
+    LedgerWriter.record_merge_outcome(data.ledger, %{
+      unit_id: culprit.id,
+      outcome: :rejected,
+      commit_sha: nil,
+      reason: :build_failed,
+      run: culprit.run
+    })
+
+    telemetry(:reject, %{hash: hd_hash([culprit])}, %{reason: :build_failed, units: [culprit]})
+
+    Phoenix.PubSub.broadcast(
+      data.pubsub,
+      "factory:pr:#{culprit.id}",
+      {:merge_result, :rejected}
+    )
+
+    # Re-queue the innocent survivors; clear train / task handles.
+    # requeue_units prepends them to the queue head so they are picked up next.
+    data_after_eject = %{
+      data
+      | train: [],
+        task_ref: nil,
+        task_pid: nil
+    }
+
+    next_data = requeue_units(data_after_eject, survivors)
+    transition_from_idle(next_data)
   end
 
   # Task crashed (:DOWN without a prior result message).
