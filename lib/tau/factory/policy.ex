@@ -46,12 +46,21 @@ defmodule Tau.Factory.Policy do
     :escalation_thresholds
   ]
 
+  # Hard ceiling on retry_bound_n (HR-8, D-318, governance.md §3).
+  # N = min(policy, ceiling); :infinity is rejected (not clamped).
+  @hard_ceiling_n 3
+
   @doc """
   Engine clamp (HR-8): validates and tightens policy values before
   pinning at admission.
 
   Returns `{:ok, policy}` when the policy is valid; `{:error, reason}`
   when a field violates an engine hard ceiling.
+
+  `retry_bound_n` is clamped to `min(policy_value, @hard_ceiling_n)`
+  (D-318: N = min(policy, ceiling)). `:infinity` and non-positive values
+  are rejected with `{:error, _}` — the arch mandates rejection, not
+  clamping, for invalid sentinels (governance.md §3 "∞ rejected").
 
   `model_per_role` is passed through unchanged — the engine MUST NOT
   substitute a hardcoded model (INV-MODEL-POLICY).
@@ -62,6 +71,9 @@ defmodule Tau.Factory.Policy do
       not is_map(policy.model_per_role) ->
         {:error, {:invalid_field, :model_per_role, "must be a map"}}
 
+      policy.retry_bound_n == :infinity ->
+        {:error, {:invalid_field, :retry_bound_n, "infinity is rejected (governance.md §3)"}}
+
       not is_integer(policy.retry_bound_n) or policy.retry_bound_n < 1 ->
         {:error, {:invalid_field, :retry_bound_n, "must be a positive integer"}}
 
@@ -69,7 +81,8 @@ defmodule Tau.Factory.Policy do
         {:error, {:invalid_field, :budget, "must be a map"}}
 
       true ->
-        {:ok, policy}
+        clamped_n = min(policy.retry_bound_n, @hard_ceiling_n)
+        {:ok, %{policy | retry_bound_n: clamped_n}}
     end
   end
 end

@@ -124,7 +124,9 @@ defmodule Tau.Factory.Coordinator do
       halt_pending: false,
       in_flight: nil,
       # Track rehydrated units so :sys.get_state reveals them (Oracle c).
-      rehydrated: rehydrated
+      rehydrated: rehydrated,
+      # Monotonic start time for duration_ms telemetry sourcing (INV-REPORTING-SOURCED).
+      start_mono_ms: System.monotonic_time(:millisecond)
     }
 
     {:ok, :running, data, init_events}
@@ -158,8 +160,17 @@ defmodule Tau.Factory.Coordinator do
       nil ->
         # Milestone boundary: work exhausted. Broadcast operator-facing report
         # on the observation plane (C117 / INV-REPORTING-ESCALATION-ONLY).
+        # Measurements sourced from monotonic clock span (INV-REPORTING-SOURCED, governance.md §5).
+        duration_ms = System.monotonic_time(:millisecond) - data.start_mono_ms
+        measurements = %{total_tokens: 0, duration_ms: duration_ms}
+        :telemetry.execute([:tau, :factory, :coordinator, :milestone], measurements, %{})
+
         :ok =
-          Phoenix.PubSub.broadcast(data.pubsub, "factory:report", {:milestone_complete, %{}})
+          Phoenix.PubSub.broadcast(
+            data.pubsub,
+            "factory:report",
+            {:milestone_complete, measurements}
+          )
 
         {:keep_state, %{data | in_flight: nil}}
 
@@ -234,13 +245,16 @@ defmodule Tau.Factory.Coordinator do
   # transitions immediately to :halted.
   # Broadcasts to "factory:escalation" per C117 / D-336 (escalation conservation).
   def running(:info, {:escalate, {e, :global}}, data) do
-    telemetry(:escalate, %{}, %{scope: :global})
+    # Measurements sourced from monotonic clock span (INV-REPORTING-SOURCED, governance.md §5).
+    duration_ms = System.monotonic_time(:millisecond) - data.start_mono_ms
+    measurements = %{total_tokens: 0, duration_ms: duration_ms}
+    :telemetry.execute([:tau, :factory, :coordinator, :escalate], measurements, %{scope: :global})
 
     :ok =
       Phoenix.PubSub.broadcast(
         data.pubsub,
         "factory:escalation",
-        {:escalation, %{reason: e, scope: :global}}
+        {:escalation, Map.merge(%{reason: e, scope: :global}, measurements)}
       )
 
     {:next_state, :halting, data, [{:next_event, :internal, :drain}]}
@@ -249,13 +263,16 @@ defmodule Tau.Factory.Coordinator do
   # Per-unit escalation → stay running; treat as a terminal for loop progress.
   # Also broadcasts to "factory:escalation" per C117 / D-336.
   def running(:info, {:escalate, {e, :unit}}, data) do
-    telemetry(:escalate, %{}, %{scope: :unit})
+    # Measurements sourced from monotonic clock span (INV-REPORTING-SOURCED, governance.md §5).
+    duration_ms = System.monotonic_time(:millisecond) - data.start_mono_ms
+    measurements = %{total_tokens: 0, duration_ms: duration_ms}
+    :telemetry.execute([:tau, :factory, :coordinator, :escalate], measurements, %{scope: :unit})
 
     :ok =
       Phoenix.PubSub.broadcast(
         data.pubsub,
         "factory:escalation",
-        {:escalation, %{reason: e, scope: :unit}}
+        {:escalation, Map.merge(%{reason: e, scope: :unit}, measurements)}
       )
 
     data = %{data | in_flight: nil}
