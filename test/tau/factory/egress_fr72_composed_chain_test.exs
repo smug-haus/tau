@@ -307,9 +307,7 @@ defmodule Tau.Factory.EgressFr72ComposedChainTest do
       writer_name = :"#{owner_name}_ledger_writer"
 
       {:ok, _writer} =
-        start_supervised(
-          {Tau.Factory.Ledger.Writer, [db_path: ":memory:", name: writer_name]}
-        )
+        start_supervised({Tau.Factory.Ledger.Writer, [db_path: ":memory:", name: writer_name]})
 
       {:ok, _owner_pid} =
         start_supervised(
@@ -375,9 +373,7 @@ defmodule Tau.Factory.EgressFr72ComposedChainTest do
       writer_name = :"#{owner_name}_ledger_writer"
 
       {:ok, _writer} =
-        start_supervised(
-          {Tau.Factory.Ledger.Writer, [db_path: ":memory:", name: writer_name]}
-        )
+        start_supervised({Tau.Factory.Ledger.Writer, [db_path: ":memory:", name: writer_name]})
 
       {:ok, _owner_pid} =
         start_supervised(
