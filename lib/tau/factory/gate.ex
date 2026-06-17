@@ -120,7 +120,16 @@ defmodule Tau.Factory.Gate do
       case compose(req.policy_pin) do
         {:error, {:gate_floor_violation, missing}} ->
           Logger.warning("Gate floor violation for unit=#{req.unit}: missing #{inspect(missing)}")
-          Verdict.fold([{:floor, :fail}])
+
+          # Run every half that IS in the requested manifest so they appear in
+          # verdict.halves (D-323: :lint MUST appear even when another floor member
+          # is absent). The missing floor members are folded as :fail — they must
+          # never be silently absent from the verdict.
+          requested_manifest = requested_manifest(req.policy_pin)
+          base_verdict = run_halves(req, requested_manifest)
+          missing_results = Map.new(missing, fn half -> {half, :fail} end)
+          merged_halves = Map.merge(base_verdict.halves, missing_results)
+          %Verdict{status: :fail, halves: merged_halves}
 
         {:ok, manifest} ->
           run_halves(req, manifest)
@@ -142,6 +151,13 @@ defmodule Tau.Factory.Gate do
   # ---------------------------------------------------------------------------
   # Private — half execution
   # ---------------------------------------------------------------------------
+
+  # Extract the caller-supplied manifest from the policy pin, or fall back to
+  # the floor. Used when compose/1 detects a floor violation so we can still
+  # execute the halves the caller did request (D-323: :lint MUST appear in
+  # verdict.halves even when another floor member is absent from the manifest).
+  defp requested_manifest(%{gate_manifest: m}) when is_list(m), do: m
+  defp requested_manifest(_), do: @gate_floor
 
   defp run_halves(req, manifest) do
     concurrency = Map.get(req.policy_pin, :gate_concurrency, 4)
