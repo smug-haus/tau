@@ -63,6 +63,14 @@ defmodule Tau.Factory.WorkerSupervisor do
   A successful return here means the child was accepted by the supervisor;
   the worker may still stop asynchronously if `init/1` fails.
 
+  ## Oracle-separation guard (D-304 sub-mechanism (b))
+
+  When `role` is `:implementer` and `:author_id` is provided, the registry
+  is scanned for any live `:test_author` worker with the same `:author_id`.
+  If one is found, the spawn is rejected with `{:error, :same_identity_oracle_subject}`.
+  This enforces INV-5: the same agent identity MUST NOT author both the gating
+  test and the implementation (HR-7).
+
   Options (all passed through to `Tau.Factory.Worker`):
     - `:registry`            — atom; registered name of the WorkerRegistry (required).
     - `:repo_dir`            — path to the git repo (required).
@@ -71,6 +79,13 @@ defmodule Tau.Factory.WorkerSupervisor do
     - `:report_to`           — pid receiving `{:worker_exit, worker_id, reason}`.
     - `:heartbeat_interval`  — ms (optional).
     - `:worker_id`           — override the generated id (optional).
+    - `:author_id`           — string; stable logical identity of the spawning agent
+                               (NOT the per-spawn worker_id UUID). Recorded in the
+                               WorkerRegistry metadata (HR-7, D-304). When role is
+                               `:implementer`, a duplicate `:author_id` matching an
+                               existing `:test_author` returns
+                               `{:error, :same_identity_oracle_subject}` (D-304
+                               oracle-separation guard).
     - `:expected_head`       — SHA string (optional; overrides expected HEAD in
                                verify_position; used by tests to inject a mismatch).
     - `:extra_env`           — list of `{key, value}` string pairs merged into
@@ -89,15 +104,59 @@ defmodule Tau.Factory.WorkerSupervisor do
   def spawn(supervisor, role, brief, base_ref, opts) do
     worker_id = Keyword.get(opts, :worker_id, generate_worker_id())
     registry = Keyword.fetch!(opts, :registry)
+    author_id = Keyword.get(opts, :author_id)
 
-    worker_opts =
-      opts
-      |> Keyword.put(:worker_id, worker_id)
-      |> Keyword.put(:role, role)
-      |> Keyword.put(:brief, brief)
-      |> Keyword.put(:base_ref, base_ref)
-      |> Keyword.put(:registry, registry)
+    # D-304 oracle-separation guard (sub-mechanism (b), HR-7):
+    # When spawning an :implementer with a known author_id, reject the spawn
+    # if the same author_id has already authored a :test_author worker in this
+    # registry. This prevents the same agent identity from authoring both the
+    # gating test and the implementation.
+    if role == :implementer and not is_nil(author_id) and
+         same_identity_test_author_exists?(registry, author_id) do
+      {:error, :same_identity_oracle_subject}
+    else
+      worker_opts =
+        opts
+        |> Keyword.put(:worker_id, worker_id)
+        |> Keyword.put(:role, role)
+        |> Keyword.put(:brief, brief)
+        |> Keyword.put(:base_ref, base_ref)
+        |> Keyword.put(:registry, registry)
 
+      do_spawn(supervisor, worker_id, worker_opts)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Private helpers
+  # ---------------------------------------------------------------------------
+
+  # Check whether any live :test_author worker with the given author_id exists
+  # in the registry. Uses Registry.select/2 with a match spec that filters by
+  # role and author_id in the stored metadata map (HR-7, D-304).
+  @spec same_identity_test_author_exists?(atom(), String.t()) :: boolean()
+  defp same_identity_test_author_exists?(registry, author_id) do
+    # Match spec: select all entries whose value (metadata) has
+    # role: :test_author and author_id matching the given string.
+    # Registry.select/2 takes a match spec in the ETS format:
+    # [{match_pattern, guards, result}]
+    # The registry stores {key, pid, value}; select receives {key, pid, value}.
+    results =
+      Registry.select(registry, [
+        {{:"$1", :"$2", :"$3"}, [{:is_map, :"$3"}],
+         [
+           {{:"$1", :"$2", :"$3"}}
+         ]}
+      ])
+
+    Enum.any?(results, fn {_key, _pid, metadata} ->
+      is_map(metadata) and
+        Map.get(metadata, :role) == :test_author and
+        Map.get(metadata, :author_id) == author_id
+    end)
+  end
+
+  defp do_spawn(supervisor, worker_id, worker_opts) do
     child_spec = %{
       id: make_ref(),
       start: {Tau.Factory.Worker, :start_link, [worker_opts]},
@@ -130,10 +189,6 @@ defmodule Tau.Factory.WorkerSupervisor do
         {:error, reason}
     end
   end
-
-  # ---------------------------------------------------------------------------
-  # Private helpers
-  # ---------------------------------------------------------------------------
 
   # Generate a unique worker_id using a random UUID-like format.
   defp generate_worker_id do

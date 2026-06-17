@@ -94,11 +94,17 @@ defmodule Tau.Factory.Worker do
   def start_link(opts) do
     worker_id = Keyword.fetch!(opts, :worker_id)
     registry = Keyword.fetch!(opts, :registry)
+    role = Keyword.fetch!(opts, :role)
+    author_id = Keyword.get(opts, :author_id)
+
+    # Register with metadata so the Gate and WorkerSupervisor can query
+    # author identity per HR-7 (D-304 oracle-separation sub-mechanism (b)).
+    metadata = %{role: role, author_id: author_id}
 
     GenServer.start_link(
       __MODULE__,
       opts,
-      name: {:via, Registry, {registry, worker_id}}
+      name: {:via, Registry, {registry, worker_id, metadata}}
     )
   end
 
