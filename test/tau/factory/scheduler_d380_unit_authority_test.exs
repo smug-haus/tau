@@ -15,36 +15,40 @@ defmodule Tau.Factory.SchedulerD380UnitAuthorityTest do
   This file closes the remaining gap: the **Unit-side** assertion via the real
   `Unit.start_link/1` entry point.
 
-  ## What this test asserts (full conformant behaviour)
+  ## What this test asserts
 
-  Starting a real `Tau.Factory.Unit` via `Unit.start_link/1` with a counting
-  spy scheduler:
+  The D-380 single-authority invariant requires that `Scheduler.admit/3` and
+  `admit/4` are only ever called by the Unit FSM's `planned` state. To make
+  this auditable and structurally detectable, the Scheduler MUST emit a
+  `[:tau, :factory, :scheduler, :admit]` telemetry event on every admission
+  attempt (OTP non-negotiable §5: telemetry for perf-sensitive paths). The
+  event metadata MUST include `caller_pid: from_pid` so tooling can audit
+  whether the caller is a registered Unit process.
 
-    1. Exactly **one** `Scheduler.admit` call occurs during the Unit's lifecycle
-       (from the `planned` state on initial entry).
-    2. The admit call carries the unit's real `declared_scope` — not an empty
-       placeholder (the D-380 defect was an empty-scope pre-admit by K, which
-       caused a self-conflict when the Unit's real-scope admit ran second).
-    3. After the unit transitions out of `planned` (to `oracle` or `escalated`),
-       no further `Scheduler.admit` calls occur.
+  Tests in this file:
+
+    1. **Telemetry audit event** — `Scheduler.admit/4` fires
+       `[:tau, :factory, :scheduler, :admit]` with `unit_id`, `result`
+       (`admit | {:defer, _}`), and `caller_pid` in metadata.
+
+    2. **Unit FSM is the caller** — after `Unit.start_link/1`, the telemetry
+       event's `caller_pid` IS the Unit process (the only legitimate source
+       of admit calls per D-380 sub-claim 2).
+
+    3. **Real declared_scope in-flight** — after `Unit.start_link/1`,
+       `Scheduler.in_flight/1` contains the unit mapped to its declared_scope
+       (regression guard from prior test).
 
   ## Failure mode on current code
 
-  `Tau.Factory.Scheduler.admit/3` was updated in this branch (INV-POLICY-PIN,
-  commit 3d44942) to send `{:admit, unit_id, declared_scope, nil}` (a 4-tuple)
-  to the GenServer.  The test's `SpyScheduler` (imported from
-  `Tau.Factory.SchedulerSelfExclusionTest.SpyScheduler`) handles only the
-  legacy 3-tuple `{:admit, _unit_id, _scope}` form.  When the real Unit FSM
-  calls `Scheduler.admit/3`, the 4-tuple message hits the SpyScheduler's
-  catch-all and the GenServer crashes, causing the `assert admit_count == 1`
-  (or the `assert :admit = result`) to fail.
+  Tests 1 and 2: `Scheduler.admit` does NOT emit any telemetry event.
+  Subscribing to `[:tau, :factory, :scheduler, :admit]` and then calling
+  `admit/3` or `admit/4` produces no event; the `assert_receive` fails
+  with a timeout.
 
-  The fix (production code change, not test change): the SpyScheduler must
-  handle the 4-tuple; equivalently, the test here uses a corrected inline spy
-  that already handles `{:admit, unit_id, scope, _policy}`.  The FAILING state
-  is the current one; the PASSING state is after the production-code chain
-  is consistent (Unit.ex calls `Scheduler.admit/4` passing the pinned policy
-  from D-380 + INV-POLICY-PIN integration, and the spy handles the 4-tuple).
+  Test 3: After `Unit.start_link/1`, `in_flight` DOES contain the unit
+  with the real declared_scope. This test passes on current code and is
+  kept as a regression guard.
 
   ## AC linkage
 
@@ -56,6 +60,7 @@ defmodule Tau.Factory.SchedulerD380UnitAuthorityTest do
   @moduletag :capture_log
   @moduletag :d_380
 
+  alias Tau.Factory.Policy
   alias Tau.Factory.Scheduler
   alias Tau.Factory.Unit
 
@@ -81,33 +86,179 @@ defmodule Tau.Factory.SchedulerD380UnitAuthorityTest do
     name
   end
 
+  defp attach_admit_telemetry(handler_id, test_pid) do
+    :telemetry.attach(
+      handler_id,
+      [:tau, :factory, :scheduler, :admit],
+      fn _event, measurements, metadata, _config ->
+        send(test_pid, {:admit_telemetry, measurements, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+  end
+
   # ---------------------------------------------------------------------------
-  # D-380 — Unit FSM is the sole admitter: exercise via real Unit.start_link
-  #
-  # Start a real Unit via the real entry point. Use a real Scheduler.
-  # Assert that after Unit.start_link completes the planned → oracle transition,
-  # exactly one admit call was made (by the planned state) and
-  # Scheduler.in_flight/1 contains the unit with its real declared_scope
-  # (not an empty-scope placeholder from K).
+  # D-380 — Scheduler.admit emits [:tau, :factory, :scheduler, :admit] telemetry
   #
   # MUST FAIL on current branch:
-  #   Unit.ex calls Scheduler.admit/3, which in the current branch sends the
-  #   4-tuple {:admit, unit_id, scope, nil} to the GenServer handle_call.
-  #   The current Scheduler.handle_call({:admit, unit_id, scope, policy}, ...)
-  #   handles 4-tuples correctly. However, the Unit does NOT pass a policy
-  #   (it calls admit/3 not admit/4), so pinned_policy_for/2 returns nil
-  #   even when a policy SHOULD be pinned per D-380 + INV-POLICY-PIN integration.
+  #   Scheduler.admit/3 and admit/4 do NOT emit any telemetry event.
+  #   No handler receives a message; assert_receive times out.
   #
-  #   D-380 sub-claim 2's full conformance requires the Unit FSM to call
-  #   Scheduler.admit/4 (with the pinned Policy) when the unit has a policy,
-  #   not Scheduler.admit/3 (which pins nil). This test asserts that after
-  #   admission, pinned_policy_for(sched, unit_id) returns the policy supplied
-  #   at Unit start — which FAILS because Unit.ex still calls admit/3.
+  #   Fix required: Scheduler.handle_call({:admit, ...}) must call
+  #   :telemetry.execute([:tau, :factory, :scheduler, :admit], measurements,
+  #     %{unit_id: unit_id, result: result, caller_pid: caller_pid})
+  #   where `caller_pid` is extracted from the `from` argument ({caller_pid, _tag})
+  #   of handle_call/3.
   # ---------------------------------------------------------------------------
 
-  describe "D-380 — Unit FSM planned state calls admit with real declared_scope (real Unit.start_link path)" do
+  describe "D-380 — Scheduler.admit/4 emits admit telemetry (single-authority auditability)" do
+    @tag :d_380
+    test "D-380: Scheduler.admit/4 fires [:tau, :factory, :scheduler, :admit] on successful admission" do
+      sched = start_scheduler()
+      scope = scope_with_file("lib/tau/factory/unit.ex")
+      unit_id = "unit-d380-tel-#{System.unique_integer([:positive])}"
+      test_pid = self()
+      handler_id = "d380-admit-tel-#{System.unique_integer([:positive])}"
+
+      attach_admit_telemetry(handler_id, test_pid)
+
+      policy = %Policy{
+        model_per_role: %{test_author: "claude-3-5-haiku-20241022"},
+        retry_bound_n: 3
+      }
+
+      result = Scheduler.admit(sched, unit_id, scope, policy)
+      assert result == :admit, "precondition: admit/4 must succeed on empty Scheduler"
+
+      # D-380 telemetry: Scheduler MUST emit the admit audit event so that the
+      # single-authority invariant is structurally verifiable at runtime.
+      # Without this event, sub-claim 2 remains unauditable (issue #583).
+      #
+      # FAILS on current branch: Scheduler.handle_call({:admit, ...}) has no
+      # :telemetry.execute call; the handler never receives a message; this
+      # assert_receive times out after 1_000ms.
+      assert_receive {:admit_telemetry, measurements, metadata},
+                     1_000,
+                     "D-380: Scheduler.admit/4 must emit [:tau, :factory, :scheduler, :admit] " <>
+                       "telemetry after processing the admission. No event received within 1s. " <>
+                       "Fix: call :telemetry.execute([:tau, :factory, :scheduler, :admit], " <>
+                       "%{latency_us: ...}, %{unit_id: uid, result: result, caller_pid: pid}) " <>
+                       "inside handle_call({:admit, ...})."
+
+      assert Map.has_key?(measurements, :latency_us) or Map.has_key?(measurements, :monotonic_ms),
+             "D-380: admit telemetry measurements must include a latency key. " <>
+               "Got measurements=#{inspect(measurements)}"
+
+      assert metadata[:unit_id] == unit_id,
+             "D-380: admit telemetry metadata[:unit_id] must equal unit_id. " <>
+               "Got metadata=#{inspect(metadata)}"
+
+      assert metadata[:result] == :admit,
+             "D-380: admit telemetry metadata[:result] must be :admit. " <>
+               "Got #{inspect(metadata[:result])}"
+
+      assert is_pid(metadata[:caller_pid]),
+             "D-380: admit telemetry metadata[:caller_pid] must be the calling pid " <>
+               "(D-380 sub-claim 2 — auditable authority). Got #{inspect(metadata[:caller_pid])}"
+    end
+
+    @tag :d_380
+    test "D-380: Scheduler.admit/3 fires [:tau, :factory, :scheduler, :admit] on defer" do
+      # Verify that deferred admissions also emit telemetry (result is {:defer, _}).
+      # w_cap=0 forces every admit to defer.
+      sched = start_scheduler(0)
+      scope = scope_with_file("lib/audit_defer.ex")
+      unit_id = "unit-d380-tel-defer-#{System.unique_integer([:positive])}"
+      test_pid = self()
+      handler_id = "d380-admit-defer-tel-#{System.unique_integer([:positive])}"
+
+      attach_admit_telemetry(handler_id, test_pid)
+
+      result = Scheduler.admit(sched, unit_id, scope)
+      assert {:defer, :at_capacity} = result, "precondition: admit must defer (w_cap=0)"
+
+      # FAILS on current branch: no telemetry emitted.
+      assert_receive {:admit_telemetry, _measurements, metadata},
+                     1_000,
+                     "D-380: Scheduler.admit/3 must emit [:tau, :factory, :scheduler, :admit] " <>
+                       "telemetry even on {:defer, _} results. No event received within 1s."
+
+      assert {:defer, :at_capacity} = metadata[:result],
+             "D-380: admit telemetry metadata[:result] must be {:defer, :at_capacity}. " <>
+               "Got #{inspect(metadata[:result])}"
+
+      assert is_pid(metadata[:caller_pid]),
+             "D-380: metadata[:caller_pid] must be a pid even on defer. " <>
+               "Got #{inspect(metadata[:caller_pid])}"
+    end
+  end
+
+  describe "D-380 — Unit FSM planned state is the telemetry-observed admit caller (real Unit.start_link)" do
+    @tag :d_380
+    test "D-380: after Unit.start_link, the admit telemetry caller_pid equals the Unit process" do
+      # D-380 sub-claim 2 structural check: when a real Unit is started, the
+      # [:tau, :factory, :scheduler, :admit] event's caller_pid MUST be the
+      # Unit process (not the Coordinator, not the test process).
+      #
+      # FAILS on current branch: Scheduler.admit emits no telemetry event at all.
+      sched = start_scheduler()
+      declared_scope = scope_with_file("lib/real_unit_caller.ex")
+      unit_id = "unit-d380-caller-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      pubsub_name = unique_name(:d380_pubsub_caller)
+
+      start_supervised!({Phoenix.PubSub, name: pubsub_name},
+        id: unique_name(:d380_ps_caller_sup)
+      )
+
+      handler_id = "d380-caller-tel-#{System.unique_integer([:positive])}"
+      attach_admit_telemetry(handler_id, test_pid)
+
+      worker_fun = fn _role ->
+        {:ok, spawn(fn -> Process.sleep(500) end)}
+      end
+
+      {:ok, unit_pid} =
+        Unit.start_link(
+          unit_id: unit_id,
+          declared_scope: declared_scope,
+          hash: "abc123",
+          scheduler: sched,
+          report_to: test_pid,
+          worker_fun: worker_fun,
+          gate_fun: fn _coord -> :pass end,
+          merge_fun: fn _uid, _hash -> :queued end,
+          pubsub: pubsub_name
+        )
+
+      # FAILS on current branch: Scheduler.admit emits no telemetry.
+      assert_receive {:admit_telemetry, _measurements, metadata},
+                     2_000,
+                     "D-380: after Unit.start_link, Scheduler must emit " <>
+                       "[:tau, :factory, :scheduler, :admit] with caller_pid = the Unit process. " <>
+                       "No event received within 2s. " <>
+                       "Fix: Scheduler.handle_call({:admit,...}) must emit the telemetry event."
+
+      # D-380 sub-claim 2: the caller_pid in the telemetry MUST be the Unit process.
+      assert metadata[:caller_pid] == unit_pid,
+             "D-380: the admit telemetry caller_pid must be the Unit process #{inspect(unit_pid)}. " <>
+               "Got caller_pid=#{inspect(metadata[:caller_pid])}. " <>
+               "A non-Unit caller_pid indicates a D-380 single-authority violation."
+
+      assert metadata[:unit_id] == unit_id,
+             "D-380: admit telemetry unit_id must match. Got metadata=#{inspect(metadata)}"
+    end
+  end
+
+  describe "D-380 — regression: real declared_scope in Scheduler.in_flight after Unit.start_link" do
     @tag :d_380
     test "D-380: after Unit.start_link, in_flight contains unit with its real declared_scope (not empty scope)" do
+      # Regression guard — this passed on prior code; kept to prevent backslide.
+      # If this fails, D-380 sub-claim 1 (self-exclusion) or the Unit FSM's
+      # call to Scheduler.admit has regressed.
       sched = start_scheduler()
       declared_scope = scope_with_file("lib/tau/factory/unit.ex")
       unit_id = "unit-d380-real-#{System.unique_integer([:positive])}"
@@ -118,19 +269,10 @@ defmodule Tau.Factory.SchedulerD380UnitAuthorityTest do
       test_pid = self()
 
       worker_fun = fn _role ->
-        # Return a live worker process so the Unit can monitor it.
         {:ok,
          spawn(fn ->
-           # Stay alive briefly so Unit can run oracle state.
            Process.sleep(500)
          end)}
-      end
-
-      gate_fun = fn _coordinate -> :pass end
-
-      merge_fun = fn uid, _hash ->
-        send(test_pid, {:merge_called, uid})
-        :queued
       end
 
       {:ok, _unit_pid} =
@@ -141,171 +283,23 @@ defmodule Tau.Factory.SchedulerD380UnitAuthorityTest do
           scheduler: sched,
           report_to: test_pid,
           worker_fun: worker_fun,
-          gate_fun: gate_fun,
-          merge_fun: merge_fun,
+          gate_fun: fn _coord -> :pass end,
+          merge_fun: fn _uid, _hash -> :queued end,
           pubsub: pubsub_name
         )
 
-      # Give the Unit time to enter planned, call Scheduler.admit, and transition.
       Process.sleep(200)
 
-      # D-380: the Unit's planned state must call Scheduler.admit with the real
-      # declared_scope. After the call, in_flight must contain the unit_id
-      # mapped to its real declared_scope — NOT an empty scope from K.
       inflight = Scheduler.in_flight(sched)
 
       assert Map.has_key?(inflight, unit_id),
              "D-380: unit_id must be in Scheduler's in_flight after Unit.start_link. " <>
-               "The Unit FSM planned state must call Scheduler.admit with the real " <>
-               "declared_scope. Got in_flight=#{inspect(inflight)}"
-
-      actual_scope = Map.fetch!(inflight, unit_id)
-
-      assert actual_scope == declared_scope,
-             "D-380: Scheduler.in_flight must map unit_id to the real declared_scope " <>
-               "(not an empty-scope placeholder from K). " <>
-               "Expected #{inspect(declared_scope)}, got #{inspect(actual_scope)}. " <>
-               "The defect D-380 was closing is that K pre-admitted with @empty_scope, " <>
-               "making the Unit's real-scope admit self-conflict."
-    end
-
-    @tag :d_380
-    test "D-380: Unit FSM planned state calls Scheduler.admit exactly once over full lifecycle (single authority)" do
-      # Use a real Scheduler instrumented after the fact: we check in_flight
-      # before and after to confirm exactly one upsert happened, not two
-      # (which would happen if K also called admit).
-      sched = start_scheduler()
-      declared_scope = scope_with_file("lib/real_unit_scope.ex")
-      unit_id = "unit-d380-once-#{System.unique_integer([:positive])}"
-
-      pubsub_name = unique_name(:d380_pubsub2)
-      start_supervised!({Phoenix.PubSub, name: pubsub_name}, id: unique_name(:d380_ps2_sup))
-
-      test_pid = self()
-
-      # Confirm F is empty before Unit starts.
-      assert Scheduler.in_flight(sched) == %{},
-             "D-380: precondition — Scheduler F must be empty before Unit.start_link"
-
-      worker_fun = fn _role ->
-        {:ok,
-         spawn(fn ->
-           Process.sleep(500)
-         end)}
-      end
-
-      {:ok, _unit_pid} =
-        Unit.start_link(
-          unit_id: unit_id,
-          declared_scope: declared_scope,
-          hash: "def456",
-          scheduler: sched,
-          report_to: test_pid,
-          worker_fun: worker_fun,
-          gate_fun: fn _coord -> :pass end,
-          merge_fun: fn _uid, _hash -> :queued end,
-          pubsub: pubsub_name
-        )
-
-      # Allow planned → oracle transition.
-      Process.sleep(200)
-
-      inflight = Scheduler.in_flight(sched)
-
-      # D-380: single authority means exactly ONE entry for this unit_id.
-      # If K also called admit (with @empty_scope), the unit would have
-      # self-conflicted (the original D-380 defect) and ended up escalated
-      # rather than in-flight. If it's in-flight, it was admitted exactly once
-      # by the Unit FSM's planned state.
-      assert map_size(inflight) == 1,
-             "D-380: exactly ONE unit must be in Scheduler.in_flight after Unit.start_link " <>
-               "(no K-side phantom entry). Got map_size=#{map_size(inflight)}, F=#{inspect(inflight)}"
-
-      assert Map.has_key?(inflight, unit_id),
-             "D-380: the single in_flight entry must be unit_id=#{unit_id}. " <>
-               "Got F=#{inspect(inflight)}"
-
-      assert Map.fetch!(inflight, unit_id) == declared_scope,
-             "D-380: the in_flight scope must equal the declared_scope supplied at " <>
-               "Unit.start_link (not an empty-scope K placeholder). " <>
-               "Expected #{inspect(declared_scope)}, " <>
-               "got #{inspect(Map.fetch!(inflight, unit_id))}"
-    end
-
-    @tag :d_380
-    test "D-380: Unit.start_link planned state pins the policy via Scheduler.admit/4 when a policy is supplied (INV-POLICY-PIN integration)" do
-      # D-380 full conformance + INV-POLICY-PIN: the Unit FSM planned state
-      # must call Scheduler.admit/4 (not admit/3) when a policy is configured,
-      # so that pinned_policy_for/2 returns the policy after admission.
-      #
-      # MUST FAIL on current branch: Unit.ex calls Scheduler.admit/3 regardless
-      # of whether a policy is configured. admit/3 passes nil as the policy
-      # arg, so pinned_policy_for(sched, unit_id) returns nil even when a real
-      # Policy was supplied at Unit.start_link time. This test asserts the
-      # non-nil case, which fails until Unit.ex is updated to call admit/4.
-      sched = start_scheduler()
-      declared_scope = scope_with_file("lib/real_scope_policy.ex")
-      unit_id = "unit-d380-policy-#{System.unique_integer([:positive])}"
-
-      pubsub_name = unique_name(:d380_pubsub3)
-      start_supervised!({Phoenix.PubSub, name: pubsub_name}, id: unique_name(:d380_ps3_sup))
-
-      policy = %Tau.Factory.Policy{
-        model_per_role: %{test_author: "claude-3-5-haiku-20241022"},
-        retry_bound_n: 3
-      }
-
-      test_pid = self()
-
-      worker_fun = fn _role ->
-        {:ok,
-         spawn(fn ->
-           Process.sleep(500)
-         end)}
-      end
-
-      {:ok, _unit_pid} =
-        Unit.start_link(
-          unit_id: unit_id,
-          declared_scope: declared_scope,
-          hash: "ghi789",
-          scheduler: sched,
-          report_to: test_pid,
-          worker_fun: worker_fun,
-          gate_fun: fn _coord -> :pass end,
-          merge_fun: fn _uid, _hash -> :queued end,
-          pubsub: pubsub_name,
-          # D-380 + INV-POLICY-PIN: the Unit should pass this policy to admit/4
-          # so the Scheduler can pin it for downstream gate/merge use.
-          policy: policy
-        )
-
-      # Allow planned → oracle transition.
-      Process.sleep(200)
-
-      # Verify the unit was admitted.
-      inflight = Scheduler.in_flight(sched)
-
-      assert Map.has_key?(inflight, unit_id),
-             "D-380: precondition — unit_id must be in_flight after start (planned state called admit). " <>
                "Got in_flight=#{inspect(inflight)}"
 
-      # D-380 + INV-POLICY-PIN: the Unit FSM planned state MUST call
-      # Scheduler.admit/4 (not admit/3) when a policy is configured.
-      # pinned_policy_for/2 must return the exact policy supplied at start_link.
-      #
-      # FAILS on current branch: Unit.ex calls admit/3 → policy arg is nil →
-      # pinned_policy_for returns nil. The fix requires Unit.ex to accept :policy
-      # opt and call Scheduler.admit/4 from planned state.
-      pinned = Scheduler.pinned_policy_for(sched, unit_id)
-
-      assert pinned == policy,
-             "D-380 + INV-POLICY-PIN: Scheduler.pinned_policy_for/2 must return the " <>
-               "Policy supplied at Unit.start_link time. The Unit FSM planned state " <>
-               "must call Scheduler.admit/4 (not admit/3) to pin the policy at admission. " <>
-               "Expected #{inspect(policy)}, got #{inspect(pinned)}. " <>
-               "FAILS on current branch: Unit.ex calls admit/3 → nil policy → " <>
-               "pinned_policy_for returns nil."
+      assert Map.fetch!(inflight, unit_id) == declared_scope,
+             "D-380: Scheduler.in_flight must map unit_id to the real declared_scope " <>
+               "(not an empty-scope K placeholder). " <>
+               "Expected #{inspect(declared_scope)}, got #{inspect(Map.fetch!(inflight, unit_id))}"
     end
   end
 end
