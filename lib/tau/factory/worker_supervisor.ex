@@ -52,6 +52,25 @@ defmodule Tau.Factory.WorkerSupervisor do
   end
 
   @doc """
+  Returns the cross-node routing mechanism for the execution tier.
+
+  Always returns `:oban_queue`, declaring that the Oban queue boundary is the
+  ONLY permitted cross-node routing mechanism for W/G (workers and gate runs).
+  Raw distributed Erlang full-mesh routing MUST NOT be used for FSMs or large
+  payloads (diffs, agent transcripts), which would cause head-of-line blocking
+  on the full-mesh TCP connections between cluster nodes (INV-DIST-NO-FULLMESH,
+  distribution-readiness.md §4).
+
+  This function makes the architectural wall machine-checkable: any future PR
+  that introduces raw distributed routing would need to change this return value,
+  triggering the gating test for issue #593.
+
+  See `docs/arch/04-software-architecture/distribution-readiness.md` §3, §4.
+  """
+  @spec cross_node_routing_mechanism() :: :oban_queue
+  def cross_node_routing_mechanism, do: :oban_queue
+
+  @doc """
   Returns the liveness authority for workers on the given node.
 
   - `:local_process_monitor` — for the local node (`node()`). In-node workers
