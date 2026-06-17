@@ -165,7 +165,7 @@ defmodule Tau.Factory.CoordinatorEscalationDurabilityTest do
     # Tau.Factory.Ledger.Writer.
     records = @writer.escalations_recorded(ledger)
 
-    assert length(records) >= 1,
+    assert records != [],
            "LIVE-liveness-2 (2/3): global escalation MUST write reason + state " <>
              "snapshot to the durable Ledger (record_escalation/3, CON-7 / B3). " <>
              "escalations_recorded/1 returned an empty list — the Coordinator " <>
@@ -229,7 +229,7 @@ defmodule Tau.Factory.CoordinatorEscalationDurabilityTest do
     # FAILS today with UndefinedFunctionError — same root cause as global path.
     records = @writer.escalations_recorded(ledger)
 
-    assert length(records) >= 1,
+    assert records != [],
            "LIVE-liveness-2 (2/3): per-unit escalation MUST durably write reason " <>
              "+ state snapshot to the Ledger (record_escalation/3, CON-7 / B3). " <>
              "escalations_recorded/1 returned an empty list."
