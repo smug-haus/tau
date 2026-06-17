@@ -13,19 +13,22 @@ defmodule Tau.Factory.SpecMembershipPropertyTest do
 
     `Gate.SpecMembership.check/3` FAILs a diff that touches any source-map
     boundary path without a `SPEC-*`/`D-NNN` token in the PR body, naming
-    that boundary. A diff touching only non-SPEC'd paths ⇒ PASS regardless
+    that boundary. A diff touching only non-SPEC'd paths => PASS regardless
     of body.
 
   ## Properties
 
-  - **P-SP1** (SPEC'd-boundary-without-reference ⇒ FAIL): a diff touching a
+  - **P-SP1** (SPEC'd-boundary-without-reference => FAIL): a diff touching a
     source-map boundary with no `SPEC-*`/`D-NNN` token in the PR body causes
     `Gate.run/1` to return `:fail` for the `:spec_membership` half, naming
     that boundary.
 
-  - **P-SP2** (non-SPEC'd-only ⇒ PASS): when every path touched by the diff
-    is absent from all source-map boundaries, `Gate.run/1` returns `:pass`
-    for the `:spec_membership` half regardless of body content.
+  - **P-SP2** (non-SPEC'd-only => PASS): when every path touched by the diff
+    is absent from all source-map boundaries, `SpecMembership.check/3` returns
+    `{:pass, []}` regardless of body content. Tested at the pure-function
+    boundary in `test/mix/gate/spec_membership_p_sp2_test.exs` (not here via
+    Gate.run/1, because the oracle stub returns :pass for unmapped halves
+    by default, making Gate.run/1 tests that assert :pass vacuous).
 
   ## Fail-before contract (why these tests fail at the merge-base)
 
@@ -36,13 +39,17 @@ defmodule Tau.Factory.SpecMembershipPropertyTest do
   - `verdict.halves[:spec_membership]` is therefore `{:error, _}`, not `:pass`
     or `:fail`.
   - `assert verdict.halves[:spec_membership] == :fail` FAILS.
-  - `assert verdict.halves[:spec_membership] == :pass` FAILS.
 
-  The tests exercise `Gate.run/1` (the real user-facing path for D-322) using the
-  `spec_membership_diff` / `spec_membership_pr_body` / `spec_membership_source_maps`
-  hermetic seam keys — NOT the `spec_membership_override` bypass. This forces the
-  gate to invoke the real `SpecMembership.check/3` logic end-to-end through the
-  production path.
+  The P-SP1 test exercises `Gate.run/1` (the real user-facing path for D-322)
+  using the `spec_membership_diff` / `spec_membership_source_maps` hermetic
+  seam keys. This forces the gate to invoke the real `SpecMembership.check/3`
+  logic end-to-end through the production path.
+
+  P-SP2 and corollary tests (assert :pass) are NOT exercised through Gate.run/1
+  here because the oracle stub returns :pass for unmapped halves by default —
+  making those tests vacuous. They live in `test/mix/gate/spec_membership_p_sp2_test.exs`
+  where they call `SpecMembership.check/3` directly (UndefinedFunctionError at
+  merge-base).
 
   AC linkage: AC-7, D-322 (the `@tag :ac_7` / `@tag :d_322` / `@tag :property`
   tokens satisfy Gate 5.1).
@@ -61,7 +68,7 @@ defmodule Tau.Factory.SpecMembershipPropertyTest do
   @request_mod Tau.Factory.Gate.Request
   @writer Tau.Factory.Ledger.Writer
 
-  # A fixed SPEC-source-map boundary used across P-SP1/P-SP2 tests.
+  # A fixed SPEC-source-map boundary used across tests.
   @test_boundary "lib/spec_membership_test_boundary/module.ex"
   @test_spec_ref "SPEC-FACTORY-GATE"
 
@@ -74,16 +81,7 @@ defmodule Tau.Factory.SpecMembershipPropertyTest do
   +new line
   """
 
-  # A diff that does NOT touch @test_boundary — used for the P-SP2 pass path.
-  @non_boundary_diff """
-  --- a/lib/totally_unrelated/helper.ex
-  +++ b/lib/totally_unrelated/helper.ex
-  @@ -1,1 +1,2 @@
-   existing line
-  +new line
-  """
-
-  # Source maps provided via spec_membership_source_maps policy_pin key.
+  # Source maps: only @test_boundary is a SPEC'd path.
   @source_maps [{@test_boundary, @test_spec_ref}]
 
   # ---------------------------------------------------------------------------
@@ -107,7 +105,7 @@ defmodule Tau.Factory.SpecMembershipPropertyTest do
   end
 
   # ---------------------------------------------------------------------------
-  # P-SP1: SPEC'd-boundary-without-reference ⇒ :fail via Gate.run/1
+  # P-SP1: SPEC'd-boundary-without-reference => :fail via Gate.run/1
   #
   # The diff (spec_membership_diff) touches @test_boundary. The PR body
   # (spec_membership_pr_body) is absent (defaults to ""), which contains no
@@ -115,8 +113,12 @@ defmodule Tau.Factory.SpecMembershipPropertyTest do
   # and Gate.run/1 MUST map this to verdict.halves[:spec_membership] == :fail.
   #
   # Fail-before: at the merge-base, run_half(:spec_membership, ...) hits the
-  # unknown_half catch-all → {:error, {:unknown_half, :spec_membership}}.
+  # unknown_half catch-all => {:error, {:unknown_half, :spec_membership}}.
   # The assertion `== :fail` FAILS.
+  #
+  # NOT vacuous: the oracle stub returns :pass by default for unmapped halves.
+  # Asserting :fail via Gate.run/1 discriminates stub (would give :pass) from
+  # the real check (gives :fail). P-SP1 stays at the Gate.run/1 boundary.
   # ---------------------------------------------------------------------------
 
   @tag :ac_7
@@ -155,134 +157,7 @@ defmodule Tau.Factory.SpecMembershipPropertyTest do
   end
 
   # ---------------------------------------------------------------------------
-  # P-SP1 corollary: SPEC'd-boundary WITH reference ⇒ :pass via Gate.run/1
-  #
-  # Same diff touches @test_boundary. The PR body (spec_membership_pr_body) DOES
-  # contain a SPEC-* token. SpecMembership.check/3 MUST return {:pass, []}, and
-  # Gate.run/1 MUST map this to verdict.halves[:spec_membership] == :pass.
-  #
-  # Fail-before: at the merge-base, the unknown_half catch-all fires →
-  # {:error, {:unknown_half, :spec_membership}}, not :pass. FAILS.
-  # ---------------------------------------------------------------------------
-
-  @tag :ac_7
-  @tag :d_322
-  test "P-SP1 corollary (D-322): Gate.run/1 returns :pass for :spec_membership when diff touches a SPEC'd boundary AND PR body has a SPEC ref",
-       %{writer: writer, repo: repo} do
-    req =
-      build_request(repo, writer, %{
-        gate_manifest: [:mutation, :critic, :reviewer, :lint, :spec_membership],
-        gate_concurrency: 4,
-        gate_timeout: 120_000,
-        oracle: %{critic: :pass, reviewer: :pass},
-        lint_override: %LintDescriptor{steps: []},
-        spec_membership_diff: @boundary_touching_diff,
-        spec_membership_pr_body: "This PR advances SPEC-FACTORY-GATE D-322.",
-        spec_membership_source_maps: @source_maps
-      })
-
-    verdict = @gate.run(req)
-
-    sm_result = Map.get(verdict.halves, :spec_membership, :absent)
-
-    assert sm_result == :pass,
-           "P-SP1 corollary (D-322): Gate.run/1 MUST return :pass for :spec_membership " <>
-             "when the PR body contains a SPEC-* token covering the touched boundary. " <>
-             "At the merge-base, the unknown_half catch-all fires and returns " <>
-             "{:error, {:unknown_half, :spec_membership}}, not :pass. " <>
-             "Got verdict.halves[:spec_membership] = #{inspect(sm_result)}\n" <>
-             "Full verdict: #{inspect(verdict)}"
-  end
-
-  # ---------------------------------------------------------------------------
-  # P-SP2: non-SPEC'd-only diff ⇒ :pass via Gate.run/1
-  #
-  # The diff (spec_membership_diff) touches a path NOT in @source_maps.
-  # Regardless of the PR body, SpecMembership.check/3 MUST return {:pass, []},
-  # and Gate.run/1 MUST map this to verdict.halves[:spec_membership] == :pass.
-  #
-  # Fail-before: at the merge-base, the unknown_half catch-all fires →
-  # {:error, {:unknown_half, :spec_membership}}, not :pass. FAILS.
-  # ---------------------------------------------------------------------------
-
-  @tag :ac_7
-  @tag :d_322
-  test "P-SP2 (D-322): Gate.run/1 returns :pass for :spec_membership when diff touches only non-SPEC'd paths",
-       %{writer: writer, repo: repo} do
-    req =
-      build_request(repo, writer, %{
-        gate_manifest: [:mutation, :critic, :reviewer, :lint, :spec_membership],
-        gate_concurrency: 4,
-        gate_timeout: 120_000,
-        oracle: %{critic: :pass, reviewer: :pass},
-        lint_override: %LintDescriptor{steps: []},
-        spec_membership_diff: @non_boundary_diff,
-        spec_membership_pr_body: "",
-        spec_membership_source_maps: @source_maps
-      })
-
-    verdict = @gate.run(req)
-
-    sm_result = Map.get(verdict.halves, :spec_membership, :absent)
-
-    assert sm_result == :pass,
-           "P-SP2 (D-322): Gate.run/1 MUST return :pass for :spec_membership when the " <>
-             "diff touches only non-SPEC'd paths. The diff path 'lib/totally_unrelated/helper.ex' " <>
-             "is NOT in @source_maps, so SpecMembership.check/3 returns {:pass, []} regardless " <>
-             "of the PR body. " <>
-             "At the merge-base, the unknown_half catch-all fires and returns " <>
-             "{:error, {:unknown_half, :spec_membership}}, not :pass. " <>
-             "Got verdict.halves[:spec_membership] = #{inspect(sm_result)}\n" <>
-             "Full verdict: #{inspect(verdict)}"
-  end
-
-  # ---------------------------------------------------------------------------
-  # P-SP1 D-NNN variant: PR body with D-NNN reference covers the boundary
-  #
-  # Same diff touches @test_boundary. The PR body contains a D-NNN token (D-322)
-  # but no SPEC-* token. SpecMembership.check/3 MUST return {:pass, []} (D-NNN
-  # coverage satisfies the contract), and Gate.run/1 MUST return :pass.
-  #
-  # Fail-before: at the merge-base, the unknown_half catch-all fires, not :pass.
-  # ---------------------------------------------------------------------------
-
-  @tag :ac_7
-  @tag :d_322
-  test "P-SP1 D-NNN variant (D-322): Gate.run/1 returns :pass for :spec_membership when PR body has a D-NNN token",
-       %{writer: writer, repo: repo} do
-    req =
-      build_request(repo, writer, %{
-        gate_manifest: [:mutation, :critic, :reviewer, :lint, :spec_membership],
-        gate_concurrency: 4,
-        gate_timeout: 120_000,
-        oracle: %{critic: :pass, reviewer: :pass},
-        lint_override: %LintDescriptor{steps: []},
-        spec_membership_diff: @boundary_touching_diff,
-        spec_membership_pr_body: "Closes D-322 invariant enforcement.",
-        spec_membership_source_maps: @source_maps
-      })
-
-    verdict = @gate.run(req)
-
-    sm_result = Map.get(verdict.halves, :spec_membership, :absent)
-
-    assert sm_result == :pass,
-           "P-SP1 D-NNN variant (D-322): Gate.run/1 MUST return :pass for :spec_membership " <>
-             "when the PR body contains a D-NNN token (e.g. 'D-322') even without a SPEC-* " <>
-             "token, because D-NNN coverage alone satisfies the D-322 contract. " <>
-             "At the merge-base, the unknown_half catch-all fires → not :pass. " <>
-             "Got verdict.halves[:spec_membership] = #{inspect(sm_result)}\n" <>
-             "Full verdict: #{inspect(verdict)}"
-  end
-
-  # ---------------------------------------------------------------------------
   # Fixture builder: genuine discriminating git worktree
-  #
-  # merge-base: minimal Mix project
-  # HEAD: lib/widget.ex added + test that fails without it
-  #
-  # The mutation half sees a PASS (the gating test fails on the reverted tree),
-  # so the spec_membership half drives the verdict in these tests.
   # ---------------------------------------------------------------------------
 
   defp build_genuine_repo(root) do
