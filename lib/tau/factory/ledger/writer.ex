@@ -830,8 +830,12 @@ defmodule Tau.Factory.Ledger.Writer do
     end
   end
 
-  # Insert an append-only merge-outcome row. No UPDATE/DELETE path (D-355).
-  # WAL-before-ack: reply sent only after step/2 (WAL commit) returns (D-315).
+  # Insert an append-only merge-outcome row co-transactionally with a lineage row.
+  # D-353 (INV-LINEAGE-ATOMIC, issue #550): every merge record MUST be written in
+  # the same transaction as its lineage row — no merge may be observable in L
+  # without a complete lineage record (WAL-before-ack, D-315; NFR-AUDIT=100%).
+  # Returns {:ok, ref} where ref is the merge_outcomes rowid (SPEC-FACTORY-MERGE §4 B9).
+  # No UPDATE/DELETE path (D-355).
   # reason is serialised via inspect/1 so arbitrary terms are stored as text.
   defp do_record_merge_outcome(db, %{
          unit_id: unit_id,
@@ -840,16 +844,57 @@ defmodule Tau.Factory.Ledger.Writer do
          reason: reason,
          run: run
        }) do
-    outcome_text = atom_to_outcome(outcome)
-    reason_text = if reason == nil, do: nil, else: inspect(reason)
+    :ok = Exqlite.Sqlite3.execute(db, "BEGIN")
+
+    result =
+      with {:ok, merge_ref} <-
+             insert_merge_row(db, %{
+               unit_id: unit_id,
+               outcome: outcome,
+               commit_sha: commit_sha,
+               reason: reason,
+               run: run
+             }),
+           {:ok, _lineage_ref} <- insert_lineage_row_minimal(db, unit_id, commit_sha) do
+        {:ok, merge_ref}
+      end
+
+    case result do
+      {:ok, _} = ok ->
+        :ok = Exqlite.Sqlite3.execute(db, "COMMIT")
+        ok
+
+      {:error, _} = err ->
+        Exqlite.Sqlite3.execute(db, "ROLLBACK")
+        err
+    end
+  end
+
+  # Insert a minimal lineage row for a merge outcome written via record_merge_outcome/2.
+  # D-353 (INV-LINEAGE-ATOMIC, issue #550): lineage must be co-transactional with
+  # the merge record (no null edge). Uses commit_sha (or "" for rejection outcomes
+  # with no sha) as main_commit; all list fields default to empty JSON arrays.
+  # Callers that have full lineage data use record_merge_with_lineage/3 instead.
+  defp insert_lineage_row_minimal(db, unit_id, commit_sha) do
+    main_commit = commit_sha || ""
+    empty_json = "[]"
 
     sql = """
-    INSERT INTO merge_outcomes (unit_id, outcome, commit_sha, reason, run)
-    VALUES (?1, ?2, ?3, ?4, ?5)
+    INSERT INTO lineage (unit_id, main_commit, gate_verdicts, gating_test_paths, claims, specs, issues)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
     """
 
     with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, String.trim(sql)),
-         :ok <- Exqlite.Sqlite3.bind(stmt, [unit_id, outcome_text, commit_sha, reason_text, run]),
+         :ok <-
+           Exqlite.Sqlite3.bind(stmt, [
+             unit_id,
+             main_commit,
+             empty_json,
+             empty_json,
+             empty_json,
+             empty_json,
+             empty_json
+           ]),
          step_result <- Exqlite.Sqlite3.step(db, stmt),
          :ok <- Exqlite.Sqlite3.release(db, stmt) do
       case step_result do
