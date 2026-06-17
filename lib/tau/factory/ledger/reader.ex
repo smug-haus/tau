@@ -59,4 +59,28 @@ defmodule Tau.Factory.Ledger.Reader do
   def merge_outcome_for(server, unit_id) do
     Writer.merge_outcome_for(server, unit_id)
   end
+
+  @doc """
+  Return the latest durable retry counters for `unit_id` (D-318 counter-durability).
+
+  Used by `Tau.Factory.Unit.init/1` to restore `refine_count`, `pivot_count`, and
+  `stall_count` from the Ledger when a Unit is re-spawned after a crash (D-344
+  resume pattern). Prevents the restarted Unit from resetting its retry budget.
+
+  Returns:
+    - `{:ok, %{refine_count: n, pivot_count: n, stall_count: n}}` — counters
+      from the most-recently-snapshotted row.
+    - `:none` — no snapshot exists for this `unit_id` (fresh unit, counters start at 0).
+  """
+  @spec unit_counters_for(GenServer.server(), String.t()) ::
+          {:ok,
+           %{
+             refine_count: non_neg_integer(),
+             pivot_count: non_neg_integer(),
+             stall_count: non_neg_integer()
+           }}
+          | :none
+  def unit_counters_for(server, unit_id) do
+    Writer.unit_counters_for(server, unit_id)
+  end
 end

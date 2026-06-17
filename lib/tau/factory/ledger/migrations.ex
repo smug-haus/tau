@@ -126,6 +126,24 @@ defmodule Tau.Factory.Ledger.Migrations do
        run         TEXT    NOT NULL,
        inserted_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
      )
+     """},
+    # D-318 counter-durability sub-clause (issue #540): add retry counter columns
+    # to unit_snapshots so a restarted Unit can restore its refine/pivot/stall
+    # counts from the Ledger rather than resetting them to 0. SQLite ADD COLUMN
+    # with a NOT NULL default is idempotent when column already exists (IF NOT
+    # EXISTS is not supported in ALTER TABLE, so we use a IGNORE-on-error
+    # pattern via three separate migrations — one per column).
+    {"20260616_011_unit_snapshots_add_refine_count",
+     """
+     ALTER TABLE unit_snapshots ADD COLUMN refine_count INTEGER NOT NULL DEFAULT 0
+     """},
+    {"20260616_012_unit_snapshots_add_pivot_count",
+     """
+     ALTER TABLE unit_snapshots ADD COLUMN pivot_count INTEGER NOT NULL DEFAULT 0
+     """},
+    {"20260616_013_unit_snapshots_add_stall_count",
+     """
+     ALTER TABLE unit_snapshots ADD COLUMN stall_count INTEGER NOT NULL DEFAULT 0
      """}
   ]
 

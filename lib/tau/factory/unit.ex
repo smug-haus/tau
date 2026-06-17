@@ -149,6 +149,21 @@ defmodule Tau.Factory.Unit do
       Registry.register(registry_name, unit_id, self())
     end
 
+    # D-318 counter-durability: restore retry counters from the Ledger when a
+    # snapshot exists for this unit_id (D-344 resume pattern). On fresh start
+    # (no prior snapshot), all counters default to 0.
+    {refine_count, pivot_count, stall_count} =
+      case ledger do
+        nil ->
+          {0, 0, 0}
+
+        _ ->
+          case LedgerReader.unit_counters_for(ledger, unit_id) do
+            {:ok, %{refine_count: rc, pivot_count: pc, stall_count: sc}} -> {rc, pc, sc}
+            :none -> {0, 0, 0}
+          end
+      end
+
     data = %{
       unit_id: unit_id,
       declared_scope: declared_scope,
@@ -169,18 +184,19 @@ defmodule Tau.Factory.Unit do
       worker_id: nil,
       # Monitor ref for the current worker.
       worker_mref: nil,
-      # Retry counters.
-      refine_count: 0,
-      pivot_count: 0,
+      # Retry counters (D-318 counter-durability: restored from Ledger on restart).
+      refine_count: refine_count,
+      pivot_count: pivot_count,
       # Total times oracle/implementing state was entered (non-terminal attempts).
       # Also used as an observability metric; see stall_count for the ladder counter.
       attempt_count: 0,
-      # D-378 bounded stall ladder counter. Starts at 0; incremented exclusively
-      # by advance_retry_ladder/2 (worker-outcome events). Distinct from attempt_count
-      # which includes initial spawns. Used as the position counter for Retry.next/3
-      # on the worker-outcome path so the budget of N_REFINE + N_PIVOT stall advances
-      # is not pre-consumed by the initial oracle/implementing spawns.
-      stall_count: 0,
+      # D-378 bounded stall ladder counter (D-318 counter-durability: restored from
+      # Ledger on restart). Incremented exclusively by advance_retry_ladder/2
+      # (worker-outcome events). Distinct from attempt_count which includes initial
+      # spawns. Used as the position counter for Retry.next/3 on the worker-outcome
+      # path so the budget of N_REFINE + N_PIVOT stall advances is not pre-consumed
+      # by the initial oracle/implementing spawns.
+      stall_count: stall_count,
       # Last gate findings (nil until a gate failure occurs).
       last_findings: nil,
       # Monotonic per-entry counter for idempotency-key uniqueness (D-318 / §4 B3).
@@ -817,7 +833,10 @@ defmodule Tau.Factory.Unit do
     LedgerWriter.snapshot_unit(data.ledger, %{
       unit_id: data.unit_id,
       state: state,
-      idempotency_key: idempotency_key
+      idempotency_key: idempotency_key,
+      refine_count: data.refine_count,
+      pivot_count: data.pivot_count,
+      stall_count: data.stall_count
     })
 
     %{data | entry_seq: seq + 1}

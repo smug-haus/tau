@@ -137,7 +137,10 @@ defmodule Tau.Factory.Ledger.Writer do
   @type unit_snapshot_attrs :: %{
           unit_id: String.t(),
           state: atom(),
-          idempotency_key: String.t()
+          idempotency_key: String.t(),
+          refine_count: non_neg_integer(),
+          pivot_count: non_neg_integer(),
+          stall_count: non_neg_integer()
         }
 
   @type capture_attrs :: %{
@@ -161,12 +164,39 @@ defmodule Tau.Factory.Ledger.Writer do
     - `:unit_id`         — `String.t()`; the PR/unit identifier.
     - `:state`           — `atom()`; the Unit FSM state at this snapshot.
     - `:idempotency_key` — `String.t()`; deterministic per `{unit_id, kind, coordinate}`.
+    - `:refine_count`    — `non_neg_integer()`; current gate-failure refine counter (D-318).
+    - `:pivot_count`     — `non_neg_integer()`; current gate-failure pivot counter (D-318).
+    - `:stall_count`     — `non_neg_integer()`; current worker-outcome stall counter (D-318).
 
   Returns `{:ok, ref}` where `ref` is the inserted (or existing) row id.
   """
   @spec snapshot_unit(GenServer.server(), unit_snapshot_attrs()) :: {:ok, ref()} | {:error, term()}
   def snapshot_unit(server, attrs) do
     GenServer.call(server, {:snapshot_unit, attrs})
+  end
+
+  @doc """
+  Return the latest durable retry counters for `unit_id` (D-318 counter-durability).
+
+  Reads the row with the highest `id` for `unit_id` from `unit_snapshots` and
+  returns its counter columns. Used by `Tau.Factory.Unit.init/1` to restore
+  counters on restart (D-344 resume pattern).
+
+  Returns:
+    - `{:ok, %{refine_count: n, pivot_count: n, stall_count: n}}` — counters
+      from the latest snapshot row.
+    - `:none` — no snapshot row exists for this `unit_id` (fresh unit).
+  """
+  @spec unit_counters_for(GenServer.server(), String.t()) ::
+          {:ok,
+           %{
+             refine_count: non_neg_integer(),
+             pivot_count: non_neg_integer(),
+             stall_count: non_neg_integer()
+           }}
+          | :none
+  def unit_counters_for(server, unit_id) do
+    GenServer.call(server, {:unit_counters_for, unit_id})
   end
 
   @doc """
@@ -317,6 +347,11 @@ defmodule Tau.Factory.Ledger.Writer do
 
   def handle_call({:merge_outcome_for, unit_id}, _from, %{db: db} = state) do
     result = do_merge_outcome_for(db, unit_id)
+    {:reply, result, state}
+  end
+
+  def handle_call({:unit_counters_for, unit_id}, _from, %{db: db} = state) do
+    result = do_unit_counters_for(db, unit_id)
     {:reply, result, state}
   end
 
@@ -547,20 +582,34 @@ defmodule Tau.Factory.Ledger.Writer do
   # Insert a unit snapshot row. Uses INSERT OR IGNORE for idempotency — if the
   # idempotency_key already exists the row is skipped and we return the existing
   # row id. Append-only; WAL-before-ack (D-315, RPO=0).
+  # D-318 counter-durability: stores refine_count/pivot_count/stall_count so a
+  # restarted Unit can restore its retry counters from the Ledger.
   defp do_snapshot_unit(db, %{
          unit_id: unit_id,
          state: state,
-         idempotency_key: idempotency_key
+         idempotency_key: idempotency_key,
+         refine_count: refine_count,
+         pivot_count: pivot_count,
+         stall_count: stall_count
        }) do
     state_text = Atom.to_string(state)
 
     sql = """
-    INSERT OR IGNORE INTO unit_snapshots (unit_id, state, idempotency_key)
-    VALUES (?1, ?2, ?3)
+    INSERT OR IGNORE INTO unit_snapshots
+      (unit_id, state, idempotency_key, refine_count, pivot_count, stall_count)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6)
     """
 
     with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, String.trim(sql)),
-         :ok <- Exqlite.Sqlite3.bind(stmt, [unit_id, state_text, idempotency_key]),
+         :ok <-
+           Exqlite.Sqlite3.bind(stmt, [
+             unit_id,
+             state_text,
+             idempotency_key,
+             refine_count,
+             pivot_count,
+             stall_count
+           ]),
          step_result <- Exqlite.Sqlite3.step(db, stmt),
          :ok <- Exqlite.Sqlite3.release(db, stmt) do
       case step_result do
@@ -570,6 +619,37 @@ defmodule Tau.Factory.Ledger.Writer do
 
         {:error, reason} ->
           {:error, reason}
+      end
+    end
+  end
+
+  # D-318 counter-durability: return the latest retry counters for unit_id.
+  # Reads the row with the highest id to obtain the most-recently-snapshotted
+  # refine_count/pivot_count/stall_count. Returns :none for a fresh unit.
+  defp do_unit_counters_for(db, unit_id) do
+    sql = """
+    SELECT refine_count, pivot_count, stall_count
+    FROM unit_snapshots
+    WHERE unit_id = ?1
+    ORDER BY id DESC
+    LIMIT 1
+    """
+
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, String.trim(sql)),
+         :ok <- Exqlite.Sqlite3.bind(stmt, [unit_id]),
+         {:ok, rows} <- Exqlite.Sqlite3.fetch_all(db, stmt),
+         :ok <- Exqlite.Sqlite3.release(db, stmt) do
+      case rows do
+        [[refine_count, pivot_count, stall_count]] ->
+          {:ok,
+           %{
+             refine_count: refine_count,
+             pivot_count: pivot_count,
+             stall_count: stall_count
+           }}
+
+        [] ->
+          :none
       end
     end
   end
