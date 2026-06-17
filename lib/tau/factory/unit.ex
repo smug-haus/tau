@@ -80,7 +80,7 @@ defmodule Tau.Factory.Unit do
 
   Required options:
     - `:unit_id`        — `String.t()`; unique identity; registered in UnitRegistry.
-    - `:declared_scope` — scope map passed to `Scheduler.admit/3`.
+    - `:declared_scope` — scope map passed to `Scheduler.admit/3` or `admit/4`.
     - `:hash`           — `String.t()`; content hash for the PR.
     - `:scheduler`      — atom or pid of a running `Tau.Factory.Scheduler`.
     - `:report_to`      — pid receiving `{:unit_terminal, unit_id, outcome, provenance}`.
@@ -98,6 +98,12 @@ defmodule Tau.Factory.Unit do
     - `:merge_fun`      — `(unit_id, hash -> :queued | {:error, reason})`.
 
   Optional options:
+    - `:policy`         — `%Tau.Factory.Policy{}` | `nil`; when non-nil, the Unit's
+                          `planned` state calls `Scheduler.admit/4` (not `admit/3`),
+                          pinning the policy at admission (D-380 + INV-POLICY-PIN).
+                          When absent or nil, `admit/3` is called and no policy pin
+                          is recorded. This allows downstream callers to retrieve the
+                          pinned policy via `Scheduler.pinned_policy_for/2`.
     - `:ledger`         — `GenServer.server()` | `nil`; when present and non-nil,
                           the Unit calls `Ledger.Writer.snapshot_unit/2` on each
                           state entry (WAL-before-ack, D-318). The idempotency key
@@ -138,6 +144,7 @@ defmodule Tau.Factory.Unit do
     worker_fun = Keyword.fetch!(opts, :worker_fun)
     gate_fun = Keyword.fetch!(opts, :gate_fun)
     merge_fun = Keyword.fetch!(opts, :merge_fun)
+    policy = Keyword.get(opts, :policy, nil)
     ledger = Keyword.get(opts, :ledger, nil)
     pubsub = Keyword.get(opts, :pubsub, Tau.PubSub)
     registry_name = Keyword.get(opts, :registry_name, nil)
@@ -155,6 +162,8 @@ defmodule Tau.Factory.Unit do
       hash: hash,
       scheduler: scheduler,
       report_to: report_to,
+      # D-380 + INV-POLICY-PIN: policy to pin at admission (nil = no pin).
+      policy: policy,
       ledger: ledger,
       pubsub: pubsub,
       worker_fun: worker_fun,
@@ -206,7 +215,20 @@ defmodule Tau.Factory.Unit do
   def planned(:internal, :on_enter, data) do
     data = snapshot_state(:planned, data)
 
-    case Scheduler.admit(data.scheduler, data.unit_id, data.declared_scope) do
+    # D-380 + INV-POLICY-PIN: call admit/4 when a policy was supplied at
+    # Unit.start_link time, so the Scheduler pins the policy for downstream
+    # use (e.g., gate/merge) via pinned_policy_for/2. Call admit/3 (nil
+    # policy) when no policy was configured (back-compat).
+    admit_result =
+      case data.policy do
+        nil ->
+          Scheduler.admit(data.scheduler, data.unit_id, data.declared_scope)
+
+        policy ->
+          Scheduler.admit(data.scheduler, data.unit_id, data.declared_scope, policy)
+      end
+
+    case admit_result do
       :admit ->
         {:next_state, :oracle, data, [{:next_event, :internal, :on_enter}]}
 

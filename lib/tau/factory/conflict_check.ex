@@ -15,6 +15,7 @@ defmodule Tau.Factory.ConflictCheck do
   @type scope :: %{
           required(:deps) => [unit_id()],
           required(:files) => MapSet.t(String.t()),
+          required(:gating_paths) => MapSet.t(String.t()),
           required(:codepoints) => MapSet.t({String.t(), atom()}),
           required(:specs) => MapSet.t(atom()),
           required(:resources) => MapSet.t(atom()),
@@ -38,9 +39,32 @@ defmodule Tau.Factory.ConflictCheck do
   Clauses are checked in the order defined in `factory-loop.md`:
   `no_dependency`, `disjoint_files`, `disjoint_codepoints`, `no_shared_spec`,
   `resource_isolatable`.
+
+  The `no_dependency` check is **unidirectional** in this two-argument form: it
+  only checks whether the candidate's own `deps` list contains an in-flight id.
+  For the **bidirectional** check (D-312 — also blocks when an in-flight unit
+  lists the candidate in its own `deps`), use `clear?/3` and pass the
+  candidate's own `unit_id`.
   """
   @spec clear?(scope(), in_flight()) :: :clear | {:conflict, clause()}
   def clear?(declared_scope, in_flight) do
+    clear?(nil, declared_scope, in_flight)
+  end
+
+  @doc """
+  Three-argument form: `clear?(candidate_id, declared_scope, in_flight)`.
+
+  Extends `clear?/2` with a **bidirectional** `no_dependency` check (D-312).
+  In addition to the forward check (`declared_scope.deps ∩ in_flight_ids ≠ ∅`),
+  this form scans every in-flight scope for a reverse mention of `candidate_id`
+  in its own `deps` list.  When `candidate_id` is `nil`, the reverse check is
+  skipped and behaviour is identical to `clear?/2`.
+
+  The Scheduler (D-380 self-exclusion) passes the candidate's own id so that
+  reverse-dependency edges are caught at admission time.
+  """
+  @spec clear?(unit_id() | nil, scope(), in_flight()) :: :clear | {:conflict, clause()}
+  def clear?(candidate_id, declared_scope, in_flight) do
     candidate_sentinel = Map.get(declared_scope, :universal_conflict, false)
 
     in_flight_has_sentinel =
@@ -53,7 +77,8 @@ defmodule Tau.Factory.ConflictCheck do
       members = Map.values(in_flight)
 
       with :ok <- check_no_dependency(declared_scope, in_flight_ids),
-           :ok <- check_disjoint_sets(members, declared_scope, :files, :disjoint_files),
+           :ok <- check_reverse_dependency(candidate_id, in_flight),
+           :ok <- check_disjoint_files(members, declared_scope),
            :ok <-
              check_disjoint_sets(members, declared_scope, :codepoints, :disjoint_codepoints),
            :ok <- check_disjoint_sets(members, declared_scope, :specs, :no_shared_spec),
@@ -86,11 +111,68 @@ defmodule Tau.Factory.ConflictCheck do
     end
   end
 
-  # Clauses 2–5 — symmetric MapSet disjointness checks
+  # Reverse-direction dependency check (D-312 fix, issue #574).
+  # When candidate_id is nil (called from clear?/2), skip.
+  # Otherwise return {:conflict, :no_dependency} if any in-flight scope's deps
+  # list contains candidate_id, i.e. an in-flight unit is waiting for us.
+  @spec check_reverse_dependency(unit_id() | nil, in_flight()) ::
+          :ok | {:conflict, :no_dependency}
+  defp check_reverse_dependency(nil, in_flight) do
+    if Enum.any?(Map.values(in_flight), fn m -> m.deps != [] end) do
+      {:conflict, :no_dependency}
+    else
+      :ok
+    end
+  end
+
+  defp check_reverse_dependency(candidate_id, in_flight) do
+    reverse_blocked =
+      Enum.any?(Map.values(in_flight), fn scope ->
+        candidate_id in scope.deps
+      end)
+
+    if reverse_blocked do
+      {:conflict, :no_dependency}
+    else
+      :ok
+    end
+  end
+
+  # Clause 2 — disjoint_files (P-CC-5: gating_paths are unioned into files)
+  # Two scopes conflict on files if (files ∪ gating_paths) of either scope
+  # intersects (files ∪ gating_paths) of any in-flight scope.
+  # Reference: control-plane.md:288-290.
+  @spec check_disjoint_files([scope()], scope()) :: :ok | {:conflict, :disjoint_files}
+  defp check_disjoint_files(members, declared_scope) do
+    declared_effective =
+      MapSet.union(
+        declared_scope.files,
+        Map.get(declared_scope, :gating_paths, MapSet.new())
+      )
+
+    conflict =
+      Enum.any?(members, fn member ->
+        member_effective =
+          MapSet.union(
+            member.files,
+            Map.get(member, :gating_paths, MapSet.new())
+          )
+
+        not MapSet.disjoint?(declared_effective, member_effective)
+      end)
+
+    if conflict do
+      {:conflict, :disjoint_files}
+    else
+      :ok
+    end
+  end
+
+  # Clauses 3–5 — symmetric MapSet disjointness checks
   @spec check_disjoint_sets(
           [scope()],
           scope(),
-          :files | :codepoints | :specs | :resources,
+          :codepoints | :specs | :resources,
           clause()
         ) :: :ok | {:conflict, clause()}
   defp check_disjoint_sets(members, declared_scope, field, clause) do
@@ -106,5 +188,21 @@ defmodule Tau.Factory.ConflictCheck do
     else
       :ok
     end
+  end
+
+  @doc """
+  Engine floor predicate for the conflict check (HR-8 / SPEC-FACTORY-GOV B6).
+
+  Returns `true` iff `scope_a` and `scope_b` are disjoint on both files and
+  codepoints — the structural floor that a policy `conflict_predicate` can
+  only *tighten*, never relax.  Called by `Policy.clamp/1` to compose the
+  engine floor with the caller-supplied predicate.
+
+  Both arguments are `scope()` maps.
+  """
+  @spec engine_floor(scope(), scope()) :: boolean()
+  def engine_floor(scope_a, scope_b) do
+    MapSet.disjoint?(scope_a.files, scope_b.files) and
+      MapSet.disjoint?(scope_a.codepoints, scope_b.codepoints)
   end
 end
