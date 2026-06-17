@@ -159,12 +159,31 @@ defmodule Tau.Factory.Scheduler do
   end
 
   @impl GenServer
-  def handle_call({:admit, unit_id, declared_scope, policy}, _from, state) do
+  def handle_call({:admit, unit_id, declared_scope, policy}, {caller_pid, _tag} = _from, state) do
     # D-380 self-exclusion: evaluate admission over F ∖ {unit_id} so a unit
     # never conflicts with its own in-flight entry (idempotent upsert).
     f_prime = Map.delete(state.f, unit_id)
 
-    case evaluate_admission(unit_id, declared_scope, policy, %{state | f: f_prime}) do
+    t0 = System.monotonic_time(:microsecond)
+
+    result =
+      case evaluate_admission(unit_id, declared_scope, policy, %{state | f: f_prime}) do
+        :admit -> :admit
+        {:defer, reason} -> {:defer, reason}
+      end
+
+    latency_us = System.monotonic_time(:microsecond) - t0
+
+    # OTP non-negotiable §5 / D-380 single-authority auditability:
+    # emit [:tau, :factory, :scheduler, :admit] so the caller_pid can be
+    # audited to verify only the Unit FSM planned state calls admit.
+    :telemetry.execute(
+      [:tau, :factory, :scheduler, :admit],
+      %{latency_us: latency_us},
+      %{unit_id: unit_id, result: result, caller_pid: caller_pid}
+    )
+
+    case result do
       :admit ->
         new_f = Map.put(state.f, unit_id, declared_scope)
         # INV-POLICY-PIN: pin the policy at admission when supplied;
