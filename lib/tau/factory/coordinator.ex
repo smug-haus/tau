@@ -21,6 +21,7 @@ defmodule Tau.Factory.Coordinator do
 
   alias Tau.Factory.Escalation
   alias Tau.Factory.Ledger.Reader, as: LedgerReader
+  alias Tau.Factory.Ledger.Writer, as: LedgerWriter
 
   require Logger
 
@@ -140,6 +141,7 @@ defmodule Tau.Factory.Coordinator do
       drive_fun: drive_fun,
       scheduler: scheduler,
       on_halted: on_halted,
+      ledger: ledger,
       halt_pending: false,
       in_flight: nil,
       # Track rehydrated units so :sys.get_state reveals them (Oracle c).
@@ -291,11 +293,26 @@ defmodule Tau.Factory.Coordinator do
   # If no unit is in flight, the existing halting(:internal, :drain) nil-branch
   # transitions immediately to :halted.
   # Broadcasts to "factory:escalation" per C117 / D-336 (escalation conservation).
+  # WAL-before-ack (D-315, CON-7): record_escalation/4 call completes before
+  # any external effect (halt or broadcast) to ensure RPO=0 durability.
   def running(:info, {:escalate, {e, :global}}, data) do
     # Measurements sourced from monotonic clock span (INV-REPORTING-SOURCED, governance.md §5).
     duration_ms = System.monotonic_time(:millisecond) - data.start_mono_ms
     measurements = %{total_tokens: data.accumulated_tokens, duration_ms: duration_ms}
     :telemetry.execute([:tau, :factory, :coordinator, :escalate], measurements, %{scope: :global})
+
+    # CON-7 / LIVE-liveness-2 (2/3): durable write — WAL-before-ack.
+    # Write reason + state snapshot to the Ledger BEFORE external effects so the
+    # escalation is durable even if the process crashes mid-broadcast (RPO=0).
+    if data.ledger do
+      snapshot = %{
+        state: :running,
+        in_flight: data.in_flight,
+        accumulated_tokens: data.accumulated_tokens
+      }
+
+      LedgerWriter.record_escalation(data.ledger, e, :global, snapshot)
+    end
 
     :ok =
       Phoenix.PubSub.broadcast(
@@ -309,11 +326,26 @@ defmodule Tau.Factory.Coordinator do
 
   # Per-unit escalation → stay running; treat as a terminal for loop progress.
   # Also broadcasts to "factory:escalation" per C117 / D-336.
+  # WAL-before-ack (D-315, CON-7): record_escalation/4 call completes before
+  # any external effect (broadcast or loop) to ensure RPO=0 durability.
   def running(:info, {:escalate, {e, :unit}}, data) do
     # Measurements sourced from monotonic clock span (INV-REPORTING-SOURCED, governance.md §5).
     duration_ms = System.monotonic_time(:millisecond) - data.start_mono_ms
     measurements = %{total_tokens: data.accumulated_tokens, duration_ms: duration_ms}
     :telemetry.execute([:tau, :factory, :coordinator, :escalate], measurements, %{scope: :unit})
+
+    # CON-7 / LIVE-liveness-2 (2/3): durable write — WAL-before-ack.
+    # Write reason + state snapshot to the Ledger BEFORE external effects so the
+    # escalation is durable even if the process crashes mid-broadcast (RPO=0).
+    if data.ledger do
+      snapshot = %{
+        state: :running,
+        in_flight: data.in_flight,
+        accumulated_tokens: data.accumulated_tokens
+      }
+
+      LedgerWriter.record_escalation(data.ledger, e, :unit, snapshot)
+    end
 
     :ok =
       Phoenix.PubSub.broadcast(

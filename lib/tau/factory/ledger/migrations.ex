@@ -126,6 +126,23 @@ defmodule Tau.Factory.Ledger.Migrations do
        run         TEXT    NOT NULL,
        inserted_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
      )
+     """},
+    # Issue #614 (LIVE-liveness-2 / CON-7): Durable escalation record.
+    # Append-only; no UPDATE/DELETE. WAL-before-ack (D-315): reply sent only
+    # after step/2 (WAL commit) returns. Stores the escalation reason (atom as
+    # text) and scope (:global | :unit as text) plus an optional JSON snapshot.
+    # The `delivered` column tracks operator-notification delivery for CON-7
+    # re-delivery (durable-spine.md §3 escalations schema).
+    {"20260617_011_escalations",
+     """
+     CREATE TABLE IF NOT EXISTS escalations (
+       id          INTEGER PRIMARY KEY AUTOINCREMENT,
+       reason      TEXT    NOT NULL,
+       scope       TEXT    NOT NULL CHECK (scope IN ('global', 'unit')),
+       snapshot    TEXT,
+       delivered   INTEGER NOT NULL DEFAULT 0,
+       inserted_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+     )
      """}
   ]
 

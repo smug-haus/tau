@@ -244,6 +244,41 @@ defmodule Tau.Factory.Ledger.Writer do
     GenServer.call(server, {:merge_outcome_for, unit_id})
   end
 
+  @doc """
+  Append a durable escalation row for the given `reason` and `scope`.
+
+  Append-only — no UPDATE/DELETE path (CON-7, LIVE-liveness-2). WAL-before-ack
+  (D-315): the `{:ok, ref}` reply arrives only after the SQLite WAL commit is
+  durable, so the caller's ack is strictly ordered after the write's visibility
+  (WAL-before-effect: the coordinator does not proceed to external effects until
+  after this call returns).
+
+  `reason` is an atom (one of the total escalation set E or `:E-UNCLASSIFIED`).
+  `scope` is `:global` or `:unit`.
+  `snapshot` is a map of the coordinator's state at the time of escalation (CON-7:
+  `∀ e ∈ raised. delivered(e) ∧ recorded(reason(e), state(e))`).
+
+  Returns `{:ok, ref}` where `ref` is the inserted row id.
+  """
+  @spec record_escalation(GenServer.server(), atom(), :global | :unit, map()) ::
+          {:ok, ref()}
+  def record_escalation(server, reason, scope, snapshot \\ %{}) do
+    GenServer.call(server, {:record_escalation, reason, scope, snapshot})
+  end
+
+  @doc """
+  Return all escalation rows recorded via `record_escalation/4`, ordered by
+  insertion (ascending id).
+
+  Each row is a map with at least `:reason` (atom) and `:scope` (atom).
+
+  This is the durable oracle for LIVE-liveness-2 / CON-7 conformance tests.
+  """
+  @spec escalations_recorded(GenServer.server()) :: [map()]
+  def escalations_recorded(server) do
+    GenServer.call(server, :escalations_recorded)
+  end
+
   # ---------------------------------------------------------------------------
   # GenServer callbacks
   # ---------------------------------------------------------------------------
@@ -317,6 +352,16 @@ defmodule Tau.Factory.Ledger.Writer do
 
   def handle_call({:merge_outcome_for, unit_id}, _from, %{db: db} = state) do
     result = do_merge_outcome_for(db, unit_id)
+    {:reply, result, state}
+  end
+
+  def handle_call({:record_escalation, reason, scope, snapshot}, _from, %{db: db} = state) do
+    result = do_record_escalation(db, reason, scope, snapshot)
+    {:reply, result, state}
+  end
+
+  def handle_call(:escalations_recorded, _from, %{db: db} = state) do
+    result = do_escalations_recorded(db)
     {:reply, result, state}
   end
 
@@ -768,4 +813,59 @@ defmodule Tau.Factory.Ledger.Writer do
 
   defp text_to_status("pass"), do: :pass
   defp text_to_status("fail"), do: :fail
+
+  # Insert an append-only escalation row. Stores reason (atom as text) and
+  # scope (:global | :unit as text). snapshot is serialized as JSON text.
+  # WAL-before-ack: reply sent only after step/2 (WAL commit) returns (D-315).
+  defp do_record_escalation(db, reason, scope, snapshot) do
+    reason_text = Atom.to_string(reason)
+    scope_text = Atom.to_string(scope)
+    snapshot_text = Jason.encode!(snapshot)
+
+    sql = """
+    INSERT INTO escalations (reason, scope, snapshot)
+    VALUES (?1, ?2, ?3)
+    """
+
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, String.trim(sql)),
+         :ok <- Exqlite.Sqlite3.bind(stmt, [reason_text, scope_text, snapshot_text]),
+         step_result <- Exqlite.Sqlite3.step(db, stmt),
+         :ok <- Exqlite.Sqlite3.release(db, stmt) do
+      case step_result do
+        :done -> {:ok, fetch_last_rowid(db)}
+        {:error, reason_err} -> {:error, reason_err}
+      end
+    end
+  end
+
+  # SELECT all escalation rows ordered by insertion (ascending id).
+  # Returns a list of maps with :reason (atom) and :scope (atom) at minimum.
+  # Unknown atoms (not pre-existing in the atom table) are returned as strings.
+  defp do_escalations_recorded(db) do
+    sql = """
+    SELECT reason, scope FROM escalations ORDER BY id ASC
+    """
+
+    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, String.trim(sql)),
+         {:ok, rows} <- Exqlite.Sqlite3.fetch_all(db, stmt),
+         :ok <- Exqlite.Sqlite3.release(db, stmt) do
+      Enum.map(rows, fn [reason_text, scope_text] ->
+        reason_atom =
+          case safe_to_existing_atom(reason_text) do
+            {:ok, atom} -> atom
+            :error -> String.to_atom(reason_text)
+          end
+
+        scope_atom =
+          case safe_to_existing_atom(scope_text) do
+            {:ok, atom} -> atom
+            :error -> String.to_atom(scope_text)
+          end
+
+        %{reason: reason_atom, scope: scope_atom}
+      end)
+    else
+      _ -> []
+    end
+  end
 end
