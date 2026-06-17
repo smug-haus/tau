@@ -241,6 +241,11 @@ defmodule Tau.Factory.Supervisor do
       # UnitDriver omits the key → Worker skips preflight (non-:claude_code unchanged).
       agent_mode: agent_mode,
       creds_check_fun: creds_check_fun,
+      # D-379(b): thread the derived Watchdog name so UnitDriver.drive/2 can
+      # register each spawned worker with the Watchdog via `if watchdog do`
+      # (unit_driver.ex:249). The Watchdog IS started as a child (line 282) but
+      # was previously absent from this map — workers were never registered.
+      watchdog: watchdog_name,
       report_to: coord_name
     }
 
@@ -408,13 +413,15 @@ defmodule Tau.Factory.Supervisor do
       hash: hash,
       branch: branch,
       run: "run-1",
-      base_ref: branch,
-      # oracle_base_ref: the oracle (test_author) Worker uses `origin/<branch>`
-      # (detached HEAD) so it does NOT lock the named branch while checking out.
-      # This lets the implementing Worker checkout the named branch immediately
-      # after the oracle emits work_ready, without waiting for the oracle's
-      # worktree to be reclaimed (D-358 / SPEC-FACTORY-CORE §4 B11).
-      oracle_base_ref: "origin/#{branch}",
+      # INV-WF-9 / D-311: base_ref MUST be a system-established ref derived from
+      # fresh origin/main, never the feature branch name.  The feature branch is
+      # what the worker *creates* (forked from this base); "origin/main" is the
+      # canonical pinned base (SPEC-FACTORY-FLEET §4 B2, §3 [C214-B2]).
+      base_ref: "origin/main",
+      # INV-WF-9 / D-311: oracle_base_ref (test_author worker checkout) must also
+      # be origin/main-derived, not the feature branch's remote-tracking ref.
+      # "origin/main" is detached-HEAD-safe and satisfies the invariant.
+      oracle_base_ref: "origin/main",
       # D-372: role-agnostic brief (backward compat default)
       brief: brief,
       # D-382: role-specific briefs; UnitDriver.worker_fun selects at spawn time

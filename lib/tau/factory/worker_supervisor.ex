@@ -22,7 +22,10 @@ defmodule Tau.Factory.WorkerSupervisor do
   Start the WorkerSupervisor and register it under `:name`.
 
   Options:
-    - `:name` — atom; registered name for this DynamicSupervisor (required).
+    - `:name`  — atom; registered name for this DynamicSupervisor (required).
+    - `:w_cap` — non-negative integer; maximum concurrent live worker processes
+                  admitted by the DynamicSupervisor (`max_children`).
+                  Defaults to `128` (NFR-AGENT-FLEET: |agents alive| <= A_max = 128).
   """
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts) do
@@ -47,12 +50,20 @@ defmodule Tau.Factory.WorkerSupervisor do
   end
 
   @impl DynamicSupervisor
-  def init(_opts) do
-    DynamicSupervisor.init(strategy: :one_for_one)
+  def init(opts) do
+    w_cap = Keyword.get(opts, :w_cap, 128)
+    DynamicSupervisor.init(strategy: :one_for_one, max_children: w_cap)
   end
 
   @doc """
   Spawn a new `Worker` child under the given supervisor.
+
+  Idempotent (INV-DIST-WORKER-IDEMPOTENT): if a worker with the same
+  `worker_id` is already live in the registry, this call is a no-op and
+  returns `{:ok, worker_id}` without starting a second process. This
+  satisfies the re-delivery-is-benign property: a duplicate dispatch from
+  the Oban queue boundary (D-S4, `supervision-tree.md` §6) MUST NOT
+  double-execute.
 
   Generates a `worker_id` (a UUID-formatted binary string) unless one is
   provided via `opts[:worker_id]`. Starts the Worker as a `:temporary`
@@ -90,6 +101,25 @@ defmodule Tau.Factory.WorkerSupervisor do
     worker_id = Keyword.get(opts, :worker_id, generate_worker_id())
     registry = Keyword.fetch!(opts, :registry)
 
+    # INV-DIST-WORKER-IDEMPOTENT: pre-check the registry before attempting to
+    # start a child. If a live entry already exists for this worker_id the
+    # spawn is a no-op — re-delivery is benign (D-S4 queue boundary). The
+    # DynamicSupervisor.start_child error-path also handles the race window
+    # between this check and start_child, so neither path double-executes.
+    case Registry.lookup(registry, worker_id) do
+      [{_pid, _}] ->
+        {:ok, worker_id}
+
+      [] ->
+        do_start_child(supervisor, registry, worker_id, role, brief, base_ref, opts)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Private helpers
+  # ---------------------------------------------------------------------------
+
+  defp do_start_child(supervisor, registry, worker_id, role, brief, base_ref, opts) do
     worker_opts =
       opts
       |> Keyword.put(:worker_id, worker_id)
@@ -112,6 +142,8 @@ defmodule Tau.Factory.WorkerSupervisor do
       {:ok, _pid, _info} ->
         {:ok, worker_id}
 
+      # Race window: another caller registered the same worker_id between
+      # the Registry.lookup check and start_child — still idempotent.
       {:error, {:already_started, _pid}} ->
         {:ok, worker_id}
 

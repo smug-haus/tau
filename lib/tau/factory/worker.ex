@@ -108,6 +108,12 @@ defmodule Tau.Factory.Worker do
 
   @impl GenServer
   def init(opts) do
+    # NFR-SPAWN: capture spawn start time before any I/O (git worktree add,
+    # namespace resolution, position verify, Port.open). duration_ms is emitted
+    # in the [:tau, :factory, :worker, :start] telemetry so external collectors
+    # (Prometheus, OtelReporter) can derive p95 spawn latency (issue #679).
+    t0 = System.monotonic_time(:millisecond)
+
     worker_id = Keyword.fetch!(opts, :worker_id)
     role = Keyword.fetch!(opts, :role)
     brief = Keyword.fetch!(opts, :brief)
@@ -149,7 +155,8 @@ defmodule Tau.Factory.Worker do
           extra_env: extra_env,
           agent_mode: agent_mode,
           creds_check_fun: creds_check_fun,
-          ws: ws
+          ws: ws,
+          t0: t0
         }
 
         init_after_worktree(init_ctx)
@@ -164,6 +171,24 @@ defmodule Tau.Factory.Worker do
   @impl GenServer
   def handle_call(:get_ws, _from, state) do
     {:reply, {:ok, state.ws}, state}
+  end
+
+  # INV-WF-10 / D-309 clause 2: unsupported toolchain — stop the worker immediately
+  # after start_link returns (so the caller gets {:ok, worker_id} before the stop).
+  # Arm the death-cert monitor here (before stop) so report_to is notified.
+  @impl GenServer
+  def handle_continue({:stop_unsupported_toolchain, lang}, state) do
+    %{worker_id: worker_id, report_to: report_to, janitor: janitor, ws: ws, repo_dir: repo_dir} =
+      state
+
+    if janitor do
+      WorkspaceJanitor.register(janitor, worker_id, self(), ws, [], report_to)
+    else
+      spawn_death_monitor(worker_id, report_to)
+    end
+
+    cleanup_worktree(ws, repo_dir)
+    {:stop, {:unsupported_toolchain, lang}, state}
   end
 
   # Port exited: stop the worker. The death-certificate is delivered by the
@@ -237,12 +262,50 @@ defmodule Tau.Factory.Worker do
     # Step 2: resolve namespace
     tc_module = Toolchain.for(toolchain_key)
 
-    decls =
-      case tc_module do
-        {:error, _} -> []
-        mod -> mod.declare_resource_namespace(%{})
-      end
+    case tc_module do
+      {:error, {:unsupported_language, lang}} ->
+        # INV-WF-10 / D-309 clause 2: an unsupported toolchain is a spawn error,
+        # not a silent degradation. We MUST NOT continue to Port.open with an
+        # empty namespace map (zero isolation). Stop immediately.
+        #
+        # We cannot return {:stop, ...} directly from init/1 here because
+        # DynamicSupervisor.start_child would propagate the error back to
+        # WorkerSupervisor.spawn, breaking the caller contract ({:ok, worker_id}
+        # is expected regardless of post-init asynchronous failure).
+        #
+        # Instead we return {:ok, state, {:continue, {:stop_unsupported_toolchain, lang}}}
+        # so that start_link completes successfully, and then the worker stops
+        # immediately in handle_continue before processing any other messages.
+        # The death-certificate monitor is armed in the continue handler BEFORE
+        # the stop, so report_to receives the death cert.
+        %{worker_id: worker_id, report_to: report_to, janitor: janitor, repo_dir: repo_dir} = ctx
 
+        state = %{
+          worker_id: worker_id,
+          role: ctx.role,
+          brief: ctx.brief,
+          base_ref: ctx.base_ref,
+          repo_dir: repo_dir,
+          ws: ws,
+          port: nil,
+          report_to: report_to,
+          registry: ctx.registry,
+          heartbeat_interval: ctx.heartbeat_interval,
+          heartbeat_timer: nil,
+          work_ready_seen?: false,
+          janitor: janitor,
+          unsupported_toolchain_lang: lang
+        }
+
+        {:ok, state, {:continue, {:stop_unsupported_toolchain, lang}}}
+
+      mod ->
+        decls = mod.declare_resource_namespace(%{})
+        init_with_namespace(ctx, ws, decls)
+    end
+  end
+
+  defp init_with_namespace(%{} = ctx, ws, decls) do
     ns = Isolation.resolve_namespace(ws, decls)
 
     # Create all namespace directories inside the worktree.
@@ -410,9 +473,13 @@ defmodule Tau.Factory.Worker do
     # The :heartbeat_interval opt is preserved in state as metadata (the shim
     # reads it at write time for rate-limiting). heartbeat_timer starts nil and
     # is kept nil throughout — the dispatch(%Heartbeat{}) handler checks it.
+    # NFR-SPAWN: emit duration_ms so external collectors can derive p95 spawn latency.
+    # t0 was captured at the start of init/1, before git worktree add (issue #679).
+    duration_ms = System.monotonic_time(:millisecond) - ctx.t0
+
     :telemetry.execute(
       [:tau, :factory, :worker, :start],
-      %{},
+      %{duration_ms: duration_ms},
       %{worker_id: worker_id, role: role}
     )
 
