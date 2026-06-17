@@ -2,8 +2,9 @@ defmodule Tau.Factory.Scheduler do
   @moduledoc """
   Admission authority for parallel PR execution (SPEC-FACTORY-CORE §4, D-312, D-343).
 
-  Holds the in-flight set F (`%{unit_id => declared_scope}`) in GenServer state
-  and gates admission through three sequential conditions:
+  Holds the in-flight set F (`%{unit_id => declared_scope}`) and the policy-version
+  pins (`%{unit_id => %Policy{}}`) in GenServer state, and gates admission through
+  three sequential conditions:
 
   1. **Conflict check** — `ConflictCheck.clear?(declared_scope, F)`.
   2. **Capacity check** — `map_size(F) < w_cap`.
@@ -13,18 +14,31 @@ defmodule Tau.Factory.Scheduler do
   The first failing condition wins (defer reason precedence: conflict →
   at_capacity → budget). A `{:defer, _}` reply NEVER mutates F (D-343).
 
+  ## INV-POLICY-PIN
+
+  `admit/4` captures the supplied `%Policy{}` in `pins` at admission time.
+  A mid-flight policy version bump only affects units admitted after the change —
+  the pinned policy for an in-flight unit is immutable for its lifetime.
+  `pinned_policy_for/2` exposes the frozen `%Policy{}` for downstream use
+  (e.g., by the Unit FSM when composing a `Gate.Request`; arch `control-plane.md §2.2`).
+
   ## Public API
 
     - `start_link/1` — start and register.
-    - `admit/3` — `call`; returns `:admit` or `{:defer, reason}`.
-    - `release/2` — `call`; removes `unit_id` from F; no-op if absent.
+    - `admit/3` — `call`; returns `:admit` or `{:defer, reason}`. No policy pin.
+    - `admit/4` — `call`; returns `:admit` or `{:defer, reason}`. Pins the `%Policy{}`
+      at admission (INV-POLICY-PIN, arch §2.2).
+    - `release/2` — `call`; removes `unit_id` from F and pins; no-op if absent.
     - `in_flight/1` — `call`; returns the current F snapshot.
+    - `pinned_policy_for/2` — `call`; returns the `%Policy{}` pinned at admission,
+      or `nil` if the unit has no pin.
   """
 
   use GenServer
 
   alias Tau.Factory.Budget.Owner, as: BudgetOwner
   alias Tau.Factory.ConflictCheck
+  alias Tau.Factory.Policy
 
   # ---------------------------------------------------------------------------
   # Types
@@ -39,6 +53,7 @@ defmodule Tau.Factory.Scheduler do
 
   @type state :: %{
           f: %{unit_id() => declared_scope()},
+          pins: %{unit_id() => Policy.t()},
           w_cap: pos_integer(),
           budget: {atom(), [atom()]} | nil
         }
@@ -66,7 +81,7 @@ defmodule Tau.Factory.Scheduler do
   end
 
   @doc """
-  Attempt to admit `unit_id` with `declared_scope`.
+  Attempt to admit `unit_id` with `declared_scope`. No policy pin recorded.
 
   Returns `:admit` when all conditions clear; `{:defer, reason}` otherwise.
   On `:admit`, `unit_id => declared_scope` is added to F before the reply.
@@ -77,7 +92,35 @@ defmodule Tau.Factory.Scheduler do
   @spec admit(GenServer.server(), unit_id(), declared_scope()) ::
           :admit | {:defer, defer_reason()}
   def admit(server, unit_id, declared_scope) do
-    GenServer.call(server, {:admit, unit_id, declared_scope})
+    GenServer.call(server, {:admit, unit_id, declared_scope, nil})
+  end
+
+  @doc """
+  Attempt to admit `unit_id` with `declared_scope`, pinning `policy` at admission.
+
+  Identical to `admit/3` but also stores `policy` in `pins` on `:admit`,
+  implementing INV-POLICY-PIN (arch `control-plane.md §2.2`).  A mid-flight
+  policy version bump only affects units admitted after the change; the pinned
+  policy for this unit is frozen for its lifetime.
+
+  Returns `:admit` when all conditions clear; `{:defer, reason}` otherwise.
+  On `{:defer, _}`, neither F nor pins are mutated (D-343).
+  """
+  @spec admit(GenServer.server(), unit_id(), declared_scope(), Policy.t()) ::
+          :admit | {:defer, defer_reason()}
+  def admit(server, unit_id, declared_scope, policy) do
+    GenServer.call(server, {:admit, unit_id, declared_scope, policy})
+  end
+
+  @doc """
+  Return the `%Policy{}` pinned at admission for `unit_id`.
+
+  Returns the `%Policy{}` struct that was supplied at `admit/4` time, or `nil`
+  if `unit_id` was admitted via `admit/3` (no policy) or is not in `pins`.
+  """
+  @spec pinned_policy_for(GenServer.server(), unit_id()) :: Policy.t() | nil
+  def pinned_policy_for(server, unit_id) do
+    GenServer.call(server, {:pinned_policy_for, unit_id})
   end
 
   @doc """
@@ -107,6 +150,7 @@ defmodule Tau.Factory.Scheduler do
 
     state = %{
       f: %{},
+      pins: %{},
       w_cap: w_cap,
       budget: budget
     }
@@ -115,7 +159,7 @@ defmodule Tau.Factory.Scheduler do
   end
 
   @impl GenServer
-  def handle_call({:admit, unit_id, declared_scope}, _from, state) do
+  def handle_call({:admit, unit_id, declared_scope, policy}, _from, state) do
     # D-380 self-exclusion: evaluate admission over F ∖ {unit_id} so a unit
     # never conflicts with its own in-flight entry (idempotent upsert).
     f_prime = Map.delete(state.f, unit_id)
@@ -123,21 +167,34 @@ defmodule Tau.Factory.Scheduler do
     case evaluate_admission(declared_scope, %{state | f: f_prime}) do
       :admit ->
         new_f = Map.put(state.f, unit_id, declared_scope)
-        {:reply, :admit, %{state | f: new_f}}
+        # INV-POLICY-PIN: pin the policy at admission when supplied.
+        new_pins =
+          if is_nil(policy) do
+            state.pins
+          else
+            Map.put(state.pins, unit_id, policy)
+          end
+
+        {:reply, :admit, %{state | f: new_f, pins: new_pins}}
 
       {:defer, reason} ->
-        # D-343: F MUST NOT be mutated on a defer path.
+        # D-343: F and pins MUST NOT be mutated on a defer path.
         {:reply, {:defer, reason}, state}
     end
   end
 
   def handle_call({:release, unit_id}, _from, state) do
     new_f = Map.delete(state.f, unit_id)
-    {:reply, :ok, %{state | f: new_f}}
+    new_pins = Map.delete(state.pins, unit_id)
+    {:reply, :ok, %{state | f: new_f, pins: new_pins}}
   end
 
   def handle_call(:in_flight, _from, state) do
     {:reply, state.f, state}
+  end
+
+  def handle_call({:pinned_policy_for, unit_id}, _from, state) do
+    {:reply, Map.get(state.pins, unit_id), state}
   end
 
   # ---------------------------------------------------------------------------
