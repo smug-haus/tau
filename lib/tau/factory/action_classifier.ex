@@ -21,9 +21,9 @@ defmodule Tau.Factory.ActionClassifier do
   `classify/1` is a total pure function over `%Action{}` that denies every
   action whose `kind` is in the `@destructive` denylist and allows all others.
 
-  The denylist is data (a `MapSet` of atoms — INV-24 #2: pattern-match on
+  The denylist is data (a compile-time list of atoms — INV-24 #2: pattern-match on
   atoms/structs, no string-keyed dispatch). Adding a new destructive class is
-  one `MapSet` entry, not a new code path.
+  one list entry, not a new code path.
 
   A `{:deny, :destructive}` verdict routes to the Coordinator as E-DESTRUCTIVE
   via `Tau.Factory.Escalation.classify({:destructive, action})`, and the action
@@ -42,7 +42,7 @@ defmodule Tau.Factory.ActionClassifier do
   alias Tau.Factory.ActionClassifier.Action
 
   # The denylist is data — one list entry to add a new destructive class (INV-24 #2).
-  # Used as a compile-time list in the guard (Elixir guards require compile-time literals).
+  # A compile-time list is used directly in the guard clause (Elixir guards require compile-time literals).
   @destructive [
     :force_push,
     :history_rewrite,
