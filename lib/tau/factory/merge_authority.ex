@@ -860,6 +860,9 @@ defmodule Tau.Factory.MergeAuthority do
   # After a successful rebase we force-push the rebased tip to origin/<branch>
   # so the tip SHA is addressable on the remote for CAS (cas_push creates the
   # fast-forward from origin/<branch>'s tip onto origin/main).
+  # D-303 / INV-MAI-5: health check runs PRE-PUSH — no push to origin (including
+  # origin/<branch>) may precede a green health result. Fetch and rebase first,
+  # run health on the rebased tip, and only push if health returns :green.
   defp do_build_in_worktree(repo_dir, merge_wt, [unit | _] = units, base) do
     git_wt = fn args ->
       System.cmd("git", args, cd: merge_wt, stderr_to_stdout: true)
@@ -867,19 +870,23 @@ defmodule Tau.Factory.MergeAuthority do
 
     with {_, 0} <- System.cmd("git", ["fetch", "origin"], cd: repo_dir, stderr_to_stdout: true),
          {_, 0} <- git_wt.(["rebase", base]),
-         {tip_raw, 0} <- git_wt.(["rev-parse", "HEAD"]),
-         {_, 0} <-
-           System.cmd(
-             "git",
-             ["push", "--force-with-lease", "origin", "HEAD:#{unit.branch}"],
-             cd: merge_wt,
-             stderr_to_stdout: true
-           ) do
+         {tip_raw, 0} <- git_wt.(["rev-parse", "HEAD"]) do
       tip = String.trim(tip_raw)
 
       case Health.check(merge_wt, :elixir, %{}) do
         :green ->
-          {:built, units, base, tip}
+          case System.cmd(
+                 "git",
+                 ["push", "--force-with-lease", "origin", "HEAD:#{unit.branch}"],
+                 cd: merge_wt,
+                 stderr_to_stdout: true
+               ) do
+            {_, 0} ->
+              {:built, units, base, tip}
+
+            {output, code} ->
+              {:build_failed, {:git_error, code, output}}
+          end
 
         {:red, report} ->
           {:build_failed, {:health_red, report}}
