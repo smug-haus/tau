@@ -113,6 +113,14 @@ defmodule Tau.Factory.WorkerSupervisor do
     registry = Keyword.fetch!(opts, :registry)
     author_id = Keyword.get(opts, :author_id)
 
+    # D-313 janitor guard — fail-closed: janitor is mandatory infrastructure for
+    # capture-before-destroy (INV-14). A nil janitor bypasses the capture path
+    # entirely (spawn_death_monitor sends only {:worker_exit, ...} with zero git
+    # capture). Reject before oracle-separation checks so the error is unambiguous
+    # regardless of role. Mirrors the D-374 precedent (infra prerequisites are
+    # rejected at init time, not silently bypassed).
+    janitor = Keyword.get(opts, :janitor)
+
     # D-304 oracle-separation guard — two sub-mechanisms (SPEC-FACTORY-FLEET §4 B8):
     #
     # Sub-mechanism (a) — spawn-order constraint:
@@ -127,6 +135,9 @@ defmodule Tau.Factory.WorkerSupervisor do
     # registry. This prevents the same agent identity from authoring both the
     # gating test and the implementation.
     cond do
+      is_nil(janitor) ->
+        {:error, :no_janitor}
+
       role == :implementer and not any_test_author_registered?(registry) ->
         {:error, :no_test_author_registered}
 
