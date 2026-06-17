@@ -134,15 +134,13 @@ defmodule Tau.Factory.InvDistR8Test do
     co_residency_patterns = [
       {~r/:net_kernel\.connect_node/,
        ":net_kernel.connect_node (explicit cluster join — couples supervisor to topology)"},
-      {~r/Node\.connect/,
-       "Node.connect (explicit cluster join — couples supervisor to topology)"},
+      {~r/Node\.connect/, "Node.connect (explicit cluster join — couples supervisor to topology)"},
       {~r/:global\.register_name/,
        ":global.register_name (global naming — forbidden by OTP non-negotiable #4; " <>
          "couples placement to a specific cluster)"},
       {~r/:global\.whereis_name/,
        ":global.whereis_name (global name lookup — forbidden by OTP non-negotiable #4)"},
-      {~r/:pg\.join/,
-       ":pg.join (process group — couples process identity to cluster topology)"},
+      {~r/:pg\.join/, ":pg.join (process group — couples process identity to cluster topology)"},
       {~r/:pg\.get_members/,
        ":pg.get_members (process group membership lookup — topology coupling)"}
     ]
@@ -185,10 +183,8 @@ defmodule Tau.Factory.InvDistR8Test do
        "Node.connect (explicit cluster join from within a worker — topology coupling)"},
       {~r/:net_kernel\.connect_node/,
        ":net_kernel.connect_node (explicit cluster join — topology coupling)"},
-      {~r/:pg\.join/,
-       ":pg.join (process group — couples worker identity to cluster topology)"},
-      {~r/:pg\.get_members/,
-       ":pg.get_members (process group membership — topology coupling)"},
+      {~r/:pg\.join/, ":pg.join (process group — couples worker identity to cluster topology)"},
+      {~r/:pg\.get_members/, ":pg.get_members (process group membership — topology coupling)"},
       {~r/Node\.list/,
        "Node.list (live-cluster enumeration from within a worker — cross-node assumption)"}
     ]
