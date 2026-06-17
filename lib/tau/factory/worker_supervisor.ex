@@ -52,6 +52,24 @@ defmodule Tau.Factory.WorkerSupervisor do
   end
 
   @doc """
+  Machine-checkable R8 attestation: Stage (a) distributed-execution move
+  touches ONLY WorkerSupervisor/GateTasks placement and an Oban queue —
+  no invariant, FSM, or contract changes are required.
+
+  Returns `:verified` to make INV-DIST-R8 enforceable at the boundary where
+  the Stage (a) placement change would be wired. This is the R8 analogue of
+  `cross_node_routing_mechanism/0` (INV-DIST-NO-FULLMESH) and
+  `liveness_authority/1` (INV-DIST-MONITOR-LOCAL): any PR that attempts to
+  introduce a Stage (a) invariant or contract change would need to remove or
+  alter this attestation, surfacing the violation to the gating test.
+
+  See `docs/arch/04-software-architecture/distribution-readiness.md` §5
+  Stage (a) and §6 R8.
+  """
+  @spec stage_a_placement_only() :: :verified
+  def stage_a_placement_only, do: :verified
+
+  @doc """
   Returns the cross-node routing mechanism for the execution tier.
 
   Always returns `:oban_queue`, declaring that the Oban queue boundary is the
