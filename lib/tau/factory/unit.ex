@@ -325,20 +325,26 @@ defmodule Tau.Factory.Unit do
     {:keep_state, data}
   end
 
-  # INV-WF-13 Clause 2 (4-tuple form): 4-tuple work_ready carries NO gating_test_paths —
-  # REFUSE the oracle→implementing transition. The oracle-separation contract requires
-  # a non-empty gating_test_paths list (INV-WF-13). The 4-tuple form (no paths) is
-  # structurally absent of any path set; it must be blocked the same as the 5-tuple-empty
-  # guard above. Log a warning; the Unit stays in :oracle.
-  def oracle(:info, {:work_ready, worker_id, _branch, _head_sha}, %{worker_id: worker_id} = data)
+  # D-326 / D-362: 4-tuple work_ready (no gating_test_paths) from the current oracle
+  # worker — advance to :implementing without capturing a path set. INV-WF-13 Clause 1
+  # (5-tuple with non-empty paths) takes priority above; this clause handles legacy oracle
+  # workers (e.g. test helpers and any caller not yet migrated to the 5-tuple seam) that
+  # send the 4-tuple form. The arch contract (control-plane.md §3.2.1) specifies
+  # work_ready(w, branch, head_sha) → :implementing; the 5-tuple extension is additive.
+  def oracle(:info, {:work_ready, worker_id, branch, head_sha}, %{worker_id: worker_id} = data)
       when not is_nil(worker_id) do
-    Logger.warning(
-      "[Unit \#{data.unit_id}] oracle work_ready from worker \#{worker_id} uses " <>
-        "4-tuple form (no gating_test_paths) — " <>
-        "refusing oracle→implementing transition (INV-WF-13 Clause 2)"
-    )
+    Process.demonitor(data.worker_mref, [:flush])
 
-    {:keep_state, data}
+    new_data = %{
+      data
+      | worker_pid: nil,
+        worker_id: nil,
+        worker_mref: nil,
+        branch: branch,
+        head_sha: head_sha
+    }
+
+    {:next_state, :implementing, new_data, [{:next_event, :internal, :on_enter}]}
   end
 
   # Discard work_ready from a superseded worker_id (stale-worker discard, B8).
