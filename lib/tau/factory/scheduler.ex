@@ -63,6 +63,7 @@ defmodule Tau.Factory.Scheduler do
   @type declared_scope :: ConflictCheck.scope()
   @type defer_reason ::
           {:conflict, ConflictCheck.clause()}
+          | :scope_too_large
           | :at_capacity
           | {:budget, atom()}
 
@@ -70,6 +71,7 @@ defmodule Tau.Factory.Scheduler do
           f: %{unit_id() => declared_scope()},
           pins: %{unit_id() => Policy.t()},
           w_cap: pos_integer(),
+          scope_ceiling: pos_integer() | nil,
           budget: {atom(), [atom()]} | nil,
           pubsub: atom() | nil,
           name: atom()
@@ -172,6 +174,7 @@ defmodule Tau.Factory.Scheduler do
   def init(opts) do
     name = Keyword.fetch!(opts, :name)
     w_cap = Keyword.fetch!(opts, :w_cap)
+    scope_ceiling = Keyword.get(opts, :scope_ceiling, nil)
     budget = Keyword.get(opts, :budget, nil)
     pubsub = Keyword.get(opts, :pubsub, nil)
 
@@ -179,6 +182,7 @@ defmodule Tau.Factory.Scheduler do
       f: %{},
       pins: %{},
       w_cap: w_cap,
+      scope_ceiling: scope_ceiling,
       budget: budget,
       pubsub: pubsub,
       name: name
@@ -295,13 +299,20 @@ defmodule Tau.Factory.Scheduler do
   # remains the mandatory floor for the dep/spec/resource clauses.
   @spec evaluate_admission(unit_id(), declared_scope(), Policy.t() | nil, state()) ::
           :admit | {:defer, defer_reason()}
-  defp evaluate_admission(unit_id, declared_scope, policy, %{f: f, w_cap: w_cap, budget: budget}) do
-    with :clear <- ConflictCheck.clear?(unit_id, declared_scope, f),
+  defp evaluate_admission(unit_id, declared_scope, policy, %{
+         f: f,
+         w_cap: w_cap,
+         scope_ceiling: scope_ceiling,
+         budget: budget
+       }) do
+    with :ok <- check_scope_ceiling(declared_scope, scope_ceiling),
+         :clear <- ConflictCheck.clear?(unit_id, declared_scope, f),
          :ok <- check_policy_conflict_predicate(declared_scope, f, policy),
          :ok <- check_capacity(f, w_cap),
          :ok <- check_budget(budget) do
       :admit
     else
+      {:defer, :scope_too_large} -> {:defer, :scope_too_large}
       {:conflict, clause} -> {:defer, {:conflict, clause}}
       {:defer, reason} -> {:defer, reason}
     end
@@ -331,6 +342,22 @@ defmodule Tau.Factory.Scheduler do
 
     if conflict do
       {:conflict, :disjoint_files}
+    else
+      :ok
+    end
+  end
+
+  # FR-2.2: gateability ceiling — a unit whose declared file count exceeds the
+  # scope_ceiling is deferred as :scope_too_large. D-343: the caller never mutates
+  # F when this returns {:defer, :scope_too_large}.
+  # When scope_ceiling is nil (not configured), the check is skipped.
+  @spec check_scope_ceiling(declared_scope(), pos_integer() | nil) ::
+          :ok | {:defer, :scope_too_large}
+  defp check_scope_ceiling(_declared_scope, nil), do: :ok
+
+  defp check_scope_ceiling(%{files: files}, ceiling) do
+    if MapSet.size(files) > ceiling do
+      {:defer, :scope_too_large}
     else
       :ok
     end
