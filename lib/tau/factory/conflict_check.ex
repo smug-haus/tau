@@ -107,4 +107,20 @@ defmodule Tau.Factory.ConflictCheck do
       :ok
     end
   end
+
+  @doc """
+  Engine floor predicate for the conflict check (HR-8 / SPEC-FACTORY-GOV B6).
+
+  Returns `true` iff `scope_a` and `scope_b` are disjoint on both files and
+  codepoints — the structural floor that a policy `conflict_predicate` can
+  only *tighten*, never relax.  Called by `Policy.clamp/1` to compose the
+  engine floor with the caller-supplied predicate.
+
+  Both arguments are `scope()` maps.
+  """
+  @spec engine_floor(scope(), scope()) :: boolean()
+  def engine_floor(scope_a, scope_b) do
+    MapSet.disjoint?(scope_a.files, scope_b.files) and
+      MapSet.disjoint?(scope_a.codepoints, scope_b.codepoints)
+  end
 end
