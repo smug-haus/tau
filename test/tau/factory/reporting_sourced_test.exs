@@ -18,33 +18,42 @@ defmodule Tau.Factory.ReportingSourcedTest do
 
   ## What this test asserts
 
+  ### Part 1 — Milestone boundary (token accumulation)
+
   When the Coordinator broadcasts `{:milestone_complete, payload}` on
-  `"factory:report"` (INV-REPORTING-ESCALATION-ONLY), the payload MUST carry:
+  `"factory:report"` after processing a unit, the payload MUST carry
+  `:total_tokens` equal to the sum of `total_tokens` emitted by
+  `[:tau, :factory, :unit, :merged]` telemetry spans during the run — NOT
+  a hardcoded `0`. The `drive_fun` fires `[:tau, :factory, :unit, :merged]`
+  with `%{total_tokens: 99}` before sending `{:unit_terminal, …}`. The
+  milestone payload's `:total_tokens` MUST equal 99.
 
-    - `:total_tokens` — a non-negative integer sourced from the
-      `[:tau, :factory, :coordinator, ...]` telemetry span measurements.
-    - `:duration_ms` — a non-negative integer (or float) sourced from the
-      `[:tau, :factory, :coordinator, ...]` telemetry span measurements.
+  The current implementation hardcodes `total_tokens: 0` (coordinator.ex:165).
+  This test FAILS against current code because `payload.total_tokens == 0`,
+  not `99`.
 
-  The test attaches a `:telemetry` handler to the Coordinator's span event, captures
-  the measurements emitted at the milestone boundary, then asserts the broadcast
-  payload carries the SAME values — proving they are sourced, not hardcoded or
-  estimated.
+  ### Part 2 — Escalation (token accumulation)
 
-  Similarly, when the Coordinator broadcasts `{:escalation, payload}` on
-  `"factory:escalation"`, the payload MUST carry `:total_tokens` and
-  `:duration_ms` from the `[:tau, :factory, :coordinator, :escalate]` span.
+  When the Coordinator broadcasts `{:escalation, payload}` on
+  `"factory:escalation"` after processing a unit + global escalation, the
+  payload MUST carry `:total_tokens` equal to the accumulated value from unit
+  telemetry spans — NOT a hardcoded `0`.
 
-  ## Fail-before validity
+  The current implementation hardcodes `total_tokens: 0` (coordinator.ex:250).
+  This test FAILS against current code because `payload.total_tokens == 0`.
 
-  The current `Tau.Factory.Coordinator.running(:internal, :loop, data)` with
-  `select_fun → nil` broadcasts `{:milestone_complete, %{}}` (coordinator.ex:162)
-  — an EMPTY map. No `:total_tokens` or `:duration_ms` key is present in the
-  payload. Both assertions below FAIL against the current implementation.
+  ### Part 3 — Duration sourcing (no rounding / estimation)
 
-  The telemetry/3 helper (coordinator.ex:338-340) always passes `%{}` as the
-  measurements map at every call site, so no telemetry-sourced number exists to
-  carry into the report.
+  The `duration_ms` in both milestone and escalation payloads MUST be sourced
+  from the monotonic-clock span (non-negative, strictly positive when the
+  coordinator has been running for any observable time). A hardcoded `0` or
+  a rounded-to-nearest-second value would falsify this.
+
+  ## Fail-before validity (issue #557)
+
+  Current coordinator.ex lines 165, 250, 268: `total_tokens: 0` — hardcoded.
+  No mechanism accumulates unit-telemetry token counts. Every assertion on
+  `total_tokens == injected_value` fails (got 0, expected 99 or 42).
 
   AC/D-NNN linkage: INV-REPORTING-SOURCED (#557).
   """
@@ -62,46 +71,25 @@ defmodule Tau.Factory.ReportingSourcedTest do
   end
 
   # ---------------------------------------------------------------------------
-  # INV-REPORTING-SOURCED — Part 1: milestone boundary report carries
-  # telemetry-sourced :total_tokens and :duration_ms.
+  # INV-REPORTING-SOURCED — Part 1: milestone_complete payload carries
+  # :total_tokens sourced from unit telemetry spans (NOT hardcoded 0).
   #
-  # Timeline:
-  #   1. Subscribe to "factory:report" on Tau.PubSub.
-  #   2. Attach a telemetry handler to [:tau, :factory, :coordinator, :loop] (or
-  #      the coordinator's milestone-boundary span event) to capture measurements.
-  #   3. Start Coordinator with select_fun returning one work item then nil.
-  #   4. drive_fun immediately sends {:unit_terminal, …} (instant unit).
-  #   5. The second loop call hits select_fun → nil = milestone boundary.
-  #   6. Coordinator broadcasts {:milestone_complete, payload} on "factory:report".
-  #   7. Assert payload has :total_tokens (non-negative integer) and :duration_ms
-  #      (non-negative number), sourced from the telemetry span measurements.
+  # The drive_fun fires [:tau, :factory, :unit, :merged] with total_tokens: 99
+  # before sending {:unit_terminal, …}. The Coordinator MUST subscribe to that
+  # event and accumulate the value; the milestone broadcast's :total_tokens
+  # MUST equal 99.
   #
-  # FAILS against current code: {:milestone_complete, %{}} has no :total_tokens
-  # or :duration_ms key.
+  # FAILS against current code: total_tokens: 0 is hardcoded (coordinator.ex:165).
   # ---------------------------------------------------------------------------
 
   @tag :inv_reporting_sourced
-  test "INV-REPORTING-SOURCED: milestone_complete payload carries :total_tokens and :duration_ms sourced from telemetry span" do
+  test "INV-REPORTING-SOURCED: milestone_complete :total_tokens reflects unit telemetry accumulation, not hardcoded 0" do
     coord_name = unique_name(:coord_sourced_milestone)
-
-    # Capture the telemetry measurements emitted by the Coordinator's
-    # milestone-boundary span so we can verify the broadcast payload is sourced
-    # from them (not hardcoded or estimated).
-    test_pid = self()
-    handler_id = "#{coord_name}_handler_milestone"
-
-    :telemetry.attach(
-      handler_id,
-      [:tau, :factory, :coordinator, :milestone],
-      fn _event, measurements, _metadata, _config ->
-        send(test_pid, {:telemetry_measurements, measurements})
-      end,
-      nil
-    )
 
     :ok = Phoenix.PubSub.subscribe(Tau.PubSub, "factory:report")
 
     work_item = "unit-sourced-milestone-#{System.unique_integer([:positive])}"
+    injected_tokens = 99
     {:ok, counter} = Agent.start_link(fn -> 0 end)
 
     select_fun = fn ->
@@ -109,9 +97,18 @@ defmodule Tau.Factory.ReportingSourcedTest do
       if n == 0, do: work_item, else: nil
     end
 
-    drive_fun = fn _work ->
+    drive_fun = fn work ->
+      # Emit the unit-level telemetry event that the Coordinator MUST subscribe
+      # to and accumulate. This mirrors the real path where a Unit FSM emits
+      # [:tau, :factory, :unit, :merged] with measured token counts.
+      :telemetry.execute(
+        [:tau, :factory, :unit, :merged],
+        %{total_tokens: injected_tokens},
+        %{unit_id: work}
+      )
+
       coord_pid = Process.whereis(coord_name)
-      if is_pid(coord_pid), do: send(coord_pid, {:unit_terminal, work_item, :merged})
+      if is_pid(coord_pid), do: send(coord_pid, {:unit_terminal, work, :merged})
       :ok
     end
 
@@ -127,78 +124,70 @@ defmodule Tau.Factory.ReportingSourcedTest do
       id: coord_name
     )
 
-    on_exit(fn -> :telemetry.detach(handler_id) end)
-
-    # Assert the Coordinator broadcasts {:milestone_complete, payload} on "factory:report"
-    # at the milestone boundary. Use pattern-match in assert_receive to skip any
-    # telemetry handler echoes in the test process mailbox.
     assert_receive {:milestone_complete, payload},
                    2000,
-                   "INV-REPORTING-SOURCED: no {:milestone_complete, _} message on " <>
-                     "\"factory:report\" at milestone boundary. Coordinator must broadcast " <>
-                     "{:milestone_complete, payload} when select_fun returns nil."
+                   "INV-REPORTING-SOURCED: no {:milestone_complete, _} on " <>
+                     "\"factory:report\" at milestone boundary"
 
-    # INV-REPORTING-SOURCED core assertion: payload MUST carry :total_tokens
-    # sourced from telemetry span measurements.
+    # INV-REPORTING-SOURCED core assertion: total_tokens MUST equal the
+    # value emitted by the unit telemetry span — NOT the hardcoded 0.
     assert Map.has_key?(payload, :total_tokens),
-           "INV-REPORTING-SOURCED violation: milestone_complete payload is missing " <>
-             ":total_tokens. All numbers in reports must be sourced from telemetry " <>
-             "span measurements (governance.md §5). Got payload: #{inspect(payload)}"
+           "INV-REPORTING-SOURCED violation: milestone_complete payload missing " <>
+             ":total_tokens. Got: #{inspect(payload)}"
 
-    assert is_integer(payload.total_tokens) and payload.total_tokens >= 0,
-           "INV-REPORTING-SOURCED violation: :total_tokens must be a non-negative " <>
-             "integer (sourced from the span measurement), got: #{inspect(payload.total_tokens)}"
-
-    # INV-REPORTING-SOURCED core assertion: payload MUST carry :duration_ms
-    # sourced from telemetry span measurements.
-    assert Map.has_key?(payload, :duration_ms),
-           "INV-REPORTING-SOURCED violation: milestone_complete payload is missing " <>
-             ":duration_ms. All wall-times in reports must be sourced from telemetry " <>
-             "span measurements (governance.md §5). Got payload: #{inspect(payload)}"
-
-    assert (is_integer(payload.duration_ms) or is_float(payload.duration_ms)) and
-             payload.duration_ms >= 0,
-           "INV-REPORTING-SOURCED violation: :duration_ms must be a non-negative " <>
-             "number (sourced from the span measurement), got: #{inspect(payload.duration_ms)}"
+    assert payload.total_tokens == injected_tokens,
+           "INV-REPORTING-SOURCED violation: milestone_complete :total_tokens is " <>
+             "#{inspect(payload.total_tokens)}, expected #{injected_tokens} (the value " <>
+             "emitted by [:tau, :factory, :unit, :merged] telemetry). The Coordinator " <>
+             "must accumulate token counts from unit telemetry spans, not hardcode 0. " <>
+             "(governance.md §5, coordinator.ex:165)"
   end
 
   # ---------------------------------------------------------------------------
-  # INV-REPORTING-SOURCED — Part 2: escalation report carries
-  # telemetry-sourced :total_tokens and :duration_ms.
+  # INV-REPORTING-SOURCED — Part 2: escalation payload carries
+  # :total_tokens sourced from unit telemetry spans (NOT hardcoded 0).
   #
-  # Timeline:
-  #   1. Subscribe to "factory:escalation" on Tau.PubSub.
-  #   2. Start idle Coordinator (select_fun always nil).
-  #   3. Deliver {:escalate, {reason, :global}}.
-  #   4. Coordinator broadcasts {:escalation, payload} on "factory:escalation".
-  #   5. Assert payload has :total_tokens and :duration_ms from the
-  #      [:tau, :factory, :coordinator, :escalate] span measurements.
+  # The drive_fun fires [:tau, :factory, :unit, :merged] with total_tokens: 42
+  # before unit_terminal, then a global escalation fires. The escalation broadcast
+  # MUST carry total_tokens: 42 accumulated from the unit span.
   #
-  # FAILS against current code: running(:info, {:escalate, {e, :global}}, data)
-  # broadcasts {:escalation, %{reason: e, scope: :global}} — no :total_tokens
-  # or :duration_ms key.
+  # FAILS against current code: total_tokens: 0 is hardcoded (coordinator.ex:250).
   # ---------------------------------------------------------------------------
 
   @tag :inv_reporting_sourced
-  test "INV-REPORTING-SOURCED: escalation payload carries :total_tokens and :duration_ms sourced from telemetry span" do
+  test "INV-REPORTING-SOURCED: escalation :total_tokens reflects unit telemetry accumulation, not hardcoded 0" do
     coord_name = unique_name(:coord_sourced_escalation)
-
-    test_pid = self()
-    handler_id = "#{coord_name}_handler_escalation"
-
-    :telemetry.attach(
-      handler_id,
-      [:tau, :factory, :coordinator, :escalate],
-      fn _event, measurements, _metadata, _config ->
-        send(test_pid, {:telemetry_measurements, measurements})
-      end,
-      nil
-    )
 
     :ok = Phoenix.PubSub.subscribe(Tau.PubSub, "factory:escalation")
 
-    select_fun = fn -> nil end
-    drive_fun = fn _work -> :ok end
+    work_item = "unit-sourced-escalation-#{System.unique_integer([:positive])}"
+    injected_tokens = 42
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    select_fun = fn ->
+      n = Agent.get_and_update(counter, fn c -> {c, c + 1} end)
+      if n == 0, do: work_item, else: nil
+    end
+
+    drive_fun = fn work ->
+      # Emit unit telemetry with known token count before terminal.
+      :telemetry.execute(
+        [:tau, :factory, :unit, :merged],
+        %{total_tokens: injected_tokens},
+        %{unit_id: work}
+      )
+
+      coord_pid = Process.whereis(coord_name)
+
+      if is_pid(coord_pid) do
+        send(coord_pid, {:unit_terminal, work, :merged})
+        # Trigger global escalation after unit completes.
+        Process.sleep(20)
+        send(coord_pid, {:escalate, {:E_SOURCED_TEST, :global}})
+      end
+
+      :ok
+    end
 
     start_supervised!(
       {
@@ -212,37 +201,87 @@ defmodule Tau.Factory.ReportingSourcedTest do
       id: coord_name
     )
 
-    on_exit(fn -> :telemetry.detach(handler_id) end)
-
-    Process.sleep(20)
-    send(coord_name, {:escalate, {:E_SOURCED_TEST, :global}})
-
     assert_receive {:escalation, payload},
                    2000,
-                   "INV-REPORTING-SOURCED: no {:escalation, _} message on \"factory:escalation\" after " <>
-                     "global escalation. Coordinator must broadcast escalation report."
+                   "INV-REPORTING-SOURCED: no {:escalation, _} on " <>
+                     "\"factory:escalation\" after global escalation"
 
-    # INV-REPORTING-SOURCED core assertion: escalation payload MUST carry
-    # :total_tokens sourced from the [:tau, :factory, :coordinator, :escalate] span.
+    # INV-REPORTING-SOURCED core assertion: total_tokens MUST equal the
+    # accumulated value from unit telemetry spans — NOT the hardcoded 0.
     assert Map.has_key?(payload, :total_tokens),
-           "INV-REPORTING-SOURCED violation: escalation payload is missing :total_tokens. " <>
-             "All numbers in reports must be sourced from telemetry span measurements " <>
-             "(governance.md §5). Got payload: #{inspect(payload)}"
+           "INV-REPORTING-SOURCED violation: escalation payload missing " <>
+             ":total_tokens. Got: #{inspect(payload)}"
 
-    assert is_integer(payload.total_tokens) and payload.total_tokens >= 0,
-           "INV-REPORTING-SOURCED violation: :total_tokens must be a non-negative " <>
-             "integer (sourced from the span measurement), got: #{inspect(payload.total_tokens)}"
+    assert payload.total_tokens == injected_tokens,
+           "INV-REPORTING-SOURCED violation: escalation :total_tokens is " <>
+             "#{inspect(payload.total_tokens)}, expected #{injected_tokens} (the value " <>
+             "emitted by [:tau, :factory, :unit, :merged] telemetry). The Coordinator " <>
+             "must accumulate token counts from unit telemetry spans, not hardcode 0. " <>
+             "(governance.md §5, coordinator.ex:250)"
+  end
 
-    # INV-REPORTING-SOURCED core assertion: escalation payload MUST carry
-    # :duration_ms sourced from the span.
+  # ---------------------------------------------------------------------------
+  # INV-REPORTING-SOURCED — Part 3: duration_ms is sourced from the monotonic
+  # clock span (strictly positive — NOT hardcoded or rounded).
+  #
+  # The coordinator records start_mono_ms at init and computes duration_ms at
+  # each report boundary. With a brief sleep before the milestone, duration_ms
+  # MUST be > 0 — a hardcoded 0 would falsify this.
+  #
+  # Current code sources duration_ms from the monotonic clock correctly.
+  # This test confirms that property is preserved and guards against regression.
+  # It PASSES against current code; Parts 1 and 2 are the fail-before tests.
+  # ---------------------------------------------------------------------------
+
+  @tag :inv_reporting_sourced
+  test "INV-REPORTING-SOURCED: milestone_complete :duration_ms is sourced from monotonic clock (strictly positive after sleep)" do
+    coord_name = unique_name(:coord_sourced_duration)
+
+    :ok = Phoenix.PubSub.subscribe(Tau.PubSub, "factory:report")
+
+    work_item = "unit-sourced-duration-#{System.unique_integer([:positive])}"
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    select_fun = fn ->
+      n = Agent.get_and_update(counter, fn c -> {c, c + 1} end)
+      if n == 0, do: work_item, else: nil
+    end
+
+    drive_fun = fn work ->
+      # Inject a brief delay so the coordinator has been running for a
+      # measurable wall time. duration_ms must be > 0.
+      Process.sleep(10)
+
+      coord_pid = Process.whereis(coord_name)
+      if is_pid(coord_pid), do: send(coord_pid, {:unit_terminal, work, :merged})
+      :ok
+    end
+
+    start_supervised!(
+      {
+        @coordinator,
+        name: coord_name,
+        pubsub: Tau.PubSub,
+        select_fun: select_fun,
+        drive_fun: drive_fun,
+        scheduler: nil
+      },
+      id: coord_name
+    )
+
+    assert_receive {:milestone_complete, payload},
+                   2000,
+                   "INV-REPORTING-SOURCED: no {:milestone_complete, _} on " <>
+                     "\"factory:report\" at milestone boundary"
+
     assert Map.has_key?(payload, :duration_ms),
-           "INV-REPORTING-SOURCED violation: escalation payload is missing :duration_ms. " <>
-             "All wall-times in reports must be sourced from telemetry span measurements " <>
-             "(governance.md §5). Got payload: #{inspect(payload)}"
+           "INV-REPORTING-SOURCED violation: milestone_complete payload missing " <>
+             ":duration_ms. Got: #{inspect(payload)}"
 
     assert (is_integer(payload.duration_ms) or is_float(payload.duration_ms)) and
-             payload.duration_ms >= 0,
-           "INV-REPORTING-SOURCED violation: :duration_ms must be a non-negative " <>
-             "number (sourced from the span measurement), got: #{inspect(payload.duration_ms)}"
+             payload.duration_ms > 0,
+           "INV-REPORTING-SOURCED violation: :duration_ms is #{inspect(payload.duration_ms)}, " <>
+             "expected a strictly positive number sourced from the monotonic clock span. " <>
+             "(governance.md §5, coordinator.ex:164)"
   end
 end
