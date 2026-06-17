@@ -138,10 +138,14 @@ defmodule Tau.Factory.MergeHealthPrePushOrderTest do
 
     # Create and push the bare origin
     {_, 0} = System.cmd("git", ["init", "--bare", origin_path])
-    {_, 0} = System.cmd(
-      "git", ["symbolic-ref", "HEAD", "refs/heads/main"],
-      cd: origin_path
-    )
+
+    {_, 0} =
+      System.cmd(
+        "git",
+        ["symbolic-ref", "HEAD", "refs/heads/main"],
+        cd: origin_path
+      )
+
     {_, 0} = git_work.(["remote", "add", "origin", origin_path])
     {_, 0} = git_work.(["push", "-u", "origin", "main"])
 
