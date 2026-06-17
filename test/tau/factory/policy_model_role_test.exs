@@ -56,9 +56,10 @@ defmodule Tau.Factory.PolicyModelRoleTest do
   alias Tau.Factory.Policy.Owner, as: PolicyOwner
 
   # ---------------------------------------------------------------------------
-  # Minimal valid policy for testing.
-  # Every field uses the smallest admissible positive integer for numeric
-  # dimensions; model_per_role uses two representative roles.
+  # @model_per_role is a plain map — safe to store in a module attribute.
+  # The full %Policy{} struct is built in valid_policy/0 because
+  # conflict_predicate is a 2-arity function and Elixir cannot escape anonymous
+  # functions into module attributes (ArgumentError at compile time).
   # ---------------------------------------------------------------------------
 
   @model_per_role %{
@@ -66,16 +67,20 @@ defmodule Tau.Factory.PolicyModelRoleTest do
     critic: "claude-opus-4-5"
   }
 
-  @valid_policy %Policy{
-    version: 1,
-    model_per_role: @model_per_role,
-    retry_bound_n: 3,
-    budget: %{token: 100_000, cost: 10, wall_time: 3_600, iteration: 5},
-    priority_order: [],
-    conflict_predicate: &(&1 == &1 and &2 == &2),
-    gate_manifest: [:mutation, :critic, :reviewer],
-    escalation_thresholds: %{upheld_challenges: 2}
-  }
+  # Build the %Policy{} at call time so the anonymous function in
+  # conflict_predicate is never stored in a module attribute.
+  defp valid_policy do
+    %Policy{
+      version: 1,
+      model_per_role: @model_per_role,
+      retry_bound_n: 3,
+      budget: %{token: 100_000, cost: 10, wall_time: 3_600, iteration: 5},
+      priority_order: [],
+      conflict_predicate: fn _a, _b -> false end,
+      gate_manifest: [:mutation, :critic, :reviewer],
+      escalation_thresholds: %{upheld_challenges: 2}
+    }
+  end
 
   # ---------------------------------------------------------------------------
   # INV-MODEL-POLICY assertion 1 — struct field presence
@@ -90,7 +95,7 @@ defmodule Tau.Factory.PolicyModelRoleTest do
       #
       # FAIL BEFORE: Tau.Factory.Policy does not exist → compile error.
 
-      policy = @valid_policy
+      policy = valid_policy()
 
       assert Map.has_key?(policy, :model_per_role),
              "INV-MODEL-POLICY: %Policy{} must carry a :model_per_role field " <>
@@ -125,7 +130,7 @@ defmodule Tau.Factory.PolicyModelRoleTest do
       #
       # FAIL BEFORE: Tau.Factory.Policy.clamp/1 does not exist → UndefinedFunctionError.
 
-      assert {:ok, clamped} = Policy.clamp(@valid_policy),
+      assert {:ok, clamped} = Policy.clamp(valid_policy()),
              "INV-MODEL-POLICY: Policy.clamp/1 must return {:ok, policy} for a " <>
                "valid policy; got error instead"
 
@@ -162,7 +167,7 @@ defmodule Tau.Factory.PolicyModelRoleTest do
 
       {:ok, _owner} = PolicyOwner.start_link(name: owner_name)
 
-      {:ok, clamped} = Policy.clamp(@valid_policy)
+      {:ok, clamped} = Policy.clamp(valid_policy())
 
       :ok = PolicyOwner.pin(owner_name, unit_id, clamped)
 
