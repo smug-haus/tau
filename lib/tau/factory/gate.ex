@@ -233,7 +233,7 @@ defmodule Tau.Factory.Gate do
         # plan/2 produces the pure data record for the engine seam (used below).
         plan = Mutation.plan(merge_base, req.frozen_paths)
 
-        if project_creation_na?(adapter, gating_paths, merge_base, workspace, ctx) do
+        if project_creation_na?(language, gating_paths, merge_base, workspace) do
           :pass
         else
           execute_mutation_check(adapter, plan, gating_paths, workspace, ctx)
@@ -244,11 +244,13 @@ defmodule Tau.Factory.Gate do
   # Returns true iff every gating-test path's enclosing build manifest is absent
   # at merge_base (PR-created sub-project; no production to revert → N/A → pass).
   #
-  # D-S2: the manifest filename comes from the adapter (not hardcoded "mix.exs").
-  defp project_creation_na?(_adapter, [], _merge_base, _workspace, _ctx), do: false
+  # The manifest filename is determined by the language atom via
+  # language_manifest_file/1 — an engine-internal auxiliary, not a Toolchain
+  # callback (the behaviour seam covers test execution only; D-S2 / SPEC §4 B4).
+  defp project_creation_na?(_language, [], _merge_base, _workspace), do: false
 
-  defp project_creation_na?(adapter, gating_paths, merge_base, workspace, ctx) do
-    manifest_file = adapter.project_manifest_file(ctx)
+  defp project_creation_na?(language, gating_paths, merge_base, workspace) do
+    manifest_file = language_manifest_file(language)
 
     if is_nil(manifest_file) do
       false
@@ -261,6 +263,13 @@ defmodule Tau.Factory.Gate do
       end)
     end
   end
+
+  # Maps a language atom to its conventional single-file build manifest name.
+  # Used only for the project-creation N/A pre-check (Gate 5.3). Returns nil
+  # when the language has no conventional single-file manifest (the check is
+  # then skipped and the mutation check runs unconditionally).
+  defp language_manifest_file(:elixir), do: "mix.exs"
+  defp language_manifest_file(_), do: nil
 
   defp find_enclosing_manifest(test_path, manifest_file, workspace) do
     start_dir = Path.dirname(test_path)

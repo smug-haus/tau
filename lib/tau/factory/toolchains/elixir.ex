@@ -101,7 +101,4 @@ defmodule Tau.Factory.Toolchain.Elixir do
       %Tau.Toolchain.ResourceNS{kind: :dir, var: "REBAR3_CACHE", path: "~/.cache/rebar3"}
     ]
   end
-
-  @impl Tau.Factory.Toolchain
-  def project_manifest_file(_ctx), do: "mix.exs"
 end

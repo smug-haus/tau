@@ -101,24 +101,6 @@ defmodule Tau.Factory.Toolchain do
   """
   @callback declare_resource_namespace(ctx :: ctx()) :: [Tau.Toolchain.ResourceNS.t()]
 
-  @doc """
-  Returns the filename of the project's build manifest (the file whose presence
-  at a given git ref signals that a project existed at that ref).
-
-  Used by the gate engine to determine the project-creation N/A condition
-  (Gate 5.3): when the manifest file is absent at `merge_base`, the entire
-  project was PR-created and the mutation check is N/A.
-
-  Examples:
-    - Elixir: `"mix.exs"`
-    - Node.js: `"package.json"`
-    - Rust:    `"Cargo.toml"`
-
-  Returns `nil` when the language has no conventional single-file manifest
-  (the N/A condition is then skipped — the mutation check runs unconditionally).
-  """
-  @callback project_manifest_file(ctx :: ctx()) :: String.t() | nil
-
   # ---------------------------------------------------------------------------
   # Atom dispatch
   # ---------------------------------------------------------------------------
