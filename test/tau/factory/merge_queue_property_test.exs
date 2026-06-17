@@ -33,9 +33,9 @@ defmodule Tau.Factory.MergeQueuePropertyTest do
   # P-Q-1: effective_priority/1 returns a number; higher restale_count yields <= priority
   property "D-341 P-Q-1: effective_priority/1 numeric; aging lowers priority" do
     check all(
-      seq <- StreamData.positive_integer(),
-      restale_count <- StreamData.positive_integer()
-    ) do
+            seq <- StreamData.positive_integer(),
+            restale_count <- StreamData.positive_integer()
+          ) do
       fresh = %{id: "fresh", seq: seq, restale_count: 0}
       restaled = %{id: "restaled", seq: seq, restale_count: restale_count}
 
@@ -54,9 +54,9 @@ defmodule Tau.Factory.MergeQueuePropertyTest do
   # P-Q-2: strictly monotone — each additional restale strictly decreases priority
   property "D-341 P-Q-2: effective_priority strictly decreases with restale_count" do
     check all(
-      seq <- StreamData.positive_integer(),
-      k <- StreamData.positive_integer()
-    ) do
+            seq <- StreamData.positive_integer(),
+            k <- StreamData.positive_integer()
+          ) do
       unit_k = %{id: "u", seq: seq, restale_count: k}
       unit_k1 = %{id: "u", seq: seq, restale_count: k + 1}
 
@@ -90,10 +90,10 @@ defmodule Tau.Factory.MergeQueuePropertyTest do
   # P-Q-4: dequeue_batch/1 selects minimum effective_priority (highest urgency)
   property "D-341 P-Q-4: dequeue_batch selects minimum-priority unit first" do
     check all(
-      n <- StreamData.integer(2..8),
-      seqs <- StreamData.list_of(StreamData.positive_integer(), length: n),
-      restales <- StreamData.list_of(StreamData.non_negative_integer(), length: n)
-    ) do
+            n <- StreamData.integer(2..8),
+            seqs <- StreamData.list_of(StreamData.positive_integer(), length: n),
+            restales <- StreamData.list_of(StreamData.non_negative_integer(), length: n)
+          ) do
       units =
         [seqs, restales]
         |> Enum.zip()
@@ -138,6 +138,7 @@ defmodule Tau.Factory.MergeQueuePropertyTest do
 
       # Seq must be monotone-increasing
       seqs = Enum.map(stamped, & &1.seq)
+
       assert seqs == Enum.sort(seqs),
              "D-341: :seq must be monotone-increasing in enqueue order. Got #{inspect(seqs)}"
 
