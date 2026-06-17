@@ -18,6 +18,7 @@ defmodule Tau.Factory.MergeAuthority do
 
   @behaviour :gen_statem
 
+  alias Tau.Factory.ActionClassifier
   alias Tau.Factory.Ledger.Writer, as: LedgerWriter
   alias Tau.Factory.Merge.Cas
   alias Tau.Factory.Merge.Health
@@ -348,59 +349,80 @@ defmodule Tau.Factory.MergeAuthority do
         transition_from_idle(next_data)
 
       :all_pass ->
-        case cas.cas_push(repo_dir, tip, base) do
-          :ok ->
-            Logger.info("[MergeAuthority] merged tip #{tip}")
+        # D-319 / INV-20: structural deny guard — classify/1 MUST be called
+        # before any side-effecting push (C207-B7). A :force_push action is the
+        # kind that represents M's cas_push; {:deny, :destructive} routes to K
+        # as E-DESTRUCTIVE and the push never executes.
+        case ActionClassifier.classify(:force_push) do
+          {:deny, :destructive} ->
+            Logger.warning(
+              "[MergeAuthority] D-319: classify/1 denied :force_push as destructive; " <>
+                "routing E-DESTRUCTIVE — train not pushed"
+            )
 
-            # D-355 / WAL-before-ack: write the durable merge-outcome row BEFORE
-            # the ephemeral telemetry projection fires. Telemetry/PubSub becomes a
-            # derived projection of the durable row. reply arrives only after the
-            # WAL commit is durable (D-315, RPO=0).
-            Enum.each(units, fn unit ->
-              LedgerWriter.record_merge_outcome(ledger, %{
-                unit_id: unit.id,
-                outcome: :merged,
-                commit_sha: tip,
-                reason: nil,
-                run: unit.run
-              })
-            end)
+            telemetry(:reject, %{hash: hd_hash(units)}, %{
+              reason: :e_destructive,
+              units: units
+            })
 
-            telemetry(:merged, %{hash: hd_hash(units)}, %{tip: tip, units: units})
-
-            # D-356: broadcast :merged to each train member's per-PR topic AFTER the
-            # D-355 durable record and AFTER telemetry (WAL-before-ack ordering).
-            Enum.each(units, fn unit ->
-              Phoenix.PubSub.broadcast(
-                pubsub,
-                "factory:pr:#{unit.id}",
-                {:merge_result, :merged}
-              )
-            end)
-
-            # D-394: reset build_attempts for successfully merged members.
-            next_attempts =
-              Enum.reduce(units, data.build_attempts, fn unit, acc ->
-                Map.delete(acc, unit.id)
-              end)
-
-            transition_from_idle(%{data | build_attempts: next_attempts})
-
-          {:error, :stale_ref} ->
-            Logger.info("[MergeAuthority] stale ref; requeuing train for rebase + re-gate")
-            telemetry(:reject, %{hash: hd_hash(units)}, %{reason: :stale_ref, units: units})
-            # :stale_ref is NOT a terminal reject — the train is requeued for retry.
-            # D-356: do NOT broadcast :rejected here.
             next_data = requeue_units(data, units)
             transition_from_idle(next_data)
 
-          {:error, reason} ->
-            Logger.warning("[MergeAuthority] cas_push failed: #{inspect(reason)}")
-            telemetry(:reject, %{hash: hd_hash(units)}, %{reason: reason, units: units})
-            # Other cas_push errors are also requeued for retry.
-            # D-356: do NOT broadcast :rejected here.
-            next_data = requeue_units(data, units)
-            transition_from_idle(next_data)
+          :allow ->
+            case cas.cas_push(repo_dir, tip, base) do
+              :ok ->
+                Logger.info("[MergeAuthority] merged tip #{tip}")
+
+                # D-355 / WAL-before-ack: write the durable merge-outcome row BEFORE
+                # the ephemeral telemetry projection fires. Telemetry/PubSub becomes a
+                # derived projection of the durable row. reply arrives only after the
+                # WAL commit is durable (D-315, RPO=0).
+                Enum.each(units, fn unit ->
+                  LedgerWriter.record_merge_outcome(ledger, %{
+                    unit_id: unit.id,
+                    outcome: :merged,
+                    commit_sha: tip,
+                    reason: nil,
+                    run: unit.run
+                  })
+                end)
+
+                telemetry(:merged, %{hash: hd_hash(units)}, %{tip: tip, units: units})
+
+                # D-356: broadcast :merged to each train member's per-PR topic AFTER
+                # the D-355 durable record and AFTER telemetry (WAL-before-ack ordering).
+                Enum.each(units, fn unit ->
+                  Phoenix.PubSub.broadcast(
+                    pubsub,
+                    "factory:pr:#{unit.id}",
+                    {:merge_result, :merged}
+                  )
+                end)
+
+                # D-394: reset build_attempts for successfully merged members.
+                next_attempts =
+                  Enum.reduce(units, data.build_attempts, fn unit, acc ->
+                    Map.delete(acc, unit.id)
+                  end)
+
+                transition_from_idle(%{data | build_attempts: next_attempts})
+
+              {:error, :stale_ref} ->
+                Logger.info("[MergeAuthority] stale ref; requeuing train for rebase + re-gate")
+                telemetry(:reject, %{hash: hd_hash(units)}, %{reason: :stale_ref, units: units})
+                # :stale_ref is NOT a terminal reject — the train is requeued for retry.
+                # D-356: do NOT broadcast :rejected here.
+                next_data = requeue_units(data, units)
+                transition_from_idle(next_data)
+
+              {:error, reason} ->
+                Logger.warning("[MergeAuthority] cas_push failed: #{inspect(reason)}")
+                telemetry(:reject, %{hash: hd_hash(units)}, %{reason: reason, units: units})
+                # Other cas_push errors are also requeued for retry.
+                # D-356: do NOT broadcast :rejected here.
+                next_data = requeue_units(data, units)
+                transition_from_idle(next_data)
+            end
         end
     end
   end
