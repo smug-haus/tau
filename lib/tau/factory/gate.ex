@@ -17,9 +17,22 @@ defmodule Tau.Factory.Gate do
 
   ## Floor (D-354, non-shrinkable)
 
-  The engine-fixed floor is `[:mutation, :critic, :reviewer, :lint]`. `compose/1`
-  adds these to any policy manifest and rejects a manifest that tries to omit
-  them. An operator cannot policy away a floor member.
+  The engine-fixed floor is `[:mutation, :critic, :reviewer, :lint, :spec_membership]`.
+  `compose/1` adds these to any policy manifest and rejects a manifest that tries
+  to omit them. An operator cannot policy away a floor member.
+
+  ### Backward-compatibility note (D-322 / D-323 / HR-6)
+
+  Pre-extended-floor manifests (those omitting both `:lint` and `:spec_membership`,
+  e.g. the legacy `[:mutation, :critic, :reviewer]` form used in tests authored
+  before the extended floor landed) receive a soft-run path: extended missing
+  members are dispatched through the oracle stub, which returns `:pass` for
+  unmapped halves. This is a deliberate compatibility seam for gating tests frozen
+  before HR-6/D-322/D-323 landed. When a manifest includes `:lint` but omits
+  `:spec_membership` (a lint-aware caller), the omission is a hard D-354 floor
+  violation and the half is pre-failed. The soft-run path only applies to manifests
+  entirely unaware of the extended floor (omitting both `:lint` and
+  `:spec_membership`).
 
   ## Oracle seam (§4 B1/B2 amendment — PR #464)
 
