@@ -63,13 +63,20 @@ defmodule Tau.Factory.WorkerSupervisor do
   A successful return here means the child was accepted by the supervisor;
   the worker may still stop asynchronously if `init/1` fails.
 
-  ## Oracle-separation guard (D-304 sub-mechanism (b))
+  ## Oracle-separation guard (D-304, SPEC-FACTORY-FLEET §4 B8)
 
+  Sub-mechanism (a) — spawn-order constraint:
+  When `role` is `:implementer` and no `:test_author` is registered in the registry,
+  the spawn is rejected with `{:error, :no_test_author_registered}`. This enforces
+  INV-5: `:test_author` must be spawned first and its gating-test path set frozen
+  before any `:implementer` is spawned.
+
+  Sub-mechanism (b) — same-identity guard (HR-7):
   When `role` is `:implementer` and `:author_id` is provided, the registry
   is scanned for any live `:test_author` worker with the same `:author_id`.
   If one is found, the spawn is rejected with `{:error, :same_identity_oracle_subject}`.
   This enforces INV-5: the same agent identity MUST NOT author both the gating
-  test and the implementation (HR-7).
+  test and the implementation.
 
   Options (all passed through to `Tau.Factory.Worker`):
     - `:registry`            — atom; registered name of the WorkerRegistry (required).
@@ -106,30 +113,61 @@ defmodule Tau.Factory.WorkerSupervisor do
     registry = Keyword.fetch!(opts, :registry)
     author_id = Keyword.get(opts, :author_id)
 
-    # D-304 oracle-separation guard (sub-mechanism (b), HR-7):
+    # D-304 oracle-separation guard — two sub-mechanisms (SPEC-FACTORY-FLEET §4 B8):
+    #
+    # Sub-mechanism (a) — spawn-order constraint:
+    # An :implementer spawn MUST be rejected with {:error, :no_test_author_registered}
+    # when no :test_author is currently registered in the same registry. This enforces
+    # the ordering invariant: ":test_author first, freeze gating-test path set before
+    # any :implementer." (INV-5, SPEC-FACTORY-FLEET §4 B8, D-304).
+    #
+    # Sub-mechanism (b) — same-identity guard (HR-7):
     # When spawning an :implementer with a known author_id, reject the spawn
     # if the same author_id has already authored a :test_author worker in this
     # registry. This prevents the same agent identity from authoring both the
     # gating test and the implementation.
-    if role == :implementer and not is_nil(author_id) and
-         same_identity_test_author_exists?(registry, author_id) do
-      {:error, :same_identity_oracle_subject}
-    else
-      worker_opts =
-        opts
-        |> Keyword.put(:worker_id, worker_id)
-        |> Keyword.put(:role, role)
-        |> Keyword.put(:brief, brief)
-        |> Keyword.put(:base_ref, base_ref)
-        |> Keyword.put(:registry, registry)
+    cond do
+      role == :implementer and not any_test_author_registered?(registry) ->
+        {:error, :no_test_author_registered}
 
-      do_spawn(supervisor, worker_id, worker_opts)
+      role == :implementer and not is_nil(author_id) and
+          same_identity_test_author_exists?(registry, author_id) ->
+        {:error, :same_identity_oracle_subject}
+
+      true ->
+        worker_opts =
+          opts
+          |> Keyword.put(:worker_id, worker_id)
+          |> Keyword.put(:role, role)
+          |> Keyword.put(:brief, brief)
+          |> Keyword.put(:base_ref, base_ref)
+          |> Keyword.put(:registry, registry)
+
+        do_spawn(supervisor, worker_id, worker_opts)
     end
   end
 
   # ---------------------------------------------------------------------------
   # Private helpers
   # ---------------------------------------------------------------------------
+
+  # Check whether ANY :test_author worker is currently registered in the registry.
+  # Used for the D-304 spawn-order constraint (sub-mechanism (a), SPEC-FACTORY-FLEET §4 B8):
+  # an :implementer MUST NOT be spawned before a :test_author is registered.
+  @spec any_test_author_registered?(atom()) :: boolean()
+  defp any_test_author_registered?(registry) do
+    results =
+      Registry.select(registry, [
+        {{:"$1", :"$2", :"$3"}, [{:is_map, :"$3"}],
+         [
+           {{:"$1", :"$2", :"$3"}}
+         ]}
+      ])
+
+    Enum.any?(results, fn {_key, _pid, metadata} ->
+      is_map(metadata) and Map.get(metadata, :role) == :test_author
+    end)
+  end
 
   # Check whether any live :test_author worker with the given author_id exists
   # in the registry. Uses Registry.select/2 with a match spec that filters by
