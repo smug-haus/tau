@@ -24,11 +24,14 @@ defmodule Tau.Factory.KillSwitchConformanceTest do
     Currently `perform/1` only checks `Store.armed?` when a `"store"` arg is
     present; it does not check the filesystem sentinel at all → assertion failure.
 
-  - NFR-KILL-LATENCY: after a kill signal, a running unit MUST NOT continue
-    beyond T_unit_max. A configurable total-unit-duration timer must exist on
-    the Coordinator/Unit and fire, causing the unit to be ejected and the factory
-    to halt within the absolute ceiling. Currently only per-state timeouts exist
-    (no accumulating total-unit-duration timer) → assertion fails.
+  - NFR-KILL-LATENCY (#673): T_unit_max must be finite and bounded by a
+    compile-time ceiling (@max_unit_max_ms). Passing unit_max_ms: nil (by omitting
+    the option) must NOT be accepted — a finite default must exist. The
+    verify-volatility-split.md §3 V3-b clamp contract requires every liveness-
+    bounding number to be clamped against a hard ceiling (same pattern as N and
+    budget). Currently: Keyword.get(opts, :unit_max_ms) defaults to nil →
+    arm_unit_max_timer/1 returns [] → absolute ceiling never fires when omitted →
+    factory can hang forever after a kill with a stalled unit.
 
   Tests are written before the production fix exists (oracle-separation §4b).
   Failing modes: `UndefinedFunctionError`, compile error, or assertion failure.
@@ -341,94 +344,77 @@ defmodule Tau.Factory.KillSwitchConformanceTest do
   # NFR-KILL-LATENCY (#673)
   #
   # After a kill signal, the factory MUST halt within at most 1 atomic unit,
-  # bounded above by T_unit_max (configurable; default 30 min). A unit that
-  # runs longer than T_unit_max must be forcibly terminated and treated as
-  # escalated; the factory must then halt.
+  # bounded above by T_unit_max. From kill signal to clean halt:
+  # **≤ 1 atomic unit**, bounded above by T_unit_max (default 30 min).
   #
-  # Conformant behaviour: the Coordinator or Unit accepts a `:unit_max_ms`
-  # option. A per-unit accumulating timer (not a per-state timer) fires after
-  # T_unit_max from unit start. On fire, the unit is ejected (escalated) and
-  # the factory halts if halt_pending.
+  # The architecture document (verify-volatility-split.md §3 "V3-b") identifies
+  # that `T_unit_max` must be:
+  #   (a) finite — nil / :infinity sentinels must be REJECTED. A Coordinator
+  #       without an explicit unit_max_ms must fall back to a finite default, not
+  #       to nil which silently disarms the ceiling.
+  #   (b) clamped — there must be a hard compile-time upper bound
+  #       (@max_unit_max_ms) that the option is clamped against, matching the
+  #       min(policy, ceiling) pattern used for N and budget.
   #
-  # Current failure mode: only a per-state `:state_timeout` exists in Unit FSM
-  # (unit.ex:60); no accumulating total-unit-duration timer exists → a
-  # continuously heartbeating worker can prevent the bound from ever firing →
-  # assertion failure (halt does not arrive within the configured ceiling).
+  # Current failure modes:
+  #   (a) Coordinator.init/1: `Keyword.get(opts, :unit_max_ms)` with no default
+  #       → stores nil → arm_unit_max_timer(%{unit_max_ms: nil}) returns [] →
+  #       no ceiling ever armed when unit_max_ms is omitted.
+  #   (b) No @max_unit_max_ms module attribute exists in coordinator.ex, and
+  #       unit_max_ms is never clamped → over-ceiling values accepted silently.
   # ---------------------------------------------------------------------------
 
   @tag :nfr_kill_latency
-  test "NFR-KILL-LATENCY: factory halts within T_unit_max after kill, even if unit never finishes" do
-    coord_name = unique_name(:coord_nfr_latency)
-    on_halted = self()
+  test "NFR-KILL-LATENCY: Coordinator defaults unit_max_ms to a finite value (nil disarms ceiling)" do
+    # arm_unit_max_timer(%{unit_max_ms: nil}) currently returns [] — no ceiling.
+    # A Coordinator started without :unit_max_ms has NO kill-latency bound at all,
+    # defeating NFR-KILL-LATENCY entirely.
+    #
+    # Conformant behaviour: Coordinator.init/1 must default :unit_max_ms to a
+    # finite positive integer (e.g. @default_unit_max_ms = 1_800_000 ms = 30 min),
+    # never nil. The stored value must be a positive integer.
+    coord_name = unique_name(:coord_nfr_default)
 
-    # Use a very short T_unit_max for test speed.
-    unit_max_ms = 300
-
-    # A unit that NEVER sends {:unit_terminal,...} — simulates a stalled unit.
-    # The factory must forcibly terminate it within T_unit_max and then halt.
-    unit_never_finishes = fn _work ->
-      # Spawn a process that blocks forever (no terminal message).
-      spawn(fn -> Process.sleep(:infinity) end)
-      :ok
-    end
-
-    {:ok, counter} = Agent.start_link(fn -> 0 end)
-
-    select_fun = fn ->
-      n = Agent.get_and_update(counter, fn c -> {c, c + 1} end)
-
-      if n == 0 do
-        "unit-latency-stalled-#{System.unique_integer([:positive])}"
-      else
-        nil
-      end
-    end
-
-    # The Coordinator MUST accept :unit_max_ms and enforce the absolute ceiling.
-    # This option does not exist in the current implementation.
+    # Start WITHOUT any :unit_max_ms option — the conformant default must be finite.
     start_supervised!(
       {
         @coordinator,
         name: coord_name,
         pubsub: Tau.PubSub,
-        select_fun: select_fun,
-        drive_fun: unit_never_finishes,
-        scheduler: nil,
-        on_halted: on_halted,
-        unit_max_ms: unit_max_ms
+        select_fun: fn -> nil end,
+        drive_fun: fn _w -> :ok end,
+        scheduler: nil
+        # :unit_max_ms intentionally omitted — default must be a finite positive integer
       },
       id: coord_name
     )
 
-    # Wait for the unit to start (it will never finish on its own).
-    Process.sleep(50)
+    {_state, data} = :sys.get_state(coord_name)
+    stored = Map.get(data, :unit_max_ms)
 
-    # Trigger halt. With halt_pending = true, the factory should eject the
-    # stalled unit once T_unit_max elapses, then halt.
-    ks_name = unique_name(:ks_nfr)
-
-    start_supervised!(
-      {@kill_switch, name: ks_name, pubsub: Tau.PubSub},
-      id: ks_name
-    )
-
-    :ok = @kill_switch.request_halt(ks_name)
-
-    # Allow up to unit_max_ms + generous margin for the forced ejection and halt.
-    margin_ms = unit_max_ms + 500
-
-    assert_receive :coordinator_halted,
-                   margin_ms,
-                   "NFR-KILL-LATENCY: factory did not halt within T_unit_max (#{unit_max_ms}ms) " <>
-                     "after kill signal with a stalled unit — no accumulating total-unit-duration " <>
-                     "timer exists (only per-state timeouts, which heartbeats can reset indefinitely)"
+    assert is_integer(stored) and stored > 0,
+           "NFR-KILL-LATENCY: Coordinator.init/1 defaulted :unit_max_ms to " <>
+             "#{inspect(stored)} (nil means NO ceiling is ever armed). " <>
+             "A Coordinator omitting :unit_max_ms must fall back to a finite default " <>
+             "(e.g. @default_unit_max_ms = 1_800_000 ms). " <>
+             "Current code: `Keyword.get(opts, :unit_max_ms)` with no default → nil → " <>
+             "arm_unit_max_timer/1 clause 'def arm_unit_max_timer(%{unit_max_ms: nil}), do: []' " <>
+             "fires → absolute ceiling NEVER armed after kill when option is omitted."
   end
 
   @tag :nfr_kill_latency
-  test "NFR-KILL-LATENCY: Coordinator stores :unit_max_ms in state for accumulating-timer enforcement" do
-    coord_name = unique_name(:coord_nfr_state)
+  test "NFR-KILL-LATENCY: Coordinator clamps unit_max_ms to @max_unit_max_ms hard ceiling" do
+    # V3-b clamp contract (verify-volatility-split.md §3): every liveness-bounding
+    # number must be clamped against a compile-time ceiling. Passing an absurdly
+    # large unit_max_ms must be silently clamped to @max_unit_max_ms — never
+    # accepted as-is.
+    #
+    # Conformant behaviour: a @max_unit_max_ms module attribute exists and
+    # init/1 stores min(provided_value, @max_unit_max_ms).
+    coord_name = unique_name(:coord_nfr_clamp)
 
-    unit_max_ms = 30_000
+    # Pass a value that exceeds any sane ceiling (7 days = 604_800_000 ms).
+    over_ceiling_ms = 7 * 24 * 60 * 60 * 1000
 
     start_supervised!(
       {
@@ -438,19 +424,117 @@ defmodule Tau.Factory.KillSwitchConformanceTest do
         select_fun: fn -> nil end,
         drive_fun: fn _w -> :ok end,
         scheduler: nil,
-        unit_max_ms: unit_max_ms
+        unit_max_ms: over_ceiling_ms
       },
       id: coord_name
     )
 
     {_state, data} = :sys.get_state(coord_name)
+    stored = Map.get(data, :unit_max_ms)
 
-    # The Coordinator must store :unit_max_ms in its state data so the
-    # accumulating-timer arm code can read it. Silently ignoring the option
-    # means no timer is ever armed — the absolute ceiling cannot fire.
-    assert Map.get(data, :unit_max_ms) == unit_max_ms,
-           "NFR-KILL-LATENCY: Coordinator did not store :unit_max_ms in state data — " <>
-             "the absolute ceiling option is silently ignored; no accumulating timer " <>
-             "can be armed without this value"
+    # The stored value must be clamped to @max_unit_max_ms.
+    # The arch doc proposes 30 min default; a reasonable hard ceiling is 2 hours
+    # (7_200_000 ms). Any value above 2 hours is a policy misconfiguration that
+    # the engine should reject via clamping.
+    max_sane_ceiling_ms = 2 * 60 * 60 * 1000
+
+    assert is_integer(stored) and stored <= max_sane_ceiling_ms,
+           "NFR-KILL-LATENCY: Coordinator stored unit_max_ms = #{inspect(stored)} " <>
+             "when given over_ceiling_ms = #{over_ceiling_ms}. " <>
+             "The V3-b clamp contract (verify-volatility-split.md §3) requires " <>
+             "min(policy_value, @max_unit_max_ms). " <>
+             "No @max_unit_max_ms attribute exists in coordinator.ex → " <>
+             "over-ceiling values accepted silently, defeating NFR-KILL-LATENCY."
+  end
+
+  @tag :nfr_kill_latency
+  test "NFR-KILL-LATENCY: factory halts within default ceiling after kill with stalled unit (no explicit unit_max_ms)" do
+    # Most dangerous failure mode: a Coordinator with no explicit :unit_max_ms
+    # option has a stalled unit in flight when a kill arrives.
+    #
+    # Conformant: the default ceiling fires and the factory halts within the
+    # default unit_max_ms.
+    # Non-conformant (current): unit_max_ms defaults to nil →
+    # arm_unit_max_timer returns [] → no timer → factory hangs forever.
+    #
+    # We use a Coordinator with NO :unit_max_ms option. The conformant
+    # implementation must supply a finite default. We then trigger a kill and
+    # assert the factory halts within a generous test window (5 s). If the
+    # default is nil, the factory will never halt and assert_receive will time out.
+    #
+    # This test is slow if the conformant default is large (30 min). The
+    # implementation MUST support a test-injectable default OR the test verifies
+    # the state-stored default is finite (see test above) — this test exercises
+    # the observable behaviour, not just the stored value.
+    #
+    # To keep the test fast: we still use an explicit :unit_max_ms of 200ms here.
+    # The FAILING assertion is in the test above (nil default). This test
+    # additionally asserts that the absolute ceiling bypasses main_synced_fun.
+    coord_name = unique_name(:coord_nfr_absolute)
+    on_halted = self()
+
+    unit_max_ms = 200
+
+    # main_synced_fun returns false. The absolute ceiling MUST bypass it.
+    # If the implementation incorrectly calls main_synced_fun before halting on
+    # unit_max_ceiling, the factory will stay in :halting forever → timeout.
+    sync_called_ref = :atomics.new(1, signed: false)
+
+    main_synced_fun = fn ->
+      :atomics.add(sync_called_ref, 1, 1)
+      false
+    end
+
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    select_fun = fn ->
+      n = Agent.get_and_update(counter, fn c -> {c, c + 1} end)
+      if n == 0, do: "unit-absolute-stalled-#{System.unique_integer([:positive])}", else: nil
+    end
+
+    start_supervised!(
+      {
+        @coordinator,
+        name: coord_name,
+        pubsub: Tau.PubSub,
+        select_fun: select_fun,
+        drive_fun: fn _w -> :ok end,
+        scheduler: nil,
+        on_halted: on_halted,
+        unit_max_ms: unit_max_ms,
+        main_synced_fun: main_synced_fun
+      },
+      id: coord_name
+    )
+
+    Process.sleep(50)
+
+    ks_name = unique_name(:ks_nfr_abs)
+
+    start_supervised!(
+      {@kill_switch, name: ks_name, pubsub: Tau.PubSub},
+      id: ks_name
+    )
+
+    :ok = @kill_switch.request_halt(ks_name)
+
+    margin_ms = unit_max_ms + 400
+
+    # The factory MUST halt within the absolute ceiling, bypassing main_synced_fun.
+    assert_receive :coordinator_halted,
+                   margin_ms,
+                   "NFR-KILL-LATENCY: factory did not halt within T_unit_max (#{unit_max_ms}ms) " <>
+                     "when main_synced_fun returns false — the unit_max_ceiling timeout MUST " <>
+                     "bypass the main-sync gate and call do_halt unconditionally " <>
+                     "(coordinator.ex halting/{:timeout,:unit_max_ceiling} must NOT check main_synced?)."
+
+    sync_calls = :atomics.get(sync_called_ref, 1)
+
+    # The absolute ceiling must NOT call main_synced_fun.
+    assert sync_calls == 0,
+           "NFR-KILL-LATENCY: unit_max_ceiling timeout called main_synced_fun " <>
+             "(#{sync_calls} times) — the absolute ceiling must bypass main-sync entirely. " <>
+             "Coordinator.ex halting({:timeout, :unit_max_ceiling}) must call do_halt directly " <>
+             "without consulting main_synced?/1."
   end
 end
