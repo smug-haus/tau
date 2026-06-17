@@ -122,7 +122,9 @@ defmodule Tau.Factory.CoordinatorLivenessAmbiguityTest do
 
         pid ->
           case :sys.get_state(pid, 500) do
-            {:running, _data} -> {:halt, pid}
+            {:running, _data} ->
+              {:halt, pid}
+
             _ ->
               Process.sleep(5)
               {:cont, nil}
