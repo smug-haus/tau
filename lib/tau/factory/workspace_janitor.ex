@@ -159,18 +159,23 @@ defmodule Tau.Factory.WorkspaceJanitor do
         cert_reason = normalize_reason(reason)
 
         # Capture-before-reclaim, in order (D-313, C203).
+        # INV-ST-15 / D-334: reclaim ONLY on successful capture.
+        # A capture failure (Ledger infra error) MUST NOT trigger reclaim —
+        # the workspace must be preserved so the operator can recover dirty
+        # artifacts manually.  Unconditional reclaim after {:error, _} is the
+        # "capture failure → silent data loss" pattern this invariant forbids.
         capture_result = capture_workspace(state.ledger, worker_id, ws)
 
         case capture_result do
           {:ok, _} ->
-            :ok
+            reclaim_workspace(ws)
 
           {:error, err} ->
-            Logger.error("[WorkspaceJanitor] capture failed for #{worker_id}: #{inspect(err)}")
+            Logger.error(
+              "[WorkspaceJanitor] capture failed for #{worker_id}: #{inspect(err)}; " <>
+                "workspace preserved at #{ws} for manual recovery (INV-ST-15 / D-334)"
+            )
         end
-
-        # Reclaim the workspace (after the durable write).
-        reclaim_workspace(ws)
 
         # Deliver death-certificate.
         if report_to do
