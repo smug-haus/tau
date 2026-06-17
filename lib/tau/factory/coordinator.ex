@@ -93,6 +93,24 @@ defmodule Tau.Factory.Coordinator do
 
     :ok = Phoenix.PubSub.subscribe(pubsub, "factory:control")
 
+    # Subscribe to unit-merged telemetry to accumulate token counts for
+    # INV-REPORTING-SOURCED (governance.md §5). Token counts MUST be sourced
+    # from telemetry spans, never hardcoded.
+    self_pid = self()
+    # Use a unique handler id per coordinator instance so handlers don't collide
+    # across concurrent coordinators and can be detached on terminate.
+    telemetry_handler_id =
+      "coordinator-unit-merged-#{System.unique_integer([:positive, :monotonic])}"
+
+    :telemetry.attach(
+      telemetry_handler_id,
+      [:tau, :factory, :unit, :merged],
+      fn _event, measurements, metadata, pid ->
+        send(pid, {:telemetry_unit_merged, measurements, metadata})
+      end,
+      self_pid
+    )
+
     # Resume from L when a ledger is provided (D-344, §5 "start (resume from L)").
     # Read latest_unit_snapshots/1 to discover which units were in flight at crash
     # time. Non-terminal units are rehydrated (driven). Terminal sinks are skipped.
@@ -126,7 +144,15 @@ defmodule Tau.Factory.Coordinator do
       # Track rehydrated units so :sys.get_state reveals them (Oracle c).
       rehydrated: rehydrated,
       # Monotonic start time for duration_ms telemetry sourcing (INV-REPORTING-SOURCED).
-      start_mono_ms: System.monotonic_time(:millisecond)
+      start_mono_ms: System.monotonic_time(:millisecond),
+      # Accumulated token counts from [:tau, :factory, :unit, :merged] telemetry
+      # spans (INV-REPORTING-SOURCED). MUST NOT be hardcoded — sourced from spans.
+      accumulated_tokens: 0,
+      # Pending token counts keyed by unit_id, awaiting unit_terminal to commit.
+      # Allows telemetry events and unit_terminal to arrive in any order.
+      pending_unit_tokens: %{},
+      # Telemetry handler id; detached in terminate/3 to prevent cross-test leaks.
+      telemetry_handler_id: telemetry_handler_id
     }
 
     {:ok, :running, data, init_events}
@@ -162,7 +188,7 @@ defmodule Tau.Factory.Coordinator do
         # on the observation plane (C117 / INV-REPORTING-ESCALATION-ONLY).
         # Measurements sourced from monotonic clock span (INV-REPORTING-SOURCED, governance.md §5).
         duration_ms = System.monotonic_time(:millisecond) - data.start_mono_ms
-        measurements = %{total_tokens: 0, duration_ms: duration_ms}
+        measurements = %{total_tokens: data.accumulated_tokens, duration_ms: duration_ms}
         :telemetry.execute([:tau, :factory, :coordinator, :milestone], measurements, %{})
 
         :ok =
@@ -200,9 +226,17 @@ defmodule Tau.Factory.Coordinator do
     {:next_state, :halting, %{data | in_flight: nil}, [{:next_event, :internal, :drain}]}
   end
 
-  def running(:info, {:unit_terminal, _unit_id, _outcome}, data) do
+  def running(:info, {:unit_terminal, unit_id, _outcome}, data) do
     telemetry(:unit_terminal, %{}, %{halt_pending: false})
-    data = %{data | in_flight: nil}
+    # Commit any staged token counts for this unit (INV-REPORTING-SOURCED).
+    {tokens, pending} = Map.pop(data.pending_unit_tokens, unit_id, 0)
+
+    data = %{
+      data
+      | in_flight: nil,
+        accumulated_tokens: data.accumulated_tokens + tokens,
+        pending_unit_tokens: pending
+    }
 
     # If rehydration of recovered units is still in progress, drive the next one.
     case Map.get(data, :rehydrate_queue, %{}) do
@@ -225,9 +259,17 @@ defmodule Tau.Factory.Coordinator do
     {:next_state, :halting, %{data | in_flight: nil}, [{:next_event, :internal, :drain}]}
   end
 
-  def running(:info, {:unit_terminal, _unit_id, _outcome, _provenance}, data) do
+  def running(:info, {:unit_terminal, unit_id, _outcome, _provenance}, data) do
     telemetry(:unit_terminal, %{}, %{halt_pending: false})
-    data = %{data | in_flight: nil}
+    # Commit any staged token counts for this unit (INV-REPORTING-SOURCED).
+    {tokens, pending} = Map.pop(data.pending_unit_tokens, unit_id, 0)
+
+    data = %{
+      data
+      | in_flight: nil,
+        accumulated_tokens: data.accumulated_tokens + tokens,
+        pending_unit_tokens: pending
+    }
 
     case Map.get(data, :rehydrate_queue, %{}) do
       queue when map_size(queue) > 0 ->
@@ -247,7 +289,7 @@ defmodule Tau.Factory.Coordinator do
   def running(:info, {:escalate, {e, :global}}, data) do
     # Measurements sourced from monotonic clock span (INV-REPORTING-SOURCED, governance.md §5).
     duration_ms = System.monotonic_time(:millisecond) - data.start_mono_ms
-    measurements = %{total_tokens: 0, duration_ms: duration_ms}
+    measurements = %{total_tokens: data.accumulated_tokens, duration_ms: duration_ms}
     :telemetry.execute([:tau, :factory, :coordinator, :escalate], measurements, %{scope: :global})
 
     :ok =
@@ -265,7 +307,7 @@ defmodule Tau.Factory.Coordinator do
   def running(:info, {:escalate, {e, :unit}}, data) do
     # Measurements sourced from monotonic clock span (INV-REPORTING-SOURCED, governance.md §5).
     duration_ms = System.monotonic_time(:millisecond) - data.start_mono_ms
-    measurements = %{total_tokens: 0, duration_ms: duration_ms}
+    measurements = %{total_tokens: data.accumulated_tokens, duration_ms: duration_ms}
     :telemetry.execute([:tau, :factory, :coordinator, :escalate], measurements, %{scope: :unit})
 
     :ok =
@@ -277,6 +319,19 @@ defmodule Tau.Factory.Coordinator do
 
     data = %{data | in_flight: nil}
     {:keep_state, data, [{:next_event, :internal, :loop}]}
+  end
+
+  # Stage token counts from unit-merged telemetry spans (INV-REPORTING-SOURCED).
+  # [:tau, :factory, :unit, :merged] fires when a Unit FSM transitions to :merged;
+  # the measurements map carries :total_tokens from the span.
+  # Store by unit_id so tokens are committed when unit_terminal fires — this
+  # tolerates any ordering of telemetry vs unit_terminal messages (async-safe).
+  def running(:info, {:telemetry_unit_merged, measurements, metadata}, data) do
+    unit_id = Map.get(metadata, :unit_id)
+    tokens = Map.get(measurements, :total_tokens, 0)
+
+    pending = Map.update(data.pending_unit_tokens, unit_id, tokens, &(&1 + tokens))
+    {:keep_state, %{data | pending_unit_tokens: pending}}
   end
 
   def running(event_type, event, data) do
@@ -331,6 +386,17 @@ defmodule Tau.Factory.Coordinator do
 
   def halted(_event_type, _event, data) do
     {:keep_state, data}
+  end
+
+  # ---------------------------------------------------------------------------
+  # Terminate: detach telemetry handler to prevent cross-process leaks
+  # (INV-REPORTING-SOURCED — each coordinator instance owns its own handler).
+  # ---------------------------------------------------------------------------
+
+  @impl :gen_statem
+  def terminate(_reason, _state, data) do
+    :telemetry.detach(data.telemetry_handler_id)
+    :ok
   end
 
   # ---------------------------------------------------------------------------
