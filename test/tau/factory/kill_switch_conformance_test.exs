@@ -16,9 +16,13 @@ defmodule Tau.Factory.KillSwitchConformanceTest do
     before notifying `:on_halted`. Currently absent from the Coordinator — tests
     will fail with `UndefinedFunctionError` or assertion failure.
 
-  - INV-DS-KILL-SWITCH: `StepJob` (an Oban Worker) must exist and
-    check the kill-switch sentinel at the start of `perform/1`. Oban dep is not
-    declared → compile error is the legitimate fail-before.
+  - INV-DS-KILL-SWITCH (#599): `StepJob.perform/1` MUST check the filesystem
+    sentinel file (`.claude/STOP-FACTORY`, or an injectable `"sentinel_path"` job
+    arg) at the start of every job execution (factory-loop.md §kill-switch-latency).
+    When the sentinel file EXISTS at job start, `perform/1` MUST return
+    `{:cancel, :kill_switch_armed}` — even without a `KillSwitch.Store` wired.
+    Currently `perform/1` only checks `Store.armed?` when a `"store"` arg is
+    present; it does not check the filesystem sentinel at all → assertion failure.
 
   - NFR-KILL-LATENCY: after a kill signal, a running unit MUST NOT continue
     beyond T_unit_max. A configurable total-unit-duration timer must exist on
@@ -254,62 +258,83 @@ defmodule Tau.Factory.KillSwitchConformanceTest do
   # ---------------------------------------------------------------------------
   # INV-DS-KILL-SWITCH (#599)
   #
-  # The Oban cron/recurring driver MUST check for the kill-switch sentinel at
-  # the start of every factory step job. This requires:
-  #   - `Tau.Factory.StepJob` implementing `Oban.Worker`
-  #   - `perform/1` calls `KillSwitch.Store.armed?/1` (or equivalent) at the
-  #     start of execution and returns `{:cancel, :kill_switch_armed}` when armed.
+  # factory-loop.md §kill-switch-latency states:
+  #   "placing a sentinel file at `.claude/STOP-FACTORY`. The coordinator MUST
+  #    check for this sentinel at the start of every factory step; if present,
+  #    it does no new work, reports current state, and halts."
   #
-  # Current failure mode: `Tau.Factory.StepJob` does not exist (Oban not even a
-  # dependency) → `UndefinedFunctionError` on `Tau.Factory.StepJob.new/1`.
+  # `StepJob.perform/1` IS the factory-step entry point invoked by the Oban cron
+  # driver. It MUST check the filesystem sentinel at job start and return
+  # `{:cancel, :kill_switch_armed}` when the file is present — independently of
+  # any `KillSwitch.Store`.
+  #
+  # Conformant `perform/1` contract:
+  #   1. Accepts a `"sentinel_path"` job arg (injectable for tests; production
+  #      default: `.claude/STOP-FACTORY`).
+  #   2. When the file at `sentinel_path` EXISTS at job start → return
+  #      `{:cancel, :kill_switch_armed}` without executing factory work.
+  #   3. When the file is ABSENT → return `:ok` (step proceeds normally).
+  #
+  # Current failure mode: `StepJob.perform/1` does NOT read `"sentinel_path"`
+  # from job args; it only checks `Store.armed?` when `"store"` is provided.
+  # A job with `"sentinel_path"` pointing at an existing sentinel file and no
+  # `"store"` returns `:ok` instead of `{:cancel, :kill_switch_armed}` →
+  # assertion failure on the first test.
   # ---------------------------------------------------------------------------
 
   @tag :inv_ds_kill_switch
-  test "INV-DS-KILL-SWITCH: StepJob.perform/1 cancels when kill-switch sentinel is armed" do
-    # The StepJob is an Oban Worker. When the kill-switch sentinel is armed,
-    # perform/1 must return {:cancel, :kill_switch_armed} without executing
-    # any factory-step work.
-    #
-    # This test calls perform/1 directly (not via Oban scheduler) to verify
-    # the sentinel check at the user-facing entry point.
+  test "INV-DS-KILL-SWITCH: StepJob.perform/1 cancels when sentinel FILE exists (no Store required)" do
+    # The filesystem sentinel is the PRIMARY kill-switch mechanism per
+    # factory-loop.md §kill-switch-latency. StepJob must check it at job start,
+    # independent of any ETS Store.
 
-    store_name = unique_name(:ks_store_stepjob)
+    sentinel_path =
+      Path.join(
+        System.tmp_dir!(),
+        "stop_factory_#{System.unique_integer([:positive])}"
+      )
 
-    start_supervised!(
-      {Store, name: store_name},
-      id: store_name
-    )
+    # Create the sentinel file before the job runs.
+    File.write!(sentinel_path, "")
 
-    # Arm the kill switch in the Store.
-    :ok = Store.set_armed(store_name)
+    on_exit(fn -> File.rm(sentinel_path) end)
 
-    # Build a StepJob args map pointing at our test Store.
-    args = %{"store" => store_name, "milestone" => "test-milestone"}
+    # Args carry the injectable sentinel path but NO store — the filesystem
+    # check must be sufficient on its own.
+    args = %{"sentinel_path" => sentinel_path, "milestone" => "test-milestone"}
 
-    # Calling perform/1 via the Oban.Worker contract.
-    # Must return {:cancel, :kill_switch_armed} when the sentinel is armed.
     job = StepJob.new(args)
-
     result = StepJob.perform(job)
 
     assert result == {:cancel, :kill_switch_armed},
-           "INV-DS-KILL-SWITCH: StepJob.perform/1 did not cancel when kill-switch was armed; " <>
-             "got: #{inspect(result)}"
+           "INV-DS-KILL-SWITCH: StepJob.perform/1 returned #{inspect(result)} when sentinel " <>
+             "file was present at #{inspect(sentinel_path)}. " <>
+             "perform/1 MUST read 'sentinel_path' from job args and cancel when the file " <>
+             "exists (factory-loop.md §kill-switch-latency). Current implementation ignores " <>
+             "'sentinel_path' entirely — it only checks Store.armed? via 'store' arg."
   end
 
   @tag :inv_ds_kill_switch
-  test "INV-DS-KILL-SWITCH: StepJob exists and implements Oban.Worker behaviour" do
-    # This test will fail to compile / raise UndefinedFunctionError if
-    # Tau.Factory.StepJob does not exist.
+  test "INV-DS-KILL-SWITCH: StepJob.perform/1 proceeds (:ok) when sentinel FILE is absent" do
+    # Inverse: without the sentinel file the job must NOT be cancelled.
 
-    assert function_exported?(StepJob, :perform, 1),
-           "INV-DS-KILL-SWITCH: StepJob does not export perform/1 — " <>
-             "the Oban cron/recurring driver that checks the sentinel does not exist"
+    absent_path =
+      Path.join(
+        System.tmp_dir!(),
+        "stop_factory_absent_#{System.unique_integer([:positive])}"
+      )
 
-    assert StepJob.__info__(:attributes)
-           |> Keyword.get(:behaviour, [])
-           |> Enum.member?(Oban.Worker),
-           "INV-DS-KILL-SWITCH: StepJob does not implement the Oban.Worker behaviour"
+    refute File.exists?(absent_path),
+           "test setup: sentinel path must not exist before the test"
+
+    args = %{"sentinel_path" => absent_path, "milestone" => "test-milestone"}
+
+    job = StepJob.new(args)
+    result = StepJob.perform(job)
+
+    assert result == :ok,
+           "INV-DS-KILL-SWITCH: StepJob.perform/1 returned #{inspect(result)} when sentinel " <>
+             "file was absent — cancellation must only fire when the sentinel is present."
   end
 
   # ---------------------------------------------------------------------------
