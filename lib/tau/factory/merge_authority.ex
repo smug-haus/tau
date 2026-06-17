@@ -57,6 +57,9 @@ defmodule Tau.Factory.MergeAuthority do
       (default #{@build_backoff_ms}; injectable for tests, D-394).
     - `:build_timeout_ms` — ms before a running build task is killed as wedged
       (default #{@build_timeout_ms}; injectable for tests, D-394).
+    - `:post_merge_health_fun` — `(repo_dir, lang, ctx) -> :green | {:red, report}`
+      post-merge origin/main health check (default: `Health.check/3`; injectable
+      for tests, D-303).
   """
   @spec child_spec(keyword()) :: Supervisor.child_spec()
   def child_spec(opts) do
@@ -86,6 +89,18 @@ defmodule Tau.Factory.MergeAuthority do
   @spec request_merge(:gen_statem.server_ref(), map()) :: :queued
   def request_merge(server, unit) do
     :gen_statem.call(server, {:request_merge, unit})
+  end
+
+  @doc """
+  Clear the red-main gate. Called by an operator (or coordinator) after
+  the red `origin/main` has been fixed (revert-or-fix-forward). Allows
+  the next queued unit to be built.
+
+  Returns `:ok`.
+  """
+  @spec clear_red_main(:gen_statem.server_ref()) :: :ok
+  def clear_red_main(server) do
+    :gen_statem.call(server, :clear_red_main)
   end
 
   # ---------------------------------------------------------------------------
@@ -124,6 +139,11 @@ defmodule Tau.Factory.MergeAuthority do
         default_build(repo_dir, units, base)
       end)
 
+    post_merge_health_fun =
+      Keyword.get(opts, :post_merge_health_fun, fn dir, lang, ctx ->
+        Health.check(dir, lang, ctx)
+      end)
+
     data = %{
       ledger: ledger,
       repo_dir: repo_dir,
@@ -132,6 +152,7 @@ defmodule Tau.Factory.MergeAuthority do
       cas: cas,
       pubsub: pubsub,
       build_fun: build_fun,
+      post_merge_health_fun: post_merge_health_fun,
       # D-394: resolved retry parameters
       build_retry_max: build_retry_max,
       build_backoff_ms: build_backoff_ms,
@@ -147,7 +168,10 @@ defmodule Tau.Factory.MergeAuthority do
       # D-394: per-member consecutive failure counter (unit_id => non_neg_integer)
       build_attempts: %{},
       # D-394: true while the T_backoff timer is armed; blocks start_build
-      backoff_pending: false
+      backoff_pending: false,
+      # D-303 (B6): true after a post-merge red origin/main is detected;
+      # gates start_build closed until an operator calls clear_red_main/1.
+      main_red: false
     }
 
     {:ok, :idle, data}
@@ -175,6 +199,19 @@ defmodule Tau.Factory.MergeAuthority do
   def idle(:timeout, :build_backoff, data) do
     next_data = %{data | backoff_pending: false}
     transition_from_idle(next_data)
+  end
+
+  # D-303 (B6): operator clears the red-main gate after fixing origin/main.
+  def idle({:call, from}, :clear_red_main, data) do
+    next_data = %{data | main_red: false}
+
+    case start_build(next_data) do
+      {:integrating, new_data, actions} ->
+        {:next_state, :integrating, new_data, [{:reply, from, :ok} | actions]}
+
+      {:idle, new_data} ->
+        {:keep_state, new_data, [{:reply, from, :ok}]}
+    end
   end
 
   # Ignore stray barrier messages in idle state.
@@ -292,6 +329,12 @@ defmodule Tau.Factory.MergeAuthority do
     transition_from_idle(next_data)
   end
 
+  # D-303 (B6): accept clear_red_main while integrating (state recorded;
+  # start_build guard will re-evaluate when this train completes).
+  def integrating({:call, from}, :clear_red_main, data) do
+    {:keep_state, %{data | main_red: false}, [{:reply, from, :ok}]}
+  end
+
   def integrating(:info, msg, data) do
     Logger.debug("[MergeAuthority] integrating received unexpected message: #{inspect(msg)}")
     {:keep_state, data}
@@ -384,7 +427,33 @@ defmodule Tau.Factory.MergeAuthority do
                 Map.delete(acc, unit.id)
               end)
 
-            transition_from_idle(%{data | build_attempts: next_attempts})
+            data_after_merge = %{data | build_attempts: next_attempts}
+
+            # D-303 (B6) / [C209-B6]: post-merge origin/main re-check.
+            # After a successful CAS push, re-check origin/main health.
+            # A red result gates the merge precondition closed (□ red(main) → ¬∃ d.
+            # merge(d)) and raises E-RED-MAIN to K via "factory:control".
+            case data.post_merge_health_fun.(repo_dir, :elixir, %{}) do
+              :green ->
+                transition_from_idle(data_after_merge)
+
+              {:red, report} ->
+                Logger.warning(
+                  "[MergeAuthority] post-merge origin/main is red; raising E-RED-MAIN: #{inspect(report)}"
+                )
+
+                telemetry(:health, %{}, %{result: :red, phase: :post_merge_check})
+
+                Phoenix.PubSub.broadcast(
+                  pubsub,
+                  "factory:control",
+                  {:escalate, {:"E-RED-MAIN", :global}}
+                )
+
+                # Gate the merge precondition closed: set main_red = true so
+                # start_build refuses to admit any further build until cleared.
+                {:next_state, :idle, %{data_after_merge | main_red: true}}
+            end
 
           {:error, :stale_ref} ->
             Logger.info("[MergeAuthority] stale ref; requeuing train for rebase + re-gate")
@@ -410,6 +479,11 @@ defmodule Tau.Factory.MergeAuthority do
     {:keep_state, data, [{:reply, from, :queued}]}
   end
 
+  # D-303 (B6): accept clear_red_main while committing.
+  def committing({:call, from}, :clear_red_main, data) do
+    {:keep_state, %{data | main_red: false}, [{:reply, from, :ok}]}
+  end
+
   def committing(:info, msg, data) do
     Logger.debug("[MergeAuthority] committing received unexpected message: #{inspect(msg)}")
     {:keep_state, data}
@@ -424,9 +498,12 @@ defmodule Tau.Factory.MergeAuthority do
   end
 
   # D-394: head guard — if a backoff timer is armed, do NOT launch a build.
+  # D-303 (B6): if origin/main is red, do NOT launch a build until cleared.
   # This is the single chokepoint: every code path that might launch funnels
-  # through start_build/1, so the guard covers all of them.
+  # through start_build/1, so the guards cover all of them.
   defp start_build(%{backoff_pending: true} = data), do: {:idle, data}
+
+  defp start_build(%{main_red: true} = data), do: {:idle, data}
 
   defp start_build(%{queue: []} = data), do: {:idle, data}
 
