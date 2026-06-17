@@ -12,36 +12,34 @@ defmodule Tau.Factory.MergeHealthPrePushOrderTest do
     For the bootstrap toolchain the recipe is `mix compile --warnings-as-errors`
     + `mix test`, run in an isolated workspace on the batch **tip**, **pre-push**.
 
-  The SPEC §4 B4 contract (D-301) states:
-    Pre: `assert_all_verdicts_live == :all_pass`; M is the **sole** writer of
-    `origin/main`.
-
-  The SPEC §5 state table `:integrating` exit states:
-    `{:build_failed, :health_red}` → `:idle` (bisect/eject).
-    The `cas_push` runs only from `:committing`, which is entered only via
-    `Task {:built, ...}` — a result returned ONLY when health is `:green`.
+  The phrase "pre-push" means: health MUST complete before ANY push to origin —
+  including the intermediate push to `origin/<branch>` that `do_build_in_worktree`
+  does to make the tip addressable for the subsequent CAS step. No push of any
+  kind may precede a green health result.
 
   ## What this test asserts
 
-  Using the real default build path (`build_fun` not injected — `Health.check`
-  runs via real `mix test` execution on a synthetic mix project), a CAS module
-  is injected that records whether `cas_push/3` is ever called. When the batch
-  tip has a failing test (health returns `{:red, _}`), `cas_push` MUST NOT be
-  called — neither for `origin/main` nor for any other ref. Any call to
-  `cas_push` when health was red is a direct violation of INV-MAI-5.
+  Uses the REAL default build_fun (no injection) so the actual
+  `do_build_in_worktree/4` code path is exercised. The topology is constructed
+  so that rebase necessarily produces a NEW commit SHA (a diverged-main scenario):
+  after the feature branch was created, a new commit is added to main. When
+  MergeAuthority processes the unit, it rebases the feature branch onto the
+  updated main, producing a different tip SHA. If production code pushes before
+  health, `origin/<branch>` will be updated to the new rebased SHA even though
+  health returned :red. The test asserts that `origin/<branch>` is NOT updated
+  when health is red — i.e., the push did NOT precede the health check.
 
   ## Fail-before validity (oracle separation)
 
-  Against the current production code the test is EXPECTED TO PASS (the
-  overturned audit finding confirms the CAS push to origin/main is not
-  attempted on a red health result). However, the test is required as a
-  gating/regression guard: any future refactor that calls `cas_push` before
-  completing health will cause this test to fail immediately, catching the
-  invariant violation at the unit-test boundary.
+  Against the current production code this test is EXPECTED TO FAIL: the
+  current `do_build_in_worktree/4` does `git push --force-with-lease` at the
+  push step BEFORE calling `Health.check`. This means `origin/<branch>` will
+  be updated to the rebased SHA even when health is red, causing the assertion
+  `assert branch_oid_after == branch_oid_before` to fail.
 
-  The test exercises the invariant's EXACT falsification condition stated in
-  the issue body: "Falsified if a CAS push is attempted on a batch tip that
-  produced a :red health result."
+  After a correct implementation (push moved to after health returns :green),
+  the test passes: on a :red health result the worktree is discarded without
+  pushing, so `origin/<branch>` remains at the original SHA.
 
   ## D-NNN linkage: INV-MAI-5 / D-303 / AC-5.
   """
@@ -57,31 +55,7 @@ defmodule Tau.Factory.MergeHealthPrePushOrderTest do
   @writer Tau.Factory.Ledger.Writer
 
   # ---------------------------------------------------------------------------
-  # Injected CAS that records whether cas_push was ever called.
-  # If cas_push is called, it sends a message to the registered :inv_mai5_spy
-  # process. It also forwards to the real CAS so M can continue normally.
-  # ---------------------------------------------------------------------------
-
-  defmodule SpyCas do
-    @moduledoc false
-
-    def assert_all_verdicts_live(ledger, units, required_halves) do
-      Tau.Factory.Merge.Cas.assert_all_verdicts_live(ledger, units, required_halves)
-    end
-
-    def cas_push(repo_dir, tip, base) do
-      # Notify the spy process that cas_push was called.
-      case Process.whereis(:inv_mai5_spy) do
-        nil -> :ok
-        pid -> send(pid, {:cas_push_called, %{repo_dir: repo_dir, tip: tip, base: base}})
-      end
-
-      Tau.Factory.Merge.Cas.cas_push(repo_dir, tip, base)
-    end
-  end
-
-  # ---------------------------------------------------------------------------
-  # Fixture mix project helpers (mirrors merge_health_test.exs setup)
+  # Fixture mix project helpers
   # ---------------------------------------------------------------------------
 
   defp write_mix_project(base_dir) do
@@ -127,9 +101,25 @@ defmodule Tau.Factory.MergeHealthPrePushOrderTest do
     """)
   end
 
-  # Build the synthetic git topology.
-  # Returns: {origin_path, work_path, main_oid}
-  defp setup_fixture_repo(tmp_dir) do
+  # Build the git topology with a DIVERGED main.
+  #
+  # Returns: {origin_path, work_path, branch_name, branch_oid_before_rebase}
+  #
+  # Topology:
+  #   initial -- (main) -- [extra-main-commit]   <- main advances AFTER branch
+  #           \- (feature/...) -- [red-test-commit]  <- branch has failing test
+  #
+  # When MergeAuthority processes the feature branch it will:
+  #   1. fetch origin
+  #   2. rebase feature onto updated main  <- produces a NEW commit SHA
+  #   3. push HEAD:feature (BEFORE health in current buggy code)
+  #   4. health -> :red
+  #   5. {:build_failed, {:health_red, _}}
+  #
+  # The test checks whether step 3 actually updated origin/feature — which
+  # would be a direct violation of INV-MAI-5 ("pre-push" means no push before
+  # a green health result).
+  defp setup_diverged_repo(tmp_dir) do
     origin_path = Path.join(tmp_dir, "origin.git")
     work_path = Path.join(tmp_dir, "work")
 
@@ -146,27 +136,18 @@ defmodule Tau.Factory.MergeHealthPrePushOrderTest do
     {_, 0} = git_work.(["add", "."])
     {_, 0} = git_work.(["commit", "-m", "initial: green fixture"])
 
+    # Create and push the bare origin
     {_, 0} = System.cmd("git", ["init", "--bare", origin_path])
-
-    {_, 0} =
-      System.cmd("git", ["symbolic-ref", "HEAD", "refs/heads/main"], cd: origin_path)
-
+    {_, 0} = System.cmd(
+      "git", ["symbolic-ref", "HEAD", "refs/heads/main"],
+      cd: origin_path
+    )
     {_, 0} = git_work.(["remote", "add", "origin", origin_path])
     {_, 0} = git_work.(["push", "-u", "origin", "main"])
 
-    {main_oid_raw, 0} = git_work.(["rev-parse", "HEAD"])
-    main_oid = String.trim(main_oid_raw)
+    branch_name = "feat/inv-mai5-diverge-#{System.unique_integer([:positive])}"
 
-    {origin_path, work_path, main_oid}
-  end
-
-  # Add a RED branch: introduces a failing test.
-  # Returns: {branch_name, tip_oid}
-  defp add_red_branch(work_path, branch_name) do
-    git_work = fn args ->
-      System.cmd("git", args, cd: work_path, stderr_to_stdout: true)
-    end
-
+    # Create the feature branch with a FAILING test
     {_, 0} = git_work.(["checkout", "-b", branch_name])
 
     File.write!(Path.join(work_path, "test/health_pre_push_fixture_test.exs"), """
@@ -184,18 +165,40 @@ defmodule Tau.Factory.MergeHealthPrePushOrderTest do
     """)
 
     {_, 0} = git_work.(["add", "."])
-    {_, 0} = git_work.(["commit", "-m", "red: failing test for INV-MAI-5 invariant check"])
-    {tip_raw, 0} = git_work.(["rev-parse", "HEAD"])
-    tip = String.trim(tip_raw)
+    {_, 0} = git_work.(["commit", "-m", "red: failing test for INV-MAI-5"])
     {_, 0} = git_work.(["push", "origin", branch_name])
+
+    # Record the branch OID on origin BEFORE MergeAuthority touches it
+    {branch_oid_raw, 0} =
+      System.cmd("git", ["rev-parse", "refs/heads/#{branch_name}"], cd: origin_path)
+
+    branch_oid_before = String.trim(branch_oid_raw)
+
+    # Switch back to main and add a NEW commit — this diverges main from the
+    # branch's merge-base, so the rebase will produce a DIFFERENT commit SHA.
     {_, 0} = git_work.(["checkout", "main"])
 
-    {branch_name, tip}
+    File.write!(Path.join(work_path, "lib/health_pre_push_fixture.ex"), """
+    defmodule HealthPrePushFixture do
+      @moduledoc "Minimal health fixture module (updated after branch creation)."
+
+      def hello, do: :world
+      def version, do: "1.1"
+    end
+    """)
+
+    {_, 0} = git_work.(["add", "."])
+    {_, 0} = git_work.(["commit", "-m", "main: advance past branch diverge point"])
+    {_, 0} = git_work.(["push", "origin", "main"])
+
+    {origin_path, work_path, branch_name, branch_oid_before}
   end
 
-  defp origin_main_oid(origin_path) do
-    {oid, 0} = System.cmd("git", ["rev-parse", "refs/heads/main"], cd: origin_path)
-    String.trim(oid)
+  defp origin_ref_oid(origin_path, ref) do
+    case System.cmd("git", ["rev-parse", "refs/heads/#{ref}"], cd: origin_path) do
+      {oid, 0} -> {:ok, String.trim(oid)}
+      {_, _} -> {:error, :not_found}
+    end
   end
 
   defp seed_pass_verdicts(writer, %{hash: hash, run: run}) do
@@ -232,38 +235,28 @@ defmodule Tau.Factory.MergeHealthPrePushOrderTest do
   end
 
   # ---------------------------------------------------------------------------
-  # INV-MAI-5 — cas_push MUST NOT be called when health is red
+  # INV-MAI-5 — origin/<branch> MUST NOT be updated before health returns green
   #
-  # This is the direct falsification guard for the invariant statement:
-  # "Falsified if a CAS push is attempted on a batch tip that produced a
-  # :red health result."
+  # Gate: exercises the REAL default build_fun (do_build_in_worktree/4) via the
+  # real git + mix toolchain. The topology forces a rebase that changes the tip
+  # SHA, making any premature push to origin/<branch> observable.
   #
-  # Uses the real default build_fun (Health.check via mix test) — not injected.
-  # Injects SpyCas to detect any cas_push call.
+  # FAIL-BEFORE: The current production code at do_build_in_worktree/4 pushes
+  # `origin/<branch>` BEFORE calling `Health.check`. When health returns :red
+  # on this red-tip branch, the push has already mutated `origin/<branch>`, so
+  # `branch_oid_after != branch_oid_before`. This assertion will FAIL against
+  # current production code.
   # ---------------------------------------------------------------------------
 
-  describe "INV-MAI-5 — health check is pre-CAS; cas_push never called on a red tip" do
+  describe "INV-MAI-5 — origin/<branch> is NOT pushed before health returns green" do
     @tag :"INV-MAI-5"
     @tag :ac_5
     @tag :d_303
-    test "INV-MAI-5: when batch tip health is red, cas_push (origin/main CAS) is never attempted" do
-      # Register the spy process under a known name so SpyCas.cas_push/3 can
-      # notify us if it is ever called.
-      spy_pid = self()
-      Process.register(spy_pid, :inv_mai5_spy)
-
-      on_exit(fn ->
-        if Process.whereis(:inv_mai5_spy) == spy_pid do
-          Process.unregister(:inv_mai5_spy)
-        end
-      end)
-
+    test "INV-MAI-5: when health is red, origin/<branch> ref is NOT updated (push did not precede health)" do
       tmp_dir = Briefly.create!(type: :directory)
 
-      {origin_path, work_path, initial_main_oid} = setup_fixture_repo(tmp_dir)
-
-      {branch_name, _tip} =
-        add_red_branch(work_path, "feat/inv-mai5-red-#{System.unique_integer([:positive])}")
+      {origin_path, work_path, branch_name, branch_oid_before} =
+        setup_diverged_repo(tmp_dir)
 
       unit = %{
         id: "u-inv-mai5-#{System.unique_integer([:positive])}",
@@ -288,45 +281,47 @@ defmodule Tau.Factory.MergeHealthPrePushOrderTest do
 
       ma_pid =
         start_supervised!(
-          {@merge_authority,
-           name: ma_name,
-           ledger: writer,
-           repo_dir: work_path,
-           required_halves: [:critic, :reviewer],
-           tasks_name: tasks_name,
-           # Inject SpyCas to detect any cas_push call.
-           # The real build_fun (Health.check via mix test) is NOT injected —
-           # health runs via real subprocess execution.
-           cas: SpyCas},
+          {
+            @merge_authority,
+            name: ma_name,
+            ledger: writer,
+            repo_dir: work_path,
+            required_halves: [:critic, :reviewer],
+            tasks_name: tasks_name
+            # NO build_fun injection — exercises the real do_build_in_worktree/4
+            # so the actual push-before-health bug is observable.
+          },
           id: ma_name
         )
 
       assert :queued = @merge_authority.request_merge(ma_pid, unit)
 
-      # Wait for M to process: real build_fun → Health.check (red) →
-      # {:build_failed, {:health_red, _}} → eject → :idle.
-      # The :committing state is NEVER entered on a red health result.
+      # Wait for MergeAuthority to process: real build_fun ->
+      # fetch -> rebase -> push-before-health (bug) OR health -> push (correct)
+      # -> {:build_failed, {:health_red, _}} -> eject -> :idle.
       result = wait_for_idle(ma_pid)
 
       assert result == :ok,
              "INV-MAI-5: timed out waiting for MergeAuthority to return to :idle " <>
                "after a red health eject. M MUST NOT hang when health is red."
 
-      # PRIMARY ASSERTION — INV-MAI-5 falsification guard:
-      # cas_push MUST NOT have been called when health returned :red.
-      refute_received {:cas_push_called, _},
-                      "INV-MAI-5 VIOLATED: cas_push was called on a batch tip whose " <>
-                        "health check returned :red. The invariant requires health to gate " <>
-                        "the CAS push — a red health result MUST eject the unit BEFORE any " <>
-                        "CAS push is attempted (D-303, B5, SPEC-FACTORY-MERGE §4 B4 pre-condition)."
+      # PRIMARY ASSERTION — INV-MAI-5 direct falsification guard:
+      #
+      # If production code pushes BEFORE health (the bug):
+      #   origin/<branch> now points to the rebased tip SHA != branch_oid_before
+      #   -> assertion fails  (test catches the violation <- EXPECTED with current code)
+      #
+      # If the invariant is correctly enforced (push only after health = :green):
+      #   origin/<branch> still points to branch_oid_before (unchanged)
+      #   -> assertion passes (test confirms correct behaviour <- post-fix state)
+      {:ok, branch_oid_after} = origin_ref_oid(origin_path, branch_name)
 
-      # SECONDARY ASSERTION — confirm origin/main is unchanged (belt-and-suspenders).
-      current_oid = origin_main_oid(origin_path)
-
-      assert current_oid == initial_main_oid,
-             "INV-MAI-5 / D-303: origin/main MUST be unchanged after a red health eject.\n" <>
-               "Expected (initial): #{initial_main_oid}\n" <>
-               "Got (current):      #{current_oid}"
+      assert branch_oid_after == branch_oid_before,
+             "INV-MAI-5 VIOLATED: origin/#{branch_name} was updated from " <>
+               "#{branch_oid_before} to #{branch_oid_after} even though health " <>
+               "returned :red. The invariant requires health to run PRE-PUSH — " <>
+               "no push to origin (including origin/<branch>) may precede a green " <>
+               "health result (D-303, B5, SPEC-FACTORY-MERGE §4 B5 'pre-push')."
     end
   end
 end
